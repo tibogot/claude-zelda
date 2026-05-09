@@ -1,5 +1,5 @@
 import * as THREE from "three";
-import { MeshPhysicalNodeMaterial } from "three";
+import { MeshPhysicalNodeMaterial, MeshBasicNodeMaterial } from "three";
 import {
   Fn, float, vec2, vec3, vec4, uv, mix, max, min, step, smoothstep,
   fract, dot, texture, positionWorld, cameraPosition, length,
@@ -377,7 +377,164 @@ function _buildRoadColor(diffuseTex, u) {
   })();
 }
 
-export function createRoadMaterial(uniforms, diffuseTex, armTex, normalTex, reflectTex) {
+/**
+ * Smart Road lab uses piecewise planar UVs (≈ world x/10, z/10), not strip UVs with v across width.
+ * No shader-drawn lane paint on this mesh — markings are separate ribbons. Dirt / wear / micro-scratch /
+ * wet use roadUV only. **Line scratch** is applied on marking materials (`createLabLineMarkingMaterials`),
+ * not here (Full Road multiplies paint masks by `paintSurvival`; lab asphalt has no paint in-shader).
+ */
+function _buildRoadColorLabPiecewise(diffuseTex, u) {
+  const {
+    uTexScale,
+    uColorTint, uColorBrightness,
+    uAsphaltDark, uAsphaltLight, uGrainScale, uGrainStrength,
+    uDirtAmount, uDirtScale, uDirtContrast, uDirtTint, uEdgeDirtBoost,
+    uWearAmount, uWearScale, uWearContrast, uWearDarken,
+    uScratchAmount, uScratchScale, uScratchThinness,
+    uWetAmount, uWetCoverage, uPuddleAmount, uPuddleScale, uPuddleContrast, uPuddleEdgeBoost,
+    uWetDarkening, uPuddleTint,
+  } = u;
+
+  return Fn(() => {
+    const uvCoord = uv();
+    // Mesh UVs are planar (≈ world x/10, z/10). Do NOT divide U by road width — that Full-Road strip
+    // convention stretches textures anisotropically on lab patches.
+    const texUV = vec2(uvCoord.x, uvCoord.y).mul(uTexScale);
+    const base = (() => {
+      let col;
+      if (diffuseTex) {
+        col = texture(diffuseTex, texUV).rgb;
+      } else {
+        const grainUV = texUV.mul(uGrainScale);
+        const g1 = _fbm2(grainUV);
+        const g2 = _fbm2(grainUV.mul(2.35).add(vec2(0.61, 1.93)));
+        const grain = g1.mul(0.62).add(g2.mul(0.38));
+        const tone = grain.mul(uGrainStrength).add(0.5).clamp(float(0), float(1));
+        col = mix(uAsphaltDark, uAsphaltLight, tone);
+      }
+      return col.mul(uColorTint).mul(uColorBrightness).toVar();
+    })();
+
+    const dirtBase = _fbm2(texUV.mul(uDirtScale.mul(0.22)));
+    const dirtLo = float(0.42).sub(uDirtContrast.mul(0.22));
+    const dirtHi = float(0.68).add(uDirtContrast.mul(0.22));
+    const dirtEdgeNoise = _fbm2(texUV.mul(3.2)).mul(uEdgeDirtBoost).mul(0.35);
+    const dirtMask = smoothstep(dirtLo, dirtHi, dirtBase)
+      .add(dirtEdgeNoise)
+      .mul(uDirtAmount)
+      .clamp(float(0), float(1));
+
+    const wearStreak = _fbm2(texUV.mul(uWearScale.mul(0.22)));
+    const wearLo = float(0.34).sub(uWearContrast.mul(0.2));
+    const wearHi = float(0.66).add(uWearContrast.mul(0.2));
+    const wearMask = smoothstep(wearLo, wearHi, wearStreak).mul(uWearAmount).clamp(float(0), float(1));
+
+    const scratchField = _fbm2(texUV.mul(uScratchScale).add(vec2(_fbm2(texUV.mul(1.7)), _fbm2(texUV.mul(2.3)))));
+    const scratchMask = smoothstep(uScratchThinness, float(0.995), scratchField).mul(uScratchAmount).clamp(float(0), float(1));
+
+    const dirtColor = base.mul(uDirtTint);
+    const withDirt = mix(base, dirtColor, dirtMask);
+    const withWear = mix(withDirt, withDirt.mul(float(1).sub(uWearDarken)), wearMask);
+    const agedBase = mix(withWear, withWear.mul(0.72), scratchMask);
+
+    const puddleNoise = _fbm2(
+      texUV.mul(uPuddleScale.mul(0.18))
+        .add(vec2(_fbm2(texUV.mul(0.93)), _fbm2(texUV.mul(1.41)))),
+    );
+    const puddleLo = float(0.44).sub(uPuddleContrast.mul(0.24));
+    const puddleHi = float(0.7).add(uPuddleContrast.mul(0.24));
+    const puddlePattern = smoothstep(puddleLo, puddleHi, puddleNoise)
+      .add(_fbm2(texUV.mul(2.8)).mul(uPuddleEdgeBoost).mul(0.28))
+      .clamp(float(0), float(1));
+    const puddleMask = mix(
+      uWetAmount.mul(uWetCoverage),
+      puddlePattern.mul(uWetAmount),
+      uPuddleAmount,
+    )
+      .clamp(float(0), float(1));
+    const wetBase = mix(
+      agedBase,
+      agedBase.mul(float(1).sub(uWetDarkening)).mul(uPuddleTint),
+      puddleMask,
+    );
+
+    return wetBase.saturate();
+  })();
+}
+
+/** Paint survival (1 − scratch): opacity so asphalt shows through, matching Full Road `mix` compositing. */
+function _labLinePaintSurvivalNode(uniforms) {
+  const {
+    uLineScratchAmount,
+    uLineScratchScale,
+    uLineScratchStretch,
+    uLineScratchThreshold,
+    uLineScratchSoftness,
+    uLineScratchWarp,
+    uLineScratchDetail,
+    uLineScratchEdge,
+  } = uniforms;
+  return Fn(() => {
+    const uvCoord = uv();
+    const lineScratch = _lineScratchMask(
+      uvCoord.x,
+      uvCoord.y,
+      uLineScratchScale,
+      uLineScratchStretch,
+      uLineScratchThreshold,
+      uLineScratchSoftness,
+      uLineScratchWarp,
+      uLineScratchDetail,
+      uLineScratchEdge,
+    )
+      .mul(uLineScratchAmount)
+      .clamp(float(0), float(1));
+    return float(1).sub(lineScratch);
+  })();
+}
+
+/**
+ * Smart Road lane / edge ribbons: line-scratch chips paint (opacity), same mask as Full Road.
+ * Pass the same `createRoadUniforms` object as the lab road surface so tweakpane updates apply.
+ */
+export function createLabLineMarkingMaterials(uniforms) {
+  const paintSurvival = _labLinePaintSurvivalNode(uniforms);
+  const opts = {
+    side: THREE.DoubleSide,
+    depthTest: true,
+    depthWrite: true,
+    transparent: true,
+    fog: false,
+    polygonOffset: false,
+  };
+  const center = new MeshBasicNodeMaterial(opts);
+  center.colorNode = uniforms.uCenterLineColor;
+  center.opacityNode = paintSurvival;
+  const centerLeft = new MeshBasicNodeMaterial(opts);
+  centerLeft.colorNode = uniforms.uCenterLeftColor;
+  centerLeft.opacityNode = paintSurvival;
+  const centerRight = new MeshBasicNodeMaterial(opts);
+  centerRight.colorNode = uniforms.uCenterRightColor;
+  centerRight.opacityNode = paintSurvival;
+  const divider = new MeshBasicNodeMaterial(opts);
+  divider.colorNode = uniforms.uLineColor;
+  divider.opacityNode = paintSurvival;
+  return { center, centerLeft, centerRight, divider };
+}
+
+/**
+ * @param reflectTex Reflection probe (optional).
+ * @param options.skipUvSpaceFade When true, omit opacity/alphaTest edge fade. Smart Road lab meshes use
+ *   planar world-ish UVs (not v ∈ [0,1] across width); the fade would alpha-kill the whole surface.
+ * @param options.labPiecewiseUvs When true, Smart Road lab: texture-only base color (planar UVs), simplified
+ *   roughness, and **no polygonOffset** (GPU offset is view-dependent and makes overlays swim).
+ * @param options.polygonOffsetFactor / options.polygonOffsetUnits Optional depth bias (default -6).
+ */
+export function createRoadMaterial(uniforms, diffuseTex, armTex, normalTex, reflectTex, options = {}) {
+  const skipUvSpaceFade = options.skipUvSpaceFade === true;
+  const labPiecewiseUvs = options.labPiecewiseUvs === true;
+  const polygonOffsetFactor = options.polygonOffsetFactor ?? -6;
+  const polygonOffsetUnits = options.polygonOffsetUnits ?? -6;
   const {
     uRoadWidth, uTexScale,
     uEdgeBlendWidth, uEdgeBlendNoise,
@@ -393,7 +550,9 @@ export function createRoadMaterial(uniforms, diffuseTex, armTex, normalTex, refl
     uReflectVP,
   } = uniforms;
 
-  const roadColor = _buildRoadColor(diffuseTex, uniforms);
+  const roadColor = labPiecewiseUvs
+    ? _buildRoadColorLabPiecewise(diffuseTex, uniforms)
+    : _buildRoadColor(diffuseTex, uniforms);
 
   const distLod = Fn(() => {
     const dist = length(sub(positionWorld.xz, cameraPosition.xz));
@@ -410,21 +569,34 @@ export function createRoadMaterial(uniforms, diffuseTex, armTex, normalTex, refl
 
   const mat = new MeshPhysicalNodeMaterial({
     side: THREE.DoubleSide,
-    polygonOffset: true,
-    polygonOffsetFactor: -6,
-    polygonOffsetUnits: -6,
-    stencilWrite: true,
-    stencilFunc: THREE.NotEqualStencilFunc,
-    stencilRef: 1,
-    stencilZPass: THREE.ReplaceStencilOp,
-    stencilFail: THREE.KeepStencilOp,
-    stencilZFail: THREE.KeepStencilOp,
+    ...(labPiecewiseUvs
+      ? { polygonOffset: false }
+      : {
+          polygonOffset: true,
+          polygonOffsetFactor,
+          polygonOffsetUnits,
+        }),
+    ...(skipUvSpaceFade
+      ? { stencilWrite: false }
+      : {
+          stencilWrite: true,
+          stencilFunc: THREE.NotEqualStencilFunc,
+          stencilRef: 1,
+          stencilZPass: THREE.ReplaceStencilOp,
+          stencilFail: THREE.KeepStencilOp,
+          stencilZFail: THREE.KeepStencilOp,
+        }),
   });
 
-  const roadUV = Fn(() => {
-    const uvCoord = uv();
-    return vec2(uvCoord.x.div(uRoadWidth).mul(uTexScale), uvCoord.y.mul(uTexScale));
-  })();
+  const roadUV = labPiecewiseUvs
+    ? Fn(() => {
+        const uvCoord = uv();
+        return vec2(uvCoord.x, uvCoord.y).mul(uTexScale);
+      })()
+    : Fn(() => {
+        const uvCoord = uv();
+        return vec2(uvCoord.x.div(uRoadWidth).mul(uTexScale), uvCoord.y.mul(uTexScale));
+      })();
 
   // Project world position through reflection VP matrix to get reflection UV
   const getReflectUV = Fn(() => {
@@ -529,56 +701,100 @@ export function createRoadMaterial(uniforms, diffuseTex, armTex, normalTex, refl
     })();
   }
 
-  mat.roughnessNode = Fn(() => {
-    const uvCoord = uv();
-    const arcLen = uvCoord.x;
-    const vCoord = uvCoord.y;
-    const centerDist = abs(vCoord.sub(0.5)).mul(2).clamp(float(0), float(1));
-    const edgeMask = centerDist.pow(1.6);
-    const dirtBase = _fbm2(roadUV.mul(uDirtScale.mul(0.22)));
-    const dirtLo = float(0.42).sub(uDirtContrast.mul(0.22));
-    const dirtHi = float(0.68).add(uDirtContrast.mul(0.22));
-    const dirtMask = smoothstep(dirtLo, dirtHi, dirtBase)
-      .add(edgeMask.mul(uEdgeDirtBoost))
-      .mul(uDirtAmount)
-      .clamp(float(0), float(1));
-    const wearBandL = float(1).sub(smoothstep(float(0.0), float(0.14), abs(vCoord.sub(0.33))));
-    const wearBandR = float(1).sub(smoothstep(float(0.0), float(0.14), abs(vCoord.sub(0.67))));
-    const wearBand = max(wearBandL, wearBandR);
-    const wearStreak = _fbm2(vec2(arcLen.mul(uWearScale.mul(0.34)), vCoord.mul(uWearScale.mul(0.08))));
-    const wearLo = float(0.34).sub(uWearContrast.mul(0.2));
-    const wearHi = float(0.66).add(uWearContrast.mul(0.2));
-    const wearMask = smoothstep(wearLo, wearHi, wearStreak).mul(wearBand).mul(uWearAmount).clamp(float(0), float(1));
-    const scratchField = _fbm2(roadUV.mul(uScratchScale).add(vec2(_fbm2(roadUV.mul(1.7)), _fbm2(roadUV.mul(2.3)))));
-    const scratchMask = smoothstep(uScratchThinness, float(0.995), scratchField).mul(uScratchAmount).clamp(float(0), float(1));
-    const puddleNoise = _fbm2(
-      roadUV.mul(uPuddleScale.mul(0.18))
-        .add(vec2(_fbm2(roadUV.mul(0.93)), _fbm2(roadUV.mul(1.41))))
-    );
-    const puddleLo = float(0.44).sub(uPuddleContrast.mul(0.24));
-    const puddleHi = float(0.7).add(uPuddleContrast.mul(0.24));
-    const puddlePattern = smoothstep(puddleLo, puddleHi, puddleNoise)
-      .add(edgeMask.mul(uPuddleEdgeBoost))
-      .clamp(float(0), float(1));
-    const puddleMask = mix(
-      uWetAmount.mul(uWetCoverage),
-      puddlePattern.mul(uWetAmount),
-      uPuddleAmount
-    )
-      .clamp(float(0), float(1));
-
-    const roughAging = dirtMask.mul(uRoughnessDirtBoost)
-      .sub(wearMask.mul(uRoughnessWearReduce))
-      .add(scratchMask.mul(0.08));
-
-    if (armTex) {
-      const roughness = texture(armTex, roadUV).g;
-      const agedRough = roughness.mul(uRoughnessBase).add(roughAging).clamp(float(0), float(1));
+  if (labPiecewiseUvs) {
+    mat.roughnessNode = Fn(() => {
+      const dirtBase = _fbm2(roadUV.mul(uDirtScale.mul(0.22)));
+      const dirtLo = float(0.42).sub(uDirtContrast.mul(0.22));
+      const dirtHi = float(0.68).add(uDirtContrast.mul(0.22));
+      const dirtEdgeNoise = _fbm2(roadUV.mul(3.2)).mul(uEdgeDirtBoost).mul(0.35);
+      const dirtMask = smoothstep(dirtLo, dirtHi, dirtBase)
+        .add(dirtEdgeNoise)
+        .mul(uDirtAmount)
+        .clamp(float(0), float(1));
+      const wearStreak = _fbm2(roadUV.mul(uWearScale.mul(0.22)));
+      const wearLo = float(0.34).sub(uWearContrast.mul(0.2));
+      const wearHi = float(0.66).add(uWearContrast.mul(0.2));
+      const wearMask = smoothstep(wearLo, wearHi, wearStreak).mul(uWearAmount).clamp(float(0), float(1));
+      const scratchField = _fbm2(roadUV.mul(uScratchScale).add(vec2(_fbm2(roadUV.mul(1.7)), _fbm2(roadUV.mul(2.3)))));
+      const scratchMask = smoothstep(uScratchThinness, float(0.995), scratchField).mul(uScratchAmount).clamp(float(0), float(1));
+      const puddleNoise = _fbm2(
+        roadUV.mul(uPuddleScale.mul(0.18))
+          .add(vec2(_fbm2(roadUV.mul(0.93)), _fbm2(roadUV.mul(1.41)))),
+      );
+      const puddleLo = float(0.44).sub(uPuddleContrast.mul(0.24));
+      const puddleHi = float(0.7).add(uPuddleContrast.mul(0.24));
+      const puddlePattern = smoothstep(puddleLo, puddleHi, puddleNoise)
+        .add(_fbm2(roadUV.mul(2.8)).mul(uPuddleEdgeBoost).mul(0.28))
+        .clamp(float(0), float(1));
+      const puddleMask = mix(
+        uWetAmount.mul(uWetCoverage),
+        puddlePattern.mul(uWetAmount),
+        uPuddleAmount,
+      )
+        .clamp(float(0), float(1));
+      const roughAging = dirtMask.mul(uRoughnessDirtBoost)
+        .sub(wearMask.mul(uRoughnessWearReduce))
+        .add(scratchMask.mul(0.08));
+      if (armTex) {
+        const roughness = texture(armTex, roadUV).g;
+        const agedRough = roughness.mul(uRoughnessBase).add(roughAging).clamp(float(0), float(1));
+        return mix(agedRough, min(agedRough, uWetRoughnessMin), puddleMask).clamp(float(0), float(1));
+      }
+      const agedRough = uRoughnessBase.add(roughAging).clamp(float(0), float(1));
       return mix(agedRough, min(agedRough, uWetRoughnessMin), puddleMask).clamp(float(0), float(1));
-    }
-    const agedRough = uRoughnessBase.add(roughAging).clamp(float(0), float(1));
-    return mix(agedRough, min(agedRough, uWetRoughnessMin), puddleMask).clamp(float(0), float(1));
-  })();
+    })();
+  } else {
+    mat.roughnessNode = Fn(() => {
+      const uvCoord = uv();
+      const arcLen = uvCoord.x;
+      const vCoord = uvCoord.y;
+      const centerDist = abs(vCoord.sub(0.5)).mul(2).clamp(float(0), float(1));
+      const edgeMask = centerDist.pow(1.6);
+      const dirtBase = _fbm2(roadUV.mul(uDirtScale.mul(0.22)));
+      const dirtLo = float(0.42).sub(uDirtContrast.mul(0.22));
+      const dirtHi = float(0.68).add(uDirtContrast.mul(0.22));
+      const dirtMask = smoothstep(dirtLo, dirtHi, dirtBase)
+        .add(edgeMask.mul(uEdgeDirtBoost))
+        .mul(uDirtAmount)
+        .clamp(float(0), float(1));
+      const wearBandL = float(1).sub(smoothstep(float(0.0), float(0.14), abs(vCoord.sub(0.33))));
+      const wearBandR = float(1).sub(smoothstep(float(0.0), float(0.14), abs(vCoord.sub(0.67))));
+      const wearBand = max(wearBandL, wearBandR);
+      const wearStreak = _fbm2(vec2(arcLen.mul(uWearScale.mul(0.34)), vCoord.mul(uWearScale.mul(0.08))));
+      const wearLo = float(0.34).sub(uWearContrast.mul(0.2));
+      const wearHi = float(0.66).add(uWearContrast.mul(0.2));
+      const wearMask = smoothstep(wearLo, wearHi, wearStreak).mul(wearBand).mul(uWearAmount).clamp(float(0), float(1));
+      const scratchField = _fbm2(roadUV.mul(uScratchScale).add(vec2(_fbm2(roadUV.mul(1.7)), _fbm2(roadUV.mul(2.3)))));
+      const scratchMask = smoothstep(uScratchThinness, float(0.995), scratchField).mul(uScratchAmount).clamp(float(0), float(1));
+      const puddleNoise = _fbm2(
+        roadUV.mul(uPuddleScale.mul(0.18))
+          .add(vec2(_fbm2(roadUV.mul(0.93)), _fbm2(roadUV.mul(1.41))))
+      );
+      const puddleLo = float(0.44).sub(uPuddleContrast.mul(0.24));
+      const puddleHi = float(0.7).add(uPuddleContrast.mul(0.24));
+      const puddlePattern = smoothstep(puddleLo, puddleHi, puddleNoise)
+        .add(edgeMask.mul(uPuddleEdgeBoost))
+        .clamp(float(0), float(1));
+      const puddleMask = mix(
+        uWetAmount.mul(uWetCoverage),
+        puddlePattern.mul(uWetAmount),
+        uPuddleAmount
+      )
+        .clamp(float(0), float(1));
+
+      const roughAging = dirtMask.mul(uRoughnessDirtBoost)
+        .sub(wearMask.mul(uRoughnessWearReduce))
+        .add(scratchMask.mul(0.08));
+
+      if (armTex) {
+        const roughness = texture(armTex, roadUV).g;
+        const agedRough = roughness.mul(uRoughnessBase).add(roughAging).clamp(float(0), float(1));
+        return mix(agedRough, min(agedRough, uWetRoughnessMin), puddleMask).clamp(float(0), float(1));
+      }
+      const agedRough = uRoughnessBase.add(roughAging).clamp(float(0), float(1));
+      return mix(agedRough, min(agedRough, uWetRoughnessMin), puddleMask).clamp(float(0), float(1));
+    })();
+  }
 
   mat.metalnessNode = Fn(() => {
     if (armTex) {
@@ -594,15 +810,17 @@ export function createRoadMaterial(uniforms, diffuseTex, armTex, normalTex, refl
     return mix(float(0.4), float(0.1), nearFactor.mul(uEnhanced));
   })();
 
-  // noise-based irregular edge blend
-  mat.opacityNode = Fn(() => {
-    const vCoord = uv().y;
-    const distFromEdge = min(vCoord, float(1).sub(vCoord));
-    const noise = _fbm2(positionWorld.xz.mul(uEdgeBlendNoise));
-    const threshold = uEdgeBlendWidth.mul(float(0.3).add(noise.mul(0.7)));
-    return smoothstep(float(0), threshold, distFromEdge);
-  })();
-  mat.alphaTest = 0.5;
+  // noise-based irregular edge blend (Full Road strip UVs: v across width ∈ [0,1])
+  if (!skipUvSpaceFade) {
+    mat.opacityNode = Fn(() => {
+      const vCoord = uv().y;
+      const distFromEdge = min(vCoord, float(1).sub(vCoord));
+      const noise = _fbm2(positionWorld.xz.mul(uEdgeBlendNoise));
+      const threshold = uEdgeBlendWidth.mul(float(0.3).add(noise.mul(0.7)));
+      return smoothstep(float(0), threshold, distFromEdge);
+    })();
+    mat.alphaTest = 0.5;
+  }
 
   return mat;
 }

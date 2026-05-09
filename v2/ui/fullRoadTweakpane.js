@@ -103,6 +103,65 @@ export function addFullRoadFolder(pane, toolState, opts) {
     mk.addBinding(rp, "laneLines", { label: "Lane separators" }).on("change", onFullRoadChanged);
     mk.addBinding(rp, "laneLineWidth", { label: "Lane width", min: 0.002, max: 0.06, step: 0.001 }).on("change", onFullRoadChanged);
     mk.addBinding(rp, "laneDashScale", { label: "Lane dash density", min: 0.005, max: 2, step: 0.005 }).on("change", onFullRoadChanged);
+
+    const matSurf = folder.addFolder({ title: "Material / surface color", expanded: false });
+    matSurf.addBinding(rp, "colorTint", { label: "Tint", view: "color" }).on("change", onFullRoadChanged);
+    matSurf
+      .addBinding(rp, "colorBrightness", { label: "Brightness", min: 0.2, max: 2.0, step: 0.05 })
+      .on("change", onFullRoadChanged);
+    matSurf.addBinding(rp, "asphaltDark", { label: "Procedural dark", view: "color" }).on("change", onFullRoadChanged);
+    matSurf.addBinding(rp, "asphaltLight", { label: "Procedural light", view: "color" }).on("change", onFullRoadChanged);
+    matSurf.addBinding(rp, "grainScale", { label: "Grain scale", min: 2, max: 40, step: 0.5 }).on("change", onFullRoadChanged);
+    matSurf.addBinding(rp, "grainStrength", { label: "Grain strength", min: 0, max: 1, step: 0.02 }).on("change", onFullRoadChanged);
+
+    const pbrMaps = folder.addFolder({ title: "PBR maps (textures)", expanded: false });
+    pbrMaps
+      .addBinding(rp, "usePbrTextures", { label: "Enable diffuse / ARM / normal" })
+      .on("change", onFullRoadChanged);
+    pbrMaps.addBinding(rp, "texScale", { label: "Texture scale", min: 0.5, max: 20, step: 0.5 }).on("change", onFullRoadChanged);
+    pbrMaps.addBinding(rp, "normalStrength", { label: "Normal strength", min: 0, max: 3, step: 0.05 }).on("change", onFullRoadChanged);
+    pbrMaps.addBinding(rp, "roughnessBase", { label: "Roughness mult", min: 0.05, max: 1, step: 0.01 }).on("change", onFullRoadChanged);
+    pbrMaps.addBinding(rp, "normalDistort", { label: "Normal UV distort", min: 0, max: 0.5, step: 0.01 }).on("change", onFullRoadChanged);
+    const pbrLod = pbrMaps.addFolder({ title: "Detail vs camera distance", expanded: false });
+    pbrLod.addBinding(rp, "lodNear", { label: "LOD near (m)", min: 5, max: 120, step: 1 }).on("change", onFullRoadChanged);
+    pbrLod.addBinding(rp, "lodMid", { label: "LOD mid (m)", min: 20, max: 250, step: 1 }).on("change", onFullRoadChanged);
+    pbrLod.addBinding(rp, "lodFar", { label: "LOD far (m)", min: 50, max: 600, step: 5 }).on("change", onFullRoadChanged);
+
+    const agingFolder = folder.addFolder({ title: "Road aging (dirt / wear)", expanded: false });
+    agingFolder.addBinding(rp, "dirtAmount", { label: "Dirt amount", min: 0, max: 1, step: 0.01 }).on("change", onFullRoadChanged);
+    agingFolder.addBinding(rp, "dirtScale", { label: "Dirt scale", min: 0.5, max: 20, step: 0.1 }).on("change", onFullRoadChanged);
+    agingFolder.addBinding(rp, "dirtContrast", { label: "Dirt contrast", min: 0, max: 1, step: 0.01 }).on("change", onFullRoadChanged);
+    agingFolder.addBinding(rp, "dirtTint", { label: "Dirt tint", view: "color" }).on("change", onFullRoadChanged);
+    agingFolder.addBinding(rp, "edgeDirtBoost", { label: "Edge boost", min: 0, max: 2, step: 0.01 }).on("change", onFullRoadChanged);
+    agingFolder.addBinding(rp, "wearAmount", { label: "Wear amount", min: 0, max: 1, step: 0.01 }).on("change", onFullRoadChanged);
+    agingFolder.addBinding(rp, "wearScale", { label: "Wear scale", min: 0.5, max: 30, step: 0.1 }).on("change", onFullRoadChanged);
+    agingFolder.addBinding(rp, "wearContrast", { label: "Wear contrast", min: 0, max: 1, step: 0.01 }).on("change", onFullRoadChanged);
+    agingFolder.addBinding(rp, "wearDarken", { label: "Wear darken", min: 0, max: 0.8, step: 0.01 }).on("change", onFullRoadChanged);
+    agingFolder.addBinding(rp, "scratchAmount", { label: "Scratch amount", min: 0, max: 1, step: 0.01 }).on("change", onFullRoadChanged);
+    agingFolder.addBinding(rp, "scratchScale", { label: "Scratch scale", min: 2, max: 80, step: 0.5 }).on("change", onFullRoadChanged);
+    agingFolder.addBinding(rp, "scratchThinness", { label: "Scratch thinness", min: 0.1, max: 0.98, step: 0.01 }).on("change", onFullRoadChanged);
+    agingFolder.addBinding(rp, "lineScratchAmount", { label: "Line scratch amt", min: 0, max: 1, step: 0.01 }).on("change", onFullRoadChanged);
+    agingFolder.addBinding(rp, "lineScratchScale", { label: "Line scratch scale", min: 1, max: 20, step: 0.5 }).on("change", onFullRoadChanged);
+    agingFolder.addBinding(rp, "lineScratchStretch", { label: "Line scratch stretch", min: 1, max: 20, step: 0.5 }).on("change", onFullRoadChanged);
+    agingFolder.addBinding(rp, "lineScratchThreshold", { label: "Line scratch thresh", min: 0.05, max: 0.8, step: 0.01 }).on("change", onFullRoadChanged);
+    agingFolder.addBinding(rp, "lineScratchSoftness", { label: "Line scratch soft", min: 0.02, max: 0.5, step: 0.01 }).on("change", onFullRoadChanged);
+    agingFolder.addBinding(rp, "lineScratchWarp", { label: "Line scratch warp", min: 0, max: 2, step: 0.05 }).on("change", onFullRoadChanged);
+    agingFolder.addBinding(rp, "lineScratchDetail", { label: "Line scratch detail", min: 0, max: 1, step: 0.05 }).on("change", onFullRoadChanged);
+    agingFolder.addBinding(rp, "lineScratchEdge", { label: "Line scratch edge", min: 0, max: 1, step: 0.05 }).on("change", onFullRoadChanged);
+    agingFolder.addBinding(rp, "roughnessDirtBoost", { label: "Dirt roughness+", min: 0, max: 0.5, step: 0.01 }).on("change", onFullRoadChanged);
+    agingFolder.addBinding(rp, "roughnessWearReduce", { label: "Wear roughness−", min: 0, max: 0.4, step: 0.01 }).on("change", onFullRoadChanged);
+
+    const wetFolder = folder.addFolder({ title: "Wet road / puddles", expanded: false });
+    wetFolder.addBinding(rp, "wetAmount", { label: "Wet amount", min: 0, max: 1, step: 0.01 }).on("change", onFullRoadChanged);
+    wetFolder.addBinding(rp, "wetCoverage", { label: "Wet coverage", min: 0, max: 1, step: 0.01 }).on("change", onFullRoadChanged);
+    wetFolder.addBinding(rp, "puddleAmount", { label: "Puddle amount", min: 0, max: 1, step: 0.01 }).on("change", onFullRoadChanged);
+    wetFolder.addBinding(rp, "puddleScale", { label: "Puddle scale", min: 0.4, max: 12, step: 0.1 }).on("change", onFullRoadChanged);
+    wetFolder.addBinding(rp, "puddleContrast", { label: "Puddle contrast", min: 0, max: 1, step: 0.01 }).on("change", onFullRoadChanged);
+    wetFolder.addBinding(rp, "puddleEdgeBoost", { label: "Edge puddles", min: 0, max: 1.5, step: 0.01 }).on("change", onFullRoadChanged);
+    wetFolder.addBinding(rp, "wetDarkening", { label: "Wet darkening", min: 0, max: 0.6, step: 0.01 }).on("change", onFullRoadChanged);
+    wetFolder.addBinding(rp, "wetRoughnessMin", { label: "Min roughness", min: 0.02, max: 0.5, step: 0.01 }).on("change", onFullRoadChanged);
+    wetFolder.addBinding(rp, "puddleTint", { label: "Puddle tint", view: "color" }).on("change", onFullRoadChanged);
+
     return folder;
   }
 

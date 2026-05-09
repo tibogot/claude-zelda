@@ -1,7 +1,12 @@
 import * as THREE from "three";
 import { generateRoadGeometry } from "../../core/road/roadMesh.js";
 import { buildLabNetworkGeometry } from "../../core/road/roadNetworkLabGeometry.js";
-import { createRoadUniforms, createRoadMaterial, syncRoadUniforms } from "../../core/road/roadMaterial.js";
+import {
+  createRoadUniforms,
+  createRoadMaterial,
+  syncRoadUniforms,
+  createLabLineMarkingMaterials,
+} from "../../core/road/roadMaterial.js";
 import { createDecalMaterial } from "./roadDecalMaterial.js";
 
 const DIFFUSE_TEX_PATH = "../textures/asphalt_track/asphalt_track_diff_2k.jpg";
@@ -160,6 +165,13 @@ export class FullRoadSystem {
     this._roadMat = null;
     this._junctionUniforms = null;
     this._junctionMat = null;
+    /** Smart Road lab mesh PBR (no reflection texture). */
+    this._labPbrRoadMat = null;
+    this._labPbrJuncMat = null;
+    this._labPbrRoadUniforms = null;
+    this._labPbrJuncUniforms = null;
+    /** Last lab surface material bake: textures on vs procedural-only (must rebuild graph when this flips). */
+    this._labShaderTexActive = null;
     this._lineMat = new THREE.LineBasicMaterial({ color: 0x62c4ff, transparent: true, opacity: 0.7 });
     this._junctionLineMat = new THREE.MeshBasicMaterial({
       color: 0xf2f2f2,
@@ -232,6 +244,17 @@ export class FullRoadSystem {
     this._junctionCenterLineMat.color.set(p.centerLineColor ?? "#f0c040");
     this._roadMat.needsUpdate = true;
     this._junctionMat.needsUpdate = true;
+    if (this._useLabNetworkGeometry && this._labPbrRoadUniforms && this._labPbrJuncUniforms) {
+      const base = makeRoadParams(p, style, false);
+      Object.assign(base, { enhanced: false, reflectStrength: 0 });
+      syncRoadUniforms(this._labPbrRoadUniforms, base);
+      syncRoadUniforms(this._labPbrJuncUniforms, {
+        ...base,
+        colorBrightness: (p.colorBrightness ?? 0.62) * 0.94,
+      });
+      this._labPbrRoadMat.needsUpdate = true;
+      this._labPbrJuncMat.needsUpdate = true;
+    }
   }
 
   _pushUndo() {
@@ -827,40 +850,26 @@ export class FullRoadSystem {
       centerRightEnabled: p.centerRightEnabled !== false,
     });
 
-    const ROAD_SURFACE = 0x1c2126;
-    const JUNCTION_SURFACE = 0x22282e;
-
-    if (!this._labRoadMat) {
-      this._labRoadMat = new THREE.MeshBasicMaterial({ color: ROAD_SURFACE, side: THREE.DoubleSide });
-      this._labJunctionMat = new THREE.MeshBasicMaterial({ color: JUNCTION_SURFACE, side: THREE.DoubleSide });
-      const stripeOpts = {
-        side: THREE.DoubleSide,
-        depthTest: true,
-        polygonOffset: true,
-        polygonOffsetFactor: -1,
-        polygonOffsetUnits: -1,
-      };
-      this._labCenterLineMat = new THREE.MeshBasicMaterial({ color: p.centerLineColor ?? "#f0c040", ...stripeOpts });
-      this._labCenterLeftMat = new THREE.MeshBasicMaterial({ color: p.centerLeftColor ?? "#f0c040", ...stripeOpts });
-      this._labCenterRightMat = new THREE.MeshBasicMaterial({ color: p.centerRightColor ?? "#f0c040", ...stripeOpts });
-      this._labDividerLineMat = new THREE.MeshBasicMaterial({ color: p.lineColor ?? "#f2f2f2", ...stripeOpts });
+    // Lab road surface + line marking materials (TSL); markings need the same uniforms for line scratch.
+    const texActive = !!p.usePbrTextures && !!(this._diffuseTex && this._armTex && this._normalTex);
+    if (!this._labPbrRoadMat || this._labShaderTexActive !== texActive) {
+      this._labRebuildPbrLabMaterials(texActive);
+    } else if (!this._labCenterLineMat) {
+      this._labRebuildLineMarkingMaterials();
     }
-
-    this._labCenterLineMat.color.set(p.centerLineColor ?? "#f0c040");
-    this._labCenterLeftMat.color.set(p.centerLeftColor ?? p.centerLineColor ?? "#f0c040");
-    this._labCenterRightMat.color.set(p.centerRightColor ?? p.centerLineColor ?? "#f0c040");
-    this._labDividerLineMat.color.set(p.lineColor ?? "#f2f2f2");
+    const surfJuncMat = this._labPbrJuncMat;
+    const surfRoadMat = this._labPbrRoadMat;
 
     const roadW = Math.max(1e-6, p.width ?? 16);
 
-    // Build road surface meshes
     for (const piece of pieces) {
       if (!piece.polygon || piece.polygon.length < 3) continue;
-      const mat = piece.isJunctionCore ? this._labJunctionMat : this._labRoadMat;
+      const mat = piece.isJunctionCore ? surfJuncMat : surfRoadMat;
       const geo = this._labPolygon2DToPlaneGeometry(piece.polygon, p);
       if (geo) {
         const mesh = new THREE.Mesh(geo, mat);
         mesh.renderOrder = 3;
+        mesh.receiveShadow = true;
         this.meshGroup.add(mesh);
       }
 
@@ -922,6 +931,19 @@ export class FullRoadSystem {
           this.meshGroup.add(stripe);
         }
       }
+    }
+
+    if (this._labPbrRoadUniforms && this._labPbrJuncUniforms) {
+      const style = extractStyle(p);
+      const base = makeRoadParams(p, style, false);
+      Object.assign(base, { enhanced: false, reflectStrength: 0 });
+      syncRoadUniforms(this._labPbrRoadUniforms, base);
+      syncRoadUniforms(this._labPbrJuncUniforms, {
+        ...base,
+        colorBrightness: (p.colorBrightness ?? 0.62) * 0.94,
+      });
+      this._labPbrRoadMat.needsUpdate = true;
+      this._labPbrJuncMat.needsUpdate = true;
     }
   }
 
@@ -1052,20 +1074,42 @@ export class FullRoadSystem {
       right.push({ x: path2d[i].x - px, y: path2d[i].y - py });
     }
 
-    const lift = 0.055;
+    const cum = new Float32Array(n);
+    for (let i = 1; i < n; i++) {
+      const a = path2d[i - 1];
+      const b = path2d[i];
+      cum[i] = cum[i - 1] + Math.hypot(b.x - a.x, b.y - a.y);
+    }
+    // Same convention as generateRoadGeometry (roadMesh.js): uv.x = arc length in meters along the strip.
+    // Line scratch uses arcLen in _lineScratchMask; scaling x by 0.1 vs full road made scratches stretch
+    // along the marking tangent.
+    const uvs = new Float32Array(n * 4);
+    for (let i = 0; i < n; i++) {
+      const u = cum[i];
+      const o = i * 4;
+      uvs[o] = u;
+      uvs[o + 1] = 0;
+      uvs[o + 2] = u;
+      uvs[o + 3] = 1;
+    }
+
+    const usePbrStripe =
+      !!p.usePbrTextures && !!(this._diffuseTex && this._armTex && this._normalTex);
+    const lift = usePbrStripe ? 0.08 : 0.055;
     const yAt = (x, z) => this._roadSurfaceYLab(x, z, p) + lift;
 
     const positions = new Float32Array(n * 2 * 3);
     let pi = 0;
     for (let i = 0; i < n; i++) {
-      // One height per station (path spine). Sampling Y at left/right XZ tilts each cross-section and
-      // shows up as vertical facets along the stripe; lab0 is 2D so it never had that.
-      const y = yAt(path2d[i].x, path2d[i].y);
+      // Height per ribbon edge so geometry stays above the triangulated road surface (spine-only Y
+      // dipped below the mesh on slopes / at depth precision limits and failed the depth test).
+      const yL = yAt(left[i].x, left[i].y);
+      const yR = yAt(right[i].x, right[i].y);
       positions[pi++] = left[i].x;
-      positions[pi++] = y;
+      positions[pi++] = yL;
       positions[pi++] = left[i].y;
       positions[pi++] = right[i].x;
-      positions[pi++] = y;
+      positions[pi++] = yR;
       positions[pi++] = right[i].y;
     }
 
@@ -1080,6 +1124,7 @@ export class FullRoadSystem {
 
     const geo = new THREE.BufferGeometry();
     geo.setAttribute("position", new THREE.Float32BufferAttribute(positions, 3));
+    geo.setAttribute("uv", new THREE.Float32BufferAttribute(uvs, 2));
     geo.setIndex(indices);
     geo.computeVertexNormals();
     return new THREE.Mesh(geo, material);
@@ -1176,7 +1221,7 @@ export class FullRoadSystem {
   }
 
   /** Convert lab 2D polygon (x,y where y=worldZ) to flat 3D PlaneGeometry on terrain. */
-  _labPolygon2DToPlaneGeometry(polygon, p) {
+  _labPolygon2DToPlaneGeometry(polygon, p, yBias = 0) {
     if (!polygon || polygon.length < 3) return null;
 
     // Use earcut for robust triangulation
@@ -1191,11 +1236,12 @@ export class FullRoadSystem {
 
     const positions = [];
     const uvs = [];
+    const yOff = Number(yBias) || 0;
     for (const [i0, i1, i2] of indices) {
       for (const idx of [i0, i1, i2]) {
         const x = polygon[idx].x;
         const z = polygon[idx].y; // lab y -> world z
-        const y = this._roadSurfaceYLab(x, z, p);
+        const y = this._roadSurfaceYLab(x, z, p) + yOff;
         positions.push(x, y, z);
         uvs.push(x / 10, z / 10);
       }
@@ -1203,11 +1249,95 @@ export class FullRoadSystem {
 
     if (positions.length === 0) return null;
 
+    const nVert = positions.length / 3;
+    const junc = new Float32Array(nVert);
+
     const geo = new THREE.BufferGeometry();
     geo.setAttribute("position", new THREE.Float32BufferAttribute(positions, 3));
     geo.setAttribute("uv", new THREE.Float32BufferAttribute(uvs, 2));
+    geo.setAttribute("aJunction", new THREE.Float32BufferAttribute(junc, 1));
     geo.computeVertexNormals();
     return geo;
+  }
+
+  _labDisposeLineMarkingMaterials() {
+    if (this._labCenterLineMat) {
+      this._labCenterLineMat.dispose();
+      this._labCenterLineMat = null;
+    }
+    if (this._labCenterLeftMat) {
+      this._labCenterLeftMat.dispose();
+      this._labCenterLeftMat = null;
+    }
+    if (this._labCenterRightMat) {
+      this._labCenterRightMat.dispose();
+      this._labCenterRightMat = null;
+    }
+    if (this._labDividerLineMat) {
+      this._labDividerLineMat.dispose();
+      this._labDividerLineMat = null;
+    }
+  }
+
+  _labRebuildLineMarkingMaterials() {
+    this._labDisposeLineMarkingMaterials();
+    if (!this._labPbrRoadUniforms) return;
+    const m = createLabLineMarkingMaterials(this._labPbrRoadUniforms);
+    this._labCenterLineMat = m.center;
+    this._labCenterLeftMat = m.centerLeft;
+    this._labCenterRightMat = m.centerRight;
+    this._labDividerLineMat = m.divider;
+  }
+
+  _labDisposePbrMats() {
+    this._labDisposeLineMarkingMaterials();
+    if (this._labPbrRoadMat) {
+      this._labPbrRoadMat.dispose();
+      this._labPbrRoadMat = null;
+    }
+    if (this._labPbrJuncMat) {
+      this._labPbrJuncMat.dispose();
+      this._labPbrJuncMat = null;
+    }
+    this._labPbrRoadUniforms = null;
+    this._labPbrJuncUniforms = null;
+    this._labShaderTexActive = null;
+  }
+
+  /**
+   * Smart Road lab surface: TSL road material, optional diffuse/ARM/normal when `texActive`.
+   * Procedural asphalt + aging when maps are off or toggle is disabled.
+   */
+  _labRebuildPbrLabMaterials(texActive) {
+    const p = this.toolState.fullRoad;
+    const style = extractStyle(p);
+    const baseParams = makeRoadParams(p, style, false);
+    Object.assign(baseParams, { enhanced: false, reflectStrength: 0 });
+    const juncParams = { ...baseParams, colorBrightness: (p.colorBrightness ?? 0.62) * 0.94 };
+    this._labDisposePbrMats();
+    this._labPbrRoadUniforms = createRoadUniforms(baseParams);
+    this._labPbrJuncUniforms = createRoadUniforms(juncParams);
+    const d = texActive ? this._diffuseTex : null;
+    const a = texActive ? this._armTex : null;
+    const n = texActive ? this._normalTex : null;
+    this._labPbrRoadMat = createRoadMaterial(
+      this._labPbrRoadUniforms,
+      d,
+      a,
+      n,
+      null,
+      { skipUvSpaceFade: true, labPiecewiseUvs: true },
+    );
+    this._labPbrJuncMat = createRoadMaterial(
+      this._labPbrJuncUniforms,
+      d,
+      a,
+      n,
+      null,
+      { skipUvSpaceFade: true, labPiecewiseUvs: true },
+    );
+    this._labShaderTexActive = texActive;
+    this._labRebuildLineMarkingMaterials();
   }
 
   /** Convert lab 2D path to 3D Line on terrain. */
@@ -1599,12 +1729,12 @@ export class FullRoadSystem {
         child.material !== this._lineMat &&
         child.material !== this._junctionLineMat &&
         child.material !== this._junctionCenterLineMat &&
-        child.material !== this._labRoadMat &&
-        child.material !== this._labJunctionMat &&
         child.material !== this._labCenterLineMat &&
         child.material !== this._labCenterLeftMat &&
         child.material !== this._labCenterRightMat &&
-        child.material !== this._labDividerLineMat
+        child.material !== this._labDividerLineMat &&
+        child.material !== this._labPbrRoadMat &&
+        child.material !== this._labPbrJuncMat
       ) {
         child.material.dispose();
       }
@@ -2902,12 +3032,7 @@ export class FullRoadSystem {
     this.scene.remove(this._decalProxy);
     if (this._roadMat) this._roadMat.dispose();
     if (this._junctionMat) this._junctionMat.dispose();
-    if (this._labRoadMat) this._labRoadMat.dispose();
-    if (this._labJunctionMat) this._labJunctionMat.dispose();
-    if (this._labCenterLineMat) this._labCenterLineMat.dispose();
-    if (this._labCenterLeftMat) this._labCenterLeftMat.dispose();
-    if (this._labCenterRightMat) this._labCenterRightMat.dispose();
-    if (this._labDividerLineMat) this._labDividerLineMat.dispose();
+    this._labDisposePbrMats();
     this._lineMat.dispose();
     this._junctionLineMat.dispose();
     this._junctionCenterLineMat.dispose();
