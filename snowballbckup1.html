@@ -1,0 +1,915 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Snow ball</title>
+    <style>
+      * {
+        margin: 0;
+        padding: 0;
+        box-sizing: border-box;
+      }
+      body {
+        overflow: hidden;
+        background: #000;
+      }
+      canvas {
+        display: block;
+        width: 100vw;
+        height: 100vh;
+      }
+      #tweak-root {
+        position: fixed;
+        top: 10px;
+        right: 10px;
+        z-index: 100;
+        max-height: 96vh;
+        overflow: auto;
+        pointer-events: auto;
+      }
+      #hint {
+        position: fixed;
+        bottom: 12px;
+        left: 12px;
+        z-index: 10;
+        font:
+          12px/1.4 system-ui,
+          sans-serif;
+        color: #e8f0f8;
+        background: rgba(0, 0, 0, 0.45);
+        padding: 8px 12px;
+        border-radius: 6px;
+        pointer-events: none;
+        user-select: none;
+      }
+    </style>
+    <script type="importmap">
+      {
+        "imports": {
+          "three": "https://cdn.jsdelivr.net/npm/three@0.183.1/build/three.webgpu.js",
+          "three/webgpu": "https://cdn.jsdelivr.net/npm/three@0.183.1/build/three.webgpu.js",
+          "three/tsl": "https://cdn.jsdelivr.net/npm/three@0.183.1/build/three.tsl.js",
+          "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.183.1/examples/jsm/",
+          "tweakpane": "https://cdn.jsdelivr.net/npm/tweakpane@4.0.5/+esm"
+        }
+      }
+    </script>
+  </head>
+  <body>
+    <div id="tweak-root"></div>
+    <div id="hint">
+      WASD / arrows — roll · GPU trail (TSL) · terrain
+      <strong>3×3</strong> chunks · <strong>R</strong> clear trail · Tweakpane
+    </div>
+    <script type="module">
+      import * as THREE from "three/webgpu";
+      import {
+        texture,
+        uv,
+        float,
+        vec2,
+        vec3,
+        mul,
+        add,
+        sub,
+        clamp,
+        max,
+        min,
+        uniform,
+        positionLocal,
+        normalMap,
+      } from "three/tsl";
+      import { OrbitControls } from "three/addons/controls/OrbitControls.js";
+      import { Pane } from "tweakpane";
+      import { createHorizonSky } from "./horizon-webgpu-tsl.js";
+
+      const ARENA = 280;
+      const BALL_CLAMP = ARENA * 0.48;
+      /** Sphere radius; center Y = radius + snow surface height (displaced). */
+      const BALL_RADIUS = 0.35;
+      /**
+       * Vertex budget per chunk axis (3×3 chunks). Total terrain verts ≈ 3² × seg².
+       */
+      const TERRAIN_SEGMENTS_PER_CHUNK = 128;
+      /** Chunks along X and Z (same world coverage: `CHUNK_GRID * CHUNK_SIZE = ARENA`). */
+      const CHUNK_GRID = 3;
+      const CHUNK_SIZE = ARENA / CHUNK_GRID;
+
+      /** Trail heightfield resolution (CPU stamps + vertex samples). Lower = less bandwidth & stamp work. */
+      const TRAIL_MAP_RES = 1024;
+
+      async function init() {
+        const renderer = new THREE.WebGPURenderer({ antialias: true });
+        await renderer.init();
+        renderer.setSize(innerWidth, innerHeight);
+        renderer.setPixelRatio(Math.min(devicePixelRatio, 1.75));
+        renderer.toneMapping = THREE.ACESFilmicToneMapping;
+        renderer.toneMappingExposure = 1;
+        renderer.shadowMap.enabled = true;
+        renderer.shadowMap.type = THREE.PCFSoftShadowMap;
+        document.body.appendChild(renderer.domElement);
+
+        const scene = new THREE.Scene();
+        scene.background = new THREE.Color(0x87a8c8);
+
+        const camera = new THREE.PerspectiveCamera(
+          55,
+          innerWidth / innerHeight,
+          0.4,
+          5000,
+        );
+        camera.position.set(0, 5, 12);
+
+        const horizonSky = createHorizonSky({
+          topColor: "#5b9bd9",
+          bottomColor: "#e6eef6",
+          offset: 33,
+          exponent: 0.58,
+          radius: 4000,
+          ringStrength: 0.12,
+          ringWidth: 0.12,
+          ringColor: "#fff0d0",
+          followCamera: true,
+        });
+        scene.add(horizonSky.mesh);
+
+        const ambient = new THREE.AmbientLight(0xd8e4f0, 0.5);
+        scene.add(ambient);
+
+        const dir = new THREE.DirectionalLight(0xffffff, 1.32);
+        dir.position
+          .copy(new THREE.Vector3(0.55, 1, 0.35).normalize())
+          .multiplyScalar(120);
+        dir.castShadow = true;
+        dir.shadow.mapSize.set(1024, 1024);
+        dir.shadow.camera.near = 1;
+        dir.shadow.camera.far = 400;
+        const ext = Math.min(90, ARENA * 0.32 + 24);
+        dir.shadow.camera.left = -ext;
+        dir.shadow.camera.right = ext;
+        dir.shadow.camera.top = ext;
+        dir.shadow.camera.bottom = -ext;
+        dir.shadow.bias = -0.0001;
+        dir.shadow.normalBias = 0.02;
+        scene.add(dir);
+        scene.add(dir.target);
+
+        const texLoader = new THREE.TextureLoader();
+        const [
+          snowColorTex,
+          snowRoughnessTex,
+          snowNormalTex,
+          snowDispTex,
+          snowAoTex,
+        ] = await Promise.all([
+          texLoader.loadAsync("textures/Snow010A/Snow010A_1K-JPG_Color.jpg"),
+          texLoader.loadAsync(
+            "textures/Snow010A/Snow010A_1K-JPG_Roughness.jpg",
+          ),
+          texLoader.loadAsync("textures/Snow010A/Snow010A_1K-JPG_NormalGL.jpg"),
+          texLoader.loadAsync(
+            "textures/Snow010A/Snow010A_1K-JPG_Displacement.jpg",
+          ),
+          texLoader.loadAsync(
+            "textures/Snow010A/Snow010A_1K-JPG_AmbientOcclusion.jpg",
+          ),
+        ]);
+
+        const maxAniso =
+          typeof renderer.getMaxAnisotropy === "function"
+            ? renderer.getMaxAnisotropy()
+            : typeof renderer.capabilities?.getMaxAnisotropy === "function"
+              ? renderer.capabilities.getMaxAnisotropy()
+              : 1;
+        for (const t of [
+          snowColorTex,
+          snowRoughnessTex,
+          snowNormalTex,
+          snowDispTex,
+          snowAoTex,
+        ]) {
+          t.wrapS = t.wrapT = THREE.RepeatWrapping;
+          t.anisotropy = Math.min(maxAniso, 8);
+        }
+        snowColorTex.colorSpace = THREE.SRGBColorSpace;
+        snowRoughnessTex.colorSpace = THREE.NoColorSpace;
+        snowNormalTex.colorSpace = THREE.NoColorSpace;
+        snowDispTex.colorSpace = THREE.NoColorSpace;
+        snowAoTex.colorSpace = THREE.NoColorSpace;
+
+        const fract = (x) => x - Math.floor(x);
+
+        /** Bilinear sample red channel 0–1; `vf` is OpenGL-style (0 = bottom row of data). */
+        function bilinearR01(data, w, h, uf, vf) {
+          const x = THREE.MathUtils.clamp(uf, 0, 1) * (w - 1);
+          const y = THREE.MathUtils.clamp(vf, 0, 1) * (h - 1);
+          const x0 = Math.floor(x);
+          const y0 = Math.floor(y);
+          const x1 = Math.min(w - 1, x0 + 1);
+          const y1 = Math.min(h - 1, y0 + 1);
+          const fx = x - x0;
+          const fy = y - y0;
+          const at = (xx, yy) => data[(yy * w + xx) * 4] / 255;
+          const v00 = at(x0, y0);
+          const v10 = at(x1, y0);
+          const v01 = at(x0, y1);
+          const v11 = at(x1, y1);
+          return (
+            (v00 * (1 - fx) + v10 * fx) * (1 - fy) +
+            (v01 * (1 - fx) + v11 * fx) * fy
+          );
+        }
+
+        const dispImg = snowDispTex.image;
+        const dispCanvas = document.createElement("canvas");
+        dispCanvas.width = dispImg.width;
+        dispCanvas.height = dispImg.height;
+        const dispCtx = dispCanvas.getContext("2d", {
+          willReadFrequently: true,
+        });
+        dispCtx.drawImage(dispImg, 0, 0);
+        const dispImgData = dispCtx.getImageData(
+          0,
+          0,
+          dispCanvas.width,
+          dispCanvas.height,
+        ).data;
+        const snowDispW = dispCanvas.width;
+        const snowDispH = dispCanvas.height;
+        const snowDispData = dispImgData;
+
+        const trailData = new Uint8Array(TRAIL_MAP_RES * TRAIL_MAP_RES * 4);
+        trailData.fill(128);
+        for (let i = 0; i < TRAIL_MAP_RES * TRAIL_MAP_RES; i++) {
+          trailData[i * 4 + 3] = 255;
+        }
+        const trailTex = new THREE.DataTexture(
+          trailData,
+          TRAIL_MAP_RES,
+          TRAIL_MAP_RES,
+          THREE.RGBAFormat,
+          THREE.UnsignedByteType,
+        );
+        trailTex.minFilter = THREE.LinearFilter;
+        trailTex.magFilter = THREE.LinearFilter;
+        trailTex.wrapS = THREE.ClampToEdgeWrapping;
+        trailTex.wrapT = THREE.ClampToEdgeWrapping;
+        trailTex.colorSpace = THREE.NoColorSpace;
+        trailTex.generateMipmaps = false;
+        trailTex.flipY = false;
+        trailTex.needsUpdate = true;
+
+        const params = {
+          cameraMode: "follow",
+          camDist: 6.5,
+          camHeight: 3.2,
+          lookLift: 0.2,
+          smoothBallY: 22,
+          smoothCam: 10.5,
+          smoothLook: 14,
+          smoothShadow: 12,
+          followDirLambda: 9,
+          /** Below this speed (XZ), camera “behind” eases toward current bearing (fixes reverse snap). */
+          followDirSpeedThresh: 0.2,
+          accel: 18,
+          damping: 7,
+          maxSpeed: 7.5,
+          ballSkin: 0.0045,
+          stampRadius: 0.48,
+          stampStep: 0.048,
+          stampPush: 168,
+          minStampSpeed: 0.014,
+          stampPushMin: 0.85,
+          stampPushMax: 1.35,
+          trailGrooveScale: 1.78,
+          trailAoInGroove: 0.88,
+          trailAlbedoCavity: 0.38,
+          trailRoughnessBoost: 1.05,
+          dispStrength: 0.028,
+          snowRepeat: 14,
+          snowColorMul: 0.82,
+          normalMapScale: 0.7,
+          terrainMetalness: 0.02,
+          terrainEnvMap: 0.32,
+          ambientIntensity: 0.5,
+          dirIntensity: 1.32,
+          exposure: 1,
+          ballRoughness: 0.45,
+          ballMetalness: 0.02,
+          orbitMinDistance: 2,
+          orbitMaxDistance: 400,
+          orbitMinPolar: 0.08,
+          orbitMaxPolar: 1.52,
+          orbitDamping: 0.06,
+          /** Cap devicePixelRatio (fill-rate bound on high-DPR laptops). */
+          maxPixelRatio: 1.75,
+          /** Directional shadow map edge length (power of two). */
+          shadowMapSize: 1024,
+        };
+
+        const uTrailGrooveScale = uniform(params.trailGrooveScale);
+        const uTrailAoInGroove = uniform(params.trailAoInGroove);
+        const uTrailAlbedoCavity = uniform(params.trailAlbedoCavity);
+        const uTrailRoughnessBoost = uniform(params.trailRoughnessBoost);
+        const uDispStrength = uniform(params.dispStrength);
+        const uSnowRepeat = uniform(params.snowRepeat);
+        const uSnowColorMul = uniform(params.snowColorMul);
+        const uNormalScale = uniform(params.normalMapScale);
+        /** Chunk mesh world XZ center — set in each chunk’s `onBeforeRender` for world-space snow/trail UVs. */
+        const uChunkWorldXZ = uniform(new THREE.Vector2(0, 0));
+
+        /** Same row indexing as `stampWorldCircle` / TSL `trailUv` (u, 1−v). */
+        function bilinearTrailRWorld(wx, wz) {
+          const u = THREE.MathUtils.clamp(wx / ARENA + 0.5, 0, 1);
+          const v = THREE.MathUtils.clamp(wz / ARENA + 0.5, 0, 1);
+          const cx = u * (TRAIL_MAP_RES - 1);
+          const cy = (1 - v) * (TRAIL_MAP_RES - 1);
+          const x = THREE.MathUtils.clamp(cx, 0, TRAIL_MAP_RES - 1);
+          const y = THREE.MathUtils.clamp(cy, 0, TRAIL_MAP_RES - 1);
+          const x0 = Math.floor(x);
+          const y0 = Math.floor(y);
+          const x1 = Math.min(TRAIL_MAP_RES - 1, x0 + 1);
+          const y1 = Math.min(TRAIL_MAP_RES - 1, y0 + 1);
+          const fx = x - x0;
+          const fy = y - y0;
+          const at = (xx, yy) => trailData[(yy * TRAIL_MAP_RES + xx) * 4] / 255;
+          return (
+            (at(x0, y0) * (1 - fx) + at(x1, y0) * fx) * (1 - fy) +
+            (at(x0, y1) * (1 - fx) + at(x1, y1) * fx) * fy
+          );
+        }
+
+        /** ~1 texel — 5-tap cross matches GPU (half the texture fetches of 9-tap per vertex). */
+        function smoothedTrailRWorld(wx, wz) {
+          const du = (ARENA / TRAIL_MAP_RES) * 1.0;
+          return (
+            (bilinearTrailRWorld(wx, wz) +
+              bilinearTrailRWorld(wx + du, wz) +
+              bilinearTrailRWorld(wx - du, wz) +
+              bilinearTrailRWorld(wx, wz + du) +
+              bilinearTrailRWorld(wx, wz - du)) /
+            5
+          );
+        }
+
+        /** Match TSL `tiledUV` + `texture(snowDispTex)` (handles `flipY` on loaded maps). */
+        function bilinearSnowDispRWorld(wx, wz) {
+          const uPlane = THREE.MathUtils.clamp(wx / ARENA + 0.5, 0, 1);
+          const vPlane = THREE.MathUtils.clamp(wz / ARENA + 0.5, 0, 1);
+          let tu = fract(uPlane * params.snowRepeat);
+          let tv = fract(vPlane * params.snowRepeat);
+          if (snowDispTex.flipY) tv = 1 - tv;
+          return bilinearR01(snowDispData, snowDispW, snowDispH, tu, tv);
+        }
+
+        /** Same as TSL `totalDisp` at xz: base snow disp minus trail groove. */
+        function cpuSnowSurfaceY(wx, wz) {
+          const dispR = bilinearSnowDispRWorld(wx, wz);
+          const d = params.dispStrength;
+          const baseDisp = dispR * (d * 2) - d;
+          const trailR = smoothedTrailRWorld(wx, wz);
+          const trailGroove = (128 / 255 - trailR) * params.trailGrooveScale;
+          return baseDisp - trailGroove;
+        }
+
+        function resetTrail() {
+          trailData.fill(128);
+          for (let i = 0; i < TRAIL_MAP_RES * TRAIL_MAP_RES; i++) {
+            trailData[i * 4 + 3] = 255;
+          }
+          trailTex.needsUpdate = true;
+          renderer.initTexture(trailTex);
+        }
+
+        /**
+         * Stamp one brush in trail map (lower R = deeper groove in shader).
+         * Falloff matches Codrops `deformMesh`: cubic ((R−dist)/R)³ for smooth rims.
+         */
+        function stampWorldCircle(wx, wz, pushScale = 1) {
+          const u = (wx + ARENA * 0.5) / ARENA;
+          const v = (wz + ARENA * 0.5) / ARENA;
+          if (u < 0 || u > 1 || v < 0 || v > 1) return false;
+          const cxF = u * (TRAIL_MAP_RES - 1);
+          const cyF = (1 - v) * (TRAIL_MAP_RES - 1);
+          const cx0 = Math.round(cxF);
+          const cy0 = Math.round(cyF);
+          const radiusPx = Math.max(
+            2,
+            Math.round((params.stampRadius / ARENA) * TRAIL_MAP_RES),
+          );
+          let writes = 0;
+          const rSq = radiusPx * radiusPx;
+          for (let dy = -radiusPx; dy <= radiusPx; dy++) {
+            const py = cy0 + dy;
+            if (py < 0 || py >= TRAIL_MAP_RES) continue;
+            for (let dx = -radiusPx; dx <= radiusPx; dx++) {
+              const px = cx0 + dx;
+              if (px < 0 || px >= TRAIL_MAP_RES) continue;
+              const dSq = dx * dx + dy * dy;
+              if (dSq > rSq) continue;
+              const d = Math.sqrt(dSq) / radiusPx;
+              const falloff = (1 - d) ** 3;
+              const idx = (py * TRAIL_MAP_RES + px) * 4;
+              const push = params.stampPush * falloff * pushScale;
+              const cur = trailData[idx];
+              trailData[idx] = Math.max(0, cur - push) | 0;
+              writes++;
+            }
+          }
+          return writes > 0;
+        }
+
+        function stampTrailSegment(ax, az, bx, bz, speedXZ) {
+          if (speedXZ < params.minStampSpeed) return false;
+          const pushScale = THREE.MathUtils.clamp(
+            params.stampPushMin + speedXZ * 0.04,
+            params.stampPushMin,
+            params.stampPushMax,
+          );
+          const dx = bx - ax;
+          const dz = bz - az;
+          const len = Math.hypot(dx, dz);
+          const steps = Math.max(1, Math.ceil(len / params.stampStep));
+          let dirty = false;
+          for (let i = 0; i <= steps; i++) {
+            const t = i / steps;
+            const wx = ax + dx * t;
+            const wz = az + dz * t;
+            if (stampWorldCircle(wx, wz, pushScale)) dirty = true;
+          }
+          if (dirty) trailTex.needsUpdate = true;
+          return dirty;
+        }
+
+        const trailWorldX = uChunkWorldXZ.x.add(positionLocal.x);
+        const trailWorldZ = uChunkWorldXZ.y.add(positionLocal.z);
+        const snowU = clamp(
+          trailWorldX.div(float(ARENA)).add(float(0.5)),
+          float(0),
+          float(1),
+        );
+        const snowV = clamp(
+          trailWorldZ.div(float(ARENA)).add(float(0.5)),
+          float(0),
+          float(1),
+        );
+        const tiledUV = mul(vec2(snowU, snowV), vec2(uSnowRepeat, uSnowRepeat));
+
+        /** Match CPU stamp: world u=(x+half)/W, v=(z+half)/W → sample (u, 1−v). */
+        const trailUv = clamp(
+          vec2(snowU, sub(float(1), snowV)),
+          vec2(0, 0),
+          vec2(1, 1),
+        );
+        const neutralTrail = float(128 / 255);
+        const trailDu = float(1 / TRAIL_MAP_RES);
+        const trailR_c = texture(trailTex, trailUv).x;
+        const trailR_pu = texture(
+          trailTex,
+          clamp(trailUv.add(vec2(trailDu, float(0))), vec2(0, 0), vec2(1, 1)),
+        ).x;
+        const trailR_mu = texture(
+          trailTex,
+          clamp(
+            trailUv.add(vec2(sub(float(0), trailDu), float(0))),
+            vec2(0, 0),
+            vec2(1, 1),
+          ),
+        ).x;
+        const trailR_pv = texture(
+          trailTex,
+          clamp(trailUv.add(vec2(float(0), trailDu)), vec2(0, 0), vec2(1, 1)),
+        ).x;
+        const trailR_mv = texture(
+          trailTex,
+          clamp(
+            trailUv.add(vec2(float(0), sub(float(0), trailDu))),
+            vec2(0, 0),
+            vec2(1, 1),
+          ),
+        ).x;
+        const trailR = trailR_c
+          .add(trailR_pu)
+          .add(trailR_mu)
+          .add(trailR_pv)
+          .add(trailR_mv)
+          .mul(float(0.2));
+        const trailGroove = sub(neutralTrail, trailR).mul(uTrailGrooveScale);
+
+        const terrainMat = new THREE.MeshStandardNodeMaterial({
+          metalness: params.terrainMetalness,
+          envMapIntensity: params.terrainEnvMap,
+        });
+        const snowBaseColor = texture(snowColorTex, tiledUV).mul(uSnowColorMul);
+        const directCavity = sub(float(1), trailGroove.mul(uTrailAlbedoCavity));
+        terrainMat.colorNode = snowBaseColor.mul(directCavity);
+        terrainMat.roughnessNode = min(
+          float(1),
+          texture(snowRoughnessTex, tiledUV).x.add(
+            trailGroove.mul(uTrailRoughnessBoost),
+          ),
+        );
+        terrainMat.normalNode = normalMap(
+          texture(snowNormalTex, tiledUV),
+          vec2(uNormalScale, uNormalScale),
+        );
+        const aoBaked = texture(snowAoTex, tiledUV).x;
+        const grooveAmbient = sub(float(1), trailGroove.mul(uTrailAoInGroove));
+        terrainMat.aoNode = max(
+          float(0.08),
+          min(float(1), aoBaked.mul(grooveAmbient)),
+        );
+
+        const dispSample = texture(snowDispTex, tiledUV).x;
+        const baseDisp = sub(
+          mul(dispSample, mul(uDispStrength, float(2))),
+          uDispStrength,
+        );
+        const totalDisp = sub(baseDisp, trailGroove);
+        terrainMat.positionNode = positionLocal.add(
+          vec3(float(0), totalDisp, float(0)),
+        );
+        terrainMat.needsUpdate = true;
+
+        renderer.initTexture(trailTex);
+        renderer.initTexture(snowColorTex);
+        renderer.initTexture(snowRoughnessTex);
+        renderer.initTexture(snowNormalTex);
+        renderer.initTexture(snowDispTex);
+        renderer.initTexture(snowAoTex);
+
+        const terrainChunks = [];
+        for (let iz = 0; iz < CHUNK_GRID; iz++) {
+          for (let ix = 0; ix < CHUNK_GRID; ix++) {
+            const chunkGeo = new THREE.PlaneGeometry(
+              CHUNK_SIZE,
+              CHUNK_SIZE,
+              TERRAIN_SEGMENTS_PER_CHUNK,
+              TERRAIN_SEGMENTS_PER_CHUNK,
+            );
+            chunkGeo.rotateX(-Math.PI / 2);
+            const chunk = new THREE.Mesh(chunkGeo, terrainMat);
+            chunk.receiveShadow = true;
+            const cx = -ARENA / 2 + CHUNK_SIZE / 2 + ix * CHUNK_SIZE;
+            const cz = -ARENA / 2 + CHUNK_SIZE / 2 + iz * CHUNK_SIZE;
+            chunk.position.set(cx, 0, cz);
+            chunk.onBeforeRender = () => {
+              uChunkWorldXZ.value.set(chunk.position.x, chunk.position.z);
+            };
+            scene.add(chunk);
+            terrainChunks.push(chunk);
+          }
+        }
+
+        const ballMat = new THREE.MeshStandardNodeMaterial({
+          color: 0xd03838,
+          roughness: 0.45,
+          metalness: 0.02,
+        });
+        const ball = new THREE.Mesh(
+          new THREE.SphereGeometry(0.35, 48, 32),
+          ballMat,
+        );
+        ball.castShadow = true;
+        ball.receiveShadow = true;
+        ball.position.set(
+          0,
+          BALL_RADIUS + cpuSnowSurfaceY(0, 0) + params.ballSkin,
+          0,
+        );
+        scene.add(ball);
+
+        const controls = new OrbitControls(camera, renderer.domElement);
+        controls.enableDamping = true;
+        controls.enabled = false;
+        controls.target.copy(ball.position);
+
+        let appliedShadowMapSize = params.shadowMapSize;
+
+        const syncUniformsAndMaterialProps = () => {
+          const pr = Math.min(
+            typeof devicePixelRatio === "number" ? devicePixelRatio : 1,
+            params.maxPixelRatio,
+          );
+          if (renderer.getPixelRatio() !== pr) {
+            renderer.setPixelRatio(pr);
+            renderer.setSize(innerWidth, innerHeight);
+          }
+
+          const sm = Math.round(params.shadowMapSize);
+          if (sm !== appliedShadowMapSize) {
+            appliedShadowMapSize = sm;
+            if (dir.shadow.map) dir.shadow.map.dispose();
+            dir.shadow.map = null;
+            dir.shadow.mapSize.set(sm, sm);
+          }
+
+          uTrailGrooveScale.value = params.trailGrooveScale;
+          uTrailAoInGroove.value = params.trailAoInGroove;
+          uTrailAlbedoCavity.value = params.trailAlbedoCavity;
+          uTrailRoughnessBoost.value = params.trailRoughnessBoost;
+          uDispStrength.value = params.dispStrength;
+          uSnowRepeat.value = params.snowRepeat;
+          uSnowColorMul.value = params.snowColorMul;
+          uNormalScale.value = params.normalMapScale;
+          renderer.toneMappingExposure = params.exposure;
+          ambient.intensity = params.ambientIntensity;
+          dir.intensity = params.dirIntensity;
+          terrainMat.metalness = params.terrainMetalness;
+          terrainMat.envMapIntensity = params.terrainEnvMap;
+          ballMat.roughness = params.ballRoughness;
+          ballMat.metalness = params.ballMetalness;
+          controls.minDistance = params.orbitMinDistance;
+          controls.maxDistance = params.orbitMaxDistance;
+          controls.minPolarAngle = params.orbitMinPolar;
+          controls.maxPolarAngle = params.orbitMaxPolar;
+          controls.dampingFactor = params.orbitDamping;
+        };
+
+        const pane = new Pane({
+          container: document.getElementById("tweak-root"),
+        });
+        pane.title = "Snow ball";
+        const bindRange = (folder, key, opts) =>
+          folder.addBinding(params, key, {
+            min: opts.min,
+            max: opts.max,
+            step: opts.step ?? 0.001,
+          });
+        const fCam = pane.addFolder({ title: "Camera" });
+        fCam.addBinding(params, "cameraMode", {
+          label: "Mode",
+          options: { Follow: "follow", Orbit: "orbit" },
+        });
+        bindRange(fCam, "camDist", { min: 2, max: 40 });
+        bindRange(fCam, "camHeight", { min: 0.2, max: 25 });
+        bindRange(fCam, "lookLift", { min: -1, max: 3 });
+        bindRange(fCam, "smoothCam", { min: 0.5, max: 40 });
+        bindRange(fCam, "smoothLook", { min: 0.5, max: 40 });
+        bindRange(fCam, "followDirLambda", { min: 0.5, max: 40 });
+        bindRange(fCam, "followDirSpeedThresh", { min: 0.02, max: 1.5 });
+        const fOrb = pane.addFolder({ title: "Orbit controls" });
+        bindRange(fOrb, "orbitMinDistance", { min: 0.5, max: 30 });
+        bindRange(fOrb, "orbitMaxDistance", { min: 5, max: 800 });
+        bindRange(fOrb, "orbitMinPolar", { min: 0.01, max: 1.5 });
+        bindRange(fOrb, "orbitMaxPolar", { min: 0.5, max: 3.1 });
+        bindRange(fOrb, "orbitDamping", { min: 0.01, max: 0.2, step: 0.005 });
+        const fMov = pane.addFolder({ title: "Movement" });
+        bindRange(fMov, "accel", { min: 2, max: 60 });
+        bindRange(fMov, "damping", { min: 0.5, max: 30 });
+        bindRange(fMov, "maxSpeed", { min: 1, max: 30 });
+        const fBall = pane.addFolder({ title: "Ball" });
+        bindRange(fBall, "ballSkin", { min: 0, max: 0.05, step: 0.0005 });
+        bindRange(fBall, "smoothBallY", { min: 2, max: 60 });
+        bindRange(fBall, "ballRoughness", { min: 0, max: 1 });
+        bindRange(fBall, "ballMetalness", { min: 0, max: 1 });
+        const fTrail = pane.addFolder({ title: "Trail stamp (CPU)" });
+        bindRange(fTrail, "stampRadius", { min: 0.15, max: 1.5 });
+        bindRange(fTrail, "stampStep", { min: 0.02, max: 0.2 });
+        bindRange(fTrail, "stampPush", { min: 40, max: 320, step: 1 });
+        bindRange(fTrail, "minStampSpeed", { min: 0.001, max: 0.08 });
+        bindRange(fTrail, "stampPushMin", { min: 0.3, max: 1.5 });
+        bindRange(fTrail, "stampPushMax", { min: 0.5, max: 2.5 });
+        const fSnow = pane.addFolder({ title: "Terrain shader" });
+        bindRange(fSnow, "trailGrooveScale", { min: 0, max: 4 });
+        bindRange(fSnow, "trailAoInGroove", { min: 0, max: 2 });
+        bindRange(fSnow, "trailAlbedoCavity", { min: 0, max: 1.5 });
+        bindRange(fSnow, "trailRoughnessBoost", { min: 0, max: 3 });
+        bindRange(fSnow, "dispStrength", { min: 0, max: 0.12 });
+        bindRange(fSnow, "snowRepeat", { min: 1, max: 48, step: 0.25 });
+        bindRange(fSnow, "snowColorMul", { min: 0.3, max: 1.5 });
+        bindRange(fSnow, "normalMapScale", { min: 0.1, max: 2.5 });
+        bindRange(fSnow, "terrainMetalness", { min: 0, max: 1 });
+        bindRange(fSnow, "terrainEnvMap", { min: 0, max: 2 });
+        const fLight = pane.addFolder({ title: "Lighting & tone" });
+        bindRange(fLight, "ambientIntensity", { min: 0, max: 2 });
+        bindRange(fLight, "dirIntensity", { min: 0, max: 4 });
+        bindRange(fLight, "exposure", { min: 0.2, max: 3 });
+        bindRange(fLight, "smoothShadow", { min: 0.5, max: 40 });
+        const fPerf = pane.addFolder({ title: "Performance" });
+        bindRange(fPerf, "maxPixelRatio", { min: 0.5, max: 2, step: 0.05 });
+        fPerf.addBinding(params, "shadowMapSize", {
+          label: "Shadow map",
+          options: { "512²": 512, "1024²": 1024, "2048²": 2048 },
+        });
+        const buildInfo = {
+          chunkGrid: CHUNK_GRID,
+          segsPerChunk: TERRAIN_SEGMENTS_PER_CHUNK,
+          trailMapRes: TRAIL_MAP_RES,
+        };
+        fPerf.addBinding(buildInfo, "chunkGrid", {
+          label: "Chunk grid",
+          readonly: true,
+        });
+        fPerf.addBinding(buildInfo, "segsPerChunk", {
+          label: "Segs / chunk",
+          readonly: true,
+        });
+        fPerf.addBinding(buildInfo, "trailMapRes", {
+          label: "Trail res",
+          readonly: true,
+        });
+        pane.addButton({ title: "Clear trail (R)" }).on("click", () => {
+          resetTrail();
+          prevStampX = ball.position.x;
+          prevStampZ = ball.position.z;
+        });
+
+        let prevStampX = ball.position.x;
+        let prevStampZ = ball.position.z;
+
+        const keyState = {
+          KeyW: false,
+          KeyA: false,
+          KeyS: false,
+          KeyD: false,
+          ArrowUp: false,
+          ArrowLeft: false,
+          ArrowDown: false,
+          ArrowRight: false,
+        };
+        const onKey = (down) => (e) => {
+          if (e.code in keyState) {
+            keyState[e.code] = down;
+            e.preventDefault();
+          }
+        };
+        addEventListener("keydown", onKey(true));
+        addEventListener("keyup", onKey(false));
+        addEventListener("keydown", (e) => {
+          if (e.code === "KeyR") {
+            e.preventDefault();
+            resetTrail();
+            prevStampX = ball.position.x;
+            prevStampZ = ball.position.z;
+          }
+        });
+
+        const timer = new THREE.Timer();
+        let lastTime = 0;
+        const sphereVel = new THREE.Vector3();
+        const camForward = new THREE.Vector3();
+        const camRight = new THREE.Vector3();
+        const inputDir = new THREE.Vector3();
+        const camDesired = new THREE.Vector3();
+        const camLook = new THREE.Vector3();
+        /** Horizontal unit vector the camera sits behind — damped so it doesn’t whip with velocity noise. */
+        const smoothFollowDir = new THREE.Vector3(0, 0, 1);
+        const cameraLookTarget = new THREE.Vector3();
+        cameraLookTarget
+          .copy(ball.position)
+          .add(new THREE.Vector3(0, params.lookLift, 0));
+        const shadowTargetSmooth = new THREE.Vector3();
+        shadowTargetSmooth.copy(ball.position);
+        const tmpCamToBall = new THREE.Vector3();
+        /** Framerate-independent smoothing: `1 - exp(-λ dt)` (replaces fixed lerp factors that jitter across Hz). */
+        const smoothAlpha = (lambda, dt) =>
+          1 - Math.exp(-lambda * Math.min(dt, 0.1));
+
+        addEventListener("resize", () => {
+          camera.aspect = innerWidth / innerHeight;
+          camera.updateProjectionMatrix();
+          renderer.setPixelRatio(
+            Math.min(
+              typeof devicePixelRatio === "number" ? devicePixelRatio : 1,
+              params.maxPixelRatio,
+            ),
+          );
+          renderer.setSize(innerWidth, innerHeight);
+          controls.update();
+        });
+
+        renderer.setAnimationLoop(() => {
+          timer.update();
+          const elapsed = timer.getElapsed();
+          const dt = Math.min(0.05, elapsed - lastTime || 0.016);
+          lastTime = elapsed;
+
+          syncUniformsAndMaterialProps();
+
+          const ix =
+            (keyState.KeyD || keyState.ArrowRight ? 1 : 0) -
+            (keyState.KeyA || keyState.ArrowLeft ? 1 : 0);
+          const iz =
+            (keyState.KeyW || keyState.ArrowUp ? 1 : 0) -
+            (keyState.KeyS || keyState.ArrowDown ? 1 : 0);
+
+          if (ix !== 0 || iz !== 0) {
+            camera.getWorldDirection(camForward);
+            camForward.y = 0;
+            if (camForward.lengthSq() < 1e-6) camForward.set(0, 0, -1);
+            camForward.normalize();
+            camRight.set(-camForward.z, 0, camForward.x);
+            inputDir
+              .copy(camForward)
+              .multiplyScalar(iz)
+              .addScaledVector(camRight, ix);
+            if (inputDir.lengthSq() > 1e-6) inputDir.normalize();
+            sphereVel.addScaledVector(inputDir, params.accel * dt);
+          } else {
+            sphereVel.multiplyScalar(Math.exp(-params.damping * dt));
+          }
+
+          let speed = Math.hypot(sphereVel.x, sphereVel.z);
+          if (speed > params.maxSpeed) {
+            sphereVel.multiplyScalar(params.maxSpeed / speed);
+            speed = params.maxSpeed;
+          }
+          ball.position.x += sphereVel.x * dt;
+          ball.position.z += sphereVel.z * dt;
+          ball.position.x = THREE.MathUtils.clamp(
+            ball.position.x,
+            -BALL_CLAMP,
+            BALL_CLAMP,
+          );
+          ball.position.z = THREE.MathUtils.clamp(
+            ball.position.z,
+            -BALL_CLAMP,
+            BALL_CLAMP,
+          );
+
+          stampTrailSegment(
+            prevStampX,
+            prevStampZ,
+            ball.position.x,
+            ball.position.z,
+            speed,
+          );
+          prevStampX = ball.position.x;
+          prevStampZ = ball.position.z;
+
+          const targetBallY =
+            BALL_RADIUS +
+            cpuSnowSurfaceY(ball.position.x, ball.position.z) +
+            params.ballSkin;
+          const aBallY = smoothAlpha(params.smoothBallY, dt);
+          ball.position.y += (targetBallY - ball.position.y) * aBallY;
+
+          let targetDirX = smoothFollowDir.x;
+          let targetDirZ = smoothFollowDir.z;
+          if (speed > params.followDirSpeedThresh) {
+            targetDirX = sphereVel.x / speed;
+            targetDirZ = sphereVel.z / speed;
+          } else {
+            tmpCamToBall.set(
+              ball.position.x - camera.position.x,
+              0,
+              ball.position.z - camera.position.z,
+            );
+            if (tmpCamToBall.lengthSq() > 1e-5) {
+              tmpCamToBall.normalize();
+              targetDirX = tmpCamToBall.x;
+              targetDirZ = tmpCamToBall.z;
+            }
+          }
+          const aDir = smoothAlpha(params.followDirLambda, dt);
+          smoothFollowDir.x += (targetDirX - smoothFollowDir.x) * aDir;
+          smoothFollowDir.z += (targetDirZ - smoothFollowDir.z) * aDir;
+          const lh = Math.hypot(smoothFollowDir.x, smoothFollowDir.z);
+          if (lh > 1e-5) {
+            smoothFollowDir.x /= lh;
+            smoothFollowDir.z /= lh;
+          }
+
+          if (params.cameraMode === "orbit") {
+            controls.enabled = true;
+            controls.target.lerp(ball.position, smoothAlpha(18, dt));
+            controls.update();
+          } else {
+            controls.enabled = false;
+            camDesired
+              .copy(ball.position)
+              .addScaledVector(smoothFollowDir, -params.camDist)
+              .add(new THREE.Vector3(0, params.camHeight, 0));
+            const aCam = smoothAlpha(params.smoothCam, dt);
+            camera.position.lerp(camDesired, aCam);
+            camLook
+              .copy(ball.position)
+              .add(new THREE.Vector3(0, params.lookLift, 0));
+            const aLook = smoothAlpha(params.smoothLook, dt);
+            cameraLookTarget.lerp(camLook, aLook);
+            camera.lookAt(cameraLookTarget);
+          }
+
+          const aShadow = smoothAlpha(params.smoothShadow, dt);
+          shadowTargetSmooth.lerp(ball.position, aShadow);
+          dir.target.position.copy(shadowTargetSmooth);
+
+          horizonSky.update(camera);
+          renderer.render(scene, camera);
+        });
+      }
+
+      init().catch((e) => {
+        console.error(e);
+        document.body.insertAdjacentHTML(
+          "beforeend",
+          `<pre style="color:#f88;padding:16px;font:14px monospace;">${String(
+            e?.message ?? e,
+          )}</pre>`,
+        );
+      });
+    </script>
+  </body>
+</html>
