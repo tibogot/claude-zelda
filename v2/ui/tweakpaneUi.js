@@ -1106,7 +1106,7 @@ export function createTweakpaneUi({
   genFolder.addBinding(toolState.gen, "height", {
     label: "Height",
     min: 10,
-    max: 300,
+    max: 800,
     step: 1,
   });
   genFolder.addBinding(toolState.gen, "seed", {

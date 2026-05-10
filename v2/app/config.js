@@ -4,7 +4,7 @@ export const V2_CONFIG = {
     chunkSize: 100,
     dataResolution: 64,
     minHeight: -60,
-    maxHeight: 180,
+    maxHeight: 800,
     /** When true, new chunks are filled with `initialHeight` instead of `sampleInitialHeight` noise. */
     flatInitialTerrain: true,
     initialHeight: 0,

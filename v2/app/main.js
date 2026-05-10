@@ -94,6 +94,7 @@ import { createVolumetricCloudSystem } from "../render/clouds/volumetricCloudSys
 
 export async function startV2App(opts = {}) {
   const config = structuredClone(V2_CONFIG);
+  if (opts.worldSize) config.world.size = opts.worldSize;
   const toolState = createToolState();
   const perf = createPerfState();
   const _uiContainer = opts.container || null;
