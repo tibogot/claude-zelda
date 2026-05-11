@@ -1,26 +1,37 @@
 const CAR_HALF_WIDTH = 1.1;
 const CAR_HALF_LENGTH = 2.5;
 const CAR_BODY_HEIGHT = 0.8;
-const CAR_RIDE_HEIGHT = 0.35;
+const CAR_RIDE_HEIGHT = 0.48;
 const CAR_WHEEL_RADIUS = 0.42;
-const CAR_GRAVITY = 28;
-const CAR_EDGE_DROP_THRESHOLD = 0.25;
+const CAR_WHEEL_BASE = 1.9;
+const CAR_TRACK = 1.1;
 const CAR_COLLISION_SKIN = 0.08;
 const CAR_MAX_SLOPE_COS = 0.5;
-const CAR_SLOPE_SAMPLE_EPS = 0.5;
 const CAR_STEP_OVER_HEIGHT = 1.0;
 const CAR_SPHERE_RADIUS = 1.4;
+
+const CAR_GRAVITY = 28;
+const CAR_MASS = 1;
+const SUSP_STIFFNESS = 80;
+const SUSP_DAMP_COMPRESS = 8;
+const SUSP_DAMP_RELAX = 2.5;
+const SUSP_MAX_TRAVEL = 0.6;
+const SUSP_EQ_COMP = (CAR_MASS * CAR_GRAVITY) / (4 * SUSP_STIFFNESS);
+
 const CAR_AIR_PITCH_SMOOTH = 4;
+const CAR_JUMP_IMPULSE = 9;
 
 export class CarPhysics {
   constructor() {
     this.inAir = false;
     this.velY = 0;
     this.onSteepSlope = false;
-    this.launchPitch = 0;
     this.airPitch = 0;
-    this._prevX = 0;
-    this._prevZ = 0;
+    this.wheelContactYs = [0, 0, 0, 0];
+    this.wheelGrounded = [true, true, true, true];
+    this.wheelSuspLengths = [SUSP_EQ_COMP, SUSP_EQ_COMP, SUSP_EQ_COMP, SUSP_EQ_COMP];
+    this._prevGroundYs = [0, 0, 0, 0];
+    this._initialized = false;
   }
 
   getWheelGroundHeight(wx, wz, carY, getTerrainHeight, cliffBvh) {
@@ -60,7 +71,6 @@ export class CarPhysics {
     let finalVx = vx;
     let finalVz = vz;
 
-    // Phase 1: Anti-tunneling sphere sweep along movement direction
     if (baseStepLen > 0.01) {
       const sweepResult = cliffBvh.spherecast(
         px, carY + CAR_RIDE_HEIGHT + CAR_SPHERE_RADIUS,
@@ -82,7 +92,6 @@ export class CarPhysics {
       }
     }
 
-    // Phase 2: Position pushout using closest-point queries
     let posX = px + finalStepX;
     let posZ = pz + finalStepZ;
 
@@ -119,11 +128,9 @@ export class CarPhysics {
           if (dist >= CAR_COLLISION_SKIN + 0.3) continue;
           if (dist < 1e-6) continue;
 
-          // Check if this is a step-over surface (bridge/ramp)
           const topCheck = cliffBvh.raycastHeight(closest.x, closest.z);
           if (topCheck != null && topCheck <= stepOverY) continue;
 
-          // Check if surface is mostly horizontal (floor, not wall)
           const ny = dy / dist;
           if (ny > 0.7) continue;
 
@@ -154,116 +161,127 @@ export class CarPhysics {
     return { x: posX, z: posZ, vx: finalVx, vz: finalVz };
   }
 
-  updateVertical(carY, groundY, prevY, dtSec, getTerrainHeight, px, pz, vx, vz, cliffBvh) {
-    // Sample slope at PREVIOUS position (behind the car) for launch detection
-    // When car drives off a ramp edge, current pos is past the ramp — previous pos is still on it
-    const speed = Math.sqrt(vx * vx + vz * vz);
-    const backDist = Math.min(CAR_HALF_LENGTH, speed * dtSec + 0.5);
-    const sampleX = speed > 0.5 ? px - (vx / speed) * backDist : px;
-    const sampleZ = speed > 0.5 ? pz - (vz / speed) * backDist : pz;
+  updateSuspension(bodyYInput, wheelWorldXZs, scaleFactor, heading, dtSec, getTerrainHeight, cliffBvh, vx, vz, jumpRequested) {
+    const sf = scaleFactor;
+    const rideOffset = CAR_RIDE_HEIGHT * sf;
+    const restLen = rideOffset + SUSP_EQ_COMP;
+    const maxTravel = SUSP_MAX_TRAVEL;
 
-    const eps = CAR_SLOPE_SAMPLE_EPS;
-    const hL = getTerrainHeight(sampleX - eps, sampleZ);
-    const hR = getTerrainHeight(sampleX + eps, sampleZ);
-    const hD = getTerrainHeight(sampleX, sampleZ - eps);
-    const hU = getTerrainHeight(sampleX, sampleZ + eps);
-    const inv2eps = 1 / (2 * eps);
-    let nx = (hL - hR) * inv2eps;
-    let nz = (hD - hU) * inv2eps;
-    let nLen = Math.sqrt(nx * nx + 1 + nz * nz);
-    let normalY = 1 / nLen;
+    const bodyY = bodyYInput + rideOffset;
 
-    // Also sample BVH slope for ramp launch detection
-    if (cliffBvh?.baked) {
-      const bvhC = cliffBvh.raycastHeight(sampleX, sampleZ);
-      if (bvhC != null && bvhC > hL - 2) {
-        const bvhL = cliffBvh.raycastHeight(sampleX - eps, sampleZ);
-        const bvhR = cliffBvh.raycastHeight(sampleX + eps, sampleZ);
-        const bvhD = cliffBvh.raycastHeight(sampleX, sampleZ - eps);
-        const bvhU = cliffBvh.raycastHeight(sampleX, sampleZ + eps);
-        if (bvhL != null && bvhR != null && bvhD != null && bvhU != null) {
-          const bnx = (bvhL - bvhR) * inv2eps;
-          const bnz = (bvhD - bvhU) * inv2eps;
-          const bnLen = Math.sqrt(bnx * bnx + 1 + bnz * bnz);
-          const bNormalY = 1 / bnLen;
-          if (bNormalY < normalY) {
-            nx = bnx;
-            nz = bnz;
-            nLen = bnLen;
-            normalY = bNormalY;
-          }
-        }
+    for (let i = 0; i < 4; i++) {
+      const wx = wheelWorldXZs[i * 2];
+      const wz = wheelWorldXZs[i * 2 + 1];
+      let groundH = getTerrainHeight(wx, wz);
+      if (cliffBvh?.baked) {
+        const bvhH = cliffBvh.raycastHeight(wx, wz);
+        if (bvhH != null && bvhH > groundH && bvhH <= bodyY + 4.0) groundH = bvhH;
+      }
+      this.wheelContactYs[i] = groundH;
+    }
+
+    if (!this._initialized) {
+      for (let i = 0; i < 4; i++) this._prevGroundYs[i] = this.wheelContactYs[i];
+      this._initialized = true;
+    }
+
+    let totalForce = 0;
+    let groundedCount = 0;
+
+    for (let i = 0; i < 4; i++) {
+      const groundY = this.wheelContactYs[i];
+      const distToGround = bodyY - groundY;
+      const compression = restLen - distToGround;
+
+      if (compression > 0) {
+        this.wheelGrounded[i] = true;
+        groundedCount++;
+
+        const clampedComp = Math.min(compression, maxTravel);
+        const groundVelY = (groundY - this._prevGroundYs[i]) / Math.max(dtSec, 0.001);
+        const compVel = -(this.velY - groundVelY);
+        const dampRate = compVel > 0 ? SUSP_DAMP_COMPRESS : SUSP_DAMP_RELAX;
+        const force = SUSP_STIFFNESS * clampedComp + dampRate * compVel;
+        totalForce += Math.max(0, force);
+        this.wheelSuspLengths[i] = distToGround;
+      } else {
+        this.wheelGrounded[i] = false;
+        this.wheelSuspLengths[i] = restLen;
       }
     }
 
+    for (let i = 0; i < 4; i++) this._prevGroundYs[i] = this.wheelContactYs[i];
+
+    if (jumpRequested && groundedCount > 0 && !this.inAir) {
+      this.velY = CAR_JUMP_IMPULSE;
+    }
+
+    const weight = CAR_MASS * CAR_GRAVITY;
+    const netForce = totalForce - weight;
+    this.velY += (netForce / CAR_MASS) * dtSec;
+
+    let newBodyY = bodyY + this.velY * dtSec;
+
+    let maxGroundY = -Infinity;
+    for (let i = 0; i < 4; i++) {
+      if (this.wheelContactYs[i] > maxGroundY) maxGroundY = this.wheelContactYs[i];
+    }
+    if (newBodyY < maxGroundY) {
+      newBodyY = maxGroundY;
+      if (this.velY < 0) this.velY = 0;
+    }
+
+    this.inAir = groundedCount === 0;
+
+    if (this.inAir) {
+      const hSpeed = Math.sqrt(vx * vx + vz * vz);
+      const targetPitch = hSpeed > 1 ? Math.atan2(this.velY, hSpeed) : 0;
+      this.airPitch += (targetPitch - this.airPitch) * (1 - Math.exp(-CAR_AIR_PITCH_SMOOTH * dtSec));
+    } else {
+      this.airPitch *= (1 - Math.min(1, 8 * dtSec));
+    }
+
+    const sinH = Math.sin(heading);
+    const cosH = Math.cos(heading);
+    const wheelBaseDist = CAR_WHEEL_BASE * sf;
+    const trackDist = CAR_TRACK * sf;
+
+    const frontAvgY = (this.wheelContactYs[0] + this.wheelContactYs[1]) * 0.5;
+    const rearAvgY = (this.wheelContactYs[2] + this.wheelContactYs[3]) * 0.5;
+    const leftAvgY = (this.wheelContactYs[0] + this.wheelContactYs[2]) * 0.5;
+    const rightAvgY = (this.wheelContactYs[1] + this.wheelContactYs[3]) * 0.5;
+
+    const dHdFwd = (frontAvgY - rearAvgY) / wheelBaseDist;
+    const dHdRight = (rightAvgY - leftAvgY) / trackDist;
+    const terrainPitch = Math.atan2(dHdFwd, 1);
+    const terrainRoll = Math.atan2(dHdRight, 1);
+
+    const nLenSq = dHdFwd * dHdFwd + dHdRight * dHdRight + 1;
+    const nLen = Math.sqrt(nLenSq);
+    const normalY = 1 / nLen;
     const tooSteep = normalY < CAR_MAX_SLOPE_COS;
     this.onSteepSlope = tooSteep && !this.inAir;
 
-    let newY = carY;
+    const nx = dHdFwd * sinH - dHdRight * cosH;
+    const nz = dHdFwd * cosH + dHdRight * sinH;
+
     let slideVx = 0, slideVz = 0;
-    let launchVxScale = 0, launchVzScale = 0;
-
-    if (this.inAir) {
-      this.velY -= CAR_GRAVITY * dtSec;
-      newY = carY + this.velY * dtSec;
-
-      // Airborne pitch follows velocity arc: atan2(velY, horizontalSpeed)
-      const hSpeed = Math.sqrt(vx * vx + vz * vz);
-      const targetAirPitch = hSpeed > 1 ? Math.atan2(this.velY, hSpeed) : 0;
-      this.airPitch += (targetAirPitch - this.airPitch) * (1 - Math.exp(-CAR_AIR_PITCH_SMOOTH * dtSec));
-
-      if (newY <= groundY) {
-        newY = groundY;
-        this.velY = 0;
-        this.inAir = false;
-        this.airPitch = 0;
-        this.launchPitch = 0;
-      }
-    } else {
-      this.airPitch = 0;
-      const drop = prevY - groundY;
-      if (drop > CAR_EDGE_DROP_THRESHOLD) {
-        this.inAir = true;
-        const speed = Math.sqrt(vx * vx + vz * vz);
-        if (speed > 1 && nLen > 1.01) {
-          // Slope surface tangent in the car's movement direction
-          // Normal is (nx/nLen, 1/nLen, nz/nLen). The slope "up" direction
-          // is the tangent along the steepest ascent projected from the velocity.
-          const slopeGradX = nx / nLen;
-          const slopeGradZ = nz / nLen;
-
-          // How much the car's velocity aligns with the uphill direction
-          const alignment = (vx * slopeGradX + vz * slopeGradZ) / speed;
-          const clampedAlign = Math.max(0, alignment);
-
-          // Slope angle
-          const slopeAngle = Math.acos(Math.min(1, normalY));
-
-          // Launch: decompose speed into slope-parallel components
-          // velY = upward component from slope
-          // Horizontal speed is reduced (cos) because energy goes into vertical
-          this.velY = speed * Math.sin(slopeAngle) * clampedAlign;
-          const horizScale = 1 - (1 - Math.cos(slopeAngle)) * clampedAlign * 0.5;
-          launchVxScale = horizScale;
-          launchVzScale = horizScale;
-
-          // Store launch pitch for the visual (nose up at launch)
-          this.launchPitch = -slopeAngle * clampedAlign;
-          this.airPitch = this.launchPitch;
-        } else {
-          this.velY = 0;
-          this.launchPitch = 0;
-        }
-        newY = prevY;
-      } else if (tooSteep) {
-        slideVx = (nx / nLen) * CAR_GRAVITY * 0.5 * dtSec;
-        slideVz = (nz / nLen) * CAR_GRAVITY * 0.5 * dtSec;
-        newY = groundY;
-      } else {
-        newY = groundY;
-      }
+    if (tooSteep && !this.inAir) {
+      slideVx = (nx / nLen) * CAR_GRAVITY * 0.5 * dtSec;
+      slideVz = (nz / nLen) * CAR_GRAVITY * 0.5 * dtSec;
     }
 
-    return { y: newY, slideVx, slideVz, tooSteep, launchVxScale, launchVzScale, slopeX: nx / nLen, slopeZ: nz / nLen };
+    const outputY = newBodyY - rideOffset;
+
+    return {
+      y: outputY,
+      terrainPitch,
+      terrainRoll,
+      slideVx,
+      slideVz,
+      tooSteep,
+      slopeX: nx / nLen,
+      slopeZ: nz / nLen,
+    };
   }
 }

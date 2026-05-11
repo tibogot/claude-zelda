@@ -18,6 +18,7 @@ import {
 } from "../core/foliage/glbLoader.js";
 import { setupPlayModeCarAudio } from "./carAudioSetup.js";
 import { CarPhysics } from "./carPhysics.js";
+import { LotusPhysics, DEFAULT_LOTUS_PHYSICS_PARAMS } from "./lotusPhysics.js";
 
 const CAP_R = 0.4;
 const CAP_H = 1.2;
@@ -86,7 +87,7 @@ const ISO_FLY_CHASE_SMOOTH = 5.5;
 const CAR_MODEL = "../models/bruno.glb";
 const LOTUS_MODEL = "../models/lotusclaude2.glb";
 const CAR_MODEL_YAW = Math.PI / 2;
-const CAR_MODEL_SCALE = 1.6;
+const CAR_MODEL_SCALE = 1.9;
 const CAR_ACCEL = 26;
 const CAR_ACCEL_BOOST = 52;
 const CAR_BRAKE = 35;
@@ -102,11 +103,11 @@ const CAR_GRIP_NORMAL = 12;
 const CAR_GRIP_DRIFT = 0.8;
 const CAR_GRIP_BRAKE_TURN = 2.0;
 const CAR_DRIFT_ENTRY_SPEED = 8;
-const CAR_RIDE_HEIGHT = 0.35;
+const CAR_RIDE_HEIGHT = 0.48;
 const CAR_WHEEL_RADIUS = 0.42;
 const CAR_DRIFT_ANGLE_MIN = 0.1;
-const CAR_CAM_DIST = 10;
-const CAR_CAM_HEIGHT = 3.5;
+const CAR_CAM_DIST = 8.5;
+const CAR_CAM_HEIGHT = 3.2;
 const CAR_CAM_CHASE_SPEED = 3.5;
 const CAR_CAM_DRIFT_LAG = 1.8;
 const CAR_HANDBRAKE_DECEL = 3;
@@ -161,7 +162,7 @@ const CAR_BODY_PITCH_MAX = 0.25;
 const CAR_BODY_TERRAIN_ROLL_MAX = 0.28;
 const CAR_BODY_TERRAIN_PITCH_MAX = 0.32;
 const CAR_BODY_SMOOTH = 5;
-const CAR_TERRAIN_BODY_SMOOTH = 8;
+const CAR_TERRAIN_BODY_SMOOTH = 13;
 const CAR_WHEEL_BASE = 1.9;
 const CAR_TRACK = 1.1;
 const CAR_SUSP_TRAVEL = 0.45;
@@ -968,6 +969,9 @@ export class PlayMode {
     this.carOnSteepSlope = false;
     this.carNitro = 1.0;
     this._carPhysics = new CarPhysics();
+    this._lotusPhysics = new LotusPhysics();
+    this._driftBoostMeter = 0;
+    this._driftBoostActive = false;
     this._hudKmhSmooth = 0;
     this._hudNitroSmooth = 1;
     this._carBoostBlend = 0;
@@ -976,6 +980,9 @@ export class PlayMode {
     this.carBodyPitch = 0;
     this.carTerrainRoll = 0;
     this.carTerrainPitch = 0;
+    this._carTerrainPitchTarget = 0;
+    this._carTerrainRollTarget = 0;
+    this._wheelWorldXZs = new Float32Array(8);
     this.driftMarks = new DriftMarks(scene);
     this.smokeSettings = smokeSettings || {};
     this.driftSmoke = new DriftSmoke(scene, this.smokeSettings);
@@ -1001,15 +1008,15 @@ export class PlayMode {
     this.lotusLoaded = false;
     this._lotusChassisMetrics = null;
     this.lotusCam = {
-      distance: 6,
-      height: 2.2,
-      lookAtY: 1.2,
-      chaseSpeed: 4.5,
+      distance: 5.5,
+      height: 0.7,
+      lookAtY: 1.4,
+      chaseSpeed: 7.5,
       driftLag: 1.8,
-      fov: 65,
-      speedPullBack: 3.0,
-      rollMax: 0.35,
-      pitchMax: 0.4,
+      fov: 70,
+      speedPullBack: 1,
+      chassisRollClamp: 0.01,
+      chassisPitchClamp: 0.44,
     };
     this._lotusCamDistSmooth = 0;
     this._lotusBlinkerSide = 0;
@@ -1365,8 +1372,8 @@ export class PlayMode {
             c.receiveShadow = true;
           }
         });
-        // Wheels go on carRoot (not carChassis) so they don't rotate with body pitch/roll
-        this.carRoot.add(container);
+        // Wheels on carChassis so they tilt with body pitch/roll (like Bruno Simon's folio)
+        this.carChassis.add(container);
         return {
           container,
           suspension: suspension || container,
@@ -1621,32 +1628,123 @@ export class PlayMode {
     try {
       const { GUI } =
         await import("https://cdn.jsdelivr.net/npm/lil-gui@0.20.0/dist/lil-gui.esm.min.js");
-      const gui = new GUI({ title: "Lotus Camera", width: 260 });
+      const gui = new GUI({ title: "Lotus", width: 300 });
       gui.domElement.style.position = "fixed";
       gui.domElement.style.top = "10px";
       gui.domElement.style.right = "10px";
-      gui.add(this.lotusCam, "distance", 2, 16, 0.1).name("Distance");
-      gui.add(this.lotusCam, "height", 0.5, 8, 0.1).name("Height");
-      gui.add(this.lotusCam, "lookAtY", 0, 4, 0.1).name("Look-at Y");
-      gui.add(this.lotusCam, "chaseSpeed", 1, 12, 0.1).name("Chase Speed");
-      gui.add(this.lotusCam, "driftLag", 0, 5, 0.1).name("Drift Lag");
-      gui
-        .add(this.lotusCam, "speedPullBack", 0, 8, 0.1)
-        .name("Speed Pull-back");
-      gui.add(this.lotusCam, "rollMax", 0.01, 0.5, 0.01).name("Roll Max");
-      gui.add(this.lotusCam, "pitchMax", 0.01, 0.5, 0.01).name("Pitch Max");
-      gui
+
+      const cam = gui.addFolder("Camera");
+      cam.add(this.lotusCam, "distance", 2, 16, 0.1).name("Distance");
+      cam.add(this.lotusCam, "height", 0.5, 8, 0.1).name("Height");
+      cam.add(this.lotusCam, "lookAtY", 0, 4, 0.1).name("Look-at Y");
+      cam.add(this.lotusCam, "chaseSpeed", 1, 12, 0.1).name("Chase Speed");
+      cam.add(this.lotusCam, "driftLag", 0, 5, 0.1).name("Drift Lag");
+      cam.add(this.lotusCam, "speedPullBack", 0, 8, 0.1).name("Speed Pull-back");
+      cam
+        .add(this.lotusCam, "chassisRollClamp", 0.01, 0.5, 0.01)
+        .name("Chassis roll clamp (visual)");
+      cam
+        .add(this.lotusCam, "chassisPitchClamp", 0.01, 0.5, 0.01)
+        .name("Chassis pitch clamp (visual)");
+      cam
         .add(this.lotusCam, "fov", 40, 110, 1)
         .name("FOV")
         .onChange(() => this._applyLotusFov());
+      cam
+        .add({ log: () => console.log("lotusCam:", JSON.stringify(this.lotusCam)) }, "log")
+        .name("Log camera JSON");
+
+      const lp = this._lotusPhysics.params;
+      const eng = gui.addFolder("Physics — engine");
+      eng.add(lp, "accel", 5, 90, 1).name("Accel");
+      eng.add(lp, "accelBoost", 10, 130, 1).name("Accel (boost)");
+      eng.add(lp, "brake", 5, 70, 1).name("Brake");
+      eng.add(lp, "reverseAccel", 2, 35, 0.5).name("Reverse accel");
+      eng.add(lp, "maxSpeed", 15, 160, 1).name("Max speed");
+      eng.add(lp, "maxSpeedBoost", 25, 200, 1).name("Max speed (boost)");
+      eng.add(lp, "coast", 0.1, 6, 0.05).name("Coast");
+      eng.add(lp, "drag", 0, 0.025, 0.0005).name("Drag");
+      eng.add(lp, "handbrakeDecel", 1, 22, 0.5).name("Handbrake decel");
+      eng.add(lp, "baseAccelLowSpeedMul", 0.2, 1, 0.02).name("Low-speed accel ×");
+      eng.add(lp, "baseAccelRampToKmh", 30, 260, 5).name("Accel ramp (km/h)");
+
+      const steer = gui.addFolder("Physics — steering");
+      steer.add(lp, "turnRate", 0.15, 5, 0.05).name("Turn rate");
+      steer.add(lp, "turnRateDrift", 0.15, 7, 0.05).name("Turn (drift)");
+      steer.add(lp, "turnRateCounter", 0.15, 5, 0.05).name("Turn (counter)");
+
+      const grip = gui.addFolder("Physics — grip");
+      grip.add(lp, "gripBase", 2, 45, 0.5).name("Grip base");
+      grip.add(lp, "gripSpeedDecay", 0, 0.55, 0.01).name("Grip speed decay");
+      grip.add(lp, "gripMinSpeed", 0.5, 18, 0.25).name("Grip floor");
+      grip.add(lp, "gripHandbrake", 0.05, 2.5, 0.05).name("Grip (handbrake)");
+      grip.add(lp, "gripHandbrakeApplyRate", 1, 35, 0.5).name("Handbrake grip on");
+      grip.add(lp, "gripRecoveryRate", 1, 35, 0.5).name("Grip recovery");
+      grip.add(lp, "gripCounterBonus", 0, 12, 0.25).name("Counter-steer bonus");
+      grip.add(lp, "gripBrakeTurn", 0.5, 9, 0.1).name("Brake + turn cap");
+
+      const drift = gui.addFolder("Physics — drift");
+      drift.add(lp, "driftEntrySpeed", 1, 45, 0.5).name("Entry speed");
+      drift.add(lp, "driftAngleMin", 0.01, 0.35, 0.005).name("Angle enter");
+      drift.add(lp, "driftAngleExit", 0.01, 0.25, 0.005).name("Angle exit");
+
+      const dboost = gui.addFolder("Physics — drift boost");
+      dboost.add(lp, "driftBoostBuildRate", 0, 6, 0.1).name("Build rate");
+      dboost.add(lp, "driftBoostMax", 0.1, 3.5, 0.05).name("Meter max");
+      dboost.add(lp, "driftBoostAngleMin", 0.05, 0.55, 0.01).name("Boost angle min");
+      dboost.add(lp, "driftBoostAngleMax", 0.2, 1.6, 0.02).name("Boost angle max");
+      dboost.add(lp, "driftBoostAnglePenaltyEnd", 0.5, 2.5, 0.05).name("Angle penalty end");
+      dboost.add(lp, "driftBoostSpeedAdd", 0, 45, 1).name("Speed add");
+      dboost.add(lp, "driftBoostDuration", 0.2, 6, 0.1).name("Duration scale");
+      dboost.add(lp, "driftBoostQualifyTime", 0.1, 2.5, 0.05).name("Qualify time");
+
+      const body = gui.addFolder("Physics — dynamics / wheels");
+      body
+        .add(lp, "bodyRollMax", 0.05, 0.45, 0.01)
+        .name("Drift roll strength (sim)");
+      body
+        .add(lp, "bodyPitchMax", 0.05, 0.45, 0.01)
+        .name("Pitch response cap (sim)");
+      body.add(lp, "bodySmooth", 1, 28, 0.5).name("Body smooth");
+      body.add(lp, "wheelRadius", 0.15, 0.85, 0.01).name("Wheel radius");
+
+      const nitro = gui.addFolder("Physics — nitro / blend");
+      nitro.add(lp, "nitroAccelBonus", 0, 50, 1).name("Nitro accel +");
+      nitro.add(lp, "nitroMaxSpeedBonus", 0, 55, 1).name("Nitro max spd +");
+      nitro.add(lp, "nitroDrainPerSec", 0.05, 1, 0.02).name("Nitro drain/s");
+      nitro.add(lp, "nitroRegenPerSec", 0.02, 0.6, 0.02).name("Nitro regen/s");
+      nitro.add(lp, "nitroMinToUse", 0.01, 0.25, 0.01).name("Min to use");
+      nitro.add(lp, "boostBlendSmooth", 1, 45, 1).name("Boost blend smooth");
+      nitro.add(lp, "nitroFxBlendSmooth", 1, 45, 1).name("Nitro FX smooth");
+
+      const terr = gui.addFolder("Physics — terrain");
+      terr.add(lp, "gravity", 5, 55, 1).name("Gravity");
+      terr.add(lp, "rideHeight", 0.1, 1.1, 0.02).name("Ride height");
+      terr.add(lp, "groundSmooth", 1, 55, 1).name("Ground smooth");
+      terr.add(lp, "maxSlopeCos", 0.1, 0.99, 0.01).name("Max slope cos");
+      terr.add(lp, "wheelBase", 0.8, 4.2, 0.05).name("Wheelbase");
+      terr.add(lp, "track", 0.5, 2.6, 0.05).name("Track width");
+
       gui
         .add(
           {
-            log: () => console.log("lotusCam:", JSON.stringify(this.lotusCam)),
+            resetPhysics: () => {
+              Object.assign(this._lotusPhysics.params, DEFAULT_LOTUS_PHYSICS_PARAMS);
+              for (const c of gui.controllersRecursive()) {
+                c.updateDisplay();
+              }
+            },
           },
-          "log",
+          "resetPhysics",
         )
-        .name("Log to console");
+        .name("Reset physics defaults");
+      gui
+        .add(
+          { logPhysics: () => console.log("lotusPhysics:", JSON.stringify(lp, null, 2)) },
+          "logPhysics",
+        )
+        .name("Log physics JSON");
+
       gui.domElement.style.display = "none";
       this._lotusCamGui = gui;
     } catch (err) {
@@ -2411,208 +2509,242 @@ export class PlayMode {
         mz = -Math.cos(this.flyHeading) * sg;
       }
     } else if (this.carMode) {
-      // ── Arcade drift: heading + world velocity model ──
-      const carFeel = this.carSettings;
-      const accelScale = carFeel.accelScale ?? 1;
-      const maxSpeedScale = carFeel.maxSpeedScale ?? 1;
+      const isLotus = this.moveMode === "lotus";
       const forward = keys.KeyW || keys.ArrowUp;
       const backward = keys.KeyS || keys.ArrowDown;
       const leftKey = keys.KeyA || keys.ArrowLeft;
       const rightKey = keys.KeyD || keys.ArrowRight;
       const handbrake = keys.Space;
       const nitroHeld = !!keys[CAR_NITRO_KEY];
-
-      // Current speed from velocity vector
-      const curSpeed = Math.sqrt(
-        this.carVx * this.carVx + this.carVz * this.carVz,
-      );
-
-      // Heading direction
-      const hx = -Math.sin(this.carHeading);
-      const hz = -Math.cos(this.carHeading);
-
-      // Throttle / brake applied along heading
       const boostKeys = keys.ShiftLeft || keys.ShiftRight;
-      const nitroActive =
-        nitroHeld && this.carNitro > CAR_NITRO_MIN_TO_USE && !backward;
 
-      this._carBoostBlend = _expSmoothStep(
-        this._carBoostBlend,
-        boostKeys ? 1 : 0,
-        dtSec,
-        CAR_BOOST_BLEND_SMOOTH,
-      );
-      this._carNitroFxBlend = _expSmoothStep(
-        this._carNitroFxBlend,
-        nitroActive ? 1 : 0,
-        dtSec,
-        CAR_NITRO_FX_BLEND_SMOOTH,
-      );
+      if (isLotus) {
+        // ── Lotus drift physics ──
+        const result = this._lotusPhysics.updateDriving(
+          {
+            vx: this.carVx, vz: this.carVz,
+            heading: this.carHeading,
+            nitro: this.carNitro,
+            drifting: this.carDrifting,
+            driftAngle: this.carDriftAngle,
+            boostBlend: this._carBoostBlend,
+            nitroFxBlend: this._carNitroFxBlend,
+            wheelSpin: this.carWheelSpin,
+            onSteepSlope: this.carOnSteepSlope,
+          },
+          { forward, backward, leftKey, rightKey, handbrake, nitroHeld, boostKeys },
+          dtSec,
+        );
+        this.carVx = result.vx;
+        this.carVz = result.vz;
+        this.carHeading = result.heading;
+        this.carNitro = result.nitro;
+        this.carDrifting = result.drifting;
+        this.carDriftAngle = result.driftAngle;
+        this._carBoostBlend = result.boostBlend;
+        this._carNitroFxBlend = result.nitroFxBlend;
+        this.carWheelSpin = result.wheelSpin;
+        this.carBodyRoll += (result.bodyRollTarget - this.carBodyRoll) * result.bodySmooth;
+        this.carBodyPitch += (result.bodyPitchTarget - this.carBodyPitch) * result.bodySmooth;
+        this._driftBoostMeter = result.driftBoostMeter;
+        this._driftBoostActive = result.driftBoostActive;
+      } else {
+        // ── Bruno arcade drift: heading + world velocity model ──
+        const carFeel = this.carSettings;
+        const accelScale = carFeel.accelScale ?? 1;
+        const maxSpeedScale = carFeel.maxSpeedScale ?? 1;
 
-      const accelBase = THREE.MathUtils.lerp(
-        CAR_ACCEL,
-        CAR_ACCEL_BOOST,
-        this._carBoostBlend,
-      );
-      let accel =
-        (accelBase + this._carNitroFxBlend * CAR_NITRO_ACCEL_BONUS) *
-        accelScale;
-      if (!boostKeys && !nitroActive) {
-        const speedKmh = curSpeed * 3.6;
-        const rampT = THREE.MathUtils.smoothstep(
-          speedKmh,
-          0,
-          CAR_BASE_ACCEL_RAMP_TO_KMH,
+        // Current speed from velocity vector
+        const curSpeed = Math.sqrt(
+          this.carVx * this.carVx + this.carVz * this.carVz,
         );
-        const accelMul = THREE.MathUtils.lerp(
-          CAR_BASE_ACCEL_LOW_SPEED_MUL,
-          1.0,
-          rampT,
+
+        // Heading direction
+        const hx = -Math.sin(this.carHeading);
+        const hz = -Math.cos(this.carHeading);
+
+        // Throttle / brake applied along heading
+        const nitroActive =
+          nitroHeld && this.carNitro > CAR_NITRO_MIN_TO_USE && !backward;
+
+        this._carBoostBlend = _expSmoothStep(
+          this._carBoostBlend,
+          boostKeys ? 1 : 0,
+          dtSec,
+          CAR_BOOST_BLEND_SMOOTH,
         );
-        accel *= accelMul;
-      }
-      // Reduce acceleration on steep slopes
-      if (this.carOnSteepSlope) {
-        accel *= 0.1;
-      }
-      if (forward) {
-        this.carVx += hx * accel * dtSec;
-        this.carVz += hz * accel * dtSec;
-      } else if (backward) {
-        if (curSpeed > 1) {
-          this.carVx -= hx * CAR_BRAKE * accelScale * dtSec;
-          this.carVz -= hz * CAR_BRAKE * accelScale * dtSec;
-        } else {
-          this.carVx -= hx * CAR_REVERSE_ACCEL * accelScale * dtSec;
-          this.carVz -= hz * CAR_REVERSE_ACCEL * accelScale * dtSec;
+        this._carNitroFxBlend = _expSmoothStep(
+          this._carNitroFxBlend,
+          nitroActive ? 1 : 0,
+          dtSec,
+          CAR_NITRO_FX_BLEND_SMOOTH,
+        );
+
+        const accelBase = THREE.MathUtils.lerp(
+          CAR_ACCEL,
+          CAR_ACCEL_BOOST,
+          this._carBoostBlend,
+        );
+        let accel =
+          (accelBase + this._carNitroFxBlend * CAR_NITRO_ACCEL_BONUS) *
+          accelScale;
+        if (!boostKeys && !nitroActive) {
+          const speedKmh = curSpeed * 3.6;
+          const rampT = THREE.MathUtils.smoothstep(
+            speedKmh,
+            0,
+            CAR_BASE_ACCEL_RAMP_TO_KMH,
+          );
+          const accelMul = THREE.MathUtils.lerp(
+            CAR_BASE_ACCEL_LOW_SPEED_MUL,
+            1.0,
+            rampT,
+          );
+          accel *= accelMul;
         }
-      } else if (curSpeed > 0.05) {
-        const decel = CAR_COAST / curSpeed;
-        this.carVx -= this.carVx * decel * dtSec;
-        this.carVz -= this.carVz * decel * dtSec;
-      } else {
-        this.carVx = 0;
-        this.carVz = 0;
-      }
+        // Reduce acceleration on steep slopes
+        if (this.carOnSteepSlope) {
+          accel *= 0.1;
+        }
+        if (forward) {
+          this.carVx += hx * accel * dtSec;
+          this.carVz += hz * accel * dtSec;
+        } else if (backward) {
+          if (curSpeed > 1) {
+            this.carVx -= hx * CAR_BRAKE * accelScale * dtSec;
+            this.carVz -= hz * CAR_BRAKE * accelScale * dtSec;
+          } else {
+            this.carVx -= hx * CAR_REVERSE_ACCEL * accelScale * dtSec;
+            this.carVz -= hz * CAR_REVERSE_ACCEL * accelScale * dtSec;
+          }
+        } else if (curSpeed > 0.05) {
+          const decel = CAR_COAST / curSpeed;
+          this.carVx -= this.carVx * decel * dtSec;
+          this.carVz -= this.carVz * decel * dtSec;
+        } else {
+          this.carVx = 0;
+          this.carVz = 0;
+        }
 
-      // Handbrake: slight decel
-      if (handbrake && curSpeed > 0.1) {
-        const decel = CAR_HANDBRAKE_DECEL / curSpeed;
-        this.carVx -= this.carVx * decel * dtSec;
-        this.carVz -= this.carVz * decel * dtSec;
-      }
+        // Handbrake: slight decel
+        if (handbrake && curSpeed > 0.1) {
+          const decel = CAR_HANDBRAKE_DECEL / curSpeed;
+          this.carVx -= this.carVx * decel * dtSec;
+          this.carVz -= this.carVz * decel * dtSec;
+        }
 
-      // Drag
-      const speed2 = this.carVx * this.carVx + this.carVz * this.carVz;
-      if (speed2 > 0.01) {
-        const spd = Math.sqrt(speed2);
-        const dragForce = CAR_DRAG * spd;
-        const factor = Math.max(0, 1 - dragForce * dtSec);
-        this.carVx *= factor;
-        this.carVz *= factor;
-      }
+        // Drag
+        const speed2 = this.carVx * this.carVx + this.carVz * this.carVz;
+        if (speed2 > 0.01) {
+          const spd = Math.sqrt(speed2);
+          const dragForce = CAR_DRAG * spd;
+          const factor = Math.max(0, 1 - dragForce * dtSec);
+          this.carVx *= factor;
+          this.carVz *= factor;
+        }
 
-      // Clamp speed (boost / nitro caps ease via blended factors — avoids instant snap on Shift release)
-      const maxBase = THREE.MathUtils.lerp(
-        CAR_MAX_SPEED,
-        CAR_MAX_SPEED_BOOST,
-        this._carBoostBlend,
-      );
-      const maxSpd =
-        (maxBase + this._carNitroFxBlend * CAR_NITRO_MAX_SPEED_BONUS) *
-        maxSpeedScale;
-      const newSpeed = Math.sqrt(
-        this.carVx * this.carVx + this.carVz * this.carVz,
-      );
-      if (newSpeed > maxSpd) {
-        const s = maxSpd / newSpeed;
-        this.carVx *= s;
-        this.carVz *= s;
-      }
-
-      // Nitro tank
-      if (nitroActive && curSpeed > 1) {
-        this.carNitro = Math.max(
-          0,
-          this.carNitro - CAR_NITRO_DRAIN_PER_SEC * dtSec,
+        // Clamp speed (boost / nitro caps ease via blended factors — avoids instant snap on Shift release)
+        const maxBase = THREE.MathUtils.lerp(
+          CAR_MAX_SPEED,
+          CAR_MAX_SPEED_BOOST,
+          this._carBoostBlend,
         );
-      } else {
-        this.carNitro = Math.min(
-          1,
-          this.carNitro + CAR_NITRO_REGEN_PER_SEC * dtSec,
+        const maxSpd =
+          (maxBase + this._carNitroFxBlend * CAR_NITRO_MAX_SPEED_BONUS) *
+          maxSpeedScale;
+        const newSpeed = Math.sqrt(
+          this.carVx * this.carVx + this.carVz * this.carVz,
         );
+        if (newSpeed > maxSpd) {
+          const s = maxSpd / newSpeed;
+          this.carVx *= s;
+          this.carVz *= s;
+        }
+
+        // Nitro tank
+        if (nitroActive && curSpeed > 1) {
+          this.carNitro = Math.max(
+            0,
+            this.carNitro - CAR_NITRO_DRAIN_PER_SEC * dtSec,
+          );
+        } else {
+          this.carNitro = Math.min(
+            1,
+            this.carNitro + CAR_NITRO_REGEN_PER_SEC * dtSec,
+          );
+        }
+
+        // Steering — rotate heading
+        let steerInput = 0;
+        if (leftKey) steerInput = 1;
+        if (rightKey) steerInput = -1;
+
+        if (steerInput !== 0 && curSpeed > 0.5) {
+          const turnRate = this.carDrifting ? CAR_TURN_RATE_DRIFT : CAR_TURN_RATE;
+          this.carHeading += steerInput * turnRate * dtSec;
+        }
+
+        // Grip: project velocity onto heading, get forward and lateral components
+        const fwdDot = this.carVx * hx + this.carVz * hz;
+        const rx = Math.cos(this.carHeading);
+        const rz = -Math.sin(this.carHeading);
+        const latDot = this.carVx * rx + this.carVz * rz;
+
+        // Choose grip strength
+        let grip;
+        if (handbrake && curSpeed > CAR_DRIFT_ENTRY_SPEED && steerInput !== 0) {
+          grip = CAR_GRIP_DRIFT;
+        } else if (backward && steerInput !== 0 && curSpeed > 3) {
+          grip = CAR_GRIP_BRAKE_TURN;
+        } else {
+          grip = CAR_GRIP_NORMAL;
+        }
+
+        // Kill lateral velocity based on grip (high grip = car follows heading)
+        const lateralKill = 1 - Math.exp(-grip * dtSec);
+        this.carVx -= rx * latDot * lateralKill;
+        this.carVz -= rz * latDot * lateralKill;
+
+        // Drift detection
+        this.carDriftAngle =
+          curSpeed > 1 ? Math.abs(Math.atan2(latDot, Math.abs(fwdDot))) : 0;
+        this.carDrifting =
+          this.carDriftAngle > CAR_DRIFT_ANGLE_MIN &&
+          curSpeed > CAR_DRIFT_ENTRY_SPEED;
+
+        const latSign = Math.sign(latDot);
+        const speedForRoll = Math.sqrt(
+          this.carVx * this.carVx + this.carVz * this.carVz,
+        );
+        const driftRollSpeedGain = THREE.MathUtils.smoothstep(
+          speedForRoll,
+          8,
+          24,
+        );
+        const driftRoll =
+          -latSign *
+          Math.min(CAR_BODY_ROLL_MAX, this.carDriftAngle * 0.85) *
+          driftRollSpeedGain;
+        const throttlePitch = forward ? 0.055 : backward ? -0.08 : 0;
+        const speedNorm = Math.min(1, curSpeed / Math.max(1, CAR_MAX_SPEED));
+        const dynamicPitch = -speedNorm * 0.05;
+        const targetDynRoll = this.carDrifting ? driftRoll : 0;
+        const targetDynPitch = dynamicPitch + throttlePitch;
+        const smooth = 1 - Math.exp(-CAR_BODY_SMOOTH * dtSec);
+        this.carBodyRoll = THREE.MathUtils.lerp(
+          this.carBodyRoll,
+          targetDynRoll,
+          smooth,
+        );
+        this.carBodyPitch = THREE.MathUtils.lerp(
+          this.carBodyPitch,
+          targetDynPitch,
+          smooth,
+        );
+
+        // Wheel spin
+        this.carWheelSpin -= (fwdDot / CAR_WHEEL_RADIUS) * dtSec;
       }
-
-      // Steering — rotate heading
-      let steerInput = 0;
-      if (leftKey) steerInput = 1;
-      if (rightKey) steerInput = -1;
-
-      if (steerInput !== 0 && curSpeed > 0.5) {
-        const turnRate = this.carDrifting ? CAR_TURN_RATE_DRIFT : CAR_TURN_RATE;
-        this.carHeading += steerInput * turnRate * dtSec;
-      }
-
-      // Grip: project velocity onto heading, get forward and lateral components
-      const fwdDot = this.carVx * hx + this.carVz * hz;
-      const rx = Math.cos(this.carHeading);
-      const rz = -Math.sin(this.carHeading);
-      const latDot = this.carVx * rx + this.carVz * rz;
-
-      // Choose grip strength
-      let grip;
-      if (handbrake && curSpeed > CAR_DRIFT_ENTRY_SPEED && steerInput !== 0) {
-        grip = CAR_GRIP_DRIFT;
-      } else if (backward && steerInput !== 0 && curSpeed > 3) {
-        grip = CAR_GRIP_BRAKE_TURN;
-      } else {
-        grip = CAR_GRIP_NORMAL;
-      }
-
-      // Kill lateral velocity based on grip (high grip = car follows heading)
-      const lateralKill = 1 - Math.exp(-grip * dtSec);
-      this.carVx -= rx * latDot * lateralKill;
-      this.carVz -= rz * latDot * lateralKill;
-
-      // Drift detection
-      this.carDriftAngle =
-        curSpeed > 1 ? Math.abs(Math.atan2(latDot, Math.abs(fwdDot))) : 0;
-      this.carDrifting =
-        this.carDriftAngle > CAR_DRIFT_ANGLE_MIN &&
-        curSpeed > CAR_DRIFT_ENTRY_SPEED;
-
-      const latSign = Math.sign(latDot);
-      const speedForRoll = Math.sqrt(
-        this.carVx * this.carVx + this.carVz * this.carVz,
-      );
-      const driftRollSpeedGain = THREE.MathUtils.smoothstep(
-        speedForRoll,
-        8,
-        24,
-      );
-      const driftRoll =
-        -latSign *
-        Math.min(CAR_BODY_ROLL_MAX, this.carDriftAngle * 0.85) *
-        driftRollSpeedGain;
-      const throttlePitch = forward ? 0.055 : backward ? -0.08 : 0;
-      const speedNorm = Math.min(1, curSpeed / Math.max(1, CAR_MAX_SPEED));
-      const dynamicPitch = -speedNorm * 0.05;
-      const targetDynRoll = this.carDrifting ? driftRoll : 0;
-      const targetDynPitch = dynamicPitch + throttlePitch;
-      const smooth = 1 - Math.exp(-CAR_BODY_SMOOTH * dtSec);
-      this.carBodyRoll = THREE.MathUtils.lerp(
-        this.carBodyRoll,
-        targetDynRoll,
-        smooth,
-      );
-      this.carBodyPitch = THREE.MathUtils.lerp(
-        this.carBodyPitch,
-        targetDynPitch,
-        smooth,
-      );
-
-      // Wheel spin
-      this.carWheelSpin -= (fwdDot / CAR_WHEEL_RADIUS) * dtSec;
 
       // Movement output
       mx = this.carVx;
@@ -3102,42 +3234,88 @@ export class PlayMode {
       }
     } else if (carDriving) {
       this.flyHeight = 0;
+      const _isLotusGround = this.moveMode === "lotus";
 
-      // Car uses its own ground height: raycast from high altitude so bridges/ramps are detected
-      const carGroundY = this._carPhysics.getGroundHeight(
-        this.playerPos.x, this.playerPos.z, this.playerPos.y,
-        this.getTerrainHeight, this.cliffBvh,
-      );
+      if (_isLotusGround) {
+        // ── Lotus: simplified center-height ground following ──
+        const _sf = this.lotusRoot?.scale.x || CAR_MODEL_SCALE;
+        this._lotusPhysics.inAir = this.carInAir;
+        this._lotusPhysics.velY = this.carVelY;
+        const vert = this._lotusPhysics.updateGroundFollow(
+          this.playerPos.x, this.playerPos.z,
+          this.playerPos.y, this.carHeading, _sf,
+          dtSec, this.getTerrainHeight, this.cliffBvh,
+          this.carVx, this.carVz,
+        );
+        this.playerPos.y = vert.y;
+        this.carVelY = this._lotusPhysics.velY;
+        this.carInAir = this._lotusPhysics.inAir;
+        this.carOnSteepSlope = this._lotusPhysics.onSteepSlope;
+        this._carSlopeX = vert.slopeX;
+        this._carSlopeZ = vert.slopeZ;
+        this._carTerrainPitchTarget = vert.terrainPitch;
+        this._carTerrainRollTarget = vert.terrainRoll;
+        if (vert.slideVx || vert.slideVz) {
+          this.carVx += vert.slideVx;
+          this.carVz += vert.slideVz;
+          if (vert.tooSteep) {
+            const nx2 = vert.slideVx, nz2 = vert.slideVz;
+            const nL = Math.hypot(nx2, nz2);
+            if (nL > 1e-6) {
+              const upDot = this.carVx * (nx2 / nL) + this.carVz * (nz2 / nL);
+              if (upDot < 0) {
+                this.carVx -= (nx2 / nL) * upDot * 0.8;
+                this.carVz -= (nz2 / nL) * upDot * 0.8;
+              }
+            }
+          }
+        }
+      } else {
+        // ── Bruno: 4-wheel spring-damper suspension ──
+        const _sf = this.carRoot?.scale.x || CAR_MODEL_SCALE;
+        if (this.carWheels.length >= 4) {
+          const _sinH = Math.sin(this.carHeading);
+          const _cosH = Math.cos(this.carHeading);
+          for (let _wi = 0; _wi < 4; _wi++) {
+            const _lx = this.carWheels[_wi].offset.x * _sf;
+            const _lz = this.carWheels[_wi].offset.z * _sf;
+            this._wheelWorldXZs[_wi * 2] = this.playerPos.x + _lx * _cosH + _lz * _sinH;
+            this._wheelWorldXZs[_wi * 2 + 1] = this.playerPos.z - _lx * _sinH + _lz * _cosH;
+          }
+        } else {
+          for (let _wi = 0; _wi < 4; _wi++) {
+            this._wheelWorldXZs[_wi * 2] = this.playerPos.x;
+            this._wheelWorldXZs[_wi * 2 + 1] = this.playerPos.z;
+          }
+        }
 
-      this._carPhysics.inAir = this.carInAir;
-      this._carPhysics.velY = this.carVelY;
-      const vert = this._carPhysics.updateVertical(
-        this.playerPos.y, carGroundY, prevY, dtSec,
-        this.getTerrainHeight, this.playerPos.x, this.playerPos.z,
-        this.carVx, this.carVz, this.cliffBvh,
-      );
-      this.playerPos.y = vert.y;
-      this.carVelY = this._carPhysics.velY;
-      this.carInAir = this._carPhysics.inAir;
-      this.carOnSteepSlope = this._carPhysics.onSteepSlope;
-      this._carSlopeX = vert.slopeX;
-      this._carSlopeZ = vert.slopeZ;
-      // On launch, reduce horizontal speed (energy goes into vertical)
-      if (vert.launchVxScale) {
-        this.carVx *= vert.launchVxScale;
-        this.carVz *= vert.launchVzScale;
-      }
-      if (vert.slideVx || vert.slideVz) {
-        this.carVx += vert.slideVx;
-        this.carVz += vert.slideVz;
-        if (vert.tooSteep) {
-          const nx2 = vert.slideVx, nz2 = vert.slideVz;
-          const nL = Math.hypot(nx2, nz2);
-          if (nL > 1e-6) {
-            const upDot = this.carVx * (nx2 / nL) + this.carVz * (nz2 / nL);
-            if (upDot < 0) {
-              this.carVx -= (nx2 / nL) * upDot * 0.8;
-              this.carVz -= (nz2 / nL) * upDot * 0.8;
+        this._carPhysics.inAir = this.carInAir;
+        this._carPhysics.velY = this.carVelY;
+        const vert = this._carPhysics.updateSuspension(
+          this.playerPos.y, this._wheelWorldXZs, _sf,
+          this.carHeading, dtSec, this.getTerrainHeight,
+          this.cliffBvh, this.carVx, this.carVz, false,
+        );
+        this.playerPos.y = vert.y;
+        this.carVelY = this._carPhysics.velY;
+        this.carInAir = this._carPhysics.inAir;
+        this.carOnSteepSlope = this._carPhysics.onSteepSlope;
+        this._carSlopeX = vert.slopeX;
+        this._carSlopeZ = vert.slopeZ;
+        this._carTerrainPitchTarget = vert.terrainPitch;
+        this._carTerrainRollTarget = vert.terrainRoll;
+        if (vert.slideVx || vert.slideVz) {
+          this.carVx += vert.slideVx;
+          this.carVz += vert.slideVz;
+          if (vert.tooSteep) {
+            const nx2 = vert.slideVx, nz2 = vert.slideVz;
+            const nL = Math.hypot(nx2, nz2);
+            if (nL > 1e-6) {
+              const upDot = this.carVx * (nx2 / nL) + this.carVz * (nz2 / nL);
+              if (upDot < 0) {
+                this.carVx -= (nx2 / nL) * upDot * 0.8;
+                this.carVz -= (nz2 / nL) * upDot * 0.8;
+              }
             }
           }
         }
@@ -3381,16 +3559,9 @@ export class PlayMode {
         this.carRoot.position.set(this.playerPos.x, rootY, this.playerPos.z);
         this.carRoot.rotation.y = this.carHeading;
 
-        // Step 2: Body pitch/roll from terrain normal at center (projected into car-local axes)
-        const sx = this._carSlopeX || 0;
-        const sz = this._carSlopeZ || 0;
-        const sinH = Math.sin(this.carHeading);
-        const cosHH = Math.cos(this.carHeading);
-        // Project world slope into car-local forward/right
-        const slopeFwd = sx * (-sinH) + sz * (-cosHH);
-        const slopeRight = sx * cosHH + sz * (-sinH);
-        const targetPitch = -Math.atan2(slopeFwd, 1);
-        const targetRoll = -Math.atan2(slopeRight, 1);
+        // Step 2: Body pitch/roll from 4-wheel contact plane
+        const targetPitch = this._carTerrainPitchTarget || 0;
+        const targetRoll = this._carTerrainRollTarget || 0;
 
         const terrainSmooth = 1 - Math.exp(-CAR_TERRAIN_BODY_SMOOTH * dtSec);
         if (this.carInAir) {
@@ -3417,8 +3588,7 @@ export class PlayMode {
         );
         this.carChassis.rotation.set(finalPitch, 0, finalRoll);
 
-        // Step 3: Each wheel raycasts ground independently — visual only, doesn't affect body
-        const suspAlpha = 1 - Math.exp(-CAR_SUSP_SMOOTH * dtSec);
+        // Step 3: Wheels positioned via suspension length in chassis-local space (like Bruno's folio)
         let rearIdx = 0;
         for (let i = 0; i < this.carWheels.length; i++) {
           const w = this.carWheels[i];
@@ -3427,22 +3597,22 @@ export class PlayMode {
           const wx = this.playerPos.x + lx * Math.cos(this.carHeading) + lz * Math.sin(this.carHeading);
           const wz = this.playerPos.z - lx * Math.sin(this.carHeading) + lz * Math.cos(this.carHeading);
 
-          if (this.carInAir) {
-            w.container.position.set(w.offset.x, -CAR_RIDE_HEIGHT, w.offset.z);
+          const grounded = i < 4 && this._carPhysics.wheelGrounded[i];
+          let targetLocalY;
+          if (this.carInAir || !grounded) {
+            targetLocalY = -CAR_RIDE_HEIGHT;
           } else {
-            let h = this._carPhysics.getWheelGroundHeight(
-              wx, wz, this.playerPos.y, this.getTerrainHeight, this.cliffBvh,
-            );
-            h = Math.max(h, this.playerPos.y - 1.5);
-            if (w._smoothWY === undefined) w._smoothWY = h;
-            w._smoothWY += (h - w._smoothWY) * suspAlpha;
-            const wheelCenterY = w._smoothWY + CAR_WHEEL_RADIUS * scaleFactor;
-            const localY = (wheelCenterY - rootY) / scaleFactor;
-            const clampedLocalY = THREE.MathUtils.clamp(localY, -CAR_RIDE_HEIGHT - CAR_SUSP_TRAVEL, -CAR_RIDE_HEIGHT + CAR_SUSP_TRAVEL);
-            w.container.position.set(w.offset.x, clampedLocalY, w.offset.z);
+            const suspLen = this._carPhysics.wheelSuspLengths[i];
+            targetLocalY = -suspLen / scaleFactor;
+            targetLocalY = Math.min(targetLocalY, -CAR_RIDE_HEIGHT + CAR_SUSP_TRAVEL);
+            targetLocalY = Math.max(targetLocalY, -CAR_RIDE_HEIGHT - CAR_SUSP_TRAVEL);
           }
+          if (w._smoothLocalY === undefined) w._smoothLocalY = targetLocalY;
+          w._smoothLocalY += (targetLocalY - w._smoothLocalY) * Math.min(1, 25 * dtSec);
+          w.container.position.set(w.offset.x, w._smoothLocalY, w.offset.z);
 
-          w.contactWorld.set(wx, (w._smoothWY ?? this.playerPos.y) + DRIFT_MARK_Y_OFFSET, wz);
+          const contactY = grounded ? this._carPhysics.wheelContactYs[i] : this.playerPos.y;
+          w.contactWorld.set(wx, contactY + DRIFT_MARK_Y_OFFSET, wz);
           if (!w.steer) {
             if (rearIdx < this._carRearContactPoints.length)
               this._carRearContactPoints[rearIdx++].copy(w.contactWorld);
@@ -3568,8 +3738,8 @@ export class PlayMode {
             terrainSmooth,
           );
         }
-        const _lotusRollMax = this.lotusCam.rollMax;
-        const _lotusPitchMax = this.lotusCam.pitchMax;
+        const _lotusRollMax = this.lotusCam.chassisRollClamp;
+        const _lotusPitchMax = this.lotusCam.chassisPitchClamp;
         const finalPitch = THREE.MathUtils.clamp(
           this.carTerrainPitch + this.carBodyPitch,
           -_lotusPitchMax * 2,
@@ -4197,6 +4367,13 @@ export class PlayMode {
       this.carVelY = 0;
       this.carInAir = false;
       this.carOnSteepSlope = false;
+      this._driftBoostMeter = 0;
+      this._driftBoostActive = false;
+      this._lotusPhysics._smoothGroundY = null;
+      this._lotusPhysics._handbrakeBlend = 0;
+      this._lotusPhysics._driftTime = 0;
+      this._lotusPhysics.driftBoostMeter = 0;
+      this._lotusPhysics._driftBoostActive = false;
       this.driftMarks.reset();
       this.driftSmoke.reset();
     } else {

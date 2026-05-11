@@ -972,6 +972,8 @@ export class FullRoadSystem {
       centerRightDashed: p.centerRightDashed !== false,
       centerLineDashScale: p.centerLineDashScale ?? 0.08,
       laneDashScale: p.laneDashScale ?? 0.08,
+      profilePreset: p.profilePreset ?? "flat",
+      profileScale: p.profileScale ?? 1,
     });
 
     // Lab road surface + line marking materials (TSL); markings need the same uniforms for line scratch.
@@ -989,7 +991,9 @@ export class FullRoadSystem {
     for (const piece of pieces) {
       if (!piece.polygon || piece.polygon.length < 3) continue;
       const mat = piece.isJunctionCore ? surfJuncMat : surfRoadMat;
-      const geo = this._labPolygon2DToPlaneGeometry(piece.polygon, p);
+      const geo = piece.grid
+        ? this._labGridToGeometry(piece.grid, p, 0, piece.gridProfile)
+        : this._labPolygon2DToPlaneGeometry(piece.polygon, p);
       if (geo) {
         const mesh = new THREE.Mesh(geo, mat);
         mesh.renderOrder = 3;
@@ -1384,6 +1388,61 @@ export class FullRoadSystem {
     geo.setAttribute("position", new THREE.Float32BufferAttribute(positions, 3));
     geo.setAttribute("uv", new THREE.Float32BufferAttribute(uvs, 2));
     geo.setAttribute("aJunction", new THREE.Float32BufferAttribute(junc, 1));
+    geo.computeVertexNormals();
+    return geo;
+  }
+
+  _labGridToGeometry(grid, p, yBias = 0, gridProfile = null) {
+    const rows = grid.length;
+    if (rows < 2) return null;
+    const cols = grid[0].length;
+    if (cols < 2) return null;
+
+    const nVert = rows * cols;
+    const positions = new Float32Array(nVert * 3);
+    const uvs = new Float32Array(nVert * 2);
+    const junc = new Float32Array(nVert);
+    const yOff = Number(yBias) || 0;
+    let pi = 0, ui = 0;
+
+    for (let i = 0; i < rows; i++) {
+      for (let j = 0; j < cols; j++) {
+        const pt = grid[i][j];
+        const x = pt.x;
+        const z = pt.y;
+        const profY = gridProfile ? (gridProfile[j] || 0) : 0;
+        const y = this._roadSurfaceYLab(x, z, p) + yOff + profY;
+        positions[pi++] = x;
+        positions[pi++] = y;
+        positions[pi++] = z;
+        uvs[ui++] = x / 10;
+        uvs[ui++] = z / 10;
+      }
+    }
+
+    const indexCount = (rows - 1) * (cols - 1) * 6;
+    const indices = new Uint32Array(indexCount);
+    let ii = 0;
+    for (let i = 0; i < rows - 1; i++) {
+      for (let j = 0; j < cols - 1; j++) {
+        const a = i * cols + j;
+        const b = a + 1;
+        const c = (i + 1) * cols + j;
+        const d = c + 1;
+        indices[ii++] = a;
+        indices[ii++] = c;
+        indices[ii++] = b;
+        indices[ii++] = b;
+        indices[ii++] = c;
+        indices[ii++] = d;
+      }
+    }
+
+    const geo = new THREE.BufferGeometry();
+    geo.setAttribute("position", new THREE.BufferAttribute(positions, 3));
+    geo.setAttribute("uv", new THREE.BufferAttribute(uvs, 2));
+    geo.setAttribute("aJunction", new THREE.BufferAttribute(junc, 1));
+    geo.setIndex(new THREE.BufferAttribute(indices, 1));
     geo.computeVertexNormals();
     return geo;
   }

@@ -668,6 +668,8 @@ export function createToolState() {
       junctionSegments: 14,
       /** When true, Smart Road surfaces use the same diffuse/ARM/normal maps as Full Road (no reflection pass). */
       usePbrTextures: false,
+      profilePreset: "flat",
+      profileScale: 1.0,
       heightOffset: 0.05,
       adaptiveLift: true,
       slopeLift: 0.35,

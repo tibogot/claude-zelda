@@ -1,3 +1,5 @@
+import { ROAD_PROFILES } from "../core/road/roadNetworkLabGeometry.js";
+
 /** Road Accessories + Road Decals — shared by Full Road and Smart Road tweakpanes. */
 function addRoadAccessoriesAndDecalsFolders(folder, rp, {
   onAccessoryTypeChanged,
@@ -172,6 +174,16 @@ export function addFullRoadFolder(pane, toolState, opts) {
 
   const geoFolder = folder.addFolder({ title: "Geometry", expanded: false });
   geoFolder.addBinding(rp, "width", { label: "Width", min: 2, max: 60, step: 0.5 }).on("change", onFullRoadChanged);
+  if (isSmartRoad) {
+    const profileOpts = {};
+    for (const [key, prof] of Object.entries(ROAD_PROFILES)) profileOpts[prof.label] = key;
+    geoFolder
+      .addBinding(rp, "profilePreset", { label: "Profile", options: profileOpts })
+      .on("change", onFullRoadChanged);
+    geoFolder
+      .addBinding(rp, "profileScale", { label: "Profile scale", min: 0, max: 5, step: 0.1 })
+      .on("change", onFullRoadChanged);
+  }
   geoFolder
     .addBinding(rp, "segments", {
       label: isSmartRoad ? "Curve segments" : "Edge segments",

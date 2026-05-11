@@ -3,6 +3,82 @@
  * Internal plane: (x, y) where y maps to world Z in Three.js.
  */
 
+export const ROAD_PROFILES = {
+  flat: {
+    label: "Flat",
+    points: [
+      { t: 0, y: 0 },
+      { t: 1, y: 0 },
+    ],
+  },
+  crowned: {
+    label: "Crowned",
+    points: [
+      { t: 0, y: 0 },
+      { t: 0.15, y: 0.02 },
+      { t: 0.5, y: 0.06 },
+      { t: 0.85, y: 0.02 },
+      { t: 1, y: 0 },
+    ],
+  },
+  curbed: {
+    label: "Curbed",
+    points: [
+      { t: 0, y: 0.15 },
+      { t: 0.06, y: 0.15 },
+      { t: 0.1, y: 0 },
+      { t: 0.9, y: 0 },
+      { t: 0.94, y: 0.15 },
+      { t: 1, y: 0.15 },
+    ],
+  },
+  highway: {
+    label: "Highway",
+    points: [
+      { t: 0, y: 0 },
+      { t: 0.08, y: 0.12 },
+      { t: 0.12, y: 0.12 },
+      { t: 0.18, y: 0 },
+      { t: 0.5, y: 0.04 },
+      { t: 0.82, y: 0 },
+      { t: 0.88, y: 0.12 },
+      { t: 0.92, y: 0.12 },
+      { t: 1, y: 0 },
+    ],
+  },
+  dirtPath: {
+    label: "Dirt path",
+    points: [
+      { t: 0, y: -0.04 },
+      { t: 0.15, y: 0.01 },
+      { t: 0.5, y: 0.03 },
+      { t: 0.85, y: 0.01 },
+      { t: 1, y: -0.04 },
+    ],
+  },
+};
+
+function sampleProfileY(profile, t) {
+  const pts = profile.points;
+  if (t <= pts[0].t) return pts[0].y;
+  if (t >= pts[pts.length - 1].t) return pts[pts.length - 1].y;
+  for (let i = 1; i < pts.length; i++) {
+    if (t <= pts[i].t) {
+      const seg = (t - pts[i - 1].t) / (pts[i].t - pts[i - 1].t);
+      return pts[i - 1].y + (pts[i].y - pts[i - 1].y) * seg;
+    }
+  }
+  return 0;
+}
+
+function profileColumns(profile, minCols) {
+  const tSet = new Set(profile.points.map(p => p.t));
+  const cols = minCols ?? 5;
+  for (let i = 0; i < cols; i++) tSet.add(i / (cols - 1));
+  const sorted = [...tSet].sort((a, b) => a - b);
+  return sorted;
+}
+
 function vec(x = 0, y = 0) {
   return { x, y };
 }
@@ -77,16 +153,43 @@ function sampleQuadraticOffset(P0, P1, P2, offset, samples) {
   return out;
 }
 
-function buildNetworkBend(start, control, end, width, curveSegments) {
+function buildNetworkBend(start, control, end, width, curveSegments, lateralCols, profile) {
   const hw = width * 0.5;
   const samples = Math.max(4, curveSegments | 0);
   const left = sampleQuadraticOffset(start, control, end, hw, samples);
   const right = sampleQuadraticOffset(start, control, end, -hw, samples);
+
+  let grid = null;
+  let gridProfile = null;
+  const tCols = profile ? profileColumns(profile, lateralCols ?? 5) : null;
+  const cols = tCols ? tCols.length : (lateralCols ?? 0);
+  if (cols >= 3) {
+    const paths = [];
+    const profileYs = [];
+    for (let j = 0; j < cols; j++) {
+      const tVal = tCols ? tCols[j] : j / (cols - 1);
+      const lateral = hw * (1 - 2 * tVal);
+      paths.push(sampleQuadraticOffset(start, control, end, lateral, samples));
+      if (profile) profileYs.push(sampleProfileY(profile, tVal));
+    }
+    grid = [];
+    for (let i = 0; i <= samples; i++) {
+      const row = [];
+      for (let j = 0; j < cols; j++) {
+        row.push(paths[j][i]);
+      }
+      grid.push(row);
+    }
+    if (profile) gridProfile = profileYs;
+  }
+
   return {
     polygon: [...left, ...right.slice().reverse()],
     left: { path: left, debug: [] },
     right: { path: right, debug: [] },
     center: sampleQuadraticOffset(start, control, end, 0, samples),
+    grid,
+    gridProfile,
     networkBend: true,
   };
 }
@@ -154,6 +257,14 @@ export function buildLabNetworkGeometry(nodes, edges, params) {
   const junctionSegments = Math.max(3, params.junctionSegments ?? 14);
   const twoRoadNodes = params.twoRoadNodes ?? "smooth";
   const endCapStyle = params.endCapStyle ?? "flat";
+  const lateralCols = Math.max(2, params.lateralCols ?? 5);
+  const spanLongStep = Math.max(0.5, params.spanLongStep ?? 4);
+  const profileKey = params.profilePreset ?? "flat";
+  const profile = ROAD_PROFILES[profileKey] || ROAD_PROFILES.flat;
+  const profileScale = params.profileScale ?? 1;
+  const scaledProfile = {
+    points: profile.points.map(p => ({ t: p.t, y: p.y * profileScale })),
+  };
   const centerLine = params.centerLine !== false;
   const laneLines = !!params.laneLines;
   const doubleCenterLine = !!params.doubleCenterLine;
@@ -255,12 +366,31 @@ export function buildLabNetworkGeometry(nodes, edges, params) {
     const cb = Math.min(clipDistance(b.id, length), length * 0.45);
     const start = add(a.p, mul(dir, ca));
     const end = add(b.p, mul(dir, -cb));
-    if (dist(start, end) < 1) continue;
+    const spanLen = dist(start, end);
+    if (spanLen < 1) continue;
+    const longRows = Math.max(1, Math.ceil(spanLen / spanLongStep));
+    const tCols = profileColumns(scaledProfile, lateralCols);
+    const spanProfileYs = tCols.map(tv => sampleProfileY(scaledProfile, tv));
+    const grid = [];
+    for (let ri = 0; ri <= longRows; ri++) {
+      const t = ri / longRows;
+      const c = lerp(start, end, t);
+      const row = [];
+      for (let ci = 0; ci < tCols.length; ci++) {
+        const lateral = hw * (1 - 2 * tCols[ci]);
+        row.push(add(c, mul(side, lateral)));
+      }
+      grid.push(row);
+    }
+    const leftPath = grid.map(row => row[0]);
+    const rightPath = grid.map(row => row[tCols.length - 1]);
     pieces.push({
       polygon: [add(start, mul(side, hw)), add(end, mul(side, hw)), add(end, mul(side, -hw)), add(start, mul(side, -hw))],
-      left: { path: [add(start, mul(side, hw)), add(end, mul(side, hw))], debug: [] },
-      right: { path: [add(start, mul(side, -hw)), add(end, mul(side, -hw))], debug: [] },
+      left: { path: leftPath, debug: [] },
+      right: { path: rightPath, debug: [] },
       center: [start, end],
+      grid,
+      gridProfile: spanProfileYs,
       networkSpan: true,
     });
 
@@ -273,8 +403,12 @@ export function buildLabNetworkGeometry(nodes, edges, params) {
           if (role === "center") dashed = em.centerLineDashed;
           else if (role === "centerLeft") dashed = em.centerLeftDashed;
           else dashed = em.centerRightDashed;
+          const mPath = [];
+          for (let mi = 0; mi <= longRows; mi++) {
+            mPath.push(add(lerp(start, end, mi / longRows), mul(side, cOff)));
+          }
           markings.push({
-            path: [add(start, mul(side, cOff)), add(end, mul(side, cOff))],
+            path: mPath,
             type: role,
             dashed,
             dashScale: centerLineDashScale,
@@ -283,8 +417,12 @@ export function buildLabNetworkGeometry(nodes, edges, params) {
       } else {
         if (!em.laneLines) continue;
         const off = -hw + i * laneW;
+        const mPath = [];
+        for (let mi = 0; mi <= longRows; mi++) {
+          mPath.push(add(lerp(start, end, mi / longRows), mul(side, off)));
+        }
         markings.push({
-          path: [add(start, mul(side, off)), add(end, mul(side, off))],
+          path: mPath,
           type: "divider",
           dashed: true,
           dashScale: laneDashScale,
@@ -337,7 +475,7 @@ export function buildLabNetworkGeometry(nodes, edges, params) {
       const clipB = Math.min(clipDistance(node.id, second.length), second.length * 0.45);
       const mouthA = add(node.p, mul(first.dir, clipA));
       const mouthB = add(node.p, mul(second.dir, clipB));
-      pieces.push(buildNetworkBend(mouthA, node.p, mouthB, width, curveSegments));
+      pieces.push(buildNetworkBend(mouthA, node.p, mouthB, width, curveSegments, lateralCols, scaledProfile));
 
       const bendSamples = Math.max(4, curveSegments | 0);
       for (let i = 1; i < count; i++) {
