@@ -512,7 +512,10 @@ export function createToolState() {
     },
     fullRoad: {
       width: 16,
-      segments: 80,
+      /** Upper cap on merged-mesh subdivisions (actual count = min(this, length × meshSegmentsPerMeter)). */
+      segments: 240,
+      /** Full Road merged ribbon: approximate vertex rows per meter of path arc length. */
+      meshSegmentsPerMeter: 1.0,
       junctionSegments: 40,
       heightOffset: 0.05,
       adaptiveLift: true,

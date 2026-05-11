@@ -186,12 +186,22 @@ export function addFullRoadFolder(pane, toolState, opts) {
   }
   geoFolder
     .addBinding(rp, "segments", {
-      label: isSmartRoad ? "Curve segments" : "Edge segments",
+      label: isSmartRoad ? "Curve segments" : "Max mesh segments",
       min: 8,
       max: 300,
       step: 4,
     })
     .on("change", onFullRoadChanged);
+  if (!isSmartRoad) {
+    geoFolder
+      .addBinding(rp, "meshSegmentsPerMeter", {
+        label: "Mesh segments / m",
+        min: 0.15,
+        max: 4,
+        step: 0.05,
+      })
+      .on("change", onFullRoadChanged);
+  }
   geoFolder.addBinding(rp, "heightOffset", { label: "Height offset", min: 0, max: 2, step: 0.01 }).on("change", onFullRoadChanged);
   geoFolder.addBinding(rp, "adaptiveLift", { label: "Adaptive lift" }).on("change", onFullRoadChanged);
   geoFolder.addBinding(rp, "slopeLift", { label: "Slope lift", min: 0, max: 2, step: 0.01 }).on("change", onFullRoadChanged);

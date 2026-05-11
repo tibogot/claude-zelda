@@ -831,6 +831,16 @@ export class FullRoadSystem {
     this._rebuildVisual();
   }
 
+  /** Merged Full Road mesh + terrain flatten: segment count scales with curve length, capped by `fullRoad.segments`. */
+  _effectiveMeshSegments(curve) {
+    const p = this.toolState.fullRoad;
+    const len = Math.max(1e-6, curve.getLength());
+    const perM = p.meshSegmentsPerMeter ?? 1.0;
+    const cap = Math.max(6, Math.min(2000, Math.max(6, p.segments | 0)));
+    const raw = Math.round(len * perM);
+    return Math.max(6, Math.min(cap, Math.max(6, raw)));
+  }
+
   flattenTerrainUnderRoads() {
     if (!this.terrainStore || !this.chunkStream) return;
     const p = this.toolState.fullRoad;
@@ -838,7 +848,8 @@ export class FullRoadSystem {
     for (const path of this._buildRoadPaths()) {
       const curve = this._curveForPath(path);
       if (!curve) continue;
-      this.terrainStore.flattenUnderRoad(curve, p.width, p.segments, p.heightOffset, dirtyChunks);
+      const segs = this._effectiveMeshSegments(curve);
+      this.terrainStore.flattenUnderRoad(curve, p.width, segs, p.heightOffset, dirtyChunks);
     }
     if (dirtyChunks.size > 0) this.chunkStream.markDirtyRects(dirtyChunks);
   }
@@ -874,11 +885,11 @@ export class FullRoadSystem {
     for (const path of roadPaths) {
       const curve = this._curveForPath(path);
       if (!curve) continue;
-      
+
       const geo = generateRoadGeometry(
         curve,
         p.width,
-        Math.max(6, p.segments | 0),
+        this._effectiveMeshSegments(curve),
         p.heightOffset,
         this.getWorldHeight,
         null,
