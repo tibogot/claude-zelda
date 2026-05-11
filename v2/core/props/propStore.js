@@ -95,6 +95,29 @@ export class PropStore {
     return idx;
   }
 
+  /** Deep enough for editor round-trip; matches snapshot liveParams handling. */
+  duplicateInstance(srcIdx, { dpx = 0.6, dpz = 0.6 } = {}) {
+    const src = this.instances[srcIdx];
+    if (!src) return -1;
+    const inst = {
+      typeIdx: src.typeIdx,
+      px: src.px + dpx,
+      py: src.py,
+      pz: src.pz + dpz,
+      rx: src.rx,
+      ry: src.ry,
+      rz: src.rz,
+      sx: src.sx,
+      sy: src.sy,
+      sz: src.sz,
+    };
+    if (src.liveParams) inst.liveParams = { ...src.liveParams };
+    const idx = this.instances.length;
+    this.instances.push(inst);
+    this._bump();
+    return idx;
+  }
+
   removeInstance(instIdx) {
     const last = this.instances.length - 1;
     if (instIdx !== last) {

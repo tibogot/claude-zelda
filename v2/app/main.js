@@ -1069,7 +1069,7 @@ export async function startV2App(opts = {}) {
   let ui;
   let _saveProject, _loadProject;
   let _importTreeGlb, _loadTreePreset, _removeTreeSlot, _clearAllTrees, _treeCastShadowChanged, _foliageParamChanged;
-  let _importPropGlb, _addPrimitive, _addLiveProp, _removePropSlot, _importPropLod, _propCastShadowChanged, _deleteSelectedProp, _clearAllProps, _propTransformModeChanged, _rebakeBvh;
+  let _importPropGlb, _addPrimitive, _addLiveProp, _removePropSlot, _importPropLod, _propCastShadowChanged, _deleteSelectedProp, _duplicateSelectedProp, _clearAllProps, _propTransformModeChanged, _rebakeBvh;
   let _loadFoliageTexture, _foliageSlotStructureChanged, _foliageSlotMaterialChanged, _clearAllFoliage, _foliageLodChanged;
   let _playSpawnChanged, _barrierOverlayChanged, _barrierClear, _barrierFill, _holeOverlayChanged, _holeClear;
   let _ambientFxFlapChanged, _ambientFxRingsChanged, _ambientFxClear, _ambientFxLeafChanged, _ambientFxClearLeaves, _ambientFxLeafRespawn;
@@ -1763,6 +1763,13 @@ export async function startV2App(opts = {}) {
     onDeleteSelectedProp: (_deleteSelectedProp = () => {
       propSystem.handleDelete();
       deactivatePropSelection();
+    }),
+    onDuplicateSelectedProp: (_duplicateSelectedProp = () => {
+      const newIdx = propSystem.handleDuplicate();
+      if (newIdx != null) {
+        activatePropSelection(newIdx);
+        ui?.pane.refresh();
+      }
     }),
     onClearAllProps: (_clearAllProps = () => propSystem.clearAll()),
     onPropTransformModeChanged: (_propTransformModeChanged = () => {
@@ -2933,6 +2940,13 @@ export async function startV2App(opts = {}) {
       event.preventDefault();
       propSystem.handleDelete();
       deactivatePropSelection();
+    } else if (ctrl && event.code === "KeyD" && toolState.mode === "props") {
+      event.preventDefault();
+      const newIdx = propSystem.handleDuplicate();
+      if (newIdx != null) {
+        activatePropSelection(newIdx);
+        ui?.pane.refresh();
+      }
     } else if (
       event.code === "KeyW" && !ctrl &&
       toolState.mode !== "cliffs" &&
@@ -3333,6 +3347,7 @@ export async function startV2App(opts = {}) {
     importPropLod(slotIdx, lod) { _importPropLod(slotIdx, lod); },
     propCastShadowChanged() { _propCastShadowChanged(); },
     deleteSelectedProp() { _deleteSelectedProp(); },
+    duplicateSelectedProp() { _duplicateSelectedProp(); },
     clearAllProps() { _clearAllProps(); },
     propTransformModeChanged() { _propTransformModeChanged(); },
     rebakeBvh() { _rebakeBvh(); },

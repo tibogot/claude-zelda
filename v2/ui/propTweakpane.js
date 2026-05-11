@@ -199,6 +199,10 @@ export function addPropFolder(pane, toolState, callbacks) {
     callbacks.onDeleteSelectedProp?.();
   });
 
+  folder.addButton({ title: "Duplicate Selected [Ctrl+D]" }).on("click", () => {
+    callbacks.onDuplicateSelectedProp?.();
+  });
+
   folder.addButton({ title: "Clear All Props" }).on("click", () => {
     callbacks.onClearAllProps?.();
   });

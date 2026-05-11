@@ -60,6 +60,20 @@ export class PropSystem {
     if (this.bvh) this.bvh.invalidate();
   }
 
+  /** Copies selected instance (transform + live params). Returns new index or null. */
+  handleDuplicate() {
+    if (!this.instancer.hasSelection) return null;
+    this.instancer.syncFromProxy();
+    const srcIdx = this.instancer.selectedIdx;
+    const src = this.store.instances[srcIdx];
+    if (!src) return null;
+    const before = this.store.snapshot();
+    const newIdx = this.store.duplicateInstance(srcIdx);
+    this._pushUndo(before);
+    if (this.bvh) this.bvh.invalidate();
+    return newIdx;
+  }
+
   handleTransformChange() {
     this.instancer.syncFromProxy();
   }
