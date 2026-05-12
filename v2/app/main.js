@@ -3348,6 +3348,14 @@ export async function startV2App(opts = {}) {
     propCastShadowChanged() { _propCastShadowChanged(); },
     deleteSelectedProp() { _deleteSelectedProp(); },
     duplicateSelectedProp() { _duplicateSelectedProp(); },
+    /** After editing `propStore.instances[instIdx]` fields in place (e.g. custom inspector sliders). */
+    syncPropInstanceFromInspector(instIdx) {
+      const inst = propStore.instances[instIdx];
+      if (!inst) return;
+      propStore._bump();
+      if (propInstancer.selectedIdx === instIdx) propInstancer.select(instIdx);
+      if (cliffBvh) cliffBvh.invalidate();
+    },
     clearAllProps() { _clearAllProps(); },
     propTransformModeChanged() { _propTransformModeChanged(); },
     rebakeBvh() { _rebakeBvh(); },

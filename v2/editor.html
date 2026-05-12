@@ -280,6 +280,71 @@
   .layer-card-label { font-size: 9px; color: var(--text-dim); text-align: center; max-width: 56px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .layer-card.active .layer-card-label { color: var(--accent); font-weight: 600; }
 
+  /* === TEXTURE LIBRARY: PBR MAP SLOTS === */
+  .tex-map-grid {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 8px;
+    padding: 4px 0 10px;
+  }
+  .tex-map-tile {
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    background: var(--bg-dark);
+    overflow: hidden;
+  }
+  .tex-map-tile-head {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 2px 6px;
+    font-size: 9px;
+    font-weight: 600;
+    color: var(--text-dim);
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+    background: var(--bg-panel);
+    border-bottom: 1px solid var(--border);
+  }
+  .tex-map-tile-clear {
+    border: none;
+    background: none;
+    color: var(--text-dim);
+    cursor: pointer;
+    font-size: 11px;
+    line-height: 1;
+    padding: 0 2px;
+    font-family: var(--font);
+  }
+  .tex-map-tile-clear:hover { color: var(--text); }
+  .tex-map-tile-preview {
+    aspect-ratio: 1;
+    min-height: 48px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    cursor: pointer;
+    background: var(--bg-input);
+  }
+  .tex-map-tile-preview img {
+    width: 100%;
+    height: 100%;
+    object-fit: cover;
+    display: block;
+    image-rendering: pixelated;
+  }
+  .tex-map-tile-preview .tex-map-empty {
+    font-size: 9px;
+    color: var(--text-dim);
+    padding: 6px;
+    text-align: center;
+    line-height: 1.25;
+  }
+  .tex-map-tile.drag-over .tex-map-tile-preview {
+    box-shadow: inset 0 0 0 2px var(--green);
+    background: rgba(92, 184, 92, 0.12);
+  }
+
   /* === RIGHT PANEL (TABBED) === */
   #right-panel {
     grid-column: 5; grid-row: 2 / -1; background: var(--bg-panel); border-left: 1px solid var(--border);
@@ -763,6 +828,67 @@ const EXT_ICONS = {
   json:'file-json', js:'file-code', ts:'file-code', html:'file-code',
 };
 const IMG_EXTS = new Set(['png','jpg','jpeg','webp','bmp']);
+
+/** Image file from a drag started on the bottom asset grid (`text/plain` name + `fsFileHandles`). */
+async function tryGetImageFileFromAssetDrag(dataTransfer) {
+  const fileName = dataTransfer.getData('text/plain');
+  if (!fileName) return null;
+  const handle = fsFileHandles.get(fileName);
+  if (!handle) return null;
+  const ext = fileName.split('.').pop().toLowerCase();
+  if (!IMG_EXTS.has(ext)) return null;
+  try {
+    return await handle.getFile();
+  } catch {
+    return null;
+  }
+}
+
+/** Bottom browser drag or OS file drop — first supported image file, if any. */
+async function tryGetImageFileFromAnyDrop(dataTransfer) {
+  let file = await tryGetImageFileFromAssetDrag(dataTransfer);
+  if (!file && dataTransfer.files?.length) {
+    const f = dataTransfer.files[0];
+    const ext = f.name.split('.').pop().toLowerCase();
+    if (IMG_EXTS.has(ext)) file = f;
+  }
+  return file;
+}
+
+/**
+ * Guess PBR map from common asset naming (Megascans, Polyhaven, etc.).
+ * @returns {'albedo'|'normal'|'ao'|'rough'}
+ */
+function inferTextureMapKindFromFileName(name) {
+  const stem = String(name || '')
+    .toLowerCase()
+    .replace(/\\/g, '/')
+    .split('/')
+    .pop()
+    .replace(/\.[^.]+$/, '');
+  if (
+    stem.includes('normalgl') ||
+    stem.includes('normaldx') ||
+    stem.includes('normal') ||
+    stem.includes('nor_gl') ||
+    stem.includes('nor_dx') ||
+    /(^|[^a-z])nrm([^a-z]|$)/.test(stem) ||
+    stem.includes('bump')
+  ) {
+    return 'normal';
+  }
+  if (stem.includes('rough') || /(^|[^a-z])rgh([^a-z]|$)/.test(stem)) return 'rough';
+  if (
+    stem.includes('ambient') ||
+    stem.includes('occlusion') ||
+    stem.includes('occlu') ||
+    /(^|[^a-z])ao([^a-z]|$)/.test(stem) ||
+    stem.endsWith('_ao')
+  ) {
+    return 'ao';
+  }
+  return 'albedo';
+}
 
 async function openFolder() {
   try {
@@ -1336,6 +1462,13 @@ function buildPaintPanel(app) {
   const cfg = app.config;
   const lib = app.textureLibrary;
 
+  const libState = { activeSlotId: lib.slots[0]?.id ?? '' };
+  const initPaintLayer = ts.paint.activeLayer;
+  if (initPaintLayer >= 1 && initPaintLayer <= 7) {
+    const initSid = ts.paint.layerSlotIds[initPaintLayer - 1];
+    if (lib.getSlot(initSid)) libState.activeSlotId = initSid;
+  }
+
   // --- Brush ---
   const brushBody = _section(panel, 'Brush');
   _slider(brushBody, ts.brush, 'radius', { label: 'Radius', min: cfg.sculpt.brushMin, max: cfg.sculpt.brushMax, step: 0.5 });
@@ -1357,10 +1490,70 @@ function buildPaintPanel(app) {
     return null;
   }
 
+  function sampleOrmThumbDataUrl(ormTex, mode) {
+    const dt = ormTex?.image;
+    const data = dt?.data;
+    if (!data || !dt.width) return null;
+    const w = dt.width;
+    const h = dt.height;
+    const out = document.createElement('canvas');
+    out.width = 56;
+    out.height = 56;
+    const ctx = out.getContext('2d');
+    const imgData = ctx.createImageData(56, 56);
+    for (let j = 0; j < 56; j++) {
+      for (let i = 0; i < 56; i++) {
+        const si = Math.min(w - 1, Math.floor(((i + 0.5) / 56) * w));
+        const sj = Math.min(h - 1, Math.floor(((j + 0.5) / 56) * h));
+        const idx = (sj * w + si) * 4;
+        const o = (j * 56 + i) * 4;
+        if (mode === 'normal') {
+          const nx = (data[idx + 2] / 255) * 2 - 1;
+          const ny = (data[idx + 3] / 255) * 2 - 1;
+          const nz = Math.sqrt(Math.max(0, 1 - Math.min(1, nx * nx + ny * ny)));
+          imgData.data[o] = Math.round((nx * 0.5 + 0.5) * 255);
+          imgData.data[o + 1] = Math.round((ny * 0.5 + 0.5) * 255);
+          imgData.data[o + 2] = Math.round((nz * 0.5 + 0.5) * 255);
+          imgData.data[o + 3] = 255;
+        } else if (mode === 'ao') {
+          const v = data[idx + 1];
+          imgData.data[o] = imgData.data[o + 1] = imgData.data[o + 2] = v;
+          imgData.data[o + 3] = 255;
+        } else {
+          const v = data[idx];
+          imgData.data[o] = imgData.data[o + 1] = imgData.data[o + 2] = v;
+          imgData.data[o + 3] = 255;
+        }
+      }
+    }
+    ctx.putImageData(imgData, 0, 0);
+    try {
+      return out.toDataURL('image/jpeg', 0.45);
+    } catch {
+      return null;
+    }
+  }
+
+  function getMapThumbDataUrl(slot, kind) {
+    if (kind === 'albedo') {
+      if (!slot.uHasAlbedo?.value) return null;
+      return getThumbUrl(slot.id);
+    }
+    if (kind === 'normal' && slot.uHasNormal?.value) return sampleOrmThumbDataUrl(slot.ormTex, 'normal');
+    if (kind === 'ao' && slot.uHasAO?.value) return sampleOrmThumbDataUrl(slot.ormTex, 'ao');
+    if (kind === 'rough' && slot.uHasRough?.value) return sampleOrmThumbDataUrl(slot.ormTex, 'rough');
+    return null;
+  }
+
   const layerLabels = ['Eraser', 'Layer 1', 'Layer 2', 'Layer 3', 'Layer 4', 'Layer 5', 'Layer 6', 'Layer 7', 'Meadow'];
   const cardContainer = document.createElement('div');
   cardContainer.className = 'layer-cards';
   layerSection.appendChild(cardContainer);
+  _info(
+    layerSection,
+    'Drop',
+    'Browser or OS → layer slot: filename picks Normal / Roughness / AO (else Albedo). Picking a layer syncs Texture Library.',
+  );
 
   function buildLayerCards() {
     cardContainer.innerHTML = '';
@@ -1403,30 +1596,49 @@ function buildPaintPanel(app) {
         ts.paint.activeLayer = i;
         cardContainer.querySelectorAll('.layer-card').forEach(c => c.classList.remove('active'));
         card.classList.add('active');
+        if (i >= 1 && i <= 7) {
+          const sid = ts.paint.layerSlotIds[i - 1];
+          if (lib.getSlot(sid)) {
+            libState.activeSlotId = sid;
+            buildLibSlotPicker();
+            buildLibSlotEditor();
+          }
+        }
       });
 
-      // Drop target for layers 1-7
+      // Drop target for layers 1-7 (any PBR map from filename heuristics)
       if (i >= 1 && i <= 7) {
-        card.addEventListener('dragover', e => { e.preventDefault(); e.dataTransfer.dropEffect = 'copy'; card.classList.add('drag-over'); });
-        card.addEventListener('dragleave', () => card.classList.remove('drag-over'));
-        card.addEventListener('drop', async e => {
+        card.addEventListener('dragover', (e) => {
+          e.preventDefault();
+          e.dataTransfer.dropEffect = 'copy';
+          card.classList.add('drag-over');
+        });
+        card.addEventListener('dragleave', (e) => {
+          if (!card.contains(e.relatedTarget)) card.classList.remove('drag-over');
+        });
+        card.addEventListener('drop', async (e) => {
           e.preventDefault();
           card.classList.remove('drag-over');
-          const fileName = e.dataTransfer.getData('text/plain');
-          if (!fileName) return;
-          const handle = fsFileHandles.get(fileName);
-          if (!handle) return;
-          const ext = fileName.split('.').pop().toLowerCase();
-          if (!IMG_EXTS.has(ext)) return;
+          const file = await tryGetImageFileFromAnyDrop(e.dataTransfer);
+          if (!file) return;
+          const kind = inferTextureMapKindFromFileName(file.name);
+          const slotId = ts.paint.layerSlotIds[i - 1];
           try {
-            const file = await handle.getFile();
-            const slotId = ts.paint.layerSlotIds[i - 1];
-            await lib.replaceMapFromFile(slotId, 'albedo', file);
-            const slot = lib.getSlot(slotId);
-            if (slot) lib.renameSlot(slotId, fileName.replace(/\.[^.]+$/, ''));
+            await lib.replaceMapFromFile(slotId, kind, file);
+            if (kind === 'albedo') {
+              const slot = lib.getSlot(slotId);
+              if (slot) lib.renameSlot(slotId, file.name.replace(/\.[^.]+$/, ''));
+            }
             app.invalidateSurfaceMaterials();
+            if (ts.paint.activeLayer === i) {
+              libState.activeSlotId = slotId;
+              buildLibSlotPicker();
+              buildLibSlotEditor();
+            }
             buildLayerCards();
-          } catch (err) { console.error('[Paint] Drop failed:', err); }
+          } catch (err) {
+            console.error('[Paint] Drop failed:', err);
+          }
         });
       }
 
@@ -1447,8 +1659,20 @@ function buildPaintPanel(app) {
         ts.paint.layerSlotIds[idx] = lib.slots[0]?.id ?? '';
       }
       _dropdown(texBody, ts.paint.layerSlotIds, idx, {
-        label: `Layer ${idx + 1}`, options: slotOpts,
-        onChange: () => { app.invalidateSurfaceMaterials(); buildLayerCards(); },
+        label: `Layer ${idx + 1}`,
+        options: slotOpts,
+        onChange: () => {
+          app.invalidateSurfaceMaterials();
+          buildLayerCards();
+          if (ts.paint.activeLayer === idx + 1) {
+            const sid = ts.paint.layerSlotIds[idx];
+            if (lib.getSlot(sid)) {
+              libState.activeSlotId = sid;
+              buildLibSlotPicker();
+              buildLibSlotEditor();
+            }
+          }
+        },
       });
     }
   }
@@ -1505,40 +1729,107 @@ function buildPaintPanel(app) {
   _toggle(maskBody, ts.paint, 'maskRandomRotation', { label: 'Random rot.' });
   _toggle(maskBody, ts.paint, 'maskFollowStroke', { label: 'Follow stroke' });
 
-  // --- Texture Library ---
+  // --- Texture Library (libState at top of buildPaintPanel — synced with active paint layer) ---
   const libBody = _section(panel, 'Texture Library', false);
-  const libState = { activeSlotId: lib.slots[0]?.id ?? '' };
 
   function buildLibSlotEditor() {
     libEditor.innerHTML = '';
     const slot = lib.getSlot(libState.activeSlotId);
     if (!slot) return;
 
-    // Thumbnail preview
-    const previewDiv = document.createElement('div');
-    previewDiv.style.cssText = 'width:64px;height:64px;border:1px solid var(--border);border-radius:4px;margin:4px auto 8px;overflow:hidden;';
-    const thumbUrl = getThumbUrl(slot.id);
-    if (thumbUrl) previewDiv.innerHTML = `<img src="${thumbUrl}" style="width:100%;height:100%;object-fit:cover;">`;
-    else previewDiv.innerHTML = '<div style="width:100%;height:100%;display:flex;align-items:center;justify-content:center;font-size:10px;color:var(--text-dim)">No tex</div>';
-    libEditor.appendChild(previewDiv);
+    const mapLabels = { albedo: 'Albedo', normal: 'Normal', ao: 'AO', rough: 'Rough' };
+    const mapGrid = document.createElement('div');
+    mapGrid.className = 'tex-map-grid';
+
+    function pickMapFile(kind) {
+      const input = document.createElement('input');
+      input.type = 'file';
+      input.accept = 'image/*';
+      input.onchange = async () => {
+        const file = input.files?.[0];
+        if (!file) return;
+        await lib.replaceMapFromFile(slot.id, kind, file);
+        app.invalidateSurfaceMaterials();
+        buildLibSlotEditor();
+        buildLayerCards();
+      };
+      input.click();
+    }
+
+    for (const kind of ['albedo', 'normal', 'ao', 'rough']) {
+      const tile = document.createElement('div');
+      tile.className = 'tex-map-tile';
+
+      const head = document.createElement('div');
+      head.className = 'tex-map-tile-head';
+      const lab = document.createElement('span');
+      lab.textContent = mapLabels[kind];
+      head.appendChild(lab);
+      const clearBtn = document.createElement('button');
+      clearBtn.type = 'button';
+      clearBtn.className = 'tex-map-tile-clear';
+      clearBtn.title = 'Clear map';
+      clearBtn.textContent = '×';
+      clearBtn.addEventListener('click', (ev) => {
+        ev.stopPropagation();
+        lib.clearSlotMap(slot.id, kind);
+        app.invalidateSurfaceMaterials();
+        buildLibSlotEditor();
+        buildLayerCards();
+      });
+      head.appendChild(clearBtn);
+      tile.appendChild(head);
+
+      const prev = document.createElement('div');
+      prev.className = 'tex-map-tile-preview';
+      const url = getMapThumbDataUrl(slot, kind);
+      if (url) {
+        const img = document.createElement('img');
+        img.src = url;
+        img.alt = kind;
+        prev.appendChild(img);
+      } else {
+        const empty = document.createElement('div');
+        empty.className = 'tex-map-empty';
+        empty.textContent = 'Drop or click';
+        prev.appendChild(empty);
+      }
+
+      prev.addEventListener('click', () => pickMapFile(kind));
+
+      tile.addEventListener('dragover', (e) => {
+        e.preventDefault();
+        e.dataTransfer.dropEffect = 'copy';
+        tile.classList.add('drag-over');
+      });
+      tile.addEventListener('dragleave', (e) => {
+        if (!tile.contains(e.relatedTarget)) tile.classList.remove('drag-over');
+      });
+      tile.addEventListener('drop', async (e) => {
+        e.preventDefault();
+        e.stopPropagation();
+        tile.classList.remove('drag-over');
+        const file = await tryGetImageFileFromAnyDrop(e.dataTransfer);
+        if (!file) return;
+        try {
+          await lib.replaceMapFromFile(slot.id, kind, file);
+          app.invalidateSurfaceMaterials();
+          buildLibSlotEditor();
+          buildLayerCards();
+        } catch (err) {
+          console.error('[TextureLibrary] Drop failed:', err);
+        }
+      });
+
+      tile.appendChild(prev);
+      mapGrid.appendChild(tile);
+    }
+    libEditor.appendChild(mapGrid);
 
     _slider(libEditor, slot, 'uvScale', { label: 'UV tile', min: 0.25, max: 80, step: 0.25, onChange: () => lib.setSlotUvScale(slot.id, slot.uvScale) });
     _slider(libEditor, slot, 'normalStrength', { label: 'Normal str', min: 0, max: 3, step: 0.02, onChange: () => lib.setSlotStrength(slot.id, 'normal', slot.normalStrength) });
     _slider(libEditor, slot, 'aoStrength', { label: 'AO str', min: 0, max: 2, step: 0.02, onChange: () => lib.setSlotStrength(slot.id, 'ao', slot.aoStrength) });
     _slider(libEditor, slot, 'roughStrength', { label: 'Rough str', min: 0, max: 2, step: 0.02, onChange: () => lib.setSlotStrength(slot.id, 'rough', slot.roughStrength) });
-
-    _separator(libEditor);
-    for (const kind of ['albedo', 'normal', 'ao', 'rough']) {
-      _button(libEditor, { title: `Upload ${kind}...`, onClick: () => {
-        const input = document.createElement('input');
-        input.type = 'file'; input.accept = 'image/*';
-        input.onchange = async () => {
-          const file = input.files?.[0];
-          if (file) { await lib.replaceMapFromFile(slot.id, kind, file); buildLibSlotEditor(); buildLayerCards(); }
-        };
-        input.click();
-      }});
-    }
 
     if (lib.slots.length > 1) {
       _separator(libEditor);
@@ -3658,18 +3949,36 @@ function buildInspector(app, itemId) {
       if (propMatch) {
         const typeIdx = parseInt(propMatch[1]);
         const slot = ts.propSlots[typeIdx];
-        const instances = app.propStore.instances.filter(inst => inst.typeIdx === typeIdx);
+        const globalIndices = [];
+        for (let gi = 0; gi < app.propStore.instances.length; gi++) {
+          if (app.propStore.instances[gi].typeIdx === typeIdx) globalIndices.push(gi);
+        }
+        const halfW = (cfg.world?.size ?? 1600) * 0.5;
         const sec = _section(container, `${slot?.name || 'Prop'} · Instances`);
         _info(sec, 'Type', slot?.name || '?');
-        _info(sec, 'Instances', `${instances.length}`);
-        if (instances.length > 0) {
-          const list = _section(container, 'Instance List', instances.length <= 20);
-          for (let i = 0; i < Math.min(instances.length, 50); i++) {
-            const inst = instances[i];
-            _info(list, `#${i}`, `(${inst.px.toFixed(0)}, ${inst.py.toFixed(0)}, ${inst.pz.toFixed(0)})  S:${inst.sx.toFixed(1)} R:${inst.ry.toFixed(0)}°`);
+        _info(sec, 'Instances', `${globalIndices.length}`);
+        if (globalIndices.length > 0) {
+          const maxPanels = 30;
+          const list = _section(container, 'Transforms', true);
+          for (let i = 0; i < globalIndices.length && i < maxPanels; i++) {
+            const instIdx = globalIndices[i];
+            const inst = app.propStore.instances[instIdx];
+            const instBody = _section(list, `Instance #${instIdx}`, i < 3);
+            const sync = () => app.syncPropInstanceFromInspector(instIdx);
+            _slider(instBody, inst, 'px', { label: 'Position X', min: -halfW, max: halfW, step: 0.1, onChange: sync });
+            _slider(instBody, inst, 'py', { label: 'Position Y', min: -200, max: 800, step: 0.1, onChange: sync });
+            _slider(instBody, inst, 'pz', { label: 'Position Z', min: -halfW, max: halfW, step: 0.1, onChange: sync });
+            _separator(instBody);
+            _slider(instBody, inst, 'rx', { label: 'Rotation X', min: -180, max: 180, step: 1, onChange: sync });
+            _slider(instBody, inst, 'ry', { label: 'Rotation Y', min: -180, max: 180, step: 1, onChange: sync });
+            _slider(instBody, inst, 'rz', { label: 'Rotation Z', min: -180, max: 180, step: 1, onChange: sync });
+            _separator(instBody);
+            _slider(instBody, inst, 'sx', { label: 'Scale X', min: 0.01, max: 40, step: 0.01, onChange: sync });
+            _slider(instBody, inst, 'sy', { label: 'Scale Y', min: 0.01, max: 40, step: 0.01, onChange: sync });
+            _slider(instBody, inst, 'sz', { label: 'Scale Z', min: 0.01, max: 40, step: 0.01, onChange: sync });
           }
-          if (instances.length > 50) {
-            _info(list, '...', `${instances.length - 50} more`);
+          if (globalIndices.length > maxPanels) {
+            _info(list, '…', `${globalIndices.length - maxPanels} more instances (not listed)`);
           }
         }
         break;

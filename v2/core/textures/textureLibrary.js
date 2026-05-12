@@ -300,6 +300,43 @@ export function createTextureLibrary() {
     emitChange(slotId, `map:${kind}`);
   }
 
+  /** Reset one map to neutral (matches `makeNeutralOrmDataTexture` / default albedo grey). */
+  function clearSlotMap(slotId, kind) {
+    const slot = getSlot(slotId);
+    if (!slot) return;
+    if (kind === "albedo") {
+      const canvas = slot.albedoTex.image;
+      const ctx = canvas.getContext("2d");
+      ctx.fillStyle = "rgb(160,160,160)";
+      ctx.fillRect(0, 0, canvas.width, canvas.height);
+      slot.albedoTex.needsUpdate = true;
+      slot.uHasAlbedo.value = 0;
+      slot.paths.albedo = null;
+    } else if (kind === "normal") {
+      const dst = slot.ormTex.image.data;
+      for (let i = 0, n = dst.length >> 2; i < n; i++) {
+        dst[i * 4 + 2] = 128;
+        dst[i * 4 + 3] = 128;
+      }
+      slot.ormTex.needsUpdate = true;
+      slot.uHasNormal.value = 0;
+      slot.paths.normal = null;
+    } else if (kind === "ao") {
+      const dst = slot.ormTex.image.data;
+      for (let i = 0, n = dst.length >> 2; i < n; i++) dst[i * 4 + 1] = 255;
+      slot.ormTex.needsUpdate = true;
+      slot.uHasAO.value = 0;
+      slot.paths.ao = null;
+    } else if (kind === "rough") {
+      const dst = slot.ormTex.image.data;
+      for (let i = 0, n = dst.length >> 2; i < n; i++) dst[i * 4] = 204;
+      slot.ormTex.needsUpdate = true;
+      slot.uHasRough.value = 0;
+      slot.paths.rough = null;
+    } else return;
+    emitChange(slotId, `map:${kind}`);
+  }
+
   async function loadSlotAllMaps(slot) {
     const tasks = [];
     if (slot.paths.albedo) tasks.push(["albedo", slot.paths.albedo]);
@@ -383,6 +420,7 @@ export function createTextureLibrary() {
     setSlotStrength,
     replaceMapFromUrl,
     replaceMapFromFile,
+    clearSlotMap,
     addSlot,
     removeSlot,
     renameSlot,
