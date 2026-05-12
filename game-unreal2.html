@@ -2054,6 +2054,36 @@
 
       async function init() {
         const renderer = new THREE.WebGPURenderer({ antialias: true });
+
+        // stats-gl must hook the renderer *before* renderer.init() so it can
+        // inject the `timestamp-query` feature into the GPUDevice descriptor.
+        const stats = new Stats({ trackGPU: true });
+        await stats.init(renderer);
+
+        // Custom panels — fed from renderer.info each frame in the render loop.
+        // Draws: total draw calls (incl. shadow cascades + post-processing passes).
+        // Tris:  triangles rendered, in thousands.
+        // Geos:  live geometry count (monotonic growth = leak).
+        // Texs:  live texture count (monotonic growth = leak).
+        const drawCallsPanel = stats.addPanel(
+          new Stats.Panel("Draws", "#ffaa66", "#221"),
+        );
+        const trianglesPanel = stats.addPanel(
+          new Stats.Panel("Tris K", "#88e0ff", "#122"),
+        );
+        const geometriesPanel = stats.addPanel(
+          new Stats.Panel("Geos", "#bbff88", "#121"),
+        );
+        const texturesPanel = stats.addPanel(
+          new Stats.Panel("Texs", "#ff88dd", "#212"),
+        );
+        // Progs: unique shader programs. Should plateau quickly; monotonic
+        // growth means new materials/variants are being compiled at runtime
+        // (per-mesh material clones, dynamic defines, etc.).
+        const programsPanel = stats.addPanel(
+          new Stats.Panel("Progs", "#ffff88", "#222"),
+        );
+
         await renderer.init();
         renderer.setSize(innerWidth, innerHeight);
         renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
@@ -2067,8 +2097,6 @@
             ? "WebGPU ✓"
             : "WebGL fallback";
 
-        const stats = new Stats({ trackGPU: false });
-        stats.init(renderer);
         document.body.appendChild(stats.dom);
 
         const scene = new THREE.Scene();
@@ -4992,6 +5020,17 @@
           }
 
           renderPipeline.render();
+          // Drain the WebGPU timestamp query pool that stats-gl enabled —
+          // otherwise it fills up and Three.js warns "Maximum number of queries exceeded".
+          renderer.resolveTimestampsAsync(THREE.TimestampQuery.RENDER);
+
+          const info = renderer.info;
+          drawCallsPanel.update(info.render.calls, 500, 0);
+          trianglesPanel.update(info.render.triangles / 1000, 2000, 1);
+          geometriesPanel.update(info.memory.geometries, 500, 0);
+          texturesPanel.update(info.memory.textures, 200, 0);
+          programsPanel.update(info.programs?.length ?? 0, 100, 0);
+
           stats.update();
         });
 
