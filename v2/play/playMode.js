@@ -17,7 +17,7 @@ import {
   getSharedGltfLoader,
 } from "../core/foliage/glbLoader.js";
 import { setupPlayModeCarAudio } from "./carAudioSetup.js";
-import { CarPhysics } from "./carPhysics.js";
+import { CarPhysics, DEFAULT_JEEP_TUNING, DEFAULT_LOTUS_COLLISION_HULL } from "./carPhysics.js";
 import { LotusPhysics, DEFAULT_LOTUS_PHYSICS_PARAMS } from "./lotusPhysics.js";
 
 const CAP_R = 0.4;
@@ -1023,8 +1023,14 @@ export class PlayMode {
     this._lotusBlinkerTime = 0;
     this._lotusBlinkerAutoHold = 0;
     this._lotusCamGui = null;
+    this._jeepTuningGui = null;
+    /** @type {Record<string, number> | null} */
+    this._jeepGuiLive = null;
+    /** Controllers for live jeep telemetry rows (lil-gui). */
+    this._jeepGuiLiveCtrls = [];
     this._loadLotus();
     this._initLotusCamGui();
+    this._initJeepTuningGui();
   }
 
   _createFlyHud() {
@@ -1719,17 +1725,71 @@ export class PlayMode {
 
       const terr = gui.addFolder("Physics — terrain");
       terr.add(lp, "gravity", 5, 55, 1).name("Gravity");
-      terr.add(lp, "rideHeight", 0.1, 1.1, 0.02).name("Ride height");
+      terr
+        .add(lp, "rideHeight", 0.1, 1.1, 0.02)
+        .name("Ride height")
+        .onChange((v) => {
+          this._carPhysics.lotusHull.rideHeight = v;
+          if (this._lotusCamGui) {
+            for (const c of this._lotusCamGui.controllersRecursive()) {
+              c.updateDisplay();
+            }
+          }
+        });
       terr.add(lp, "groundSmooth", 1, 55, 1).name("Ground smooth");
       terr.add(lp, "maxSlopeCos", 0.1, 0.99, 0.01).name("Max slope cos");
       terr.add(lp, "wheelBase", 0.8, 4.2, 0.05).name("Wheelbase");
       terr.add(lp, "track", 0.5, 2.6, 0.05).name("Track width");
+      terr
+        .add(lp, "wheelBvhRayPadAboveHub", 0.2, 4, 0.05)
+        .name("BVH ray pad (tunnel)");
+      terr
+        .add(lp, "wheelBvHMaxAboveHub", 0.6, 10, 0.05)
+        .name("BVH max above hub");
+
+      const lh = this._carPhysics.lotusHull;
+      const resetLotusHull = () => {
+        const d = DEFAULT_LOTUS_COLLISION_HULL;
+        while (lh.hullSpheres.length < d.hullSpheres.length) {
+          lh.hullSpheres.push({ ...d.hullSpheres[lh.hullSpheres.length] });
+        }
+        while (lh.hullSpheres.length > d.hullSpheres.length) {
+          lh.hullSpheres.pop();
+        }
+        for (let i = 0; i < d.hullSpheres.length; i++) {
+          Object.assign(lh.hullSpheres[i], d.hullSpheres[i]);
+        }
+        for (const k of Object.keys(d)) {
+          if (k === "hullSpheres") continue;
+          lh[k] = d[k];
+        }
+        for (const c of gui.controllersRecursive()) {
+          c.updateDisplay();
+        }
+      };
+      const col = gui.addFolder("Collision hull (Lotus)");
+      lh.hullSpheres.forEach((hs, idx) => {
+        const hf = col.addFolder(hs.label || `sphere ${idx}`);
+        hf.add(hs, "fwd", -2.8, 2.8, 0.02).name("Fwd offset");
+        hf.add(hs, "right", -1.2, 1.2, 0.02).name("Right offset");
+        hf.add(hs, "y", 0.06, 1.1, 0.01).name("Y above root");
+        hf.add(hs, "r", 0.12, 0.85, 0.01).name("Radius");
+      });
+      col.add(lh, "sweepFwdMargin", 0, 2, 0.02).name("Sweep margin");
+      col.add(lh, "probeHalfLength", 0.3, 2.2, 0.02).name("Probe half-length");
+      col.add(lh, "probeHalfWidth", 0.12, 1.2, 0.02).name("Probe half-width");
+      col.add(lh, "probeYLow", -0.15, 0.5, 0.01).name("Probe Y low + ride");
+      col.add(lh, "probeYHigh", 0.15, 1.1, 0.01).name("Probe Y high + ride");
+      col.add(lh, "stepOverHeight", 0.2, 2, 0.05).name("Step-over max Y");
+      col.add({ resetLotusHull }, "resetLotusHull").name("Reset Lotus hull");
 
       gui
         .add(
           {
             resetPhysics: () => {
               Object.assign(this._lotusPhysics.params, DEFAULT_LOTUS_PHYSICS_PARAMS);
+              this._carPhysics.lotusHull.rideHeight =
+                this._lotusPhysics.params.rideHeight;
               for (const c of gui.controllersRecursive()) {
                 c.updateDisplay();
               }
@@ -1763,6 +1823,158 @@ export class PlayMode {
     if (this.camera.fov !== 60) {
       this.camera.fov = 60;
       this.camera.updateProjectionMatrix();
+    }
+  }
+
+  async _initJeepTuningGui() {
+    try {
+      const { GUI } =
+        await import("https://cdn.jsdelivr.net/npm/lil-gui@0.20.0/dist/lil-gui.esm.min.js");
+      const gui = new GUI({ title: "Bruno (jeep)", width: 320 });
+      gui.domElement.style.position = "fixed";
+      gui.domElement.style.top = "10px";
+      gui.domElement.style.left = "10px";
+      gui.domElement.style.right = "auto";
+
+      const j = this._carPhysics.jeep;
+      const resetJeep = () => {
+        const d = DEFAULT_JEEP_TUNING;
+        while (j.hullSpheres.length < d.hullSpheres.length) {
+          j.hullSpheres.push({ ...d.hullSpheres[j.hullSpheres.length] });
+        }
+        while (j.hullSpheres.length > d.hullSpheres.length) {
+          j.hullSpheres.pop();
+        }
+        for (let i = 0; i < d.hullSpheres.length; i++) {
+          Object.assign(j.hullSpheres[i], d.hullSpheres[i]);
+        }
+        for (const k of Object.keys(d)) {
+          if (k === "hullSpheres") continue;
+          j[k] = d[k];
+        }
+        for (const c of gui.controllersRecursive()) {
+          c.updateDisplay();
+        }
+      };
+
+      const live = {
+        netVert: 0,
+        springSum: 0,
+        weight: 0,
+        velY: 0,
+        grounded: 0,
+        c0: 0,
+        c1: 0,
+        c2: 0,
+        c3: 0,
+        f0: 0,
+        f1: 0,
+        f2: 0,
+        f3: 0,
+      };
+      this._jeepGuiLive = live;
+      this._jeepGuiLiveCtrls.length = 0;
+      const liveF = gui.addFolder("Live telemetry");
+      const addRo = (prop, label) => {
+        const c = liveF.add(live, prop).name(label).disable();
+        this._jeepGuiLiveCtrls.push(c);
+      };
+      addRo("netVert", "Net vertical force");
+      addRo("springSum", "Spring sum (4 wheels)");
+      addRo("weight", "Weight (m·g)");
+      addRo("velY", "Body vel Y");
+      addRo("grounded", "Wheels grounded");
+      addRo("c0", "FL compression");
+      addRo("c1", "FR compression");
+      addRo("c2", "RL compression");
+      addRo("c3", "RR compression");
+      addRo("f0", "FL spring N");
+      addRo("f1", "FR spring N");
+      addRo("f2", "RL spring N");
+      addRo("f3", "RR spring N");
+      liveF.open();
+
+      const hullRoot = gui.addFolder("Hull — compound spheres");
+      j.hullSpheres.forEach((h, idx) => {
+        const hf = hullRoot.addFolder(h.label || `sphere ${idx}`);
+        hf.add(h, "fwd", -2.8, 2.8, 0.02).name("Fwd offset");
+        hf.add(h, "right", -1.2, 1.2, 0.02).name("Right offset");
+        hf.add(h, "y", 0.08, 1.4, 0.01).name("Y above ground");
+        hf.add(h, "r", 0.12, 1.2, 0.01).name("Radius");
+      });
+      hullRoot.add(j, "sweepFwdMargin", 0, 2.5, 0.02).name("Sweep margin");
+
+      const probe = gui.addFolder("Wall probes (XZ depenetrate)");
+      probe.add(j, "probeHalfLength", 0.35, 3.2, 0.02).name("Half-length");
+      probe.add(j, "probeHalfWidth", 0.15, 1.6, 0.02).name("Half-width");
+      probe.add(j, "probeYLow", -0.2, 0.8, 0.01).name("Probe Y low + ride");
+      probe.add(j, "probeYHigh", 0.2, 1.5, 0.01).name("Probe Y high + ride");
+      probe.add(j, "probeSearchRadius", 0.15, 1.2, 0.02).name("Search radius");
+      probe.add(j, "probePenetrationSlack", 0.08, 0.8, 0.01).name("Penetration slack");
+      probe.add(j, "collisionSkin", 0.02, 0.3, 0.005).name("Collision skin");
+      probe.add(j, "stepOverHeight", 0.2, 2.5, 0.05).name("Step-over max Y");
+
+      const susp = gui.addFolder("Suspension");
+      susp.add(j, "rideHeight", 0.15, 1.2, 0.01).name("Ride height");
+      susp.add(j, "suspStiffness", 10, 220, 1).name("Stiffness");
+      susp.add(j, "suspDampCompress", 0.5, 30, 0.5).name("Damp compress");
+      susp.add(j, "suspDampRelax", 0.2, 18, 0.25).name("Damp relax");
+      susp.add(j, "suspMaxTravel", 0.1, 1.2, 0.02).name("Max travel");
+      susp.add(j, "mass", 0.2, 8, 0.05).name("Mass (sim)");
+      susp.add(j, "gravity", 5, 55, 0.5).name("Gravity");
+      susp.add(j, "airPitchSmooth", 0.5, 18, 0.5).name("Air pitch smooth");
+      susp.add(j, "jumpImpulse", 0, 22, 0.5).name("Jump impulse");
+
+      const whBvh = gui.addFolder("Wheel BVH (no tunnel ceiling)");
+      whBvh
+        .add(j, "wheelBvhRayPadAboveHub", 0.2, 4, 0.05)
+        .name("Ray start above hub");
+      whBvh
+        .add(j, "wheelBvHMaxAboveHub", 0.6, 10, 0.05)
+        .name("Max hit above hub");
+
+      const geom = gui.addFolder("Terrain pitch / roll");
+      geom.add(j, "wheelBase", 0.8, 4.5, 0.05).name("Wheelbase (sample)");
+      geom.add(j, "track", 0.5, 2.8, 0.05).name("Track (sample)");
+      geom.add(j, "maxSlopeCos", 0.15, 0.99, 0.01).name("Max slope cos");
+
+      gui.add({ resetJeep }, "resetJeep").name("Reset jeep defaults");
+      gui
+        .add(
+          {
+            logJeep: () => console.log("jeep:", JSON.stringify(j, null, 2)),
+          },
+          "logJeep",
+        )
+        .name("Log jeep JSON");
+
+      gui.domElement.style.display = "none";
+      this._jeepTuningGui = gui;
+    } catch (err) {
+      console.warn("[V2] Bruno jeep GUI load failed:", err);
+    }
+  }
+
+  _updateJeepGuiTelemetry() {
+    if (!this._jeepGuiLive || !this._jeepGuiLiveCtrls.length) return;
+    if (!this.active || this.moveMode !== "car") return;
+    const t = this._carPhysics.telemetry;
+    const live = this._jeepGuiLive;
+    live.netVert = t.netVerticalForce;
+    live.springSum = t.totalSpringForce;
+    live.weight = t.weight;
+    live.velY = this.carVelY;
+    live.grounded = t.groundedCount;
+    live.f0 = t.wheelForce[0];
+    live.f1 = t.wheelForce[1];
+    live.f2 = t.wheelForce[2];
+    live.f3 = t.wheelForce[3];
+    live.c0 = t.compression[0];
+    live.c1 = t.compression[1];
+    live.c2 = t.compression[2];
+    live.c3 = t.compression[3];
+    for (const c of this._jeepGuiLiveCtrls) {
+      c.updateDisplay();
     }
   }
 
@@ -2390,6 +2602,7 @@ export class PlayMode {
     if (this._carHud) this._carHud.style.display = "none";
     if (this._carSpeedometer) this._carSpeedometer.style.display = "none";
     if (this._lotusCamGui) this._lotusCamGui.domElement.style.display = "none";
+    if (this._jeepTuningGui) this._jeepTuningGui.domElement.style.display = "none";
     this.planeSpeed = 0;
     this.planeNitro = PLANE_NITRO_FULL;
     this._planeHudSpdSmooth = 0;
@@ -2907,11 +3120,17 @@ export class PlayMode {
 
       if (this.cliffBvh?.baked && !flying) {
         if (carDriving) {
+          const _vehSf =
+            this.moveMode === "lotus"
+              ? this.lotusRoot?.scale.x || 1
+              : this.carRoot?.scale.x || CAR_MODEL_SCALE;
           const resolved = this._carPhysics.resolveMovement(
             this.playerPos.x, this.playerPos.z,
             stepX, stepZ,
             this.playerPos.y, this.carHeading,
             this.carVx, this.carVz, this.cliffBvh,
+            _vehSf,
+            this.moveMode === "lotus" ? this._carPhysics.lotusHull : null,
           );
           stepX = resolved.x - this.playerPos.x;
           stepZ = resolved.z - this.playerPos.z;
@@ -3665,6 +3884,8 @@ export class PlayMode {
             this.playerPos.z - lx * Math.sin(hyWheel) + lz * Math.cos(hyWheel);
           let h = this._carPhysics.getWheelGroundHeight(
             wx, wz, this.playerPos.y, this.getTerrainHeight, this.cliffBvh,
+            scaleFactor,
+            this._lotusPhysics.params,
           );
           h = Math.max(h, this.playerPos.y - 1.5);
           sumWheelH += h;
@@ -4133,9 +4354,14 @@ export class PlayMode {
           ? charLookY
           : capsuleCY + 0.6;
 
-    // Lotus camera GUI visibility
+    // Lotus / Bruno tuning GUIs
     if (this._lotusCamGui)
       this._lotusCamGui.domElement.style.display = isLotusMode ? "" : "none";
+    if (this._jeepTuningGui) {
+      const showJeep = this.active && this.moveMode === "car";
+      this._jeepTuningGui.domElement.style.display = showJeep ? "" : "none";
+    }
+    this._updateJeepGuiTelemetry();
 
     if (carDriving && !iso) {
       let chaseTarget = this.carHeading;
@@ -4811,6 +5037,10 @@ export class PlayMode {
     if (this._lotusCamGui) {
       this._lotusCamGui.destroy();
       this._lotusCamGui = null;
+    }
+    if (this._jeepTuningGui) {
+      this._jeepTuningGui.destroy();
+      this._jeepTuningGui = null;
     }
   }
 }

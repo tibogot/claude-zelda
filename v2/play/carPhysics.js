@@ -1,43 +1,152 @@
-const CAR_HALF_WIDTH = 1.1;
-const CAR_HALF_LENGTH = 2.5;
-const CAR_BODY_HEIGHT = 0.8;
-const CAR_RIDE_HEIGHT = 0.48;
-const CAR_WHEEL_RADIUS = 0.42;
-const CAR_WHEEL_BASE = 1.9;
-const CAR_TRACK = 1.1;
-const CAR_COLLISION_SKIN = 0.08;
-const CAR_MAX_SLOPE_COS = 0.5;
-const CAR_STEP_OVER_HEIGHT = 1.0;
-const CAR_SPHERE_RADIUS = 1.4;
+/** Default Bruno / jeep: compound hull (3 spheres) + suspension + probes — all GUI-tunable. */
+export const DEFAULT_JEEP_TUNING = {
+  hullSpheres: [
+    { fwd: 1.38, right: 0, y: 0.44, r: 0.4, label: "front" },
+    { fwd: 0.12, right: 0, y: 0.58, r: 0.48, label: "cabin" },
+    { fwd: -1.22, right: 0, y: 0.46, r: 0.42, label: "rear" },
+  ],
+  /** Extra cast length beyond step (world-ish; scaled by scaleFactor). */
+  sweepFwdMargin: 0.32,
+  /** AABB-style horizontal probes for depenetration (half-length / half-width, scaled). */
+  probeHalfLength: 1.02,
+  probeHalfWidth: 0.48,
+  /** Y offsets above `carY + rideHeight * sf` for low / high probe rows. */
+  probeYLow: 0.14,
+  probeYHigh: 0.7,
+  collisionSkin: 0.08,
+  probeSearchRadius: 0.52,
+  probePenetrationSlack: 0.28,
+  stepOverHeight: 1.0,
+  maxSlopeCos: 0.5,
+  rideHeight: 0.48,
+  suspStiffness: 80,
+  suspDampCompress: 8,
+  suspDampRelax: 2.5,
+  suspMaxTravel: 0.6,
+  mass: 1,
+  gravity: 28,
+  airPitchSmooth: 4,
+  jumpImpulse: 9,
+  /**
+   * Downward BVH ray for wheels starts at hubY + this·sf (not from Y=∞).
+   * Avoids tunnel ceilings being picked as “ground”.
+   */
+  wheelBvhRayPadAboveHub: 1.15,
+  /**
+   * Reject BVH wheel hits above hubY + this·sf (ceiling / bridge underside safety).
+   * Keep large enough for steep ramp approach.
+   */
+  wheelBvHMaxAboveHub: 3.25,
+  wheelBase: 1.9,
+  track: 1.1,
+};
 
-const CAR_GRAVITY = 28;
-const CAR_MASS = 1;
-const SUSP_STIFFNESS = 80;
-const SUSP_DAMP_COMPRESS = 8;
-const SUSP_DAMP_RELAX = 2.5;
-const SUSP_MAX_TRAVEL = 0.6;
-const SUSP_EQ_COMP = (CAR_MASS * CAR_GRAVITY) / (4 * SUSP_STIFFNESS);
+function _cloneJeepTuning() {
+  const j = { ...DEFAULT_JEEP_TUNING };
+  j.hullSpheres = DEFAULT_JEEP_TUNING.hullSpheres.map((h) => ({ ...h }));
+  return j;
+}
 
-const CAR_AIR_PITCH_SMOOTH = 4;
-const CAR_JUMP_IMPULSE = 9;
+/**
+ * Horizontal collision for Lotus: lower / tighter than jeep hull (same BVH API).
+ * Tuned for normalized footprint + CAR_MODEL_SCALE–sized root.
+ */
+export const DEFAULT_LOTUS_COLLISION_HULL = {
+  hullSpheres: [
+    { fwd: 1.42, right: 0, y: 0.26, r: 0.3, label: "front" },
+    { fwd: 0.05, right: 0, y: 0.34, r: 0.34, label: "cabin" },
+    { fwd: -1.28, right: 0, y: 0.28, r: 0.3, label: "rear" },
+  ],
+  sweepFwdMargin: 0.26,
+  probeHalfLength: 0.86,
+  probeHalfWidth: 0.38,
+  probeYLow: 0.06,
+  probeYHigh: 0.48,
+  collisionSkin: 0.08,
+  probeSearchRadius: 0.42,
+  probePenetrationSlack: 0.24,
+  stepOverHeight: 0.75,
+  /** Probe / sweep vertical reference vs `carY` (player root), match Lotus ride. */
+  rideHeight: 0.35,
+};
+
+function _cloneLotusHull() {
+  const h = { ...DEFAULT_LOTUS_COLLISION_HULL };
+  h.hullSpheres = DEFAULT_LOTUS_COLLISION_HULL.hullSpheres.map((s) => ({ ...s }));
+  return h;
+}
 
 export class CarPhysics {
   constructor() {
+    this.jeep = _cloneJeepTuning();
+    this.lotusHull = _cloneLotusHull();
     this.inAir = false;
     this.velY = 0;
     this.onSteepSlope = false;
     this.airPitch = 0;
     this.wheelContactYs = [0, 0, 0, 0];
     this.wheelGrounded = [true, true, true, true];
-    this.wheelSuspLengths = [SUSP_EQ_COMP, SUSP_EQ_COMP, SUSP_EQ_COMP, SUSP_EQ_COMP];
+    const eq = this._suspEqComp();
+    this.wheelSuspLengths = [eq, eq, eq, eq];
     this._prevGroundYs = [0, 0, 0, 0];
     this._initialized = false;
+
+    /** Filled each frame by `updateSuspension` for HUD / lil-gui. */
+    this.telemetry = {
+      totalSpringForce: 0,
+      netVerticalForce: 0,
+      weight: 0,
+      wheelForce: [0, 0, 0, 0],
+      groundedCount: 0,
+      compression: [0, 0, 0, 0],
+    };
   }
 
-  getWheelGroundHeight(wx, wz, carY, getTerrainHeight, cliffBvh) {
+  _suspEqComp() {
+    const j = this.jeep;
+    return (j.mass * j.gravity) / (4 * j.suspStiffness);
+  }
+
+  /**
+   * BVH height under a wheel: ray from just above hub downward (not from infinity).
+   * @returns {number|null}
+   */
+  _sampleBvhWheelY(cliffBvh, wx, wz, hubY, scaleFactor, surf = null) {
+    if (!cliffBvh?.baked) return null;
+    const s = surf || this.jeep;
+    const sf = scaleFactor;
+    const rayOy = hubY + s.wheelBvhRayPadAboveHub * sf + 1e-4;
+    const bvhH = cliffBvh.raycastHeightFrom(wx, rayOy, wz);
+    if (bvhH == null) return null;
+    const maxY = hubY + s.wheelBvHMaxAboveHub * sf;
+    if (bvhH > maxY) return null;
+    return bvhH;
+  }
+
+  /**
+   * @param {object | null} surfaceTuning ground-ray tuning (`rideHeight`, `wheelBvhRayPadAboveHub`, `wheelBvHMaxAboveHub`). Defaults to jeep when null — pass `lotusPhysics.params` for Lotus wheels.
+   */
+  getWheelGroundHeight(
+    wx,
+    wz,
+    carY,
+    getTerrainHeight,
+    cliffBvh,
+    scaleFactor = 1,
+    surfaceTuning = null,
+  ) {
+    const s = surfaceTuning || this.jeep;
+    const hubY = carY + s.rideHeight * scaleFactor;
     let h = getTerrainHeight(wx, wz);
     if (cliffBvh?.baked) {
-      const bvhH = cliffBvh.raycastHeight(wx, wz);
+      const bvhH = this._sampleBvhWheelY(
+        cliffBvh,
+        wx,
+        wz,
+        hubY,
+        scaleFactor,
+        s,
+      );
       if (bvhH != null && bvhH > h) {
         h = bvhH;
       }
@@ -45,21 +154,55 @@ export class CarPhysics {
     return h;
   }
 
-  getGroundHeight(px, pz, carY, getTerrainHeight, cliffBvh) {
+  getGroundHeight(
+    px,
+    pz,
+    carY,
+    getTerrainHeight,
+    cliffBvh,
+    scaleFactor = 1,
+    surfaceTuning = null,
+  ) {
     const terrainY = getTerrainHeight(px, pz);
     let groundY = terrainY;
     if (cliffBvh?.baked) {
-      const bvhY = cliffBvh.raycastHeight(px, pz);
-      if (bvhY != null && bvhY > terrainY && bvhY <= carY + 4.0) {
+      const s = surfaceTuning || this.jeep;
+      const hubY = carY + s.rideHeight * scaleFactor;
+      const bvhY = this._sampleBvhWheelY(
+        cliffBvh,
+        px,
+        pz,
+        hubY,
+        scaleFactor,
+        s,
+      );
+      if (bvhY != null && bvhY > terrainY) {
         groundY = bvhY;
       }
     }
     return groundY;
   }
 
-  resolveMovement(px, pz, stepX, stepZ, carY, heading, vx, vz, cliffBvh) {
+  /**
+   * @param {object | null} hullTuning hull + probes; use `lotusHull` for Lotus, else null = jeep.
+   */
+  resolveMovement(
+    px,
+    pz,
+    stepX,
+    stepZ,
+    carY,
+    heading,
+    vx,
+    vz,
+    cliffBvh,
+    scaleFactor = 1,
+    hullTuning = null,
+  ) {
     if (!cliffBvh?.baked) return { x: px + stepX, z: pz + stepZ, vx, vz };
 
+    const j = hullTuning || this.jeep;
+    const sf = scaleFactor;
     const fwdX = -Math.sin(heading);
     const fwdZ = -Math.cos(heading);
     const rightX = Math.cos(heading);
@@ -72,52 +215,82 @@ export class CarPhysics {
     let finalVz = vz;
 
     if (baseStepLen > 0.01) {
-      const sweepResult = cliffBvh.spherecast(
-        px, carY + CAR_RIDE_HEIGHT + CAR_SPHERE_RADIUS,
-        pz, CAR_SPHERE_RADIUS,
-        stepX, 0, stepZ,
-        baseStepLen + CAR_HALF_LENGTH,
-      );
-      if (sweepResult) {
-        const topY = cliffBvh.raycastHeight(sweepResult.point.x, sweepResult.point.z);
-        const isStepOver = topY != null && topY <= carY + CAR_STEP_OVER_HEIGHT;
-        if (!isStepOver) {
-          const safeDist = Math.max(0, sweepResult.distance - CAR_HALF_LENGTH - CAR_COLLISION_SKIN);
-          if (safeDist < baseStepLen) {
-            const ratio = safeDist / baseStepLen;
-            finalStepX = stepX * ratio;
-            finalStepZ = stepZ * ratio;
+      let stepRatio = 1;
+      for (const h of j.hullSpheres) {
+        const ox = px + (fwdX * h.fwd + rightX * h.right) * sf;
+        const oz = pz + (fwdZ * h.fwd + rightZ * h.right) * sf;
+        const oy = carY + h.y * sf;
+        const r = h.r * sf;
+        const maxCast = baseStepLen + r + j.sweepFwdMargin * sf;
+        const sweepResult = cliffBvh.spherecast(
+          ox, oy, oz, r,
+          stepX, 0, stepZ,
+          maxCast,
+        );
+        if (sweepResult) {
+          const topY = cliffBvh.raycastHeight(sweepResult.point.x, sweepResult.point.z);
+          const isStepOver =
+            topY != null && topY <= carY + j.stepOverHeight * sf;
+          if (!isStepOver) {
+            const safeDist = Math.max(
+              0,
+              sweepResult.distance - r - j.collisionSkin,
+            );
+            const rPart = safeDist / baseStepLen;
+            stepRatio = Math.min(stepRatio, rPart);
           }
         }
+      }
+      if (stepRatio < 1) {
+        finalStepX = stepX * stepRatio;
+        finalStepZ = stepZ * stepRatio;
       }
     }
 
     let posX = px + finalStepX;
     let posZ = pz + finalStepZ;
 
-    const probeY_low = carY + CAR_RIDE_HEIGHT + 0.15;
-    const probeY_high = carY + CAR_RIDE_HEIGHT + CAR_BODY_HEIGHT;
-    const stepOverY = carY + CAR_STEP_OVER_HEIGHT;
+    const halfL = j.probeHalfLength * sf;
+    const halfW = j.probeHalfWidth * sf;
+    const ride = j.rideHeight * sf;
+    const probeY_low = carY + ride + j.probeYLow * sf;
+    const probeY_high = carY + ride + j.probeYHigh * sf;
+    const stepOverY = carY + j.stepOverHeight * sf;
+    const skin = j.collisionSkin;
+    const searchR = j.probeSearchRadius;
+    const penSlack = j.probePenetrationSlack;
 
     for (let iter = 0; iter < 3; iter++) {
       let pushed = false;
 
       const probePoints = [
-        { x: posX + fwdX * CAR_HALF_LENGTH, z: posZ + fwdZ * CAR_HALF_LENGTH },
-        { x: posX - fwdX * CAR_HALF_LENGTH, z: posZ - fwdZ * CAR_HALF_LENGTH },
-        { x: posX + rightX * CAR_HALF_WIDTH, z: posZ + rightZ * CAR_HALF_WIDTH },
-        { x: posX - rightX * CAR_HALF_WIDTH, z: posZ - rightZ * CAR_HALF_WIDTH },
-        { x: posX + fwdX * CAR_HALF_LENGTH + rightX * CAR_HALF_WIDTH, z: posZ + fwdZ * CAR_HALF_LENGTH + rightZ * CAR_HALF_WIDTH },
-        { x: posX + fwdX * CAR_HALF_LENGTH - rightX * CAR_HALF_WIDTH, z: posZ + fwdZ * CAR_HALF_LENGTH - rightZ * CAR_HALF_WIDTH },
-        { x: posX - fwdX * CAR_HALF_LENGTH + rightX * CAR_HALF_WIDTH, z: posZ - fwdZ * CAR_HALF_LENGTH + rightZ * CAR_HALF_WIDTH },
-        { x: posX - fwdX * CAR_HALF_LENGTH - rightX * CAR_HALF_WIDTH, z: posZ - fwdZ * CAR_HALF_LENGTH - rightZ * CAR_HALF_WIDTH },
+        { x: posX + fwdX * halfL, z: posZ + fwdZ * halfL },
+        { x: posX - fwdX * halfL, z: posZ - fwdZ * halfL },
+        { x: posX + rightX * halfW, z: posZ + rightZ * halfW },
+        { x: posX - rightX * halfW, z: posZ - rightZ * halfW },
+        {
+          x: posX + fwdX * halfL + rightX * halfW,
+          z: posZ + fwdZ * halfL + rightZ * halfW,
+        },
+        {
+          x: posX + fwdX * halfL - rightX * halfW,
+          z: posZ + fwdZ * halfL - rightZ * halfW,
+        },
+        {
+          x: posX - fwdX * halfL + rightX * halfW,
+          z: posZ - fwdZ * halfL + rightZ * halfW,
+        },
+        {
+          x: posX - fwdX * halfL - rightX * halfW,
+          z: posZ - fwdZ * halfL - rightZ * halfW,
+        },
       ];
 
       for (const probe of probePoints) {
         for (const py of [probeY_low, probeY_high]) {
           const closest = cliffBvh.closestPointToPoint(
             probe.x, py, probe.z,
-            CAR_COLLISION_SKIN + 0.5,
+            skin + searchR,
           );
           if (!closest) continue;
 
@@ -125,7 +298,7 @@ export class CarPhysics {
           const dy = py - closest.y;
           const dz = probe.z - closest.z;
           const dist = Math.sqrt(dx * dx + dy * dy + dz * dz);
-          if (dist >= CAR_COLLISION_SKIN + 0.3) continue;
+          if (dist >= skin + penSlack) continue;
           if (dist < 1e-6) continue;
 
           const topCheck = cliffBvh.raycastHeight(closest.x, closest.z);
@@ -141,7 +314,7 @@ export class CarPhysics {
 
           const nnx = nx / nHoriz;
           const nnz = nz / nHoriz;
-          const pen = (CAR_COLLISION_SKIN + 0.3) - dist;
+          const pen = skin + penSlack - dist;
           if (pen > 0.001) {
             posX += nnx * pen * 0.6;
             posZ += nnz * pen * 0.6;
@@ -161,11 +334,23 @@ export class CarPhysics {
     return { x: posX, z: posZ, vx: finalVx, vz: finalVz };
   }
 
-  updateSuspension(bodyYInput, wheelWorldXZs, scaleFactor, heading, dtSec, getTerrainHeight, cliffBvh, vx, vz, jumpRequested) {
+  updateSuspension(
+    bodyYInput,
+    wheelWorldXZs,
+    scaleFactor,
+    heading,
+    dtSec,
+    getTerrainHeight,
+    cliffBvh,
+    vx,
+    vz,
+    jumpRequested,
+  ) {
+    const j = this.jeep;
     const sf = scaleFactor;
-    const rideOffset = CAR_RIDE_HEIGHT * sf;
-    const restLen = rideOffset + SUSP_EQ_COMP;
-    const maxTravel = SUSP_MAX_TRAVEL;
+    const rideOffset = j.rideHeight * sf;
+    const restLen = rideOffset + this._suspEqComp();
+    const maxTravel = j.suspMaxTravel;
 
     const bodyY = bodyYInput + rideOffset;
 
@@ -174,8 +359,8 @@ export class CarPhysics {
       const wz = wheelWorldXZs[i * 2 + 1];
       let groundH = getTerrainHeight(wx, wz);
       if (cliffBvh?.baked) {
-        const bvhH = cliffBvh.raycastHeight(wx, wz);
-        if (bvhH != null && bvhH > groundH && bvhH <= bodyY + 4.0) groundH = bvhH;
+        const bvhH = this._sampleBvhWheelY(cliffBvh, wx, wz, bodyY, sf);
+        if (bvhH != null && bvhH > groundH) groundH = bvhH;
       }
       this.wheelContactYs[i] = groundH;
     }
@@ -187,8 +372,12 @@ export class CarPhysics {
 
     let totalForce = 0;
     let groundedCount = 0;
+    const wheelF = this.telemetry.wheelForce;
+    const compDbg = this.telemetry.compression;
 
     for (let i = 0; i < 4; i++) {
+      wheelF[i] = 0;
+      compDbg[i] = 0;
       const groundY = this.wheelContactYs[i];
       const distToGround = bodyY - groundY;
       const compression = restLen - distToGround;
@@ -198,11 +387,15 @@ export class CarPhysics {
         groundedCount++;
 
         const clampedComp = Math.min(compression, maxTravel);
+        compDbg[i] = clampedComp;
         const groundVelY = (groundY - this._prevGroundYs[i]) / Math.max(dtSec, 0.001);
         const compVel = -(this.velY - groundVelY);
-        const dampRate = compVel > 0 ? SUSP_DAMP_COMPRESS : SUSP_DAMP_RELAX;
-        const force = SUSP_STIFFNESS * clampedComp + dampRate * compVel;
-        totalForce += Math.max(0, force);
+        const dampRate =
+          compVel > 0 ? j.suspDampCompress : j.suspDampRelax;
+        const force = j.suspStiffness * clampedComp + dampRate * compVel;
+        const fClamped = Math.max(0, force);
+        totalForce += fClamped;
+        wheelF[i] = fClamped;
         this.wheelSuspLengths[i] = distToGround;
       } else {
         this.wheelGrounded[i] = false;
@@ -213,12 +406,12 @@ export class CarPhysics {
     for (let i = 0; i < 4; i++) this._prevGroundYs[i] = this.wheelContactYs[i];
 
     if (jumpRequested && groundedCount > 0 && !this.inAir) {
-      this.velY = CAR_JUMP_IMPULSE;
+      this.velY = j.jumpImpulse;
     }
 
-    const weight = CAR_MASS * CAR_GRAVITY;
+    const weight = j.mass * j.gravity;
     const netForce = totalForce - weight;
-    this.velY += (netForce / CAR_MASS) * dtSec;
+    this.velY += (netForce / j.mass) * dtSec;
 
     let newBodyY = bodyY + this.velY * dtSec;
 
@@ -236,15 +429,17 @@ export class CarPhysics {
     if (this.inAir) {
       const hSpeed = Math.sqrt(vx * vx + vz * vz);
       const targetPitch = hSpeed > 1 ? Math.atan2(this.velY, hSpeed) : 0;
-      this.airPitch += (targetPitch - this.airPitch) * (1 - Math.exp(-CAR_AIR_PITCH_SMOOTH * dtSec));
+      this.airPitch +=
+        (targetPitch - this.airPitch) *
+        (1 - Math.exp(-j.airPitchSmooth * dtSec));
     } else {
       this.airPitch *= (1 - Math.min(1, 8 * dtSec));
     }
 
     const sinH = Math.sin(heading);
     const cosH = Math.cos(heading);
-    const wheelBaseDist = CAR_WHEEL_BASE * sf;
-    const trackDist = CAR_TRACK * sf;
+    const wheelBaseDist = j.wheelBase * sf;
+    const trackDist = j.track * sf;
 
     const frontAvgY = (this.wheelContactYs[0] + this.wheelContactYs[1]) * 0.5;
     const rearAvgY = (this.wheelContactYs[2] + this.wheelContactYs[3]) * 0.5;
@@ -259,19 +454,25 @@ export class CarPhysics {
     const nLenSq = dHdFwd * dHdFwd + dHdRight * dHdRight + 1;
     const nLen = Math.sqrt(nLenSq);
     const normalY = 1 / nLen;
-    const tooSteep = normalY < CAR_MAX_SLOPE_COS;
+    const tooSteep = normalY < j.maxSlopeCos;
     this.onSteepSlope = tooSteep && !this.inAir;
 
     const nx = dHdFwd * sinH - dHdRight * cosH;
     const nz = dHdFwd * cosH + dHdRight * sinH;
 
-    let slideVx = 0, slideVz = 0;
+    let slideVx = 0,
+      slideVz = 0;
     if (tooSteep && !this.inAir) {
-      slideVx = (nx / nLen) * CAR_GRAVITY * 0.5 * dtSec;
-      slideVz = (nz / nLen) * CAR_GRAVITY * 0.5 * dtSec;
+      slideVx = (nx / nLen) * j.gravity * 0.5 * dtSec;
+      slideVz = (nz / nLen) * j.gravity * 0.5 * dtSec;
     }
 
     const outputY = newBodyY - rideOffset;
+
+    this.telemetry.totalSpringForce = totalForce;
+    this.telemetry.netVerticalForce = netForce;
+    this.telemetry.weight = weight;
+    this.telemetry.groundedCount = groundedCount;
 
     return {
       y: outputY,

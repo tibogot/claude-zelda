@@ -59,6 +59,10 @@ export const DEFAULT_LOTUS_PHYSICS_PARAMS = {
   maxSlopeCos: 0.5,
   wheelBase: 1.9,
   track: 1.1,
+  /** Downward BVH ray starts at hub + this·sf (avoids tunnel ceiling as “ground”). */
+  wheelBvhRayPadAboveHub: 1.05,
+  /** Reject BVH hits above hub + this·sf. */
+  wheelBvHMaxAboveHub: 3.2,
 };
 
 function _expSmooth(current, target, dtSec, rate) {
@@ -87,12 +91,17 @@ export class LotusPhysics {
     this._wasDrifting = false;
   }
 
-  getGroundHeight(px, pz, carY, getTerrainHeight, cliffBvh) {
+  getGroundHeight(px, pz, bodyRootY, getTerrainHeight, cliffBvh, scaleFactor = 1) {
+    const p = this.params;
+    const sf = scaleFactor;
+    const hubY = bodyRootY + p.rideHeight * sf;
     let h = getTerrainHeight(px, pz);
     if (cliffBvh?.baked) {
-      const bvhY = cliffBvh.raycastHeight(px, pz);
-      if (bvhY != null && bvhY > h && bvhY <= carY + 4.0) {
-        h = bvhY;
+      const rayOy = hubY + p.wheelBvhRayPadAboveHub * sf + 1e-4;
+      const bvhY = cliffBvh.raycastHeightFrom(px, rayOy, pz);
+      if (bvhY != null && bvhY > h) {
+        const maxY = hubY + p.wheelBvHMaxAboveHub * sf;
+        if (bvhY <= maxY) h = bvhY;
       }
     }
     return h;
@@ -103,7 +112,7 @@ export class LotusPhysics {
     const sf = scaleFactor;
     const rideOffset = p.rideHeight * sf;
 
-    const centerGroundH = this.getGroundHeight(px, pz, bodyY, getTerrainHeight, cliffBvh);
+    const centerGroundH = this.getGroundHeight(px, pz, bodyY, getTerrainHeight, cliffBvh, sf);
 
     if (this._smoothGroundY === null) {
       this._smoothGroundY = centerGroundH;
@@ -137,10 +146,10 @@ export class LotusPhysics {
     const rightX = cosH * halfTr;
     const rightZ = -sinH * halfTr;
 
-    const sampleFrontH = this.getGroundHeight(px + fwdX, pz + fwdZ, bodyY, getTerrainHeight, cliffBvh);
-    const sampleRearH = this.getGroundHeight(px - fwdX, pz - fwdZ, bodyY, getTerrainHeight, cliffBvh);
-    const sampleLeftH = this.getGroundHeight(px - rightX, pz - rightZ, bodyY, getTerrainHeight, cliffBvh);
-    const sampleRightH = this.getGroundHeight(px + rightX, pz + rightZ, bodyY, getTerrainHeight, cliffBvh);
+    const sampleFrontH = this.getGroundHeight(px + fwdX, pz + fwdZ, bodyY, getTerrainHeight, cliffBvh, sf);
+    const sampleRearH = this.getGroundHeight(px - fwdX, pz - fwdZ, bodyY, getTerrainHeight, cliffBvh, sf);
+    const sampleLeftH = this.getGroundHeight(px - rightX, pz - rightZ, bodyY, getTerrainHeight, cliffBvh, sf);
+    const sampleRightH = this.getGroundHeight(px + rightX, pz + rightZ, bodyY, getTerrainHeight, cliffBvh, sf);
 
     const terrainPitch = Math.atan2((sampleFrontH - sampleRearH), (2 * halfWB));
     const terrainRoll = Math.atan2((sampleRightH - sampleLeftH), (2 * halfTr));
