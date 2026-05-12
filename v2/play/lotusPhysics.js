@@ -1,3 +1,9 @@
+/**
+ * Lotus — arcade driving only (throttle, steer, drift, nitro, body lean).
+ * World vertical position, suspension, BVH wheel rays, and slope sliding live in
+ * `CarPhysics.updateSuspension` + `playMode` (same pipeline as Bruno; do not duplicate gravity here).
+ */
+
 export const DEFAULT_LOTUS_PHYSICS_PARAMS = {
   accel: 34,
   accelBoost: 62,
@@ -53,7 +59,7 @@ export const DEFAULT_LOTUS_PHYSICS_PARAMS = {
   boostBlendSmooth: 12,
   nitroFxBlendSmooth: 16,
 
-  /** Synced each frame into `CarPhysics.lotusChassis` for world/suspension (same pipeline as Bruno). */
+  /** Copied each frame into `CarPhysics.lotusChassis` for suspension / wheel rays. */
   gravity: 28,
   rideHeight: 0.35,
   maxSlopeCos: 0.5,
@@ -85,6 +91,12 @@ export class LotusPhysics {
     this._wasDrifting = false;
   }
 
+  /**
+   * @param {LotusDrivingState} state
+   * @param {LotusDrivingInput} input
+   * @param {number} dtSec
+   * @returns {LotusDrivingResult}
+   */
   updateDriving(state, input, dtSec) {
     const p = this.params;
     let {
@@ -109,15 +121,19 @@ export class LotusPhysics {
       boostKeys,
     } = input;
 
-    const curSpeed = Math.sqrt(vx * vx + vz * vz);
+    const curSpeed = Math.hypot(vx, vz);
+
     const hx = -Math.sin(heading);
     const hz = -Math.cos(heading);
+    const rx = Math.cos(heading);
+    const rz = -Math.sin(heading);
 
     const nitroActive = nitroHeld && nitro > p.nitroMinToUse && !backward;
 
     boostBlend = _expSmooth(boostBlend, boostKeys ? 1 : 0, dtSec, p.boostBlendSmooth);
     nitroFxBlend = _expSmooth(nitroFxBlend, nitroActive ? 1 : 0, dtSec, p.nitroFxBlendSmooth);
 
+    // —— Longitudinal: accel / brake / coast / drag / cap ——
     const accelBase = p.accel + (p.accelBoost - p.accel) * boostBlend;
     let accel = accelBase + nitroFxBlend * p.nitroAccelBonus;
     if (!boostKeys && !nitroActive) {
@@ -148,23 +164,22 @@ export class LotusPhysics {
     }
 
     if (handbrake && curSpeed > 0.1) {
-      const decel = p.handbrakeDecel / curSpeed;
-      vx -= vx * decel * dtSec;
-      vz -= vz * decel * dtSec;
+      const hb = p.handbrakeDecel / curSpeed;
+      vx -= vx * hb * dtSec;
+      vz -= vz * hb * dtSec;
     }
 
     const speed2 = vx * vx + vz * vz;
     if (speed2 > 0.01) {
       const spd = Math.sqrt(speed2);
-      const dragForce = p.drag * spd;
-      const factor = Math.max(0, 1 - dragForce * dtSec);
+      const factor = Math.max(0, 1 - p.drag * spd * dtSec);
       vx *= factor;
       vz *= factor;
     }
 
     const maxBase = p.maxSpeed + (p.maxSpeedBoost - p.maxSpeed) * boostBlend;
     const maxSpd = maxBase + nitroFxBlend * p.nitroMaxSpeedBonus;
-    const newSpeed = Math.sqrt(vx * vx + vz * vz);
+    const newSpeed = Math.hypot(vx, vz);
     if (newSpeed > maxSpd) {
       const s = maxSpd / newSpeed;
       vx *= s;
@@ -177,22 +192,33 @@ export class LotusPhysics {
       nitro = Math.min(1, nitro + p.nitroRegenPerSec * dtSec);
     }
 
+    // —— Lateral grip + steering ——
     let steerInput = 0;
     if (leftKey) steerInput = 1;
     if (rightKey) steerInput = -1;
 
     const fwdDot = vx * hx + vz * hz;
-    const rx = Math.cos(heading);
-    const rz = -Math.sin(heading);
-    const latDot = vx * rx + vz * rz;
+    let latDot = vx * rx + vz * rz;
 
-    let speedGrip = p.gripBase - curSpeed * p.gripSpeedDecay;
-    speedGrip = Math.max(speedGrip, p.gripMinSpeed);
+    let speedGrip = Math.max(
+      p.gripMinSpeed,
+      p.gripBase - curSpeed * p.gripSpeedDecay,
+    );
 
     if (handbrake && curSpeed > p.driftEntrySpeed && steerInput !== 0) {
-      this._handbrakeBlend = _expSmooth(this._handbrakeBlend, 1.0, dtSec, p.gripHandbrakeApplyRate);
+      this._handbrakeBlend = _expSmooth(
+        this._handbrakeBlend,
+        1,
+        dtSec,
+        p.gripHandbrakeApplyRate,
+      );
     } else {
-      this._handbrakeBlend = _expSmooth(this._handbrakeBlend, 0.0, dtSec, p.gripRecoveryRate);
+      this._handbrakeBlend = _expSmooth(
+        this._handbrakeBlend,
+        0,
+        dtSec,
+        p.gripRecoveryRate,
+      );
     }
 
     let grip = speedGrip + (p.gripHandbrake - speedGrip) * this._handbrakeBlend;
@@ -207,7 +233,6 @@ export class LotusPhysics {
       const counterStrength = Math.min(1, Math.abs(driftAngle) / 0.5);
       grip += p.gripCounterBonus * counterStrength;
     }
-
     if (backward && steerInput !== 0 && curSpeed > 3) {
       grip = Math.min(grip, p.gripBrakeTurn);
     }
@@ -217,15 +242,15 @@ export class LotusPhysics {
     vz -= rz * latDot * lateralKill;
 
     if (steerInput !== 0 && curSpeed > 0.5) {
-      let turnRate;
-      if (drifting) {
-        turnRate = isCounterSteering ? p.turnRateCounter : p.turnRateDrift;
-      } else {
-        turnRate = p.turnRate;
-      }
+      const turnRate = drifting
+        ? isCounterSteering
+          ? p.turnRateCounter
+          : p.turnRateDrift
+        : p.turnRate;
       heading += steerInput * turnRate * dtSec;
     }
 
+    // Drift angle uses pre-yaw basis (matches legacy Lotus / Bruno feel).
     const updatedLatDot = vx * rx + vz * rz;
     driftAngle =
       curSpeed > 1 ? Math.abs(Math.atan2(updatedLatDot, Math.abs(fwdDot))) : 0;
@@ -233,9 +258,11 @@ export class LotusPhysics {
     if (!drifting) {
       drifting = driftAngle > p.driftAngleMin && curSpeed > p.driftEntrySpeed;
     } else {
-      drifting = driftAngle > p.driftAngleExit && curSpeed > p.driftEntrySpeed * 0.5;
+      drifting =
+        driftAngle > p.driftAngleExit && curSpeed > p.driftEntrySpeed * 0.5;
     }
 
+    // —— Drift boost meter + exit burst ——
     if (drifting && curSpeed > p.driftEntrySpeed) {
       this._driftTime += dtSec;
       if (this._driftTime > p.driftBoostQualifyTime) {
@@ -246,9 +273,13 @@ export class LotusPhysics {
         );
         const anglePenalty =
           driftAngle > p.driftBoostAngleMax
-            ? 1.0 -
-              _smoothstep(driftAngle, p.driftBoostAngleMax, p.driftBoostAnglePenaltyEnd)
-            : 1.0;
+            ? 1 -
+              _smoothstep(
+                driftAngle,
+                p.driftBoostAngleMax,
+                p.driftBoostAnglePenaltyEnd,
+              )
+            : 1;
         this.driftBoostMeter = Math.min(
           p.driftBoostMax,
           this.driftBoostMeter +
@@ -277,27 +308,32 @@ export class LotusPhysics {
         this._driftBoostPower = 0;
       } else {
         const boostFrac =
-          this._driftBoostRemaining / (p.driftBoostDuration * this._driftBoostPower);
+          this._driftBoostRemaining /
+          (p.driftBoostDuration * this._driftBoostPower);
         const speedBonus = p.driftBoostSpeedAdd * Math.min(1, boostFrac);
-        const curHx = -Math.sin(heading);
-        const curHz = -Math.cos(heading);
-        vx += curHx * speedBonus * dtSec * 2;
-        vz += curHz * speedBonus * dtSec * 2;
+        const bhx = -Math.sin(heading);
+        const bhz = -Math.cos(heading);
+        vx += bhx * speedBonus * dtSec * 2;
+        vz += bhz * speedBonus * dtSec * 2;
       }
     }
 
+    // —— Visual body targets ——
     const latSign = Math.sign(updatedLatDot);
-    const speedForRoll = Math.sqrt(vx * vx + vz * vz);
+    const speedForRoll = Math.hypot(vx, vz);
     const driftRollSpeedGain = _smoothstep(speedForRoll, 8, 24);
     const driftRoll =
       -latSign * Math.min(p.bodyRollMax, driftAngle * 0.85) * driftRollSpeedGain;
     const throttlePitch = forward ? 0.045 : backward ? -0.06 : 0;
     const speedNorm = Math.min(1, curSpeed / Math.max(1, p.maxSpeed));
     const dynamicPitch = -speedNorm * 0.04;
-    const _pitch = dynamicPitch + throttlePitch;
-    const targetDynPitch = Math.max(-p.bodyPitchMax, Math.min(p.bodyPitchMax, _pitch));
+    const rawPitch = dynamicPitch + throttlePitch;
+    const targetDynPitch = Math.max(
+      -p.bodyPitchMax,
+      Math.min(p.bodyPitchMax, rawPitch),
+    );
     const targetDynRoll = drifting ? driftRoll : 0;
-    const smooth = 1 - Math.exp(-p.bodySmooth * dtSec);
+    const bodySmooth = 1 - Math.exp(-p.bodySmooth * dtSec);
 
     wheelSpin -= (fwdDot / p.wheelRadius) * dtSec;
 
@@ -313,7 +349,7 @@ export class LotusPhysics {
       wheelSpin,
       bodyRollTarget: targetDynRoll,
       bodyPitchTarget: targetDynPitch,
-      bodySmooth: smooth,
+      bodySmooth,
       driftBoostMeter: this.driftBoostMeter,
       driftBoostActive: this._driftBoostActive,
     };

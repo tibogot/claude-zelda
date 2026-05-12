@@ -1012,6 +1012,7 @@ export class PlayMode {
     this.lotusWheels = [];
     this.lotusLoaded = false;
     this._lotusChassisMetrics = null;
+    this._lotusChassisVisual = null;
     this._lotusWheelHubLocalY = 0;
     this.lotusCam = {
       distance: 5.5,
@@ -1538,6 +1539,7 @@ export class PlayMode {
       const halfWB = cSize.x * 0.287;
       const wheelYOff = cBox.min.y + cSize.y * 0.23;
       const wbShift = cSize.x * -0.024;
+      this._lotusChassisVisual = chassisVisual;
 
       const layout = [
         { x: halfWB + wbShift, z: -halfTrack, steer: true, name: "FL" },
@@ -1548,6 +1550,7 @@ export class PlayMode {
 
       this.lotusWheels = layout.map((w) => {
         const container = wheelSrc.clone(true);
+        // Hub XZ must match `offset` exactly: suspension + drift use `offset` only (Bruno hubs sit on origin).
         container.position.set(cCenter.x + w.x, wheelYOff, cCenter.z + w.z);
         const isLeft = w.z < 0;
         container.rotation.set(0, CAR_MODEL_YAW + (isLeft ? 0 : Math.PI), 0);
@@ -1567,7 +1570,7 @@ export class PlayMode {
           container,
           suspension: suspension || container,
           cylinder: cylinder || container,
-          offset: new THREE.Vector3(w.x, 0, w.z),
+          offset: new THREE.Vector3(cCenter.x + w.x, 0, cCenter.z + w.z),
           steer: w.steer,
           isLeft,
           name: w.name,
@@ -1584,7 +1587,7 @@ export class PlayMode {
       const headlightGlow = new THREE.PointLight(0xfff5e0, 2.5, 8, 1.5);
       headlightGlow.position.set(
         cCenter.x + cSize.x * 0.45,
-        cCenter.y,
+        cCenter.y + chassisVisual.position.y,
         cCenter.z,
       );
       this.lotusChassis.add(headlightGlow);
@@ -1593,7 +1596,7 @@ export class PlayMode {
       const taillightGlow = new THREE.PointLight(0xff1a00, 1.8, 5, 1.5);
       taillightGlow.position.set(
         cCenter.x - cSize.x * 0.45,
-        cCenter.y,
+        cCenter.y + chassisVisual.position.y,
         cCenter.z,
       );
       this.lotusChassis.add(taillightGlow);
@@ -3909,18 +3912,9 @@ export class PlayMode {
 
         // Lotus body + wheels: driven by same CarPhysics suspension as Bruno
         const lc = this._carPhysics.lotusChassis;
-        const lp = this._lotusPhysics.params;
-        const cc = this._lotusChassisMetrics.cCenter;
         const hyWheel = this.carHeading - CAR_MODEL_YAW + Math.PI;
         const c = Math.cos(hyWheel);
         const s = Math.sin(hyWheel);
-        const hubY = this._lotusWheelHubLocalY || 0;
-
-        const rootY =
-          this.playerPos.y +
-          (lc.rideHeight + lp.wheelRadius) * scaleFactor;
-        this.lotusRoot.position.set(this.playerPos.x, rootY, this.playerPos.z);
-
         const targetPitch = this._carTerrainPitchTarget || 0;
         const targetRoll = this._carTerrainRollTarget || 0;
         const terrainSmooth = 1 - Math.exp(-CAR_TERRAIN_BODY_SMOOTH * dtSec);
@@ -3962,6 +3956,7 @@ export class PlayMode {
         this.lotusChassis.rotation.set(-finalRoll, 0, finalPitch);
 
         const suspMax = lc.suspMaxTravel;
+        const hubRef = this._lotusWheelHubLocalY || 0;
         let rearIdx = 0;
         for (let i = 0; i < this.lotusWheels.length; i++) {
           const w = this.lotusWheels[i];
@@ -3972,27 +3967,18 @@ export class PlayMode {
           const grounded = i < 4 && this._carPhysics.wheelGrounded[i];
           let targetLocalY;
           if (this.carInAir || !grounded) {
-            targetLocalY = -lc.rideHeight;
+            targetLocalY = hubRef;
           } else {
             const suspLen = this._carPhysics.wheelSuspLengths[i];
-            targetLocalY = -suspLen / scaleFactor;
-            targetLocalY = Math.min(
-              targetLocalY,
-              -lc.rideHeight + suspMax,
-            );
-            targetLocalY = Math.max(
-              targetLocalY,
-              -lc.rideHeight - suspMax,
-            );
+            const suspDelta = -suspLen / scaleFactor + lc.rideHeight;
+            targetLocalY = hubRef + suspDelta;
+            targetLocalY = Math.min(targetLocalY, hubRef + suspMax);
+            targetLocalY = Math.max(targetLocalY, hubRef - suspMax);
           }
-          if (w._smoothLocalY === undefined) w._smoothLocalY = targetLocalY;
+          if (w._smoothLocalY === undefined) w._smoothLocalY = hubRef;
           w._smoothLocalY +=
             (targetLocalY - w._smoothLocalY) * Math.min(1, 25 * dtSec);
-          w.container.position.set(
-            cc.x + w.offset.x,
-            hubY + (w._smoothLocalY + lc.rideHeight) * scaleFactor,
-            cc.z + w.offset.z,
-          );
+          w.container.position.set(w.offset.x, w._smoothLocalY, w.offset.z);
           const h = this._carPhysics.wheelContactYs[i];
           w.contactWorld.set(wx, h + DRIFT_MARK_Y_OFFSET, wz);
           if (!w.steer) {
@@ -4018,6 +4004,9 @@ export class PlayMode {
             w.cylinder.rotation.z = 0;
           }
         }
+
+        const rootY = this.playerPos.y + (this._lotusGroundOffset || 0);
+        this.lotusRoot.position.set(this.playerPos.x, rootY, this.playerPos.z);
 
         // Brake lights + turn signals (blinkers)
         const braking = keys.Space || keys.KeyS || keys.ArrowDown;
@@ -4596,9 +4585,12 @@ export class PlayMode {
       this.carVelY = 0;
       this.carInAir = false;
       this.carOnSteepSlope = false;
+      this.playerPos.y = this.getWorldHeight(
+        this.playerPos.x,
+        this.playerPos.z,
+      );
       this._driftBoostMeter = 0;
       this._driftBoostActive = false;
-      this._lotusPhysics._smoothGroundY = null;
       this._lotusPhysics._handbrakeBlend = 0;
       this._lotusPhysics._driftTime = 0;
       this._lotusPhysics.driftBoostMeter = 0;
