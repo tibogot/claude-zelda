@@ -132,7 +132,7 @@ export function createToolState() {
      * pull-in relaxes back out once the obstacle is gone.
      */
     playCamera: {
-      enabled: true,
+      enabled: false,
       wallPullEnabled: true,
       floorClampEnabled: true,
       offset: 0.3,

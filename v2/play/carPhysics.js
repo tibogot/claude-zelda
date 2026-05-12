@@ -76,17 +76,42 @@ function _cloneLotusHull() {
   return h;
 }
 
+/** Lotus: same spring-damper fields as jeep tuning; values can diverge per vehicle. */
+export const DEFAULT_LOTUS_CHASSIS = {
+  rideHeight: 0.35,
+  suspStiffness: 92,
+  suspDampCompress: 8.5,
+  suspDampRelax: 2.6,
+  suspMaxTravel: 0.52,
+  mass: 1,
+  gravity: 28,
+  airPitchSmooth: 5,
+  jumpImpulse: 9,
+  wheelBvhRayPadAboveHub: 1.05,
+  wheelBvHMaxAboveHub: 3.2,
+  wheelBase: 1.9,
+  track: 1.1,
+  maxSlopeCos: 0.5,
+};
+
+function _cloneLotusChassis() {
+  return { ...DEFAULT_LOTUS_CHASSIS };
+}
+
 export class CarPhysics {
   constructor() {
     this.jeep = _cloneJeepTuning();
     this.lotusHull = _cloneLotusHull();
+    this.lotusChassis = _cloneLotusChassis();
+    /** @type {"jeep" | "lotus" | null} */
+    this._suspChassisKind = null;
     this.inAir = false;
     this.velY = 0;
     this.onSteepSlope = false;
     this.airPitch = 0;
     this.wheelContactYs = [0, 0, 0, 0];
     this.wheelGrounded = [true, true, true, true];
-    const eq = this._suspEqComp();
+    const eq = this._suspEqComp(this.jeep);
     this.wheelSuspLengths = [eq, eq, eq, eq];
     this._prevGroundYs = [0, 0, 0, 0];
     this._initialized = false;
@@ -102,8 +127,7 @@ export class CarPhysics {
     };
   }
 
-  _suspEqComp() {
-    const j = this.jeep;
+  _suspEqComp(j = this.jeep) {
     return (j.mass * j.gravity) / (4 * j.suspStiffness);
   }
 
@@ -345,11 +369,18 @@ export class CarPhysics {
     vx,
     vz,
     jumpRequested,
+    chassisTuning = null,
   ) {
-    const j = this.jeep;
+    const j = chassisTuning || this.jeep;
+    const kind = chassisTuning ? "lotus" : "jeep";
+    if (this._suspChassisKind !== kind) {
+      this._initialized = false;
+      this._suspChassisKind = kind;
+    }
+
     const sf = scaleFactor;
     const rideOffset = j.rideHeight * sf;
-    const restLen = rideOffset + this._suspEqComp();
+    const restLen = rideOffset + this._suspEqComp(j);
     const maxTravel = j.suspMaxTravel;
 
     const bodyY = bodyYInput + rideOffset;
@@ -359,7 +390,7 @@ export class CarPhysics {
       const wz = wheelWorldXZs[i * 2 + 1];
       let groundH = getTerrainHeight(wx, wz);
       if (cliffBvh?.baked) {
-        const bvhH = this._sampleBvhWheelY(cliffBvh, wx, wz, bodyY, sf);
+        const bvhH = this._sampleBvhWheelY(cliffBvh, wx, wz, bodyY, sf, j);
         if (bvhH != null && bvhH > groundH) groundH = bvhH;
       }
       this.wheelContactYs[i] = groundH;

@@ -17,7 +17,12 @@ import {
   getSharedGltfLoader,
 } from "../core/foliage/glbLoader.js";
 import { setupPlayModeCarAudio } from "./carAudioSetup.js";
-import { CarPhysics, DEFAULT_JEEP_TUNING, DEFAULT_LOTUS_COLLISION_HULL } from "./carPhysics.js";
+import {
+  CarPhysics,
+  DEFAULT_JEEP_TUNING,
+  DEFAULT_LOTUS_CHASSIS,
+  DEFAULT_LOTUS_COLLISION_HULL,
+} from "./carPhysics.js";
 import { LotusPhysics, DEFAULT_LOTUS_PHYSICS_PARAMS } from "./lotusPhysics.js";
 
 const CAP_R = 0.4;
@@ -1007,6 +1012,7 @@ export class PlayMode {
     this.lotusWheels = [];
     this.lotusLoaded = false;
     this._lotusChassisMetrics = null;
+    this._lotusWheelHubLocalY = 0;
     this.lotusCam = {
       distance: 5.5,
       height: 0.7,
@@ -1617,6 +1623,7 @@ export class PlayMode {
       this._lotusGroundOffset = -groundBox.min.y;
 
       this.lotusLoaded = true;
+      this._lotusWheelHubLocalY = wheelYOff;
       if (this.active && this.moveMode === "lotus") {
         this.lotusRoot.visible = true;
         this.capsule.visible = false;
@@ -1730,13 +1737,13 @@ export class PlayMode {
         .name("Ride height")
         .onChange((v) => {
           this._carPhysics.lotusHull.rideHeight = v;
+          this._carPhysics.lotusChassis.rideHeight = v;
           if (this._lotusCamGui) {
             for (const c of this._lotusCamGui.controllersRecursive()) {
               c.updateDisplay();
             }
           }
         });
-      terr.add(lp, "groundSmooth", 1, 55, 1).name("Ground smooth");
       terr.add(lp, "maxSlopeCos", 0.1, 0.99, 0.01).name("Max slope cos");
       terr.add(lp, "wheelBase", 0.8, 4.2, 0.05).name("Wheelbase");
       terr.add(lp, "track", 0.5, 2.6, 0.05).name("Track width");
@@ -1783,11 +1790,37 @@ export class PlayMode {
       col.add(lh, "stepOverHeight", 0.2, 2, 0.05).name("Step-over max Y");
       col.add({ resetLotusHull }, "resetLotusHull").name("Reset Lotus hull");
 
+      const ch = this._carPhysics.lotusChassis;
+      const resetLotusChassis = () => {
+        Object.assign(ch, { ...DEFAULT_LOTUS_CHASSIS });
+        const p = this._lotusPhysics.params;
+        ch.rideHeight = p.rideHeight;
+        ch.gravity = p.gravity;
+        ch.wheelBase = p.wheelBase;
+        ch.track = p.track;
+        ch.maxSlopeCos = p.maxSlopeCos;
+        ch.wheelBvhRayPadAboveHub = p.wheelBvhRayPadAboveHub;
+        ch.wheelBvHMaxAboveHub = p.wheelBvHMaxAboveHub;
+        for (const c of gui.controllersRecursive()) {
+          c.updateDisplay();
+        }
+      };
+      const suspF = gui.addFolder("Chassis springs (Lotus = Bruno pipeline)");
+      suspF.add(ch, "suspStiffness", 20, 200, 1).name("Stiffness");
+      suspF.add(ch, "suspDampCompress", 1, 25, 0.5).name("Damp compress");
+      suspF.add(ch, "suspDampRelax", 0.5, 15, 0.25).name("Damp relax");
+      suspF.add(ch, "suspMaxTravel", 0.15, 1.0, 0.02).name("Max travel");
+      suspF.add(ch, "mass", 0.3, 6, 0.05).name("Mass (sim)");
+      suspF.add(ch, "jumpImpulse", 0, 22, 0.5).name("Jump impulse");
+      suspF.add(ch, "airPitchSmooth", 1, 22, 0.5).name("Air pitch smooth");
+      suspF.add({ resetLotusChassis }, "resetLotusChassis").name("Reset chassis defaults");
+
       gui
         .add(
           {
             resetPhysics: () => {
               Object.assign(this._lotusPhysics.params, DEFAULT_LOTUS_PHYSICS_PARAMS);
+              resetLotusChassis();
               this._carPhysics.lotusHull.rideHeight =
                 this._lotusPhysics.params.rideHeight;
               for (const c of gui.controllersRecursive()) {
@@ -3453,53 +3486,35 @@ export class PlayMode {
       }
     } else if (carDriving) {
       this.flyHeight = 0;
-      const _isLotusGround = this.moveMode === "lotus";
+      const _isLotus = this.moveMode === "lotus";
+      const _sf = _isLotus
+        ? this.lotusRoot?.scale.x || CAR_MODEL_SCALE
+        : this.carRoot?.scale.x || CAR_MODEL_SCALE;
 
-      if (_isLotusGround) {
-        // ── Lotus: simplified center-height ground following ──
-        const _sf = this.lotusRoot?.scale.x || CAR_MODEL_SCALE;
-        this._lotusPhysics.inAir = this.carInAir;
-        this._lotusPhysics.velY = this.carVelY;
-        const vert = this._lotusPhysics.updateGroundFollow(
-          this.playerPos.x, this.playerPos.z,
-          this.playerPos.y, this.carHeading, _sf,
-          dtSec, this.getTerrainHeight, this.cliffBvh,
-          this.carVx, this.carVz,
-        );
-        this.playerPos.y = vert.y;
-        this.carVelY = this._lotusPhysics.velY;
-        this.carInAir = this._lotusPhysics.inAir;
-        this.carOnSteepSlope = this._lotusPhysics.onSteepSlope;
-        this._carSlopeX = vert.slopeX;
-        this._carSlopeZ = vert.slopeZ;
-        this._carTerrainPitchTarget = vert.terrainPitch;
-        this._carTerrainRollTarget = vert.terrainRoll;
-        if (vert.slideVx || vert.slideVz) {
-          this.carVx += vert.slideVx;
-          this.carVz += vert.slideVz;
-          if (vert.tooSteep) {
-            const nx2 = vert.slideVx, nz2 = vert.slideVz;
-            const nL = Math.hypot(nx2, nz2);
-            if (nL > 1e-6) {
-              const upDot = this.carVx * (nx2 / nL) + this.carVz * (nz2 / nL);
-              if (upDot < 0) {
-                this.carVx -= (nx2 / nL) * upDot * 0.8;
-                this.carVz -= (nz2 / nL) * upDot * 0.8;
-              }
-            }
-          }
-        }
-      } else {
-        // ── Bruno: 4-wheel spring-damper suspension ──
-        const _sf = this.carRoot?.scale.x || CAR_MODEL_SCALE;
-        if (this.carWheels.length >= 4) {
-          const _sinH = Math.sin(this.carHeading);
-          const _cosH = Math.cos(this.carHeading);
-          for (let _wi = 0; _wi < 4; _wi++) {
-            const _lx = this.carWheels[_wi].offset.x * _sf;
-            const _lz = this.carWheels[_wi].offset.z * _sf;
-            this._wheelWorldXZs[_wi * 2] = this.playerPos.x + _lx * _cosH + _lz * _sinH;
-            this._wheelWorldXZs[_wi * 2 + 1] = this.playerPos.z - _lx * _sinH + _lz * _cosH;
+      if (_isLotus) {
+        const lc = this._carPhysics.lotusChassis;
+        const lp = this._lotusPhysics.params;
+        lc.rideHeight = lp.rideHeight;
+        lc.gravity = lp.gravity;
+        lc.wheelBase = lp.wheelBase;
+        lc.track = lp.track;
+        lc.maxSlopeCos = lp.maxSlopeCos;
+        lc.wheelBvhRayPadAboveHub = lp.wheelBvhRayPadAboveHub;
+        lc.wheelBvHMaxAboveHub = lp.wheelBvHMaxAboveHub;
+        this._carPhysics.lotusHull.rideHeight = lp.rideHeight;
+
+        if (this.lotusWheels.length >= 4) {
+          const hy = this.carHeading - CAR_MODEL_YAW + Math.PI;
+          const c = Math.cos(hy);
+          const s = Math.sin(hy);
+          for (let i = 0; i < 4; i++) {
+            const w = this.lotusWheels[i];
+            const lx = w.offset.x * _sf;
+            const lz = w.offset.z * _sf;
+            this._wheelWorldXZs[i * 2] =
+              this.playerPos.x + lx * c + lz * s;
+            this._wheelWorldXZs[i * 2 + 1] =
+              this.playerPos.z - lx * s + lz * c;
           }
         } else {
           for (let _wi = 0; _wi < 4; _wi++) {
@@ -3507,34 +3522,59 @@ export class PlayMode {
             this._wheelWorldXZs[_wi * 2 + 1] = this.playerPos.z;
           }
         }
+      } else if (this.carWheels.length >= 4) {
+        const _sinH = Math.sin(this.carHeading);
+        const _cosH = Math.cos(this.carHeading);
+        for (let _wi = 0; _wi < 4; _wi++) {
+          const _lx = this.carWheels[_wi].offset.x * _sf;
+          const _lz = this.carWheels[_wi].offset.z * _sf;
+          this._wheelWorldXZs[_wi * 2] =
+            this.playerPos.x + _lx * _cosH + _lz * _sinH;
+          this._wheelWorldXZs[_wi * 2 + 1] =
+            this.playerPos.z - _lx * _sinH + _lz * _cosH;
+        }
+      } else {
+        for (let _wi = 0; _wi < 4; _wi++) {
+          this._wheelWorldXZs[_wi * 2] = this.playerPos.x;
+          this._wheelWorldXZs[_wi * 2 + 1] = this.playerPos.z;
+        }
+      }
 
-        this._carPhysics.inAir = this.carInAir;
-        this._carPhysics.velY = this.carVelY;
-        const vert = this._carPhysics.updateSuspension(
-          this.playerPos.y, this._wheelWorldXZs, _sf,
-          this.carHeading, dtSec, this.getTerrainHeight,
-          this.cliffBvh, this.carVx, this.carVz, false,
-        );
-        this.playerPos.y = vert.y;
-        this.carVelY = this._carPhysics.velY;
-        this.carInAir = this._carPhysics.inAir;
-        this.carOnSteepSlope = this._carPhysics.onSteepSlope;
-        this._carSlopeX = vert.slopeX;
-        this._carSlopeZ = vert.slopeZ;
-        this._carTerrainPitchTarget = vert.terrainPitch;
-        this._carTerrainRollTarget = vert.terrainRoll;
-        if (vert.slideVx || vert.slideVz) {
-          this.carVx += vert.slideVx;
-          this.carVz += vert.slideVz;
-          if (vert.tooSteep) {
-            const nx2 = vert.slideVx, nz2 = vert.slideVz;
-            const nL = Math.hypot(nx2, nz2);
-            if (nL > 1e-6) {
-              const upDot = this.carVx * (nx2 / nL) + this.carVz * (nz2 / nL);
-              if (upDot < 0) {
-                this.carVx -= (nx2 / nL) * upDot * 0.8;
-                this.carVz -= (nz2 / nL) * upDot * 0.8;
-              }
+      this._carPhysics.inAir = this.carInAir;
+      this._carPhysics.velY = this.carVelY;
+      const vert = this._carPhysics.updateSuspension(
+        this.playerPos.y,
+        this._wheelWorldXZs,
+        _sf,
+        this.carHeading,
+        dtSec,
+        this.getTerrainHeight,
+        this.cliffBvh,
+        this.carVx,
+        this.carVz,
+        false,
+        _isLotus ? this._carPhysics.lotusChassis : null,
+      );
+      this.playerPos.y = vert.y;
+      this.carVelY = this._carPhysics.velY;
+      this.carInAir = this._carPhysics.inAir;
+      this.carOnSteepSlope = this._carPhysics.onSteepSlope;
+      this._carSlopeX = vert.slopeX;
+      this._carSlopeZ = vert.slopeZ;
+      this._carTerrainPitchTarget = vert.terrainPitch;
+      this._carTerrainRollTarget = vert.terrainRoll;
+      if (vert.slideVx || vert.slideVz) {
+        this.carVx += vert.slideVx;
+        this.carVz += vert.slideVz;
+        if (vert.tooSteep) {
+          const nx2 = vert.slideVx,
+            nz2 = vert.slideVz;
+          const nL = Math.hypot(nx2, nz2);
+          if (nL > 1e-6) {
+            const upDot = this.carVx * (nx2 / nL) + this.carVz * (nz2 / nL);
+            if (upDot < 0) {
+              this.carVx -= (nx2 / nL) * upDot * 0.8;
+              this.carVz -= (nz2 / nL) * upDot * 0.8;
             }
           }
         }
@@ -3867,95 +3907,43 @@ export class PlayMode {
         // Lotus yaw: PI offset because the GLB front faces +Z (opposite to Bruno)
         this.lotusRoot.rotation.y = this.carHeading - CAR_MODEL_YAW + Math.PI;
 
-        // Terrain wheel sampling — sample all 4 wheels first, use max height as base
+        // Lotus body + wheels: driven by same CarPhysics suspension as Bruno
+        const lc = this._carPhysics.lotusChassis;
+        const lp = this._lotusPhysics.params;
+        const cc = this._lotusChassisMetrics.cCenter;
         const hyWheel = this.carHeading - CAR_MODEL_YAW + Math.PI;
-        let frontY = 0,
-          rearY = 0,
-          leftY = 0,
-          rightY = 0,
-          rearIdx = 0;
-        let sumWheelH = 0;
-        for (const w of this.lotusWheels) {
-          const lx = w.offset.x * scaleFactor;
-          const lz = w.offset.z * scaleFactor;
-          const wx =
-            this.playerPos.x + lx * Math.cos(hyWheel) + lz * Math.sin(hyWheel);
-          const wz =
-            this.playerPos.z - lx * Math.sin(hyWheel) + lz * Math.cos(hyWheel);
-          let h = this._carPhysics.getWheelGroundHeight(
-            wx, wz, this.playerPos.y, this.getTerrainHeight, this.cliffBvh,
-            scaleFactor,
-            this._lotusPhysics.params,
-          );
-          h = Math.max(h, this.playerPos.y - 1.5);
-          sumWheelH += h;
-          w.contactWorld.set(wx, h + DRIFT_MARK_Y_OFFSET, wz);
-          if (w.steer) frontY += h;
-          else {
-            rearY += h;
-            if (rearIdx < this._carRearContactPoints.length)
-              this._carRearContactPoints[rearIdx++].copy(w.contactWorld);
-          }
-          if (w.isLeft) leftY += h;
-          else rightY += h;
-        }
+        const c = Math.cos(hyWheel);
+        const s = Math.sin(hyWheel);
+        const hubY = this._lotusWheelHubLocalY || 0;
 
-        // Position car at average wheel height + ground offset (smoothed)
-        const baseY = sumWheelH / 4;
-        const targetLotusY = baseY + (this._lotusGroundOffset || 0);
-        if (this._lotusRootYSmooth === undefined) this._lotusRootYSmooth = targetLotusY;
-        const lotusYSmooth = 1 - Math.exp(-18 * dtSec);
-        this._lotusRootYSmooth += (targetLotusY - this._lotusRootYSmooth) * lotusYSmooth;
-        const rootY = this._lotusRootYSmooth;
+        const rootY =
+          this.playerPos.y +
+          (lc.rideHeight + lp.wheelRadius) * scaleFactor;
         this.lotusRoot.position.set(this.playerPos.x, rootY, this.playerPos.z);
 
-        const leftAvg = leftY * 0.5,
-          rightAvg = rightY * 0.5,
-          frontAvg = frontY * 0.5,
-          rearAvg = rearY * 0.5;
-        const trackSpan =
-          Math.abs(
-            this.lotusWheels[1].offset.z - this.lotusWheels[0].offset.z,
-          ) * scaleFactor || CAR_TRACK * scaleFactor;
-        const wbSpan =
-          Math.abs(
-            this.lotusWheels[2].offset.x - this.lotusWheels[0].offset.x,
-          ) * scaleFactor || CAR_WHEEL_BASE * scaleFactor;
-        const terrainRollRaw = Math.atan2(rightAvg - leftAvg, trackSpan);
-        const terrainPitchRaw = Math.atan2(frontAvg - rearAvg, wbSpan);
+        const targetPitch = this._carTerrainPitchTarget || 0;
+        const targetRoll = this._carTerrainRollTarget || 0;
         const terrainSmooth = 1 - Math.exp(-CAR_TERRAIN_BODY_SMOOTH * dtSec);
         if (this.carInAir) {
+          this.carTerrainPitch = THREE.MathUtils.lerp(
+            this.carTerrainPitch,
+            this._carPhysics.airPitch,
+            terrainSmooth,
+          );
           this.carTerrainRoll = THREE.MathUtils.lerp(
             this.carTerrainRoll,
             0,
             terrainSmooth,
           );
+        } else {
           this.carTerrainPitch = THREE.MathUtils.lerp(
             this.carTerrainPitch,
-            THREE.MathUtils.clamp(
-              this._carPhysics.airPitch,
-              -CAR_BODY_TERRAIN_PITCH_MAX * 1.5,
-              CAR_BODY_TERRAIN_PITCH_MAX * 1.5,
-            ),
+            targetPitch,
             terrainSmooth,
           );
-        } else {
           this.carTerrainRoll = THREE.MathUtils.lerp(
             this.carTerrainRoll,
-            THREE.MathUtils.clamp(
-              terrainRollRaw,
-              -CAR_BODY_TERRAIN_ROLL_MAX,
-              CAR_BODY_TERRAIN_ROLL_MAX,
-            ),
-            terrainSmooth,
-          );
-          this.carTerrainPitch = THREE.MathUtils.lerp(
-            this.carTerrainPitch,
-            THREE.MathUtils.clamp(
-              terrainPitchRaw,
-              -CAR_BODY_TERRAIN_PITCH_MAX,
-              CAR_BODY_TERRAIN_PITCH_MAX,
-            ),
+            targetRoll,
             terrainSmooth,
           );
         }
@@ -3971,31 +3959,46 @@ export class PlayMode {
           -_lotusRollMax,
           _lotusRollMax,
         );
-        // Lotus axes are swapped + roll inverted due to chassis yaw orientation
         this.lotusChassis.rotation.set(-finalRoll, 0, finalPitch);
 
-        // Per-wheel suspension for Lotus
-        const suspSmooth = 1 - Math.exp(-CAR_SUSP_SMOOTH * dtSec);
+        const suspMax = lc.suspMaxTravel;
+        let rearIdx = 0;
         for (let i = 0; i < this.lotusWheels.length; i++) {
           const w = this.lotusWheels[i];
-          const wheelTerrainH = w.contactWorld.y - DRIFT_MARK_Y_OFFSET;
-          const planeH =
-            baseY +
-            (rearAvg - frontAvg) * (w.steer ? -0.5 : 0.5) +
-            (rightAvg - leftAvg) * (w.isLeft ? -0.5 : 0.5);
-          const suspOffset = this.carInAir
-            ? 0
-            : (wheelTerrainH - planeH) / scaleFactor;
-          const clampedOffset = THREE.MathUtils.clamp(
-            suspOffset,
-            -CAR_SUSP_TRAVEL,
-            CAR_SUSP_TRAVEL,
+          const lx = w.offset.x * scaleFactor;
+          const lz = w.offset.z * scaleFactor;
+          const wx = this.playerPos.x + lx * c + lz * s;
+          const wz = this.playerPos.z - lx * s + lz * c;
+          const grounded = i < 4 && this._carPhysics.wheelGrounded[i];
+          let targetLocalY;
+          if (this.carInAir || !grounded) {
+            targetLocalY = -lc.rideHeight;
+          } else {
+            const suspLen = this._carPhysics.wheelSuspLengths[i];
+            targetLocalY = -suspLen / scaleFactor;
+            targetLocalY = Math.min(
+              targetLocalY,
+              -lc.rideHeight + suspMax,
+            );
+            targetLocalY = Math.max(
+              targetLocalY,
+              -lc.rideHeight - suspMax,
+            );
+          }
+          if (w._smoothLocalY === undefined) w._smoothLocalY = targetLocalY;
+          w._smoothLocalY +=
+            (targetLocalY - w._smoothLocalY) * Math.min(1, 25 * dtSec);
+          w.container.position.set(
+            cc.x + w.offset.x,
+            hubY + (w._smoothLocalY + lc.rideHeight) * scaleFactor,
+            cc.z + w.offset.z,
           );
-          if (w._suspY === undefined) w._suspY = 0;
-          w._suspY = THREE.MathUtils.lerp(w._suspY, clampedOffset, suspSmooth);
-          if (w._suspBaseY === undefined)
-            w._suspBaseY = w.suspension.position.y;
-          w.suspension.position.y = w._suspBaseY + w._suspY;
+          const h = this._carPhysics.wheelContactYs[i];
+          w.contactWorld.set(wx, h + DRIFT_MARK_Y_OFFSET, wz);
+          if (!w.steer) {
+            if (rearIdx < this._carRearContactPoints.length)
+              this._carRearContactPoints[rearIdx++].copy(w.contactWorld);
+          }
         }
 
         const _steerTarget =
@@ -4460,7 +4463,7 @@ export class PlayMode {
     // Camera collision — raise camera above terrain/BVH surfaces, keep full distance.
     // All knobs come from toolState.playCamera so the editor UI can tweak / disable live.
     const camCfg = this.cameraCollisionSettings;
-    const camColEnabled = camCfg ? camCfg.enabled !== false : true;
+    const camColEnabled = !!(camCfg && camCfg.enabled === true);
     if (!camColEnabled) {
       // Relax pulled-in distance back out so re-enabling doesn't snap.
       this._camCollisionDist = 1;

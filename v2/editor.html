@@ -442,7 +442,17 @@
   }
   .prop-color::-webkit-color-swatch-wrapper { padding: 0; }
   .prop-color::-webkit-color-swatch { border: none; border-radius: 2px; }
-  .prop-slider-wrap { flex: 1; display: flex; align-items: center; gap: 6px; }
+  .prop-slider-wrap { flex: 1; display: flex; align-items: center; gap: 6px; min-width: 0; }
+  .prop-num-input {
+    width: 72px; height: 22px; flex-shrink: 0; box-sizing: border-box;
+    background: var(--bg-input); border: 1px solid var(--border);
+    border-radius: var(--radius); padding: 0 5px; color: var(--text);
+    font-size: 11px; font-family: var(--font-mono); text-align: right; outline: none;
+  }
+  .prop-num-input:focus { border-color: var(--accent); }
+  .prop-num-input::-webkit-outer-spin-button,
+  .prop-num-input::-webkit-inner-spin-button { -webkit-appearance: none; margin: 0; }
+  .prop-num-input[type=number] { appearance: textfield; -moz-appearance: textfield; }
   .prop-slider {
     flex: 1; height: 4px; -webkit-appearance: none; appearance: none;
     background: var(--bg-input); border-radius: 2px; outline: none;
@@ -1019,6 +1029,21 @@ function _fmt(v, step) {
   return v.toFixed(d);
 }
 
+function _clampSnap(v, min, max, step) {
+  if (!Number.isFinite(v)) return min;
+  const n = Math.round((v - min) / step);
+  let out = min + n * step;
+  const stepStr = String(step);
+  let decimals = 0;
+  if (stepStr.includes('.')) {
+    decimals = stepStr.split('.')[1].length;
+  } else if (stepStr.includes('e-')) {
+    decimals = 8;
+  }
+  if (decimals > 0) out = Number(out.toFixed(decimals));
+  return Math.min(max, Math.max(min, out));
+}
+
 function _section(parent, title, expanded = true) {
   const sec = document.createElement('div');
   sec.className = 'inspector-section';
@@ -1040,12 +1065,46 @@ function _slider(parent, obj, key, opts) {
   const row = document.createElement('div');
   row.className = 'prop-row';
   const cur = obj[key];
-  row.innerHTML = `<span class="prop-label">${label}</span><div class="prop-value"><div class="prop-slider-wrap"><input type="range" class="prop-slider" min="${min}" max="${max}" step="${step}" value="${cur}"><span class="prop-slider-val">${_fmt(cur, step)}</span></div></div>`;
+  row.innerHTML = `<span class="prop-label">${label}</span><div class="prop-value"><div class="prop-slider-wrap"><input type="range" class="prop-slider" min="${min}" max="${max}" step="${step}" value="${cur}"><input type="number" class="prop-num-input" title="Type an exact value" min="${min}" max="${max}" step="${step}" value="${_fmt(cur, step)}"></div></div>`;
   const sl = row.querySelector('.prop-slider');
-  const vl = row.querySelector('.prop-slider-val');
-  sl.addEventListener('input', () => { obj[key] = parseFloat(sl.value); vl.textContent = _fmt(obj[key], step); onChange?.(); });
+  const num = row.querySelector('.prop-num-input');
+  const syncNumDisplay = () => { num.value = _fmt(obj[key], step); };
+  const applyFromSlider = () => {
+    obj[key] = parseFloat(sl.value);
+    syncNumDisplay();
+    onChange?.();
+  };
+  const commitFromNum = () => {
+    const raw = String(num.value).trim();
+    if (raw === '' || raw === '-' || raw === '.' || raw === '-.') {
+      syncNumDisplay();
+      return;
+    }
+    let v = parseFloat(raw);
+    if (!Number.isFinite(v)) {
+      syncNumDisplay();
+      return;
+    }
+    v = _clampSnap(v, min, max, step);
+    obj[key] = v;
+    sl.value = String(v);
+    syncNumDisplay();
+    onChange?.();
+  };
+  sl.addEventListener('input', applyFromSlider);
+  num.addEventListener('change', commitFromNum);
+  num.addEventListener('keydown', (e) => { if (e.key === 'Enter') num.blur(); });
+  num.addEventListener('wheel', (e) => { if (document.activeElement === num) e.preventDefault(); }, { passive: false });
   parent.appendChild(row);
-  const handle = { row, refresh() { sl.value = obj[key]; vl.textContent = _fmt(obj[key], step); }, _obj: obj, _key: key, _sl: sl, _vl: vl, _step: step };
+  const handle = {
+    row,
+    refresh() { sl.value = obj[key]; syncNumDisplay(); },
+    _obj: obj,
+    _key: key,
+    _sl: sl,
+    _num: num,
+    _step: step,
+  };
   _liveSliders.push(handle);
   return handle;
 }
@@ -4180,7 +4239,10 @@ async function bootEditor(opts = {}) {
         _elTris.textContent = `${(p.trisApprox / 1000).toFixed(0)}k tris`;
         _elDot.style.background = p.fps >= 50 ? 'var(--green)' : p.fps >= 30 ? 'var(--orange)' : 'var(--red)';
         for (const fn of _inspectorLiveUpdaters) fn();
-        for (const h of _liveSliders) { if (parseFloat(h._sl.value) !== h._obj[h._key]) h.refresh(); }
+        for (const h of _liveSliders) {
+          if (h._num === document.activeElement || h._sl === document.activeElement) continue;
+          if (parseFloat(h._sl.value) !== h._obj[h._key]) h.refresh();
+        }
         document.getElementById('playspawn-panel')?._updateCoords?.();
         buildHierarchy(app);
       }

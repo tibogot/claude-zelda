@@ -53,15 +53,13 @@ export const DEFAULT_LOTUS_PHYSICS_PARAMS = {
   boostBlendSmooth: 12,
   nitroFxBlendSmooth: 16,
 
+  /** Synced each frame into `CarPhysics.lotusChassis` for world/suspension (same pipeline as Bruno). */
   gravity: 28,
   rideHeight: 0.35,
-  groundSmooth: 20,
   maxSlopeCos: 0.5,
   wheelBase: 1.9,
   track: 1.1,
-  /** Downward BVH ray starts at hub + this·sf (avoids tunnel ceiling as “ground”). */
   wheelBvhRayPadAboveHub: 1.05,
-  /** Reject BVH hits above hub + this·sf. */
   wheelBvHMaxAboveHub: 3.2,
 };
 
@@ -77,10 +75,6 @@ function _smoothstep(x, edge0, edge1) {
 export class LotusPhysics {
   constructor() {
     this.params = { ...DEFAULT_LOTUS_PHYSICS_PARAMS };
-    this.velY = 0;
-    this.inAir = false;
-    this.onSteepSlope = false;
-    this._smoothGroundY = null;
 
     this._handbrakeBlend = 0;
     this._driftTime = 0;
@@ -91,104 +85,29 @@ export class LotusPhysics {
     this._wasDrifting = false;
   }
 
-  getGroundHeight(px, pz, bodyRootY, getTerrainHeight, cliffBvh, scaleFactor = 1) {
-    const p = this.params;
-    const sf = scaleFactor;
-    const hubY = bodyRootY + p.rideHeight * sf;
-    let h = getTerrainHeight(px, pz);
-    if (cliffBvh?.baked) {
-      const rayOy = hubY + p.wheelBvhRayPadAboveHub * sf + 1e-4;
-      const bvhY = cliffBvh.raycastHeightFrom(px, rayOy, pz);
-      if (bvhY != null && bvhY > h) {
-        const maxY = hubY + p.wheelBvHMaxAboveHub * sf;
-        if (bvhY <= maxY) h = bvhY;
-      }
-    }
-    return h;
-  }
-
-  updateGroundFollow(px, pz, bodyY, heading, scaleFactor, dtSec, getTerrainHeight, cliffBvh, vx, vz) {
-    const p = this.params;
-    const sf = scaleFactor;
-    const rideOffset = p.rideHeight * sf;
-
-    const centerGroundH = this.getGroundHeight(px, pz, bodyY, getTerrainHeight, cliffBvh, sf);
-
-    if (this._smoothGroundY === null) {
-      this._smoothGroundY = centerGroundH;
-    }
-
-    this._smoothGroundY = _expSmooth(this._smoothGroundY, centerGroundH, dtSec, p.groundSmooth);
-    if (this._smoothGroundY < centerGroundH) {
-      this._smoothGroundY = centerGroundH;
-    }
-
-    this.velY -= p.gravity * dtSec;
-    let newY = bodyY + this.velY * dtSec;
-
-    if (newY < centerGroundH) {
-      newY = centerGroundH;
-      if (this.velY < 0) this.velY = 0;
-      this.inAir = false;
-    } else if (newY > centerGroundH + rideOffset + 0.3) {
-      this.inAir = true;
-    } else {
-      this.inAir = false;
-    }
-
-    const sinH = Math.sin(heading);
-    const cosH = Math.cos(heading);
-    const halfWB = p.wheelBase * sf * 0.5;
-    const halfTr = p.track * sf * 0.5;
-
-    const fwdX = -sinH * halfWB;
-    const fwdZ = -cosH * halfWB;
-    const rightX = cosH * halfTr;
-    const rightZ = -sinH * halfTr;
-
-    const sampleFrontH = this.getGroundHeight(px + fwdX, pz + fwdZ, bodyY, getTerrainHeight, cliffBvh, sf);
-    const sampleRearH = this.getGroundHeight(px - fwdX, pz - fwdZ, bodyY, getTerrainHeight, cliffBvh, sf);
-    const sampleLeftH = this.getGroundHeight(px - rightX, pz - rightZ, bodyY, getTerrainHeight, cliffBvh, sf);
-    const sampleRightH = this.getGroundHeight(px + rightX, pz + rightZ, bodyY, getTerrainHeight, cliffBvh, sf);
-
-    const terrainPitch = Math.atan2((sampleFrontH - sampleRearH), (2 * halfWB));
-    const terrainRoll = Math.atan2((sampleRightH - sampleLeftH), (2 * halfTr));
-
-    const dHdFwd = (sampleFrontH - sampleRearH) / (2 * halfWB);
-    const dHdRight = (sampleRightH - sampleLeftH) / (2 * halfTr);
-    const nLenSq = dHdFwd * dHdFwd + dHdRight * dHdRight + 1;
-    const nLen = Math.sqrt(nLenSq);
-    const normalY = 1 / nLen;
-    const tooSteep = normalY < p.maxSlopeCos;
-    this.onSteepSlope = tooSteep && !this.inAir;
-
-    const nx = dHdFwd * sinH - dHdRight * cosH;
-    const nz = dHdFwd * cosH + dHdRight * sinH;
-
-    let slideVx = 0, slideVz = 0;
-    if (tooSteep && !this.inAir) {
-      slideVx = (nx / nLen) * p.gravity * 0.5 * dtSec;
-      slideVz = (nz / nLen) * p.gravity * 0.5 * dtSec;
-    }
-
-    return {
-      y: newY,
-      terrainPitch,
-      terrainRoll,
-      slideVx,
-      slideVz,
-      tooSteep,
-      slopeX: nx / nLen,
-      slopeZ: nz / nLen,
-    };
-  }
-
   updateDriving(state, input, dtSec) {
     const p = this.params;
-    let { vx, vz, heading, nitro, drifting, driftAngle,
-          boostBlend, nitroFxBlend, wheelSpin, onSteepSlope } = state;
-    const { forward, backward, leftKey, rightKey,
-            handbrake, nitroHeld, boostKeys } = input;
+    let {
+      vx,
+      vz,
+      heading,
+      nitro,
+      drifting,
+      driftAngle,
+      boostBlend,
+      nitroFxBlend,
+      wheelSpin,
+      onSteepSlope,
+    } = state;
+    const {
+      forward,
+      backward,
+      leftKey,
+      rightKey,
+      handbrake,
+      nitroHeld,
+      boostKeys,
+    } = input;
 
     const curSpeed = Math.sqrt(vx * vx + vz * vz);
     const hx = -Math.sin(heading);
@@ -279,7 +198,11 @@ export class LotusPhysics {
     let grip = speedGrip + (p.gripHandbrake - speedGrip) * this._handbrakeBlend;
 
     const driftDir = Math.sign(latDot);
-    const isCounterSteering = drifting && driftDir !== 0 && steerInput !== 0 && Math.sign(steerInput) !== Math.sign(driftDir);
+    const isCounterSteering =
+      drifting &&
+      driftDir !== 0 &&
+      steerInput !== 0 &&
+      Math.sign(steerInput) !== Math.sign(driftDir);
     if (isCounterSteering) {
       const counterStrength = Math.min(1, Math.abs(driftAngle) / 0.5);
       grip += p.gripCounterBonus * counterStrength;
@@ -304,7 +227,8 @@ export class LotusPhysics {
     }
 
     const updatedLatDot = vx * rx + vz * rz;
-    driftAngle = curSpeed > 1 ? Math.abs(Math.atan2(updatedLatDot, Math.abs(fwdDot))) : 0;
+    driftAngle =
+      curSpeed > 1 ? Math.abs(Math.atan2(updatedLatDot, Math.abs(fwdDot))) : 0;
 
     if (!drifting) {
       drifting = driftAngle > p.driftAngleMin && curSpeed > p.driftEntrySpeed;
@@ -320,16 +244,23 @@ export class LotusPhysics {
           p.driftBoostAngleMin,
           p.driftBoostAngleMax,
         );
-        const anglePenalty = driftAngle > p.driftBoostAngleMax
-          ? 1.0 - _smoothstep(driftAngle, p.driftBoostAngleMax, p.driftBoostAnglePenaltyEnd)
-          : 1.0;
+        const anglePenalty =
+          driftAngle > p.driftBoostAngleMax
+            ? 1.0 -
+              _smoothstep(driftAngle, p.driftBoostAngleMax, p.driftBoostAnglePenaltyEnd)
+            : 1.0;
         this.driftBoostMeter = Math.min(
           p.driftBoostMax,
-          this.driftBoostMeter + p.driftBoostBuildRate * angleQuality * anglePenalty * dtSec,
+          this.driftBoostMeter +
+            p.driftBoostBuildRate * angleQuality * anglePenalty * dtSec,
         );
       }
     } else {
-      if (this._wasDrifting && this._driftTime > p.driftBoostQualifyTime && this.driftBoostMeter > 0.1) {
+      if (
+        this._wasDrifting &&
+        this._driftTime > p.driftBoostQualifyTime &&
+        this.driftBoostMeter > 0.1
+      ) {
         this._driftBoostActive = true;
         this._driftBoostRemaining = p.driftBoostDuration * this.driftBoostMeter;
         this._driftBoostPower = this.driftBoostMeter;
@@ -345,7 +276,8 @@ export class LotusPhysics {
         this._driftBoostActive = false;
         this._driftBoostPower = 0;
       } else {
-        const boostFrac = this._driftBoostRemaining / (p.driftBoostDuration * this._driftBoostPower);
+        const boostFrac =
+          this._driftBoostRemaining / (p.driftBoostDuration * this._driftBoostPower);
         const speedBonus = p.driftBoostSpeedAdd * Math.min(1, boostFrac);
         const curHx = -Math.sin(heading);
         const curHz = -Math.cos(heading);
@@ -357,7 +289,8 @@ export class LotusPhysics {
     const latSign = Math.sign(updatedLatDot);
     const speedForRoll = Math.sqrt(vx * vx + vz * vz);
     const driftRollSpeedGain = _smoothstep(speedForRoll, 8, 24);
-    const driftRoll = -latSign * Math.min(p.bodyRollMax, driftAngle * 0.85) * driftRollSpeedGain;
+    const driftRoll =
+      -latSign * Math.min(p.bodyRollMax, driftAngle * 0.85) * driftRollSpeedGain;
     const throttlePitch = forward ? 0.045 : backward ? -0.06 : 0;
     const speedNorm = Math.min(1, curSpeed / Math.max(1, p.maxSpeed));
     const dynamicPitch = -speedNorm * 0.04;
@@ -369,8 +302,15 @@ export class LotusPhysics {
     wheelSpin -= (fwdDot / p.wheelRadius) * dtSec;
 
     return {
-      vx, vz, heading, nitro, drifting, driftAngle,
-      boostBlend, nitroFxBlend, wheelSpin,
+      vx,
+      vz,
+      heading,
+      nitro,
+      drifting,
+      driftAngle,
+      boostBlend,
+      nitroFxBlend,
+      wheelSpin,
       bodyRollTarget: targetDynRoll,
       bodyPitchTarget: targetDynPitch,
       bodySmooth: smooth,
