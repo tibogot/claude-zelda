@@ -301,12 +301,15 @@
         <div class="row">
           <label for="networkPresetSelect">Network preset</label>
           <select id="networkPresetSelect">
+            <option value="debug_fork_3_2_1_only">
+              Debug: 3→2+1 fork island (junction shape only)
+            </option>
             <option value="lane_fork_3_2_1">
-              Article diagram: 3 lanes → 2 straight + 1 exit
+              Article diagram (simple): 3→2+1 lane fork
             </option>
             <option value="default">Default (4-way demo)</option>
             <option value="article_profile_3_2_1">
-              Advanced: profile taper 3→2 on approach, then fork
+              Article diagram (taper): 3→2 on approach, then fork
             </option>
           </select>
           <span></span>
@@ -330,11 +333,18 @@
         <div id="status"></div>
         <div class="line"></div>
         <div id="tips">
-          <strong>Same as the article fork picture:</strong> use the first
-          <em>Network preset</em> (three strips on the approach, two on the
-          through leg, one narrow exit). You do <em>not</em> need per-edge
-          <code>profiles[]</code> for that — only this preset + junction
-          <em>Lane fork</em> on the 3-way node (already set).<br />
+          In the article, a <strong>profile</strong> is the cross-section at a
+          connection (lanes, widths, types) — not the same word as these
+          <em>Network presets</em>, but each preset here fixes the graph
+          <em>and</em> those cross-sections for you.<br />
+          <strong>Debug fork island:</strong> first preset — same fork as the
+          article, but <em>only the merged junction polygon + fork markings</em>
+          are drawn (no road runs, no dead-end caps). Edges stay in the graph so
+          mouths/clips still define the shape; export JSON includes
+          <code>junctionIslandOnly</code> when on.<br />
+          <strong>Article fork (long arms):</strong> second preset — three strips
+          on the approach, two on the through leg, one narrow exit; no
+          <code>profiles[]</code> on the approach.<br />
           Network mode: click a node to continue, click a segment to select it,
           <strong>Insert knot (split edge)</strong> or Alt-click inserts a
           <strong>graph node on that road</strong> — this is the practical
@@ -363,8 +373,9 @@
           dividers</strong> are white <strong>dashes</strong> (two on a 3-strip
           highway). At a lane fork, the <strong>rightmost</strong> divider splits:
           one Hermite continues onto the through leg; a second branch (solid)
-          follows the ramp outer edge. Widen the approach with edge
-          <code>widthMul</code> (preset incoming uses <code>widthMul: 1.48</code>).
+          follows the ramp outer edge.           Widen the approach with edge
+          <code>widthMul</code> (simple preset uses <code>1.45</code>; through leg
+          <code>0.967</code> ≈ ⅔ of that; exit <code>0.483</code> ≈ ⅓ for one lane).
           <strong>Profiles along a run</strong>: optional per-edge
           <code>profiles</code> — each <code>{ u, laneLayers, widthScale? }</code>
           with <code>u</code> in <code>[0,1]</code> along the clipped run; the
@@ -377,7 +388,8 @@
           junction <em>Lane fork</em>. Put <strong>three strips</strong> on the
           incoming highway (<code>laneLayers</code>), <strong>two</strong> on
           the through leg, <strong>one</strong> on the exit ramp; narrow the
-          ramp with edge JSON <code>widthMul</code> (e.g. <code>0.45</code>).
+          ramp with edge JSON <code>widthMul</code> (e.g. one-lane ≈
+          <code>0.48</code> when incoming is <code>1.45</code> wide).
           Lane guides: inner strips stay tangent to the straight run;
           <strong>rightmost incoming strip peels</strong> to the exit. Use the two
           buttons to set
@@ -462,6 +474,8 @@
       const ARTICLE_LANE_DASH = [7, 11];
       const ARTICLE_LANE_WIDE = 1.35;
       const ARTICLE_LANE_THIN = 0.95;
+      /** Undivided road: center between opposing traffic (solid, not dashed lane dividers). */
+      const ARTICLE_CENTER_LINE = "rgba(255,214,96,0.92)";
 
       const state = {
         layout: "network",
@@ -607,28 +621,28 @@
 
       const NETWORK_PRESET_LIST = [
         {
-          id: "lane_fork_3_2_1",
-          label: "Article diagram: 3 lanes → 2 straight + 1 exit",
+          id: "debug_fork_3_2_1_only",
+          label: "Debug: 3→2+1 fork island (junction shape only)",
           network: {
             nextId: 5,
             activeNodeId: 2,
             nodes: [
-              { id: 1, p: { x: 120, y: 340 } },
+              { id: 1, p: { x: 320, y: 384 } },
               {
                 id: 2,
-                p: { x: 380, y: 340 },
+                p: { x: 440, y: 384 },
                 junctionType: "fork",
                 forkIncomingKey: "1:2",
                 forkExitKey: "2:4",
               },
-              { id: 3, p: { x: 680, y: 340 } },
-              { id: 4, p: { x: 540, y: 520 } },
+              { id: 3, p: { x: 580, y: 384 } },
+              { id: 4, p: { x: 500, y: 500 } },
             ],
             edges: [
               {
                 a: 1,
                 b: 2,
-                widthMul: 1.48,
+                widthMul: 1.45,
                 laneLayers: [
                   { w: 34, kind: "car" },
                   { w: 33, kind: "car" },
@@ -638,6 +652,7 @@
               {
                 a: 2,
                 b: 3,
+                widthMul: 0.967,
                 laneLayers: [
                   { w: 50, kind: "car" },
                   { w: 50, kind: "car" },
@@ -646,8 +661,57 @@
               {
                 a: 2,
                 b: 4,
+                widthMul: 0.483,
                 laneLayers: [{ w: 100, kind: "car" }],
-                widthMul: 0.4,
+              },
+            ],
+            laneLayers: null,
+            junctionIslandOnly: true,
+          },
+        },
+        {
+          id: "lane_fork_3_2_1",
+          label: "Article diagram (simple): 3→2+1 lane fork",
+          network: {
+            nextId: 5,
+            activeNodeId: 2,
+            nodes: [
+              { id: 1, p: { x: 72, y: 384 } },
+              {
+                id: 2,
+                p: { x: 418, y: 384 },
+                junctionType: "fork",
+                forkIncomingKey: "1:2",
+                forkExitKey: "2:4",
+              },
+              { id: 3, p: { x: 828, y: 384 } },
+              { id: 4, p: { x: 548, y: 556 } },
+            ],
+            edges: [
+              {
+                a: 1,
+                b: 2,
+                widthMul: 1.45,
+                laneLayers: [
+                  { w: 34, kind: "car" },
+                  { w: 33, kind: "car" },
+                  { w: 33, kind: "car" },
+                ],
+              },
+              {
+                a: 2,
+                b: 3,
+                widthMul: 0.967,
+                laneLayers: [
+                  { w: 50, kind: "car" },
+                  { w: 50, kind: "car" },
+                ],
+              },
+              {
+                a: 2,
+                b: 4,
+                widthMul: 0.483,
+                laneLayers: [{ w: 100, kind: "car" }],
               },
             ],
             laneLayers: null,
@@ -677,27 +741,28 @@
         },
         {
           id: "article_profile_3_2_1",
-          label: "Advanced: profile taper 3→2 on approach, then fork",
+          label: "Article diagram (taper): 3→2 on approach, then 2+1 fork",
           network: {
             nextId: 6,
             activeNodeId: 3,
             nodes: [
-              { id: 1, p: { x: 60, y: 330 } },
-              { id: 2, p: { x: 260, y: 330 }, profileBoundary: true },
+              { id: 1, p: { x: 64, y: 384 } },
+              { id: 2, p: { x: 248, y: 384 }, profileBoundary: true },
               {
                 id: 3,
-                p: { x: 500, y: 330 },
+                p: { x: 448, y: 384 },
                 junctionType: "fork",
                 forkIncomingKey: "2:3",
                 forkExitKey: "3:5",
               },
-              { id: 4, p: { x: 740, y: 330 } },
-              { id: 5, p: { x: 640, y: 510 } },
+              { id: 4, p: { x: 836, y: 384 } },
+              { id: 5, p: { x: 532, y: 568 } },
             ],
             edges: [
               {
-                a: 1, b: 2,
-                widthMul: 1.48,
+                a: 1,
+                b: 2,
+                widthMul: 1.45,
                 laneLayers: [
                   { w: 34, kind: "car" },
                   { w: 33, kind: "car" },
@@ -705,8 +770,9 @@
                 ],
               },
               {
-                a: 2, b: 3,
-                widthMul: 1.48,
+                a: 2,
+                b: 3,
+                widthMul: 1.45,
                 laneLayers: [
                   { w: 34, kind: "car" },
                   { w: 33, kind: "car" },
@@ -724,7 +790,7 @@
                   },
                   {
                     u: 1,
-                    widthScale: 0.68,
+                    widthScale: 2 / 3,
                     laneLayers: [
                       { w: 50, kind: "car" },
                       { w: 50, kind: "car" },
@@ -733,16 +799,19 @@
                 ],
               },
               {
-                a: 3, b: 4,
+                a: 3,
+                b: 4,
+                widthMul: 0.967,
                 laneLayers: [
                   { w: 50, kind: "car" },
                   { w: 50, kind: "car" },
                 ],
               },
               {
-                a: 3, b: 5,
+                a: 3,
+                b: 5,
+                widthMul: 0.483,
                 laneLayers: [{ w: 100, kind: "car" }],
-                widthMul: 0.42,
               },
             ],
             laneLayers: null,
@@ -780,6 +849,7 @@
           }),
           edges,
           laneLayers: n.laneLayers || null,
+          ...(n.junctionIslandOnly ? { junctionIslandOnly: true } : {}),
         };
       }
 
@@ -992,46 +1062,98 @@
         return { inc, exit: ex, thru };
       }
 
-      /** Peel strip centerline only (through continuity uses divider guides). */
+      /**
+       * Lateral axis for sorting fork mouths — matches `sideStraight` in
+       * `computeForkAsymmetricGeometry` (not raw `perpLeft(inc)`), so lane indices
+       * align with pavement corners and strip order cannot mirror vs. the fork fill.
+       */
+      function forkLaneLateralSortKey(arms) {
+        if (!arms) return null;
+        const tinI = norm(mul(arms.inc.dir, -1));
+        const sideL = perpLeft(tinI);
+        const exo = norm(arms.exit.dir);
+        const dotL = dot(exo, sideL);
+        const dotR = dot(exo, mul(sideL, -1));
+        return dotL <= dotR ? sideL : mul(sideL, -1);
+      }
+
+      /**
+       * When `edge` is the through arm of a lane fork, keep the straight-side outer
+       * curb flush with the incoming half-width at the fork mouth, then blend back
+       * to symmetric width along the edge (deformation only on the peel side).
+       */
+      function forkThruWideStraightContext(edge, clipCtx) {
+        const { nodeById, adjacency } = clipCtx;
+        for (const nid of [edge.a, edge.b]) {
+          const node = nodeById.get(nid);
+          if (!node || (node.junctionType || "") !== "fork") continue;
+          const roads = adjacency.get(nid);
+          if (!roads || roads.length !== 3) continue;
+          const arms = classifyForkArms(node, roads, clipCtx);
+          if (!arms) continue;
+          if (edgeKey(arms.thru.edge.a, arms.thru.edge.b) !== edgeKey(edge.a, edge.b))
+            continue;
+          const tinI = norm(mul(arms.inc.dir, -1));
+          const sideL = perpLeft(tinI);
+          const exo = norm(arms.exit.dir);
+          const dotL = dot(exo, sideL);
+          const dotR = dot(exo, mul(sideL, -1));
+          const sideStraight = dotL <= dotR ? sideL : mul(sideL, -1);
+          return {
+            forkNodeId: nid,
+            hwIncConst: edgeRoadWidth(arms.inc.edge) * 0.5,
+            sideStraight,
+            forkAtStart: nid === edge.a,
+          };
+        }
+        return null;
+      }
+
+      /** True when `edge` is the wide incoming arm of a lane fork (profile taper markings stay straight chords). */
+      function edgeIsForkIncomingArm(edge, clipCtx) {
+        return !!forkIncomingMouthContext(edge, clipCtx);
+      }
+
+      /** Fork node + lateral frame when `edge` is the incoming arm of a lane fork (for mouth-snapped markings). */
+      function forkIncomingMouthContext(edge, clipCtx) {
+        const { nodeById, adjacency } = clipCtx;
+        if (!edge || !nodeById || !adjacency) return null;
+        const ek = edgeKey(edge.a, edge.b);
+        for (const nid of [edge.a, edge.b]) {
+          const node = nodeById.get(nid);
+          if (!node || (node.junctionType || "") !== "fork") continue;
+          const roads = adjacency.get(nid);
+          if (!roads || roads.length !== 3) continue;
+          const arms = classifyForkArms(node, roads, clipCtx);
+          if (!arms) continue;
+          if (edgeKey(arms.inc.edge.a, arms.inc.edge.b) !== ek) continue;
+          const refInto = norm(mul(arms.inc.dir, -1));
+          const refLat = forkLaneLateralSortKey(arms);
+          return { forkNodeId: nid, refLat, refInto };
+        }
+        return null;
+      }
+
+      function forkThruBlendedOuterScalars(uAlong, hwSym, side, forkThru) {
+        if (!forkThru) return { lo: -hwSym, hi: hwSym };
+        const distFork = forkThru.forkAtStart ? uAlong : 1 - uAlong;
+        const blend = Math.min(1, distFork / 0.34);
+        const hwHold = forkThru.hwIncConst * (1 - blend) + hwSym * blend;
+        const uStr = dot(side, forkThru.sideStraight);
+        const straightScalar = uStr * hwHold;
+        const splitScalar = -uStr * (2 * hwSym - hwHold);
+        return {
+          lo: Math.min(straightScalar, splitScalar),
+          hi: Math.max(straightScalar, splitScalar),
+        };
+      }
+
+      /** Peel strip centerline — disabled: exit path is carried by the split outer divider + pavement edge. */
       function addForkLaneGuides(node, roads, clipCtx, markings) {
-        const arms = classifyForkArms(node, roads, clipCtx);
-        if (!arms) return;
-        const { inc, exit } = arms;
-        const samples = Math.max(18, (state.curveSegments | 0) + 6);
-        const refInto = norm(mul(inc.dir, -1));
-        const refLat = perpLeft(refInto);
-        const pIn = mouthStripCentersAtNodeLateral(
-          inc.edge,
-          node.id,
-          clipCtx,
-          true,
-          refLat,
-        );
-        const pEx = mouthStripCentersAtNodeLateral(
-          exit.edge,
-          node.id,
-          clipCtx,
-          true,
-          refLat,
-        );
-        if (!pIn || !pEx || !pIn.length || !pEx.length) return;
-        const tin = refInto;
-        const toutExit = norm(exit.dir);
-        const pi = pIn[pIn.length - 1];
-        const pe = pEx[pEx.length - 1];
-        const chord = dist(pi, pe);
-        const sPeel = clamp(chord * 0.34, 8, chord * 0.52);
-        markings.push({
-          path: sampleHermiteLane(
-            pi,
-            pe,
-            mul(tin, sPeel),
-            mul(toutExit, sPeel),
-            samples,
-          ),
-          type: "laneCenter",
-          laneLineKind: "interior",
-        });
+        void node;
+        void roads;
+        void clipCtx;
+        void markings;
       }
 
       /** Dashed strip–strip dividers across the fork (rightmost peels to ramp outer). */
@@ -1040,26 +1162,32 @@
         if (!arms) return;
         const { inc, exit, thru } = arms;
         const refInto = norm(mul(inc.dir, -1));
-        const refLat = perpLeft(refInto);
+        const latKey = forkLaneLateralSortKey(arms);
         const divIn = mouthDividerPointsAtNodeLateral(
           inc.edge,
           node.id,
           clipCtx,
           true,
-          refLat,
+          latKey,
         );
         const divThru = mouthDividerPointsAtNodeLateral(
           thru.edge,
           node.id,
           clipCtx,
           true,
-          refLat,
+          latKey,
         );
         if (!divIn.length || !divThru.length) return;
-        const samples = Math.max(18, (state.curveSegments | 0) + 6);
         const tin = refInto;
-        const toutThru = norm(thru.dir);
-        const exo = norm(exit.dir);
+
+        const halfW = (r) => edgeRoadWidth(r.edge) * 0.5;
+        const forkG = computeForkAsymmetricGeometry(
+          node,
+          roads,
+          clipCtx,
+          halfW,
+        );
+        const FM = forkG && forkG.forkMarkingGeom;
 
         const nMap = Math.min(divIn.length, divThru.length);
         for (let i = 0; i < nMap; i++) {
@@ -1069,22 +1197,13 @@
             path: [P0, P1],
             type: "laneCenter",
             laneLineKind: "interior",
+            laneLineRole: "lane",
+            interiorRef: node.p,
           });
         }
 
         if (divIn.length > divThru.length) {
           const P0 = divIn[divIn.length - 1];
-          const clipE = mouthClipAlongNode(
-            node.id,
-            exit.edge,
-            exit.other.id,
-            clipCtx,
-          );
-          const Me = add(node.p, mul(exit.dir, clipE));
-          const hwE = edgeRoadWidth(exit.edge) * 0.5;
-          const eLat = perpLeft(exo);
-          const R0 = add(Me, mul(eLat, hwE));
-          const R1 = add(Me, mul(eLat, -hwE));
           const clipT = mouthClipAlongNode(
             node.id,
             thru.edge,
@@ -1092,29 +1211,72 @@
             clipCtx,
           );
           const Mt = add(node.p, mul(thru.dir, clipT));
-          const hwT = edgeRoadWidth(thru.edge) * 0.5;
-          const tinT = norm(mul(thru.dir, -1));
-          const sL = perpLeft(tinT);
-          const dsL = dot(exo, sL);
-          const dsR = dot(exo, mul(sL, -1));
-          const sSt = dsL <= dsR ? sL : mul(sL, -1);
-          const sSp = mul(sSt, -1);
-          const CsT = add(Mt, mul(sSp, hwT));
-          const outerC = dist(R0, CsT) < dist(R1, CsT) ? R1 : R0;
-          const leg = Math.min(
-            260,
-            Math.max(36, dist(node.p, exit.other.p) * 0.72),
+          const csT = FM && FM.CsT ? FM.CsT : Mt;
+          /** Apex on incoming divider line toward through split corner (matches profile / pavement). */
+          const uApex = dot(sub(csT, P0), tin);
+          const stub = clamp(dist(P0, Mt) * 0.4, 12, 68);
+          const Kiss = add(
+            P0,
+            mul(
+              tin,
+              clamp(
+                uApex > 6 ? uApex - 0.5 : stub,
+                6,
+                Math.max(uApex + 40, stub + 24, 120),
+              ),
+            ),
           );
-          const P1 = add(outerC, mul(exo, leg));
-          const chord = dist(P0, P1);
-          const s0 = clamp(chord * 0.32, 7, chord * 0.5);
-          const s1 = clamp(chord * 0.36, 8, chord * 0.55);
+          /** Reference diagram: dashed on approach, then two solids — straight to `CsT`,
+           *  curved leg reuses the same **innerArc** as the pavement gore (no separate Hermite). */
           markings.push({
-            path: sampleHermiteLane(P0, P1, mul(tin, s0), mul(exo, s1), samples),
+            path: [P0, Kiss],
             type: "laneCenter",
             laneLineKind: "interior",
+            laneLineRole: "lane",
             interiorRef: node.p,
           });
+          markings.push({
+            path: [Kiss, csT],
+            type: "laneCenter",
+            laneLineKind: "interior",
+            laneLineRole: "forkCarrySolid",
+            interiorRef: node.p,
+          });
+          const ia = FM && FM.innerArc && FM.innerArc.length >= 2 ? FM.innerArc : null;
+          if (ia) {
+            markings.push({
+              path: ia,
+              type: "laneCenter",
+              laneLineKind: "interior",
+              laneLineRole: "forkCarrySolid",
+              interiorRef: node.p,
+            });
+          } else if (FM && FM.mergeCorner) {
+            const P1 = FM.mergeCorner;
+            const chord = dist(Kiss, P1);
+            const s0 = clamp(chord * 0.28, 8, chord * 0.42);
+            const exoF = FM.exo ? FM.exo : norm(exit.dir);
+            const tan1 =
+              FM.tangentExitGore &&
+              dot(FM.tangentExitGore, exoF) >= 0
+                ? FM.tangentExitGore
+                : FM.tangentExitGore
+                  ? mul(FM.tangentExitGore, -1)
+                  : exoF;
+            markings.push({
+              path: sampleHermiteLane(
+                Kiss,
+                P1,
+                mul(tin, s0),
+                mul(tan1, clamp(chord * 0.32, 10, chord * 0.48)),
+                Math.max(18, (state.curveSegments | 0) + 6),
+              ),
+              type: "laneCenter",
+              laneLineKind: "interior",
+              laneLineRole: "forkCarrySolid",
+              interiorRef: node.p,
+            });
+          }
         }
       }
 
@@ -1146,6 +1308,12 @@
           ctx.fill();
         }
         ctx.restore();
+      }
+
+      /** Index of the strip boundary between opposing flows (0-based among dividers), or -1. */
+      function medianDividerIndex(numStrips) {
+        const n = numStrips | 0;
+        return n >= 4 && (n & 1) === 0 ? n / 2 - 1 : -1;
       }
 
       /** Lateral offset of each lane strip midpoint (article-style lanes, not only dividers). */
@@ -1362,7 +1530,14 @@
         return out.slice(0, count);
       }
 
-      function buildProfiledNetworkSpan(edge, start, end, hF) {
+      function buildProfiledNetworkSpan(
+        edge,
+        start,
+        end,
+        hF,
+        forkThruCtx,
+        clipCtx,
+      ) {
         const kf = resolvedProfileKeyframes(edge);
         if (!kf) return null;
         const K = maxStripCountInKeyframes(kf);
@@ -1374,6 +1549,10 @@
         const bw = edgeRoadWidth(edge);
         const hw0 = bw * kf[0].widthScale * 0.5;
         const boundaryPolys = Array.from({ length: K + 1 }, () => []);
+        let forkThruStraightPlaneD = null;
+        let forkThruStraightUsesHi = null;
+        const forkIncStraight =
+          clipCtx && forkIncomingMouthContext(edge, clipCtx);
         for (let i = 0; i <= nS; i++) {
           const u = i / nS;
           const { layout, widthScale } = interpolatePhysicalLayoutAtU(
@@ -1383,25 +1562,112 @@
           );
           const W = bw * widthScale;
           const hw = W * 0.5;
-          const centerShift = hw - hw0;
+          const centerShift =
+            forkThruCtx || forkIncStraight ? 0 : hw - hw0;
           const c = add(lerp(start, end, u), mul(side, centerShift));
-          leftPts.push(add(c, mul(side, -hw)));
-          rightPts.push(add(c, mul(side, hw)));
+          const { lo, hi } = forkThruBlendedOuterScalars(
+            u,
+            hw,
+            side,
+            forkThruCtx,
+          );
+          const pLoCand = add(c, mul(side, lo));
+          const pHiCand = add(c, mul(side, hi));
+          let pLo = pLoCand;
+          let pHi = pHiCand;
+          if (forkThruCtx) {
+            if (forkThruStraightPlaneD === null) {
+              forkThruStraightUsesHi =
+                dot(pHiCand, forkThruCtx.sideStraight) >=
+                dot(pLoCand, forkThruCtx.sideStraight);
+              forkThruStraightPlaneD = dot(
+                forkThruStraightUsesHi ? pHiCand : pLoCand,
+                forkThruCtx.sideStraight,
+              );
+            }
+            if (forkThruStraightUsesHi) {
+              const err =
+                dot(pHiCand, forkThruCtx.sideStraight) - forkThruStraightPlaneD;
+              pHi = sub(pHiCand, mul(forkThruCtx.sideStraight, err));
+            } else {
+              const err =
+                dot(pLoCand, forkThruCtx.sideStraight) - forkThruStraightPlaneD;
+              pLo = sub(pLoCand, mul(forkThruCtx.sideStraight, err));
+            }
+          }
+          leftPts.push(pLo);
+          rightPts.push(pHi);
           const extended = padPhysicalLayout(layout, K);
           let off = -hw;
           for (let b = 0; b <= K; b++) {
-            boundaryPolys[b].push(add(c, mul(side, off)));
+            if (forkThruCtx) {
+              const t = (off + hw) / Math.max(1e-6, 2 * hw);
+              boundaryPolys[b].push(lerp(pLo, pHi, t));
+            } else {
+              const lat = lo + ((off + hw) / Math.max(1e-6, 2 * hw)) * (hi - lo);
+              boundaryPolys[b].push(add(c, mul(side, lat)));
+            }
             if (b < K) off += Math.max(0, extended[b].width);
           }
         }
         const polygon = [...leftPts, ...rightPts.slice().reverse()];
         const midRef = lerp(start, end, 0.5);
         const markings = [];
+        const medIdx = medianDividerIndex(K);
+        const chordMarkings =
+          clipCtx &&
+          edgeIsForkIncomingArm(edge, clipCtx) &&
+          !forkThruCtx;
+        const forkMouth =
+          chordMarkings && clipCtx
+            ? forkIncomingMouthContext(edge, clipCtx)
+            : null;
+        const farNodeId = forkMouth
+          ? edge.a === forkMouth.forkNodeId
+            ? edge.b
+            : edge.a
+          : null;
+        const divFarSnap =
+          forkMouth &&
+          mouthDividerPointsAtNodeLateral(
+            edge,
+            farNodeId,
+            clipCtx,
+            true,
+            forkMouth.refLat,
+          );
+        const divForkSnap =
+          forkMouth &&
+          mouthDividerPointsAtNodeLateral(
+            edge,
+            forkMouth.forkNodeId,
+            clipCtx,
+            true,
+            forkMouth.refLat,
+          );
         for (let b = 1; b < K; b++) {
+          const polyB = boundaryPolys[b];
+          const di = b - 1;
+          let path;
+          if (
+            forkMouth &&
+            divFarSnap &&
+            divForkSnap &&
+            divFarSnap.length > di &&
+            divForkSnap.length > di
+          ) {
+            path = [divFarSnap[di], divForkSnap[di]];
+          } else {
+            path =
+              chordMarkings && polyB.length >= 2
+                ? [polyB[0], polyB[polyB.length - 1]]
+                : polyB;
+          }
           markings.push({
-            path: boundaryPolys[b],
+            path,
             type: "laneCenter",
             laneLineKind: "interior",
+            laneLineRole: b - 1 === medIdx ? "median" : "lane",
             interiorRef: midRef,
           });
         }
@@ -1958,7 +2224,10 @@
 
         const CnI = add(Mi, mul(sideStraight, hwI));
         const CsI = add(Mi, mul(sideSplit, hwI));
-        const CnT = add(Mt, mul(sideStraight, hwT));
+        /** Straight curb must use incoming half-width at the through mouth too, so
+         *  CnT−CnI stays parallel to traffic when hwI≠hwT (otherwise the “straight”
+         *  side kinks / pinches). */
+        const CnT = add(Mt, mul(sideStraight, hwI));
         const CsT = add(Mt, mul(sideSplit, hwT));
 
         const eSide = perpLeft(exo);
@@ -1969,11 +2238,59 @@
 
         const samples = Math.max(14, (state.junctionSegments | 0) + 6);
         const dOuter = dist(outerCorner, CsI);
-        const midOE = lerp(outerCorner, CsI, 0.42);
-        const outerCtl = add(
-          midOE,
-          mul(sideSplit, -0.22 * Math.max(14, dOuter)),
+
+        const innerSteps = Math.max(24, samples);
+        const midC = lerp(CsT, mergeCorner, 0.5);
+        /** Inner gore CsT→mergeCorner: quadratic control pulled toward open space (near
+         *  `outerCorner`) for a tight, **rounded** crotch like the reference — not only
+         *  a perpendicular bump, which can read as a flat or wrong-sided bend. */
+        const chordTC = sub(mergeCorner, CsT);
+        const chordLen = len(chordTC);
+        const innerCtrl =
+          chordLen > 1e-4
+            ? (() => {
+                const vOpen = sub(outerCorner, midC);
+                const lo = len(vOpen);
+                if (lo < 1e-4) {
+                  const perp = perpLeft(norm(chordTC));
+                  const bulge = 0.36 * Math.min(chordLen, dOuter * 0.98);
+                  let ctrl = add(midC, mul(perp, bulge));
+                  const sideRef = cross(chordTC, sub(outerCorner, CsT));
+                  const sideCtrl = cross(chordTC, sub(ctrl, CsT));
+                  if (sideRef * sideCtrl < 0) ctrl = sub(midC, mul(perp, bulge));
+                  return ctrl;
+                }
+                return add(
+                  midC,
+                  mul(
+                    norm(vOpen),
+                    0.46 * Math.min(chordLen, dOuter * 1.02),
+                  ),
+                );
+              })()
+            : midC;
+        const innerArc = sampleQuadraticOffset(
+          CsT,
+          innerCtrl,
+          mergeCorner,
+          0,
+          innerSteps,
         );
+
+        /** Outer curb outerCorner→CsI: pick quadratic control *farther* from fork node (bulge outward). */
+        const chordOI = sub(CsI, outerCorner);
+        const chordLenO = len(chordOI);
+        const midOI = lerp(outerCorner, CsI, 0.5);
+        const outerCtl =
+          chordLenO > 1e-4
+            ? (() => {
+                const perpO = perpLeft(norm(chordOI));
+                const bulgeO = 0.34 * chordLenO;
+                const cPlus = add(midOI, mul(perpO, bulgeO));
+                const cMinus = sub(midOI, mul(perpO, bulgeO));
+                return dist(cPlus, node.p) >= dist(cMinus, node.p) ? cPlus : cMinus;
+              })()
+            : midOI;
         const outerArc = sampleQuadraticOffset(
           outerCorner,
           outerCtl,
@@ -1982,22 +2299,10 @@
           samples,
         );
 
-        const innerSteps = Math.max(6, Math.floor(samples * 0.45));
-        const midC = lerp(CsT, mergeCorner, 0.5);
-        const innerCtrl = add(
-          midC,
-          mul(
-            norm(sub(node.p, midC)),
-            Math.min(hwI, hwT, hwE) * 0.26,
-          ),
-        );
-        const innerArc = sampleQuadraticOffset(
-          CsT,
-          innerCtrl,
-          mergeCorner,
-          0,
-          innerSteps,
-        );
+        const tanAtMerge =
+          innerArc.length >= 2
+            ? norm(sub(mergeCorner, innerArc[innerArc.length - 2]))
+            : norm(sub(mergeCorner, CsT));
         const poly = [CnI, CnT, ...innerArc];
         if (dist(mergeCorner, outerCorner) > 0.4) poly.push(outerCorner);
         for (let i = 1; i < outerArc.length - 1; i++) poly.push(outerArc[i]);
@@ -2020,6 +2325,24 @@
           polygon: poly,
           outlineSegments,
           purpleRimOpenPaths,
+          /** Peel divider / ramp edge targets (shared with fork lane markings). */
+          forkMarkingGeom: {
+            Mi,
+            Mt,
+            Me,
+            tinI,
+            exo,
+            eSide,
+            outerCorner,
+            mergeCorner,
+            CsI,
+            CsT,
+            hwE,
+            /** Tangent of inner gore arc at exit mouth (1-lane gore edge direction). */
+            tangentExitGore: tanAtMerge,
+            /** Pavement inner gore (CsT→mergeCorner); peel marking reuses this polyline. */
+            innerArc: innerArc.slice(),
+          },
         };
       }
 
@@ -2380,8 +2703,10 @@
         const { nodeById, adjacency, safeEdges, hw } = clipCtx;
         const pieces = [];
         const markings = [];
+        const junctionIslandOnly = !!state.network.junctionIslandOnly;
 
         for (const edge of safeEdges) {
+          if (junctionIslandOnly) continue;
           const a = nodeById.get(edge.a);
           const b = nodeById.get(edge.b);
           if (!a || !b) continue;
@@ -2403,7 +2728,18 @@
             layoutE = scaleLayoutToRoadWidth(layoutE, wRoad);
           }
           const kf = resolvedProfileKeyframes(edge);
-          const prof = !edge.oneWay && kf && buildProfiledNetworkSpan(edge, start, end, hF);
+          const forkThruCtx = forkThruWideStraightContext(edge, clipCtx);
+          const prof =
+            !edge.oneWay &&
+            kf &&
+            buildProfiledNetworkSpan(
+              edge,
+              start,
+              end,
+              hF,
+              forkThruCtx,
+              clipCtx,
+            );
           let span;
           let spanMarkings;
           if (prof) {
@@ -2423,6 +2759,78 @@
               oneWayTo: { x: end.x, y: end.y },
             };
             spanMarkings = prof.markings;
+          } else if (!edge.oneWay && forkThruCtx) {
+            const nSeg = Math.max(14, (state.curveSegments | 0) + 8);
+            const fwd = vec(Math.cos(hF), Math.sin(hF));
+            const side = perpLeft(fwd);
+            const leftPts = [];
+            const rightPts = [];
+            let forkThruStraightPlaneD = null;
+            let forkThruStraightUsesHi = null;
+            for (let i = 0; i <= nSeg; i++) {
+              const u = i / nSeg;
+              const c = lerp(pS.c, pE.c, u);
+              const hw = wRoad * 0.5;
+              const { lo, hi } = forkThruBlendedOuterScalars(
+                u,
+                hw,
+                side,
+                forkThruCtx,
+              );
+              const pLoCand = add(c, mul(side, lo));
+              const pHiCand = add(c, mul(side, hi));
+              let pLo = pLoCand;
+              let pHi = pHiCand;
+              if (forkThruCtx) {
+                if (forkThruStraightPlaneD === null) {
+                  forkThruStraightUsesHi =
+                    dot(pHiCand, forkThruCtx.sideStraight) >=
+                    dot(pLoCand, forkThruCtx.sideStraight);
+                  forkThruStraightPlaneD = dot(
+                    forkThruStraightUsesHi ? pHiCand : pLoCand,
+                    forkThruCtx.sideStraight,
+                  );
+                }
+                if (forkThruStraightUsesHi) {
+                  const err =
+                    dot(pHiCand, forkThruCtx.sideStraight) -
+                    forkThruStraightPlaneD;
+                  pHi = sub(pHiCand, mul(forkThruCtx.sideStraight, err));
+                } else {
+                  const err =
+                    dot(pLoCand, forkThruCtx.sideStraight) -
+                    forkThruStraightPlaneD;
+                  pLo = sub(pLoCand, mul(forkThruCtx.sideStraight, err));
+                }
+              }
+              leftPts.push(pLo);
+              rightPts.push(pHi);
+            }
+            span = {
+              from: null,
+              to: null,
+              polygon: [...leftPts, ...rightPts.slice().reverse()],
+              left: { type: "linear", path: leftPts, debug: [] },
+              right: { type: "linear", path: rightPts, debug: [] },
+              center: [],
+              linear: true,
+              networkSpan: true,
+              profiledSpan: false,
+              edgeKey: edgeKey(edge.a, edge.b),
+              oneWayEdge: !!edge.oneWay,
+              oneWayFrom: { x: start.x, y: start.y },
+              oneWayTo: { x: end.x, y: end.y },
+            };
+            const divs = laneStripDividerOffsets(layoutE);
+            const midRef = lerp(pS.c, pE.c, 0.5);
+            const medIdx = medianDividerIndex(layoutE.length);
+            spanMarkings = divs.map((off, i) => ({
+              path: [offsetPoint(pS, off), offsetPoint(pE, off)],
+              type: "laneCenter",
+              laneLineKind: "interior",
+              laneLineRole: i === medIdx ? "median" : "lane",
+              interiorRef: midRef,
+            }));
           } else {
             span = buildLinearPiece(pS, pE);
             span.networkSpan = true;
@@ -2432,10 +2840,12 @@
             span.oneWayTo = { x: end.x, y: end.y };
             const divs = laneStripDividerOffsets(layoutE);
             const midRef = lerp(pS.c, pE.c, 0.5);
-            spanMarkings = divs.map((off) => ({
+            const medIdx = medianDividerIndex(layoutE.length);
+            spanMarkings = divs.map((off, i) => ({
               path: [offsetPoint(pS, off), offsetPoint(pE, off)],
               type: "laneCenter",
               laneLineKind: "interior",
+              laneLineRole: i === medIdx ? "median" : "lane",
               interiorRef: midRef,
             }));
           }
@@ -2446,6 +2856,12 @@
         for (const node of nodes) {
           const roads = adjacency.get(node.id);
           if (!roads || roads.length === 0) continue;
+          if (
+            junctionIslandOnly &&
+            (roads.length !== 3 ||
+              (node.junctionType || "default") !== "fork")
+          )
+            continue;
 
           if (roads.length === 1) {
             const road = roads[0];
@@ -2495,11 +2911,13 @@
             const samples = Math.max(4, state.curveSegments | 0);
             const bendLayout = getEdgeLaneLayout(roads[0].edge);
             const bendRef = node.p;
-            laneStripDividerOffsets(bendLayout).forEach((off) => {
+            const medB = medianDividerIndex(bendLayout.length);
+            laneStripDividerOffsets(bendLayout).forEach((off, i) => {
               markings.push({
                 path: sampleQuadraticOffset(mouthA, node.p, mouthB, off, samples),
                 type: "laneCenter",
                 laneLineKind: "interior",
+                laneLineRole: i === medB ? "median" : "lane",
                 interiorRef: bendRef,
               });
             });
@@ -3084,24 +3502,46 @@
               );
             } else if (m.type === "laneCenter") {
               const basePath = m.path;
-              drawPath(
-                basePath,
-                ARTICLE_LANE,
-                ARTICLE_LANE_WIDE,
-                false,
-                null,
-                0.86,
-                ARTICLE_LANE_DASH,
-              );
-              drawPath(
-                basePath,
-                ARTICLE_LANE,
-                ARTICLE_LANE_THIN,
-                false,
-                null,
-                0.9,
-                ARTICLE_LANE_DASH,
-              );
+              if (m.laneLineRole === "median") {
+                drawPath(
+                  basePath,
+                  ARTICLE_CENTER_LINE,
+                  1.55,
+                  false,
+                  null,
+                  0.96,
+                  null,
+                );
+              } else if (m.laneLineRole === "forkCarrySolid") {
+                drawPath(
+                  basePath,
+                  ARTICLE_LANE,
+                  1.48,
+                  false,
+                  null,
+                  0.94,
+                  null,
+                );
+              } else {
+                drawPath(
+                  basePath,
+                  ARTICLE_LANE,
+                  ARTICLE_LANE_WIDE,
+                  false,
+                  null,
+                  0.86,
+                  ARTICLE_LANE_DASH,
+                );
+                drawPath(
+                  basePath,
+                  ARTICLE_LANE,
+                  ARTICLE_LANE_THIN,
+                  false,
+                  null,
+                  0.9,
+                  ARTICLE_LANE_DASH,
+                );
+              }
             } else if (m.type === "yield" && m.path.length >= 2) {
               drawLine(
                 m.path[0],
@@ -3531,6 +3971,7 @@
             return o;
           }),
         };
+        if (state.network.junctionIslandOnly) data.junctionIslandOnly = true;
         networkJsonEl.value = JSON.stringify(data, null, 2);
       }
 
@@ -3600,6 +4041,9 @@
         }
         state.network.nodes = nodes;
         state.network.edges = edges;
+        if (data.junctionIslandOnly === true)
+          state.network.junctionIslandOnly = true;
+        else delete state.network.junctionIslandOnly;
         if (Array.isArray(data.laneLayers) && data.laneLayers.length > 0) {
           state.network.laneLayers = data.laneLayers.map((L) => ({
             w: Number(L.w ?? L.width),
@@ -3748,6 +4192,7 @@
         state.network.activeNodeId = null;
         state.network.selectedEdgeKey = null;
         state.network.selectedEdgeSplitPoint = null;
+        delete state.network.junctionIslandOnly;
         render();
       }
 
@@ -4090,7 +4535,7 @@
       state.view.x = window.innerWidth * 0.08;
       state.view.y = window.innerHeight * 0.08;
       resize();
-      applyNetworkPreset("lane_fork_3_2_1");
+      applyNetworkPreset("debug_fork_3_2_1_only");
     </script>
   </body>
 </html>
