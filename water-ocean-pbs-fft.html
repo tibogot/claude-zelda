@@ -1,0 +1,739 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Ocean PBS — FFT cascades + JONSWAP-style spectrum + buoyancy</title>
+  <style>
+    @import url("https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:wght@400;500;600&family=IBM+Plex+Mono:wght@400&display=swap");
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    html, body { width: 100%; height: 100%; overflow: hidden; background: #030810; }
+    canvas { display: block; width: 100%; height: 100%; }
+    #hud {
+      position: fixed; left: 12px; bottom: 12px; z-index: 5;
+      font: 11px/1.45 "IBM Plex Mono", ui-monospace, monospace;
+      color: rgba(200, 220, 255, 0.85); text-shadow: 0 1px 2px #000;
+      pointer-events: none;
+    }
+    #panel {
+      position: fixed; top: 12px; right: 12px; width: 280px; max-height: calc(100vh - 24px);
+      overflow-y: auto; z-index: 10;
+      font: 11px "IBM Plex Sans", system-ui, sans-serif;
+      color: #dbe7ff; background: rgba(6, 12, 24, 0.88); backdrop-filter: blur(14px);
+      border: 1px solid rgba(100, 160, 255, 0.15); border-radius: 10px; padding: 12px 14px;
+    }
+    #panel h1 { font-size: 11px; font-weight: 600; letter-spacing: 0.14em; text-transform: uppercase; color: #6ab0ff; margin-bottom: 10px; }
+    .row { margin-bottom: 8px; }
+    .row label { display: flex; justify-content: space-between; color: #8aa0c0; font-size: 10px; margin-bottom: 2px; }
+    .row label span { color: #9cf; font-weight: 500; }
+    .row input[type="range"] { width: 100%; height: 3px; accent-color: #5a9cff; }
+    .note { font-size: 9px; color: #6a7a94; line-height: 1.35; margin-top: 10px; padding-top: 8px; border-top: 1px solid rgba(100,160,255,0.1); }
+  </style>
+  <script type="importmap">
+    {
+      "imports": {
+        "three": "https://cdn.jsdelivr.net/npm/three@0.183.1/build/three.webgpu.js",
+        "three/webgpu": "https://cdn.jsdelivr.net/npm/three@0.183.1/build/three.webgpu.js",
+        "three/tsl": "https://cdn.jsdelivr.net/npm/three@0.183.1/build/three.tsl.js",
+        "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.183.1/examples/jsm/"
+      }
+    }
+  </script>
+</head>
+<body>
+  <div id="hud"></div>
+  <div id="panel">
+    <h1>Ocean PBS + FFT</h1>
+    <div class="row">
+      <label>Wind speed <span id="vWind">12</span> m/s</label>
+      <input type="range" id="wind" min="4" max="28" step="0.5" value="12" />
+    </div>
+    <div class="row">
+      <label>JONSWAP peak γ <span id="vGamma">3.3</span></label>
+      <input type="range" id="gamma" min="1" max="7" step="0.1" value="3.3" />
+    </div>
+    <div class="row">
+      <label>FFT swell scale <span id="vSwell">1.0</span></label>
+      <input type="range" id="swell" min="0" max="2" step="0.05" value="1" />
+    </div>
+    <div class="row">
+      <label>Ripple scale <span id="vRipple">1.0</span></label>
+      <input type="range" id="ripple" min="0" max="2" step="0.05" value="1" />
+    </div>
+    <div class="row">
+      <label>Gerstner swells <span id="vGerst">1.0</span></label>
+      <input type="range" id="gerst" min="0" max="2" step="0.05" value="1" />
+    </div>
+    <div class="row">
+      <label>Foam <span id="vFoam">1.0</span></label>
+      <input type="range" id="foam" min="0" max="2" step="0.05" value="1" />
+    </div>
+    <div class="row">
+      <label>Sun elevation <span id="vSun">38</span>°</label>
+      <input type="range" id="sunEl" min="-5" max="85" step="1" value="38" />
+    </div>
+    <div class="row">
+      <label>Exposure <span id="vExp">1.05</span></label>
+      <input type="range" id="exposure" min="0.4" max="1.8" step="0.02" value="1.05" />
+    </div>
+    <p class="note">
+      FFT 64² ×2 + Gerstner swells. <strong>Foam</strong> is three fragment layers (whitecaps + ambient + horizon / wake near the box) with hash noise so it does not band like vertex masks.
+      <strong>Buoy</strong>: height is sampled on the CPU with the same combinedHeight() as the waves (FFT + Gerstner) — it matches what the GPU draws but is not a GPU compute readback. Eight hull points + slope sampling drive bobbing, pitch, and roll.
+      No SSR in this demo; env reflections are IBL only.
+    </p>
+  </div>
+
+  <script type="module">
+    import * as THREE from "three/webgpu";
+    import {
+      Fn, uniform, vec2, vec3, float, color, sin, cos, mix, pow, normalize, dot, clamp, fract,
+      positionLocal, positionWorld, cameraPosition, length, max, min,
+      smoothstep, oneMinus, exp, texture,
+    } from "three/tsl";
+    import { OrbitControls } from "three/addons/controls/OrbitControls.js";
+
+    const G = 9.81;
+    const TAU = Math.PI * 2;
+
+    /** In-place radix-2 Cooley–Tukey FFT on interleaved complex array (re, im pairs). n must be power of 2. */
+    function fft1d(a, n, inverse) {
+      let j = 0;
+      for (let i = 1; i < n; i++) {
+        let bit = n >>> 1;
+        for (; j & bit; bit >>>= 1) j ^= bit;
+        j ^= bit;
+        if (i < j) {
+          let ri = i << 1, rj = j << 1;
+          let tr = a[ri], ti = a[ri + 1];
+          a[ri] = a[rj]; a[ri + 1] = a[rj + 1];
+          a[rj] = tr; a[rj + 1] = ti;
+        }
+      }
+      for (let len = 2; len <= n; len <<= 1) {
+        const half = len >> 1;
+        const ang = (inverse ? 1 : -1) * TAU / len;
+        const wlenRe = Math.cos(ang);
+        const wlenIm = Math.sin(ang);
+        for (let i = 0; i < n; i += len) {
+          let wRe = 1, wIm = 0;
+          for (let j = 0; j < half; j++) {
+            const u = (i + j) << 1;
+            const v = (i + j + half) << 1;
+            const ur = a[u], ui = a[u + 1];
+            const vr = a[v], vi = a[v + 1];
+            const dr = vr * wRe - vi * wIm;
+            const di = vr * wIm + vi * wRe;
+            a[v] = ur - dr; a[v + 1] = ui - di;
+            a[u] = ur + dr; a[u + 1] = ui + di;
+            const nwRe = wRe * wlenRe - wIm * wlenIm;
+            wIm = wRe * wlenIm + wIm * wlenRe;
+            wRe = nwRe;
+          }
+        }
+      }
+      if (inverse) {
+        const inv = 1 / n;
+        for (let i = 0; i < n * 2; i++) a[i] *= inv;
+      }
+    }
+
+    function fft2d(heightFreq, w, h, inverse) {
+      const row = new Float32Array(w * 2);
+      for (let y = 0; y < h; y++) {
+        const off = y * w * 2;
+        row.set(heightFreq.subarray(off, off + w * 2));
+        fft1d(row, w, inverse);
+        heightFreq.set(row, off);
+      }
+      const col = new Float32Array(h * 2);
+      for (let x = 0; x < w; x++) {
+        for (let y = 0; y < h; y++) {
+          const id = y * 2;
+          const src = (y * w + x) * 2;
+          col[id] = heightFreq[src];
+          col[id + 1] = heightFreq[src + 1];
+        }
+        fft1d(col, h, inverse);
+        for (let y = 0; y < h; y++) {
+          const dst = (y * w + x) * 2;
+          heightFreq[dst] = col[y * 2];
+          heightFreq[dst + 1] = col[y * 2 + 1];
+        }
+      }
+    }
+
+    function hash2(ix, iy, salt) {
+      const n = Math.sin(ix * 12.9898 + iy * 78.233 + salt * 43.758) * 43758.5453123;
+      return n - Math.floor(n);
+    }
+    function gauss2(ix, iy, salt) {
+      const u1 = Math.max(1e-7, hash2(ix, iy, salt));
+      const u2 = hash2(ix, iy, salt + 17.13);
+      const mag = Math.sqrt(-2 * Math.log(u1));
+      const ang = TAU * u2;
+      return { re: mag * Math.cos(ang), im: mag * Math.sin(ang) };
+    }
+
+    /** JONSWAP-style peak factor on angular frequency ω (rad/s). */
+    function jonswapPeak(omega, omegaP, gamma) {
+      const sigma = omega <= omegaP ? 0.07 : 0.09;
+      const d = omega - omegaP;
+      const r = Math.exp(-(d * d) / (2 * sigma * sigma * omegaP * omegaP + 1e-7));
+      return Math.pow(gamma, r);
+    }
+
+    /** Directional Phillips base × JONSWAP peak (deep water). */
+    function directionalSpectrum(kx, kz, V, windTheta, A, gamma) {
+      const k = Math.hypot(kx, kz);
+      if (k < 1e-5) return 0;
+      const L = (V * V) / G;
+      const k2 = k * k;
+      const k4 = Math.max(k2 * k2, 1e-12);
+      const expTerm = Math.exp(-1 / (k2 * L * L + 1e-8));
+      const wnx = Math.cos(windTheta), wnz = Math.sin(windTheta);
+      const knx = kx / k, knz = kz / k;
+      const dot = knx * wnx + knz * wnz;
+      const dir = Math.max(0, dot);
+      const phillips = (A * expTerm / k4) * (dir * dir);
+      const l = 0.0008;
+      const cutoff = Math.exp(-k2 * l * l);
+      const omega = Math.sqrt(G * k);
+      const omegaP = 0.88 * G / Math.max(V, 0.5);
+      const jp = jonswapPeak(omega, omegaP, gamma);
+      return Math.max(0, phillips * jp * cutoff);
+    }
+
+    class FFTOceanCascade {
+      /**
+       * @param {number} N power-of-two grid
+       * @param {number} tileSize world meters per tile period
+       */
+      constructor(N, tileSize, windSpeed, windDir, gamma, spectrumAmp) {
+        this.N = N;
+        this.tileSize = tileSize;
+        this.dk = TAU / tileSize;
+        this.windSpeed = windSpeed;
+        this.windDir = windDir;
+        this.gamma = gamma;
+        this.spectrumAmp = spectrumAmp;
+        this.N2 = N * N;
+        this.h0 = new Float32Array(this.N2 * 4);
+        this.htilde = new Float32Array(this.N2 * 2);
+        this.initH0();
+      }
+
+      kCoords(ix, iy) {
+        const n = this.N;
+        const nx = ix - n / 2;
+        const nz = iy - n / 2;
+        return { kx: nx * this.dk, kz: nz * this.dk };
+      }
+
+      initH0() {
+        const n = this.N;
+        for (let iy = 0; iy < n; iy++) {
+          for (let ix = 0; ix < n; ix++) {
+            const i = iy * n + ix;
+            const mx = (n - ix) % n;
+            const my = (n - iy) % n;
+            const j = my * n + mx;
+            if (j < i) continue;
+            const { kx, kz } = this.kCoords(ix, iy);
+            const P = directionalSpectrum(kx, kz, this.windSpeed, this.windDir, this.spectrumAmp, this.gamma);
+            const scale = Math.sqrt(P / 2 + 1e-12);
+            if (i === j) {
+              const g = gauss2(ix, iy, 1.23);
+              this.h0[i * 4 + 0] = g.re * scale;
+              this.h0[i * 4 + 1] = 0;
+              this.h0[i * 4 + 2] = 0;
+              this.h0[i * 4 + 3] = 0;
+              continue;
+            }
+            const g = gauss2(ix, iy, 1.23);
+            const h0re = g.re * scale;
+            const h0im = g.im * scale;
+            this.h0[i * 4 + 0] = h0re;
+            this.h0[i * 4 + 1] = h0im;
+            this.h0[i * 4 + 2] = 0;
+            this.h0[i * 4 + 3] = 0;
+            this.h0[j * 4 + 0] = h0re;
+            this.h0[j * 4 + 1] = -h0im;
+            this.h0[j * 4 + 2] = 0;
+            this.h0[j * 4 + 3] = 0;
+          }
+        }
+      }
+
+      /** @param {number} t time seconds */
+      buildHeightField(t) {
+        const n = this.N;
+        for (let iy = 0; iy < n; iy++) {
+          for (let ix = 0; ix < n; ix++) {
+            const i = iy * n + ix;
+            const { kx, kz } = this.kCoords(ix, iy);
+            const k = Math.hypot(kx, kz);
+            const w = Math.sqrt(G * k + 1e-8);
+            const h0r = this.h0[i * 4 + 0];
+            const h0i = this.h0[i * 4 + 1];
+            const c = Math.cos(w * t);
+            const s = Math.sin(w * t);
+            const re = 2 * (h0r * c - h0i * s);
+            this.htilde[i * 2 + 0] = re;
+            this.htilde[i * 2 + 1] = 0;
+          }
+        }
+        fft2d(this.htilde, n, n, true);
+      }
+
+      /** Real height at vertex grid index after buildHeightField */
+      heightAtIndex(ix, iy) {
+        const n = this.N;
+        const i = ((iy + n) % n) * n + ((ix + n) % n);
+        return this.htilde[i * 2 + 0];
+      }
+
+      /** Bilinear world XZ (meters), toroidal tile */
+      sampleBilinear(wx, wz) {
+        const n = this.N;
+        const fx = ((wx % this.tileSize) + this.tileSize) / this.tileSize * n;
+        const fz = ((wz % this.tileSize) + this.tileSize) / this.tileSize * n;
+        const x0 = Math.floor(fx) % n;
+        const z0 = Math.floor(fz) % n;
+        const x1 = (x0 + 1) % n;
+        const z1 = (z0 + 1) % n;
+        const tx = fx - Math.floor(fx);
+        const tz = fz - Math.floor(fz);
+        const h00 = this.heightAtIndex(x0, z0);
+        const h10 = this.heightAtIndex(x1, z0);
+        const h01 = this.heightAtIndex(x0, z1);
+        const h11 = this.heightAtIndex(x1, z1);
+        const a = h00 * (1 - tx) + h10 * tx;
+        const b = h01 * (1 - tx) + h11 * tx;
+        return a * (1 - tz) + b * tz;
+      }
+    }
+
+    function gerstnerCpu(px, pz, t, dir, steep, wavelength, amp, spd) {
+      const k = TAU / wavelength;
+      const c = Math.sqrt(G / k);
+      const dx = Math.cos(dir), dz = Math.sin(dir);
+      const f = k * (dx * px + dz * pz) - c * k * t * spd;
+      const s = steep / k;
+      return {
+        y: s * Math.sin(f) * amp,
+        dx: s * dx * Math.cos(f) * amp,
+        dz: s * dz * Math.cos(f) * amp,
+      };
+    }
+
+    function combinedHeight(wx, wz, t, swell, ripple, gerst, cascLo, cascHi) {
+      let y = cascLo.sampleBilinear(wx, wz) * swell + cascHi.sampleBilinear(wx, wz) * ripple;
+      const g1 = gerstnerCpu(wx, wz, t, Math.atan2(0.38, 0.92), 0.45, 22, 0.35 * gerst, 0.85);
+      const g2 = gerstnerCpu(wx, wz, t, Math.atan2(0.92, -0.35), 0.32, 14, 0.22 * gerst * 0.65, 0.9);
+      const g3 = gerstnerCpu(wx, wz, t, Math.atan2(-0.55, 0.8), 0.28, 9, 0.14 * gerst * 0.4, 1.0);
+      y += g1.y + g2.y + g3.y;
+      return y;
+    }
+
+    const N = 64;
+    let cascLo = new FFTOceanCascade(N, 48, 12, 0.4, 3.3, 0.00045);
+    let cascHi = new FFTOceanCascade(N, 6, 8, 0.55, 2.2, 1.2e-5);
+
+    const uSwell = uniform(1);
+    const uRipple = uniform(1);
+    const uGerst = uniform(1);
+    const uFoam = uniform(1);
+    const uWaterLevel = uniform(0);
+    const uTileLo = uniform(48);
+    const uTileHi = uniform(6);
+    const uTime = uniform(0);
+
+    const heightTexLo = new THREE.DataTexture(new Float32Array(N * N), N, N, THREE.RedFormat, THREE.FloatType);
+    heightTexLo.wrapS = heightTexLo.wrapT = THREE.RepeatWrapping;
+    heightTexLo.magFilter = heightTexLo.minFilter = THREE.LinearFilter;
+    heightTexLo.needsUpdate = true;
+
+    const heightTexHi = new THREE.DataTexture(new Float32Array(N * N), N, N, THREE.RedFormat, THREE.FloatType);
+    heightTexHi.wrapS = heightTexHi.wrapT = THREE.RepeatWrapping;
+    heightTexHi.magFilter = heightTexHi.minFilter = THREE.LinearFilter;
+    heightTexHi.needsUpdate = true;
+
+    const uSunDir = uniform(new THREE.Vector3(0.35, 0.75, 0.55).normalize());
+    const uSunCol = uniform(new THREE.Color(0xfff3dd));
+    const uExpo = uniform(1.05);
+
+    const gerstnerWave = Fn(([pos, dirX, dirY, steepness, wavelength, spd, ampK]) => {
+      const k = float(6.283185).div(wavelength);
+      const c = float(9.81).div(k).sqrt();
+      const dir = normalize(vec2(dirX, dirY));
+      const f = k.mul(dir.dot(vec2(pos.x, pos.z))).sub(c.mul(k).mul(uTime.mul(spd)));
+      const s = steepness.div(k).mul(ampK);
+      const sy = s.mul(sin(f));
+      const sx = s.mul(dir.x).mul(cos(f));
+      const sz = s.mul(dir.y).mul(cos(f));
+      return vec3(sx, sy, sz);
+    });
+
+    const oceanHeightY = Fn(() => {
+      const p = positionLocal;
+      const uvLo = vec2(p.x, p.z).div(uTileLo);
+      const uvHi = vec2(p.x, p.z).div(uTileHi);
+      const hLo = texture(heightTexLo, uvLo).r.mul(uSwell);
+      const hHi = texture(heightTexHi, uvHi).r.mul(uRipple);
+      const g1 = gerstnerWave(p, float(0.92), float(0.38), float(0.45), float(22), float(0.85), uGerst);
+      const g2 = gerstnerWave(p, float(-0.35), float(0.92), float(0.32), float(14), float(0.9), uGerst.mul(0.65));
+      const g3 = gerstnerWave(p, float(0.8), float(-0.55), float(0.28), float(9), float(1.0), uGerst.mul(0.4));
+      return hLo.add(hHi).add(g1.y).add(g2.y).add(g3.y);
+    });
+
+    const displace = Fn(() => {
+      const p = positionLocal;
+      const hy = oceanHeightY();
+      const g1 = gerstnerWave(p, float(0.92), float(0.38), float(0.45), float(22), float(0.85), uGerst);
+      const g2 = gerstnerWave(p, float(-0.35), float(0.92), float(0.32), float(14), float(0.9), uGerst.mul(0.65));
+      const g3 = gerstnerWave(p, float(0.8), float(-0.55), float(0.28), float(9), float(1.0), uGerst.mul(0.4));
+      return vec3(
+        p.x.add(g1.x).add(g2.x).add(g3.x),
+        p.y.add(hy),
+        p.z.add(g1.z).add(g2.z).add(g3.z)
+      );
+    });
+
+    const uBuoyXZ = uniform(new THREE.Vector2(-4, 2));
+
+    /** Sub-pixel jitter for height samples — breaks moiré with mesh / FFT grid. */
+    const uvJitter = Fn(([px, pz]) => {
+      const jx = fract(sin(pz.mul(19.13))).mul(0.11).sub(0.055);
+      const jz = fract(cos(px.mul(17.91))).mul(0.11).sub(0.055);
+      return vec2(px, pz).add(vec2(jx, jz));
+    });
+
+    const eNorm = float(0.392);
+    const oceanNormal = Fn(() => {
+      const p = positionLocal;
+      const pj = uvJitter(p.x, p.z);
+      const px = pj.x;
+      const pz = pj.y;
+      const hL = texture(heightTexLo, vec2(px.sub(eNorm), pz).div(uTileLo)).r.mul(uSwell)
+        .add(texture(heightTexHi, vec2(px.sub(eNorm), pz).div(uTileHi)).r.mul(uRipple));
+      const hR = texture(heightTexLo, vec2(px.add(eNorm), pz).div(uTileLo)).r.mul(uSwell)
+        .add(texture(heightTexHi, vec2(px.add(eNorm), pz).div(uTileHi)).r.mul(uRipple));
+      const hD = texture(heightTexLo, vec2(px, pz.sub(eNorm)).div(uTileLo)).r.mul(uSwell)
+        .add(texture(heightTexHi, vec2(px, pz.sub(eNorm)).div(uTileHi)).r.mul(uRipple));
+      const hU = texture(heightTexLo, vec2(px, pz.add(eNorm)).div(uTileLo)).r.mul(uSwell)
+        .add(texture(heightTexHi, vec2(px, pz.add(eNorm)).div(uTileHi)).r.mul(uRipple));
+      const baseN = normalize(vec3(hL.sub(hR), float(2).mul(eNorm), hD.sub(hU)));
+      const micro = float(0.055);
+      const mx = sin(px.mul(3.15)).mul(cos(pz.mul(2.75))).mul(micro);
+      const mz = cos(px.mul(2.35)).mul(sin(pz.mul(3.05))).mul(micro);
+      const hf = sin(px.mul(52)).mul(cos(pz.mul(48.7))).mul(float(0.014));
+      return normalize(baseN.add(vec3(mx.add(hf), float(0), mz.sub(hf.mul(0.6)))));
+    });
+
+    /** Albedo from per-pixel height (no vertex stripes). */
+    const oceanColor = Fn(() => {
+      const h = clamp(oceanHeightY().mul(float(0.2)).add(float(0.48)), float(0), float(1));
+      return mix(color(0x051c2d), color(0x1f7aab), h);
+    });
+
+    /**
+     * Fragment-space foam (avoids grid-aligned vertex bands).
+     * Layers: whitecaps (slope + noise), ambient sparkle, optional wake near buoy box.
+     */
+    const oceanEmissive = Fn(() => {
+      const pj = uvJitter(positionLocal.x, positionLocal.z);
+      const px = pj.x;
+      const pz = pj.y;
+      const e = float(0.23).add(fract(sin(px.mul(31.7))).mul(0.06));
+      const c = texture(heightTexLo, vec2(px, pz).div(uTileLo)).r.mul(uSwell)
+        .add(texture(heightTexHi, vec2(px, pz).div(uTileHi)).r.mul(uRipple));
+      const hx = texture(heightTexLo, vec2(px.add(e), pz).div(uTileLo)).r.mul(uSwell)
+        .add(texture(heightTexHi, vec2(px.add(e), pz).div(uTileHi)).r.mul(uRipple)).sub(c);
+      const hz = texture(heightTexLo, vec2(px, pz.add(e)).div(uTileLo)).r.mul(uSwell)
+        .add(texture(heightTexHi, vec2(px, pz.add(e)).div(uTileHi)).r.mul(uRipple)).sub(c);
+      const slopeSq = hx.mul(hx).add(hz.mul(hz));
+      const hf = oceanHeightY();
+      const nHash = fract(sin(dot(vec2(px, pz), vec2(127.1, 311.7))).mul(43758.5453123));
+      const nMix = float(0.45).add(nHash.mul(0.55));
+
+      const whitecap = smoothstep(float(0.006), float(0.028), slopeSq).mul(nMix).mul(float(0.42));
+      const crest = smoothstep(float(0.08), float(0.58), hf).mul(float(0.28)).mul(float(0.5).add(nHash.mul(0.5)));
+
+      const ambUV = vec2(px, pz).mul(float(0.065)).add(vec2(uTime.mul(0.03), uTime.mul(0.021)));
+      const ambN = sin(ambUV.x.mul(2.1)).mul(sin(ambUV.y.mul(1.9))).mul(float(0.5)).add(float(0.5));
+      const ambientFoam = smoothstep(float(0.58), float(0.82), ambN).mul(float(0.1));
+
+      const r = length(vec2(px, pz));
+      const horizonFoam = smoothstep(float(92), float(128), r).mul(float(0.08));
+
+      const dBuoy = length(vec2(px, pz).sub(uBuoyXZ));
+      const wakeFoam = smoothstep(float(16), float(3.2), dBuoy).mul(float(0.14));
+
+      const foamRaw = whitecap.add(crest).add(ambientFoam).add(horizonFoam).add(wakeFoam);
+      const foamAmt = min(float(1), foamRaw.mul(uFoam).mul(float(0.55)));
+      const foamTint = mix(vec3(0.72, 0.86, 0.94), vec3(0.94, 0.97, 1), foamAmt);
+      const foamEm = foamTint.mul(foamAmt).mul(float(0.38));
+
+      const Nw = normalize(oceanNormal());
+      const viewDir = normalize(cameraPosition.sub(positionWorld));
+      const ndv = max(dot(Nw, viewDir), float(0));
+      const spec = pow(max(dot(normalize(uSunDir.normalize().add(viewDir)), Nw), float(0)), float(42)).mul(float(1.35));
+      const specCol = vec3(1.0, 0.96, 0.9).mul(spec);
+      const fres = pow(oneMinus(ndv), float(3.4)).mul(float(0.42));
+      const skyGlint = vec3(0.4, 0.64, 1.0).mul(fres);
+      return foamEm.add(specCol).add(skyGlint);
+    });
+
+    async function main() {
+      const hud = document.getElementById("hud");
+      const scene = new THREE.Scene();
+      scene.background = new THREE.Color(0x040d18);
+
+      const camera = new THREE.PerspectiveCamera(55, innerWidth / innerHeight, 0.1, 4000);
+      camera.position.set(18, 9, 22);
+
+      const renderer = new THREE.WebGPURenderer({ antialias: true });
+      renderer.setSize(innerWidth, innerHeight);
+      renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
+      renderer.toneMapping = THREE.ACESFilmicToneMapping;
+      renderer.toneMappingExposure = 1.05;
+      document.body.appendChild(renderer.domElement);
+      await renderer.init();
+
+      const controls = new OrbitControls(camera, renderer.domElement);
+      controls.target.set(0, 0.5, 0);
+      controls.enableDamping = true;
+      controls.maxPolarAngle = Math.PI * 0.499;
+
+      const waterGeo = new THREE.PlaneGeometry(220, 220, 320, 320);
+      waterGeo.rotateX(-Math.PI / 2);
+
+      const waterMat = new THREE.MeshStandardNodeMaterial();
+      waterMat.roughnessNode = float(0.12);
+      waterMat.metalnessNode = float(0.04);
+      waterMat.envMapIntensity = 0.58;
+      waterMat.side = THREE.DoubleSide;
+      waterMat.positionNode = displace();
+      waterMat.normalNode = oceanNormal();
+      waterMat.colorNode = oceanColor();
+      waterMat.emissiveNode = oceanEmissive();
+
+      const water = new THREE.Mesh(waterGeo, waterMat);
+      water.position.y = uWaterLevel.value;
+      scene.add(water);
+
+      const skyGeo = new THREE.SphereGeometry(2500, 48, 48);
+      const skyMat = new THREE.MeshBasicNodeMaterial({ side: THREE.BackSide });
+      skyMat.colorNode = Fn(() => {
+        const dir = normalize(vec3(positionWorld.x, positionWorld.y, positionWorld.z));
+        const y = dir.y;
+        const zen = smoothstep(float(-0.2), float(0.35), y);
+        const hor = smoothstep(float(0.02), float(-0.05), y);
+        let c = mix(color(0x050a18), color(0x1a4a7a), zen);
+        c = mix(color(0x8ab0d8), c, hor);
+        const sunDot = max(float(0), dir.dot(uSunDir.normalize()));
+        const sunDisk = smoothstep(float(0.99955), float(0.99985), sunDot);
+        c = mix(c, uSunCol, sunDisk.mul(1.8));
+        const glow = pow(sunDot, float(48)).mul(0.35);
+        c = c.add(uSunCol.mul(glow));
+        const aerial = exp(dir.y.mul(float(-2.2)).mul(float(0.35)));
+        return vec3(c.r, c.g, c.b).mul(mix(float(0.85), float(1), aerial));
+      })();
+      scene.add(new THREE.Mesh(skyGeo, skyMat));
+
+      const sunLight = new THREE.DirectionalLight(0xfff4e0, 3.2);
+      scene.add(sunLight);
+
+      const amb = new THREE.HemisphereLight(0x8ab4d8, 0x0a1420, 0.72);
+      scene.add(amb);
+
+      const floorGeo = new THREE.PlaneGeometry(400, 400, 120, 120);
+      floorGeo.rotateX(-Math.PI / 2);
+      const floorMat = new THREE.MeshStandardNodeMaterial({ color: 0x3d3428, roughness: 0.92, metalness: 0 });
+      floorMat.positionNode = Fn(() => {
+        const p = positionLocal;
+        const n = sin(p.x.mul(0.08)).mul(cos(p.z.mul(0.07))).mul(0.35);
+        return vec3(p.x, p.y.add(n), p.z);
+      })();
+      floorMat.colorNode = Fn(() => {
+        const sand = vec3(0.32, 0.28, 0.2);
+        const w = vec2(positionWorld.x.mul(0.15), positionWorld.z.mul(0.15)).add(uTime.mul(0.08));
+        const c1 = sin(w.x.mul(3.1)).mul(sin(w.y.mul(2.7))).mul(0.04).add(1);
+        const ca = sin(positionWorld.x.mul(0.42)).add(sin(positionWorld.z.mul(0.38))).add(uTime.mul(1.1));
+        const caust = pow(max(float(0), ca.mul(0.5).add(0.5)), float(10)).mul(0.22);
+        return sand.mul(c1).add(vec3(0.25, 0.32, 0.38).mul(caust));
+      })();
+      const floor = new THREE.Mesh(floorGeo, floorMat);
+      floor.position.y = -12;
+      scene.add(floor);
+
+      const pmrem = new THREE.PMREMGenerator(renderer);
+      const envScene = new THREE.Scene();
+      const envBall = new THREE.Mesh(
+        new THREE.SphereGeometry(120, 32, 32),
+        new THREE.MeshStandardMaterial({ color: 0x355a78, roughness: 0.72, metalness: 0.04 })
+      );
+      envScene.add(envBall);
+      const envRT = pmrem.fromScene(envScene, 0);
+      scene.environment = envRT.texture;
+
+      const buoyGeo = new THREE.BoxGeometry(2.2, 0.55, 3.2);
+      const buoyMat = new THREE.MeshStandardMaterial({ color: 0xc45a2a, roughness: 0.45, metalness: 0.15 });
+      const buoy = new THREE.Mesh(buoyGeo, buoyMat);
+      buoy.position.set(-4, 0.8, 2);
+      scene.add(buoy);
+
+      const buoyVel = new THREE.Vector3();
+      const buoyHalf = new THREE.Vector3(1.1, 0.275, 1.6);
+      const corners = [
+        new THREE.Vector3(1, 1, 1), new THREE.Vector3(1, 1, -1), new THREE.Vector3(1, -1, 1), new THREE.Vector3(1, -1, -1),
+        new THREE.Vector3(-1, 1, 1), new THREE.Vector3(-1, 1, -1), new THREE.Vector3(-1, -1, 1), new THREE.Vector3(-1, -1, -1),
+      ];
+
+      function panelBind() {
+        const wind = +document.getElementById("wind").value;
+        const gamma = +document.getElementById("gamma").value;
+        document.getElementById("vWind").textContent = wind.toFixed(1);
+        document.getElementById("vGamma").textContent = gamma.toFixed(1);
+        document.getElementById("vSwell").textContent = (+document.getElementById("swell").value).toFixed(2);
+        document.getElementById("vRipple").textContent = (+document.getElementById("ripple").value).toFixed(2);
+        document.getElementById("vGerst").textContent = (+document.getElementById("gerst").value).toFixed(2);
+        document.getElementById("vFoam").textContent = (+document.getElementById("foam").value).toFixed(2);
+        document.getElementById("vSun").textContent = document.getElementById("sunEl").value;
+        document.getElementById("vExp").textContent = (+document.getElementById("exposure").value).toFixed(2);
+        uSwell.value = +document.getElementById("swell").value;
+        uRipple.value = +document.getElementById("ripple").value;
+        uGerst.value = +document.getElementById("gerst").value;
+        uFoam.value = +document.getElementById("foam").value;
+        uExpo.value = +document.getElementById("exposure").value;
+        renderer.toneMappingExposure = uExpo.value;
+
+        const el = THREE.MathUtils.degToRad(+document.getElementById("sunEl").value);
+        const dir = new THREE.Vector3(Math.cos(el), Math.sin(el), 0.35).normalize();
+        uSunDir.value.copy(dir);
+        sunLight.position.copy(dir).multiplyScalar(120);
+
+        cascLo.windSpeed = wind;
+        cascLo.gamma = gamma;
+        cascHi.windSpeed = Math.max(4, wind * 0.65);
+        cascHi.gamma = Math.max(1.2, gamma * 0.75);
+        cascLo.initH0();
+        cascHi.initH0();
+      }
+      ["wind", "gamma", "swell", "ripple", "gerst", "foam", "sunEl", "exposure"].forEach((id) => {
+        document.getElementById(id).addEventListener("input", panelBind);
+      });
+      panelBind();
+
+      const clock = new THREE.Timer();
+      let frames = 0;
+      let lastFps = performance.now();
+
+      function uploadHeights(casc, tex) {
+        const data = tex.image.data;
+        const n = casc.N;
+        for (let iy = 0; iy < n; iy++) {
+          for (let ix = 0; ix < n; ix++) {
+            data[iy * n + ix] = casc.heightAtIndex(ix, iy);
+          }
+        }
+        tex.needsUpdate = true;
+      }
+
+      renderer.setAnimationLoop((timestamp) => {
+        clock.update(timestamp);
+        const dt = Math.min(clock.getDelta(), 0.05);
+        const t = clock.getElapsed();
+        uTime.value = t;
+
+        cascLo.buildHeightField(t * 0.95);
+        cascHi.buildHeightField(t * 1.15);
+        uploadHeights(cascLo, heightTexLo);
+        uploadHeights(cascHi, heightTexHi);
+
+        const swell = uSwell.value;
+        const ripple = uRipple.value;
+        const gerst = uGerst.value;
+
+        let submerged = 0;
+        const wx = buoy.position.x;
+        const wz = buoy.position.z;
+        const bottomIdx = [2, 3, 6, 7];
+        let avgBottomWater = 0;
+        for (const i of bottomIdx) {
+          const lp = corners[i].clone().multiply(buoyHalf).applyMatrix4(buoy.matrixWorld);
+          avgBottomWater += combinedHeight(lp.x, lp.z, t, swell, ripple, gerst, cascLo, cascHi);
+        }
+        avgBottomWater /= bottomIdx.length;
+        const freeboard = 0.18;
+        const targetY = avgBottomWater + buoyHalf.y + freeboard;
+
+        const maxSubPerCorner = 0.32;
+        for (let i = 0; i < 8; i++) {
+          const lp = corners[i].clone().multiply(buoyHalf).applyMatrix4(buoy.matrixWorld);
+          const wh = combinedHeight(lp.x, lp.z, t, swell, ripple, gerst, cascLo, cascHi);
+          const raw = wh - lp.y;
+          submerged += Math.min(Math.max(0, raw), maxSubPerCorner);
+        }
+
+        const buoyancy = submerged * 1.05 * dt;
+        const gravity = -9.2 * dt;
+        buoyVel.y += gravity + buoyancy;
+        buoyVel.y += (targetY - buoy.position.y) * 1.35 * dt;
+        buoyVel.y -= buoyVel.y * 0.42 * dt;
+        buoyVel.y = THREE.MathUtils.clamp(buoyVel.y, -3.8, 3.8);
+        buoyVel.multiplyScalar(Math.exp(-1.95 * dt));
+        buoy.position.y += buoyVel.y * dt;
+
+        uBuoyXZ.value.set(buoy.position.x, buoy.position.z);
+
+        const du = 0.72;
+        const dhdx =
+          (combinedHeight(wx + du, wz, t, swell, ripple, gerst, cascLo, cascHi) -
+            combinedHeight(wx - du, wz, t, swell, ripple, gerst, cascLo, cascHi)) /
+          (2 * du);
+        const dhdz =
+          (combinedHeight(wx, wz + du, t, swell, ripple, gerst, cascLo, cascHi) -
+            combinedHeight(wx, wz - du, t, swell, ripple, gerst, cascLo, cascHi)) /
+          (2 * du);
+        const targetPitch = Math.atan2(-dhdx, 1);
+        const targetRoll = Math.atan2(dhdz, 1);
+        const maxTilt = 0.26;
+        buoy.rotation.x = THREE.MathUtils.clamp(
+          THREE.MathUtils.lerp(buoy.rotation.x, targetPitch, 0.065),
+          -maxTilt,
+          maxTilt
+        );
+        buoy.rotation.z = THREE.MathUtils.clamp(
+          THREE.MathUtils.lerp(buoy.rotation.z, targetRoll, 0.065),
+          -maxTilt,
+          maxTilt
+        );
+
+        controls.update();
+        renderer.render(scene, camera);
+
+        frames++;
+        const now = performance.now();
+        if (now - lastFps > 500) {
+          const fps = (frames * 1000) / (now - lastFps);
+          frames = 0;
+          lastFps = now;
+          hud.textContent = `FPS ${fps.toFixed(0)}  |  buoy: CPU height (matches GPU) · 8 pts + pitch/roll`;
+        }
+      });
+
+      addEventListener("resize", () => {
+        camera.aspect = innerWidth / innerHeight;
+        camera.updateProjectionMatrix();
+        renderer.setSize(innerWidth, innerHeight);
+      });
+    }
+
+    main().catch((e) => {
+      console.error(e);
+      document.getElementById("hud").textContent = "Init failed: " + e.message;
+    });
+  </script>
+</body>
+</html>
