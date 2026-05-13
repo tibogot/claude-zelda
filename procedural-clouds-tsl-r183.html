@@ -1,0 +1,460 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Procedural clouds — WebGPU + TSL (Three r183)</title>
+  <style>
+    body { margin: 0; overflow: hidden; font-family: system-ui, sans-serif; }
+    #info {
+      position: absolute; left: 0; right: 0; top: 8px; text-align: center;
+      color: #e8f0ff; text-shadow: 0 1px 2px #000; font-size: 13px; pointer-events: none; z-index: 10;
+    }
+  </style>
+  <script type="importmap">
+  {
+    "imports": {
+      "three": "https://cdn.jsdelivr.net/npm/three@0.183.1/build/three.webgpu.js",
+      "three/webgpu": "https://cdn.jsdelivr.net/npm/three@0.183.1/build/three.webgpu.js",
+      "three/tsl": "https://cdn.jsdelivr.net/npm/three@0.183.1/build/three.tsl.js",
+      "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.183.1/examples/jsm/"
+    }
+  }
+  </script>
+</head>
+<body>
+  <div id="info">
+    Same cloud math as <code>procedural-clouds-three-r183.html</code>: run <code>node scripts/gen-procedural-clouds-tsl-wgsl.mjs</code> after editing <code>_wgsl_body.txt</code>.<br />
+    <b>Compute</b> uses <code>WGSL_TSL_LIB</code> (noise + Voronoi + density write). <b>Fragment</b> uses <code>WGSL_TSL_FRAG_LIB</code> (uniforms + ray march + <code>textureLoad</code> only) so the GPU does not type-check unused WGSL in the fragment module.<br />
+    If the GPU rejects a shader, the console shows <code>[WGSL]</code> lines with source context. Three also compiles internal passes (e.g. <code>outputColorTransform</code>, ~1k WGSL). Your cloud material uses <code>material.name</code> as the shader label (<code>ProceduralCloudQuad</code> here): use <code>window.__PC_FRAGMENT_BY_NAME["ProceduralCloudQuad"]</code> or <code>window.__PC_MAIN_FRAGMENT_PROGRAM</code> (longest WGSL seen).<br />
+    Optional: add <code>?pcShaderLog=1</code> to the URL for per-compile fragment logs (<code>ProceduralCloudQuad</code> vs <code>outputColorTransform</code>).<br />
+  </div>
+  <script type="module">
+import * as THREE from "three/webgpu";
+import {
+  Fn,
+  wgsl,
+  wgslFn,
+  uniform,
+  vec4,
+  float,
+  uvec3,
+  uint,
+  texture3D,
+  textureStore,
+  storageTexture,
+  compute,
+  globalId,
+  attribute,
+  screenCoordinate,
+  NodeAccess,
+} from "three/tsl";
+import { OrbitControls } from "three/addons/controls/OrbitControls.js";
+import GUI from "three/addons/libs/lil-gui.module.min.js";
+import Stats from "three/addons/libs/stats.module.js";
+import { WGSL_TSL_LIB, WGSL_TSL_FRAG_LIB } from "./procedural-clouds-tsl-wgsl.mjs";
+
+/** Verbose fragment compile logs: URL ?pcShaderLog=1 or globalThis.__PC_LOG_FRAGMENT_SHADERS === true */
+const __PC_SHADER_VERBOSE =
+  (typeof location !== "undefined" && new URLSearchParams(location.search).has("pcShaderLog")) ||
+  (typeof globalThis !== "undefined" && globalThis.__PC_LOG_FRAGMENT_SHADERS === true);
+
+if (!navigator.gpu) {
+  document.body.innerHTML = "<p style=color:white;padding:2rem>WebGPU not supported.</p>";
+  throw new Error("WebGPU not supported");
+}
+
+THREE.Node.captureStackTrace = true;
+
+const wgslLibCompute = wgsl(WGSL_TSL_LIB);
+const wgslLibFrag = wgsl(WGSL_TSL_FRAG_LIB);
+
+const shadeFn = wgslFn(
+  `
+fn tsl_shade_entry(
+  fragCoord: vec4f,
+  uv: vec2f,
+  invCol0: vec4f,
+  invCol1: vec4f,
+  invCol2: vec4f,
+  invCol3: vec4f,
+  camPosPad: vec4f,
+  time_pack: vec4f,
+  alt_pack: vec4f,
+  scale_pack: vec4f,
+  extra_pack: vec4f,
+  cache_pack: vec4f,
+  bounds_pack: vec4f,
+  densityTex0: texture_3d<f32>,
+  densityTex1: texture_3d<f32>
+) -> vec4f {
+  var camera: PcCloudCamera;
+  camera.invViewProj = mat4x4f(invCol0, invCol1, invCol2, invCol3);
+  camera.position = camPosPad.xyz;
+  camera._pad = camPosPad.w;
+  var params: PcCloudParams;
+  params.time_pack = time_pack;
+  params.alt_pack = alt_pack;
+  params.scale_pack = scale_pack;
+  params.extra_pack = extra_pack;
+  params.cache_pack = cache_pack;
+  params.bounds_pack = bounds_pack;
+  return tsl_fragment_shade(fragCoord, uv, camera, params, densityTex0, densityTex1);
+}
+`,
+  [wgslLibFrag]
+);
+
+const computeDispatch = wgslFn(
+  `
+fn tsl_compute_entry(
+  gid: vec3u,
+  dims: vec3u,
+  time_pack: vec4<f32>,
+  alt_pack: vec4<f32>,
+  scale_pack: vec4<f32>,
+  extra_pack: vec4<f32>,
+  cache_pack: vec4<f32>,
+  bounds_pack: vec4<f32>,
+  densityStore: texture_storage_3d<rgba32float, write>
+) {
+  var params: PcCloudParams;
+  params.time_pack = time_pack;
+  params.alt_pack = alt_pack;
+  params.scale_pack = scale_pack;
+  params.extra_pack = extra_pack;
+  params.cache_pack = cache_pack;
+  params.bounds_pack = bounds_pack;
+  tsl_compute_write_density_cell(gid, dims, params, densityStore);
+}
+`,
+  [wgslLibCompute]
+);
+
+function makeStorage3D(res) {
+  const t = new THREE.Storage3DTexture(res, res, res);
+  // Full f32 volume so textureLoad + mix() stay in vec3<f32> without f16 promotion issues.
+  t.type = THREE.FloatType;
+  t.format = THREE.RGBAFormat;
+  t.name = "pc-density-" + res;
+  return t;
+}
+
+function buildParams(time, cacheBlend, p) {
+  const density = p.density;
+  const altitude = p.altitude;
+  const factorMacro = p.coverage;
+  const scale = p.scale;
+  const detail = p.detail;
+  return {
+    time_pack: new THREE.Vector4(time, time, time, density),
+    alt_pack: new THREE.Vector4(0.2, altitude, factorMacro, 1.0),
+    scale_pack: new THREE.Vector4(1.0, scale, scale, scale),
+    extra_pack: new THREE.Vector4(scale, detail, p.rayMarchSteps, p.skipLight ? 1.0 : 0.0),
+    cache_pack: new THREE.Vector4(cacheBlend, p.lightMarchSteps, p.shadowDarkness, p.sunIntensity),
+    bounds_pack: new THREE.Vector4(p.cloudHeight, 1, 0, 0),
+  };
+}
+
+const renderer = new THREE.WebGPURenderer({ antialias: true });
+renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, 2));
+renderer.setSize(window.innerWidth, window.innerHeight);
+document.body.appendChild(renderer.domElement);
+
+await renderer.init();
+
+/** Full GPU shader / pipeline diagnostics: Tint messages, line context, and last fragment WGSL Three emitted. */
+(function installPcWebGpuDiagnostics() {
+  const backend = renderer.backend;
+  const device = backend.device;
+  if (device.__pcDiag) return;
+  device.__pcDiag = true;
+
+  function printWgslContext(label, code, lineNum, linePos, message) {
+    const lines = code.split("\n");
+    const n = typeof lineNum === "number" && lineNum > 0 ? lineNum - 1 : 0;
+    console.warn(`[WGSL] ${label} @${lineNum}:${linePos} — ${message}`);
+    const lo = Math.max(0, n - 3);
+    const hi = Math.min(lines.length, n + 4);
+    for (let i = lo; i < hi; i++) {
+      const mark = i === n ? ">" : " ";
+      console.warn(`  ${mark} ${String(i + 1).padStart(4, " ")} | ${lines[i]}`);
+    }
+  }
+
+  const origShader = device.createShaderModule.bind(device);
+  device.createShaderModule = (descriptor) => {
+    const mod = origShader(descriptor);
+    const label = descriptor.label || "(no label)";
+    const code = typeof descriptor.code === "string" ? descriptor.code : "";
+    if (typeof mod.getCompilationInfo === "function") {
+      mod.getCompilationInfo().then((info) => {
+        let sawError = false;
+        if (label.includes("fragment") && info.messages?.length) {
+          console.warn("[PC] Tint messages for", label, info.messages);
+        }
+        for (const m of info.messages) {
+          if (m.type === "error" || m.type === "warning") {
+            if (m.type === "error") sawError = true;
+            printWgslContext(label, code, m.lineNum, m.linePos, `[${m.type}] ${m.message}`);
+          }
+        }
+        if (sawError) {
+          window.__PC_LAST_WGSL_COMPILE_ERROR = { label, messages: info.messages, codeLength: code.length };
+          console.error(
+            "[PC] WGSL compile error — inspect window.__PC_MAIN_FRAGMENT_PROGRAM (largest fragment) or window.__PC_FRAGMENT_BY_NAME[materialName]."
+          );
+        }
+      });
+    }
+    return mod;
+  };
+
+  const origCreateProgram = backend.createProgram.bind(backend);
+  backend.createProgram = (program) => {
+    if (program.stage === "fragment") {
+      const code = program.code;
+      const len = code?.length ?? 0;
+      const name = program.name || "(unnamed)";
+      window.__PC_FRAGMENT_BY_NAME = window.__PC_FRAGMENT_BY_NAME || {};
+      window.__PC_FRAGMENT_BY_NAME[name] = code;
+      window.__PC_LAST_FRAGMENT_PROGRAM = code;
+      window.__PC_LAST_FRAGMENT_META = { name, len };
+      const prevMain = window.__PC_MAIN_FRAGMENT_META;
+      if (!prevMain || len >= prevMain.len) {
+        window.__PC_MAIN_FRAGMENT_PROGRAM = code;
+        window.__PC_MAIN_FRAGMENT_META = { name, len };
+      }
+      if (__PC_SHADER_VERBOSE) {
+        console.info(
+          `[PC] Fragment WGSL ${JSON.stringify(name)} — ${len} chars → ` +
+            `__PC_FRAGMENT_BY_NAME[${JSON.stringify(name)}]; __PC_LAST_FRAGMENT_PROGRAM = latest; __PC_MAIN_FRAGMENT_PROGRAM = longest`
+        );
+      }
+    }
+    return origCreateProgram(program);
+  };
+
+  device.addEventListener?.("uncapturederror", (ev) => {
+    const err = ev.error;
+    console.error("[WebGPU uncaptured]", err && (err.message || err), err);
+  });
+})();
+
+const scene = new THREE.Scene();
+const camera = new THREE.PerspectiveCamera(45, window.innerWidth / window.innerHeight, 0.1, 100);
+camera.position.set(5, 2, 5);
+camera.lookAt(0, 0.5, 0);
+
+const controls = new OrbitControls(camera, renderer.domElement);
+controls.target.set(0, 0.5, 0);
+controls.enableDamping = true;
+controls.update();
+
+let densityRes = 96;
+let densityTex0 = makeStorage3D(densityRes);
+let densityTex1 = makeStorage3D(densityRes);
+
+const uInvCol0 = uniform(new THREE.Vector4());
+const uInvCol1 = uniform(new THREE.Vector4());
+const uInvCol2 = uniform(new THREE.Vector4());
+const uInvCol3 = uniform(new THREE.Vector4());
+const uCamPad = uniform(new THREE.Vector4());
+const uTimePack = uniform(new THREE.Vector4());
+const uAltPack = uniform(new THREE.Vector4());
+const uScalePack = uniform(new THREE.Vector4());
+const uExtraPack = uniform(new THREE.Vector4());
+const uCachePack = uniform(new THREE.Vector4());
+const uBoundsPack = uniform(new THREE.Vector4());
+
+const geo = new THREE.BufferGeometry();
+geo.setAttribute("position", new THREE.BufferAttribute(new Float32Array([-1, -1, 0, 3, -1, 0, -1, 3, 0]), 3));
+geo.setAttribute("uv", new THREE.BufferAttribute(new Float32Array([-1, -1, 3, -1, -1, 3]), 2));
+
+function buildShadeNode() {
+  return shadeFn({
+    fragCoord: vec4(screenCoordinate.x, screenCoordinate.y, float(0), float(1)),
+    uv: attribute("uv", "vec2"),
+    invCol0: uInvCol0,
+    invCol1: uInvCol1,
+    invCol2: uInvCol2,
+    invCol3: uInvCol3,
+    camPosPad: uCamPad,
+    time_pack: uTimePack,
+    alt_pack: uAltPack,
+    scale_pack: uScalePack,
+    extra_pack: uExtraPack,
+    cache_pack: uCachePack,
+    bounds_pack: uBoundsPack,
+    densityTex0: texture3D(densityTex0).setSampler(false),
+    densityTex1: texture3D(densityTex1).setSampler(false),
+  });
+}
+
+const material = new THREE.MeshBasicNodeMaterial();
+material.name = "ProceduralCloudQuad";
+material.colorNode = buildShadeNode();
+material.toneMapped = false;
+
+const quad = new THREE.Mesh(geo, material);
+quad.frustumCulled = false;
+scene.add(quad);
+
+const _viewProj = new THREE.Matrix4();
+const _invProjView = new THREE.Matrix4();
+
+function makeComputeNode(writeTex) {
+  const storeNode = storageTexture(writeTex).setAccess(NodeAccess.WRITE_ONLY);
+  return Fn(() => {
+    computeDispatch({
+      gid: globalId,
+      dims: uvec3(uint(densityRes), uint(densityRes), uint(densityRes)),
+      time_pack: uTimePack,
+      alt_pack: uAltPack,
+      scale_pack: uScalePack,
+      extra_pack: uExtraPack,
+      cache_pack: uCachePack,
+      bounds_pack: uBoundsPack,
+      densityStore: storeNode,
+    });
+  })()
+    .compute([densityRes, densityRes, densityRes], [8, 8, 4])
+    .setName("pc-density-cache");
+}
+
+let computeNodeA = makeComputeNode(densityTex0);
+let computeNodeB = makeComputeNode(densityTex1);
+
+function rebuildCompute() {
+  computeNodeA = makeComputeNode(densityTex0);
+  computeNodeB = makeComputeNode(densityTex1);
+}
+
+function refreshShadeNode() {
+  material.colorNode = buildShadeNode();
+}
+
+const params = {
+  density: 1.0,
+  coverage: 0.8,
+  scale: 3.75,
+  altitude: 0.5,
+  detail: 1.0,
+  windSpeed: 0.05,
+  skipLight: false,
+  rayMarchSteps: 48,
+  lightMarchSteps: 4,
+  shadowDarkness: 5,
+  sunIntensity: 17,
+  cloudHeight: 1.5,
+  cacheResolution: 96,
+  cacheUpdateRate: 2,
+  cacheSmooth: 0,
+};
+
+const gui = new GUI({ title: "Cloud (TSL + WGSL lib)" });
+gui.add(params, "density", 0.1, 4.0, 0.05);
+gui.add(params, "coverage", 0.0, 1.0, 0.01);
+gui.add(params, "scale", 0.2, 15.0, 0.05);
+gui.add(params, "altitude", 0.1, 1.0, 0.01);
+gui.add(params, "detail", 0.0, 15.0, 0.5);
+gui.add(params, "windSpeed", 0.0, 2.0, 0.05);
+gui.add(params, "skipLight").name("Skip Light March");
+gui.add(params, "rayMarchSteps", 16, 64, 1).name("Ray Steps");
+gui.add(params, "lightMarchSteps", 1, 8, 1).name("Light Steps");
+gui.add(params, "shadowDarkness", 0.5, 20.0, 0.1).name("Shadow Dark");
+gui.add(params, "sunIntensity", 0.5, 20.0, 0.1).name("Sun Intensity");
+gui.add(params, "cloudHeight", 0.5, 5.0, 0.1).name("Cloud Height");
+gui
+  .add(params, "cacheResolution", 32, 128, 1)
+  .name("Cache Res")
+  .onFinishChange((v) => {
+    const next = Math.max(32, Math.min(128, Math.round(v)));
+    params.cacheResolution = next;
+    densityRes = next;
+    densityTex0.dispose();
+    densityTex1.dispose();
+    densityTex0 = makeStorage3D(densityRes);
+    densityTex1 = makeStorage3D(densityRes);
+    refreshShadeNode();
+    rebuildCompute();
+  });
+gui.add(params, "cacheUpdateRate", 1, 4, 1).name("Cache Update");
+gui.add(params, "cacheSmooth", 0.0, 0.95, 0.01).name("Cache Smooth");
+
+const stats = new Stats();
+stats.showPanel(0);
+document.body.appendChild(stats.dom);
+
+const startTime = performance.now();
+let frameIndex = 0;
+let cacheIndex = 0;
+let prevCacheTime = 0.0;
+let nextCacheTime = 0.0;
+
+function onResize() {
+  const w = window.innerWidth;
+  const h = window.innerHeight;
+  camera.aspect = w / Math.max(h, 1);
+  camera.updateProjectionMatrix();
+  renderer.setSize(w, h);
+}
+window.addEventListener("resize", onResize);
+
+try {
+  await renderer.compileAsync(scene, camera);
+  if (__PC_SHADER_VERBOSE) console.info("[PC] compileAsync done.");
+} catch (e) {
+  console.error("[PC] compileAsync threw:", e);
+}
+
+renderer.setAnimationLoop(() => {
+  stats.begin();
+  frameIndex++;
+
+  const elapsed = (performance.now() - startTime) / 1000.0;
+  const windSpeed = params.windSpeed;
+
+  controls.update();
+  camera.updateMatrixWorld();
+
+  _viewProj.multiplyMatrices(camera.projectionMatrix, camera.matrixWorldInverse);
+  _invProjView.copy(_viewProj).invert();
+  const e = _invProjView.elements;
+  uInvCol0.value.set(e[0], e[1], e[2], e[3]);
+  uInvCol1.value.set(e[4], e[5], e[6], e[7]);
+  uInvCol2.value.set(e[8], e[9], e[10], e[11]);
+  uInvCol3.value.set(e[12], e[13], e[14], e[15]);
+  uCamPad.value.set(camera.position.x, camera.position.y, camera.position.z, 0);
+
+  const time = elapsed * windSpeed;
+  const blendDenom = Math.max(1e-5, nextCacheTime - prevCacheTime);
+  let linearBlend = Math.min(1.0, Math.max(0.0, (time - prevCacheTime) / blendDenom));
+  let cacheBlend = linearBlend;
+  if (params.cacheSmooth > 0.0) {
+    cacheBlend = Math.pow(linearBlend, 1.0 / (1.0 + params.cacheSmooth * 4.0));
+  }
+
+  const packs = buildParams(time, cacheBlend, params);
+  uTimePack.value.copy(packs.time_pack);
+  uAltPack.value.copy(packs.alt_pack);
+  uScalePack.value.copy(packs.scale_pack);
+  uExtraPack.value.copy(packs.extra_pack);
+  uCachePack.value.copy(packs.cache_pack);
+  uBoundsPack.value.copy(packs.bounds_pack);
+
+  if (frameIndex % params.cacheUpdateRate === 0) {
+    prevCacheTime = nextCacheTime;
+    nextCacheTime = time;
+    cacheIndex = 1 - cacheIndex;
+    const node = cacheIndex === 0 ? computeNodeA : computeNodeB;
+    renderer.compute(node);
+  }
+
+  renderer.render(scene, camera);
+  stats.end();
+});
+
+  </script>
+</body>
+</html>
