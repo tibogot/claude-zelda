@@ -3462,7 +3462,16 @@ function buildWorldTab(app) {
   const vc = ts.volumetricCloud;
   const _vcRegenVol = () => app.rebuildVolumetricCloudVolume();
   const _vcRegenMask = () => app.rebuildVolumetricCloudMasks();
-  _toggle(vcBody, vc, 'enabled', { label: 'Enabled' });
+  let vcOptEnToggle = null;
+  const vcClassicEnToggle = _toggle(vcBody, vc, 'enabled', {
+    label: 'Enabled',
+    onChange() {
+      if (vc.enabled && ts.volumetricCloudOptimized.enabled) {
+        ts.volumetricCloudOptimized.enabled = false;
+        vcOptEnToggle?.refresh?.();
+      }
+    },
+  });
 
   const vcGen = _section(vcBody, 'Texture generation (CPU regenerate)', false);
   _dropdown(vcGen, vc, 'textureSize', {
@@ -3545,6 +3554,118 @@ function buildWorldTab(app) {
   _slider(vcPost, vc, 'godRaysDensity', { label: 'God rays density', min: 0, max: 1, step: 0.01 });
   _slider(vcPost, vc, 'godRaysDecay', { label: 'God rays decay', min: 0.8, max: 1, step: 0.001 });
   _slider(vcPost, vc, 'godRaysWeight', { label: 'God rays weight', min: 0, max: 1, step: 0.01 });
+
+  // --- Volumetric clouds (optimized fork) — `volumetricCloudSystemv2.js`; independent tool state ---
+  const vcOptBody = _section(container, 'Volumetric clouds (optimized)', false);
+  const vcOpt = ts.volumetricCloudOptimized;
+  const _vcOptRegenVol = () => app.rebuildVolumetricCloudVolumeOptimized?.();
+  const _vcOptRegenMask = () => app.rebuildVolumetricCloudMasksOptimized?.();
+  vcOptEnToggle = _toggle(vcOptBody, vcOpt, 'enabled', {
+    label: 'Enabled',
+    onChange() {
+      if (vcOpt.enabled && ts.volumetricCloud.enabled) {
+        ts.volumetricCloud.enabled = false;
+        vcClassicEnToggle?.refresh?.();
+      }
+    },
+  });
+
+  const vcOptPerf = _section(vcOptBody, 'Performance (optimized path)', false);
+  _slider(vcOptPerf, vcOpt, 'cloudBufferScale', {
+    label: 'Beauty cloud RT scale',
+    min: 0.25,
+    max: 1,
+    step: 0.05,
+    onChange: () => app.resizeVolumetricCloudTargets?.(),
+  });
+  _slider(vcOptPerf, vcOpt, 'occlusionRaymarchSteps', {
+    label: 'Occlusion ray steps',
+    min: 4,
+    max: 32,
+    step: 1,
+  });
+
+  const vcOptGen = _section(vcOptBody, 'Texture generation (CPU regenerate)', false);
+  _dropdown(vcOptGen, vcOpt, 'textureSize', {
+    label: 'Texture resolution',
+    options: { '32': 32, '64': 64, '96': 96, '128': 128, '256': 256 },
+  });
+  _slider(vcOptGen, vcOpt, 'cloudCoverage', { label: 'Coverage / threshold', min: 0, max: 1, step: 0.01 });
+  _slider(vcOptGen, vcOpt, 'cloudSoftness', { label: 'Edge softness', min: 0, max: 0.5, step: 0.005 });
+  _slider(vcOptGen, vcOpt, 'noiseScale', { label: 'Scale (zoom)', min: 0.1, max: 20, step: 0.1 });
+  _slider(vcOptGen, vcOpt, 'octaves', { label: 'Octaves (detail)', min: 1, max: 8, step: 1 });
+  _slider(vcOptGen, vcOpt, 'persistence', { label: 'Persistence', min: 0.1, max: 1, step: 0.01 });
+  _slider(vcOptGen, vcOpt, 'lacunarity', { label: 'Lacunarity', min: 1.1, max: 4, step: 0.1 });
+  _slider(vcOptGen, vcOpt, 'noiseIntensity', { label: 'Noise intensity', min: 0.1, max: 5, step: 0.05 });
+  _slider(vcOptGen, vcOpt, 'seed', { label: 'Seed', min: 0, max: 1000, step: 0.01 });
+  const vcOptGenBtns = document.createElement('div');
+  vcOptGenBtns.style.padding = '4px 0';
+  vcOptGen.appendChild(vcOptGenBtns);
+  _button(vcOptGenBtns, { title: '▶ Generate new 3D texture', onClick: _vcOptRegenVol });
+
+  const vcOptShape = _section(vcOptBody, 'Cloud shape (real-time)', false);
+  _slider(vcOptShape, vcOpt, 'textureTiling', { label: 'Tiling', min: 1, max: 10, step: 1 });
+
+  const vcOptMat = _section(vcOptBody, 'Material & rendering (real-time)', false);
+  _slider(vcOptMat, vcOpt, 'densityThreshold', { label: 'Density threshold', min: 0, max: 1, step: 0.01 });
+  _slider(vcOptMat, vcOpt, 'densityMultiplier', { label: 'Density multiplier', min: 0, max: 100, step: 0.1 });
+  _slider(vcOptMat, vcOpt, 'opacity', { label: 'Overall opacity', min: 0, max: 20, step: 0.1 });
+  _slider(vcOptMat, vcOpt, 'raymarchSteps', { label: 'Quality (steps)', min: 10, max: 120, step: 1 });
+  _slider(vcOptMat, vcOpt, 'lightSteps', { label: 'Internal shadow quality', min: 0, max: 32, step: 1 });
+  _slider(vcOptMat, vcOpt, 'containerScale', { label: 'Container scale', min: 1, max: 10000, step: 1 });
+
+  const vcOptMask = _section(vcOptBody, 'Cloud shape (mask)', false);
+  _toggle(vcOptMask, vcOpt, 'visualizeMask', { label: 'Visualize mask' });
+  _slider(vcOptMask, vcOpt, 'maskSeed', { label: 'Mask seed', min: 0, max: 100, step: 1, onChange: _vcOptRegenMask });
+  _slider(vcOptMask, vcOpt, 'frequenciaRuido', { label: 'Noise frequency', min: 0.1, max: 10, step: 0.1, onChange: _vcOptRegenMask });
+  _slider(vcOptMask, vcOpt, 'raio', { label: 'Mask radius', min: 0.1, max: 0.7, step: 0.01 });
+  _slider(vcOptMask, vcOpt, 'maskSoftness', { label: 'Mask edge softness', min: 0, max: 0.5, step: 0.005 });
+  _slider(vcOptMask, vcOpt, 'forcaRuido', { label: 'Noise strength (deform.)', min: 0, max: 0.5, step: 0.01 });
+  const vcOptFlat = _section(vcOptMask, 'Flattening', false);
+  _slider(vcOptFlat, vcOpt, 'achatamentoCima', { label: 'Top (Y+)', min: 0.1, max: 2, step: 0.05 });
+  _slider(vcOptFlat, vcOpt, 'achatamentoBaixo', { label: 'Bottom (Y−)', min: 0.1, max: 2, step: 0.05 });
+  _slider(vcOptFlat, vcOpt, 'achatamentoXpos', { label: 'Right (X+)', min: 0.1, max: 2, step: 0.05 });
+  _slider(vcOptFlat, vcOpt, 'achatamentoXneg', { label: 'Left (X−)', min: 0.1, max: 2, step: 0.05 });
+  _slider(vcOptFlat, vcOpt, 'achatamentoZpos', { label: 'Front (Z+)', min: 0.1, max: 2, step: 0.05 });
+  _slider(vcOptFlat, vcOpt, 'achatamentoZneg', { label: 'Back (Z−)', min: 0.1, max: 2, step: 0.05 });
+  const vcOptDet = _section(vcOptMask, 'Detail noise', false);
+  _slider(vcOptDet, vcOpt, 'seedDetalhe', { label: 'Detail seed', min: 0, max: 100, step: 1, onChange: _vcOptRegenMask });
+  _slider(vcOptDet, vcOpt, 'frequenciaRuidoDetalhe', { label: 'Detail frequency', min: 0.1, max: 25, step: 0.1, onChange: _vcOptRegenMask });
+  _slider(vcOptDet, vcOpt, 'forcaRuidoDetalhe', { label: 'Detail strength', min: 0, max: 0.1, step: 0.001 });
+
+  const vcOptAnim = _section(vcOptBody, 'Texture animation', false);
+  _toggle(vcOptAnim, vcOpt, 'isAnimating', { label: '▶ Animate cloud' });
+  _slider(vcOptAnim, vcOpt, 'animationSpeedX', { label: 'Speed X', min: -0.2, max: 0.2, step: 0.001 });
+  _slider(vcOptAnim, vcOpt, 'animationSpeedY', { label: 'Speed Y', min: -0.2, max: 0.2, step: 0.001 });
+  _slider(vcOptAnim, vcOpt, 'animationSpeedZ', { label: 'Speed Z', min: -0.2, max: 0.2, step: 0.001 });
+
+  const vcOptPlace = _section(vcOptBody, 'Placement & volume LOD', false);
+  _toggle(vcOptPlace, vcOpt, 'lodAuto', { label: 'Auto LOD (distance)' });
+  _toggle(vcOptPlace, vcOpt, 'followCamera', { label: 'Follow anchor XZ (pivot / car)' });
+  _toggle(vcOptPlace, vcOpt, 'lodFrustumCull', { label: 'Frustum cull volume' });
+  _slider(vcOptPlace, vcOpt, 'cloudFollowSmoothing', { label: 'Follow smoothing', min: 0.02, max: 0.5, step: 0.01 });
+  _slider(vcOptPlace, vcOpt, 'cloudHeightY', { label: 'Cloud height Y', min: 80, max: 600, step: 1 });
+  const vcOptBtnRow = document.createElement('div');
+  vcOptBtnRow.style.padding = '4px 0';
+  vcOptPlace.appendChild(vcOptBtnRow);
+  _button(vcOptBtnRow, { title: 'Rebuild shape masks (CPU)', onClick: _vcOptRegenMask });
+
+  const vcOptPost = _section(vcOptBody, 'Sun disc & god rays (superjet)', false);
+  _slider(vcOptPost, vcOpt, 'sunMeshDistance', { label: 'Sun mesh distance', min: 3500, max: 16000, step: 50 });
+  _slider(vcOptPost, vcOpt, 'sunDiscRadius', { label: 'Sun disc radius', min: 80, max: 650, step: 5 });
+  _slider(vcOptPost, vcOpt, 'effectBufferScale', {
+    label: 'Occlusion / god-rays scale',
+    min: 0.2,
+    max: 1,
+    step: 0.05,
+    onChange: () => app.resizeVolumetricCloudTargets?.(),
+  });
+  _toggle(vcOptPost, vcOpt, 'frustumDimGodRays', { label: 'Dim god-rays when volume culled' });
+  _slider(vcOptPost, vcOpt, 'godRaysExposureUI', { label: 'God rays exposure', min: 0, max: 1, step: 0.01 });
+  _slider(vcOptPost, vcOpt, 'godRaysSamplesUI', { label: 'God rays samples (base)', min: 10, max: 128, step: 1 });
+  _slider(vcOptPost, vcOpt, 'godRaysDensity', { label: 'God rays density', min: 0, max: 1, step: 0.01 });
+  _slider(vcOptPost, vcOpt, 'godRaysDecay', { label: 'God rays decay', min: 0.8, max: 1, step: 0.001 });
+  _slider(vcOptPost, vcOpt, 'godRaysWeight', { label: 'God rays weight', min: 0, max: 1, step: 0.01 });
 
   // --- Terrain / streaming LOD (was Tweakpane "Terrain/LOD") ---
   const cfg = app.config;

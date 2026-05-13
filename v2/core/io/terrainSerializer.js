@@ -366,6 +366,7 @@ function extractSerializableSettings(toolState) {
       distance: { ...toolState.fog.distance },
     },
     volumetricCloud: { ...toolState.volumetricCloud },
+    volumetricCloudOptimized: { ...toolState.volumetricCloudOptimized },
     borderMountains: { ...toolState.borderMountains },
     playSpawn: { ...toolState.playSpawn },
     playCamera: { ...toolState.playCamera },
@@ -454,6 +455,9 @@ export function applySettings(toolState, settings) {
   }
   if (settings.volumetricCloud) {
     Object.assign(toolState.volumetricCloud, settings.volumetricCloud);
+  }
+  if (settings.volumetricCloudOptimized) {
+    Object.assign(toolState.volumetricCloudOptimized, settings.volumetricCloudOptimized);
   }
   if (settings.borderMountains) Object.assign(toolState.borderMountains, settings.borderMountains);
   if (settings.playSpawn) Object.assign(toolState.playSpawn, settings.playSpawn);

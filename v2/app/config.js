@@ -1,3 +1,62 @@
+const VOLUMETRIC_CLOUD_DEFAULTS = {
+  enabled: false,
+  /** Same default as superjet: fixed world volume; enable to lerp XZ toward pivot / car. */
+  followCamera: false,
+  /** Same as superjet `lodAuto` — reduce raymarch steps when camera is far from the volume. */
+  lodAuto: true,
+  /** Same as superjet `isAnimating` — scroll 3D noise offset. */
+  isAnimating: true,
+  cloudFollowSmoothing: 0.12,
+  lodFrustumCull: true,
+  containerScale: 420,
+  /** Same default as `clouds_terrain_1600-superjet.html` `parameters.cloudHeightY`. */
+  cloudHeightY: 268,
+  textureSize: 96,
+  cloudCoverage: 0.55,
+  cloudSoftness: 0.05,
+  noiseScale: 3.5,
+  octaves: 5,
+  persistence: 0.5,
+  lacunarity: 3.0,
+  noiseIntensity: 1.0,
+  /** Overridden per session in `createToolState()` like superjet `Math.random() * 1000`. */
+  seed: 0,
+  textureTiling: 2.0,
+  densityThreshold: 0.0,
+  densityMultiplier: 50.0,
+  opacity: 6.0,
+  raymarchSteps: 44,
+  lightSteps: 1,
+  animationSpeedX: 0.02,
+  animationSpeedY: 0.0,
+  animationSpeedZ: 0.01,
+  raio: 0.52,
+  maskSoftness: 0.17,
+  achatamentoCima: 0.7,
+  achatamentoBaixo: 0.3,
+  achatamentoXpos: 0.9,
+  achatamentoXneg: 0.9,
+  achatamentoZpos: 0.9,
+  achatamentoZneg: 0.9,
+  maskSeed: 1,
+  forcaRuido: 0.05,
+  frequenciaRuido: 2.7,
+  seedDetalhe: 10,
+  forcaRuidoDetalhe: 0.036,
+  frequenciaRuidoDetalhe: 10.5,
+  visualizeMask: false,
+  /** Occlusion / god-rays buffer scale (same role as superjet `effectBufferScale`). */
+  effectBufferScale: 0.35,
+  godRaysExposureUI: 0.58,
+  godRaysSamplesUI: 64,
+  godRaysDensity: 0.98,
+  godRaysDecay: 0.975,
+  godRaysWeight: 0.55,
+  sunMeshDistance: 8000,
+  sunDiscRadius: 260,
+  frustumDimGodRays: false,
+};
+
 export const V2_CONFIG = {
   world: {
     size: 1600,
@@ -216,62 +275,18 @@ export const V2_CONFIG = {
    * Off by default; enable from editor World tab.
    */
   volumetricCloud: {
-    enabled: false,
-    /** Same default as superjet: fixed world volume; enable to lerp XZ toward pivot / car. */
-    followCamera: false,
-    /** Same as superjet `lodAuto` — reduce raymarch steps when camera is far from the volume. */
-    lodAuto: true,
-    /** Same as superjet `isAnimating` — scroll 3D noise offset. */
-    isAnimating: true,
-    cloudFollowSmoothing: 0.12,
-    lodFrustumCull: true,
-    containerScale: 420,
-    /** Same default as `clouds_terrain_1600-superjet.html` `parameters.cloudHeightY`. */
-    cloudHeightY: 268,
-    textureSize: 96,
-    cloudCoverage: 0.55,
-    cloudSoftness: 0.05,
-    noiseScale: 3.5,
-    octaves: 5,
-    persistence: 0.5,
-    lacunarity: 3.0,
-    noiseIntensity: 1.0,
-    /** Overridden per session in `createToolState()` like superjet `Math.random() * 1000`. */
-    seed: 0,
-    textureTiling: 2.0,
-    densityThreshold: 0.0,
-    densityMultiplier: 50.0,
-    opacity: 6.0,
-    raymarchSteps: 44,
-    lightSteps: 1,
-    animationSpeedX: 0.02,
-    animationSpeedY: 0.0,
-    animationSpeedZ: 0.01,
-    raio: 0.52,
-    maskSoftness: 0.17,
-    achatamentoCima: 0.7,
-    achatamentoBaixo: 0.3,
-    achatamentoXpos: 0.9,
-    achatamentoXneg: 0.9,
-    achatamentoZpos: 0.9,
-    achatamentoZneg: 0.9,
-    maskSeed: 1,
-    forcaRuido: 0.05,
-    frequenciaRuido: 2.7,
-    seedDetalhe: 10,
-    forcaRuidoDetalhe: 0.036,
-    frequenciaRuidoDetalhe: 10.5,
-    visualizeMask: false,
-    /** Occlusion / god-rays buffer scale (same role as superjet `effectBufferScale`). */
-    effectBufferScale: 0.35,
-    godRaysExposureUI: 0.58,
-    godRaysSamplesUI: 64,
-    godRaysDensity: 0.98,
-    godRaysDecay: 0.975,
-    godRaysWeight: 0.55,
-    sunMeshDistance: 8000,
-    sunDiscRadius: 260,
-    frustumDimGodRays: false,
+    ...VOLUMETRIC_CLOUD_DEFAULTS,
+  },
+  /**
+   * Optimized fork (`v2/render/clouds/volumetricCloudSystemv2.js`): cheap occlusion march + fractional `cloudRT`.
+   * Separate tool state; enable from World tab. Prefer disabling classic volumetric clouds when using this.
+   */
+  volumetricCloudOptimized: {
+    ...VOLUMETRIC_CLOUD_DEFAULTS,
+    /** Full-screen scale for the beauty cloud pass (0.25–1). */
+    cloudBufferScale: 0.5,
+    /** Occlusion-only raymarch steps (≤32, shader loop cap). */
+    occlusionRaymarchSteps: 12,
   },
 };
 

@@ -91,6 +91,7 @@ import { createAmbientFxStore } from "../core/ambientfx/ambientFxStore.js";
 import { createLeafFxStore } from "../core/ambientfx/leafFxStore.js";
 import { BorderMountains } from "../render/terrain/borderMountains.js";
 import { createVolumetricCloudSystem } from "../render/clouds/volumetricCloudSystem.js";
+import { createVolumetricCloudSystemOptimized } from "../render/clouds/volumetricCloudSystemv2.js";
 
 export async function startV2App(opts = {}) {
   const config = structuredClone(V2_CONFIG);
@@ -2303,6 +2304,7 @@ export async function startV2App(opts = {}) {
   });
 
   let volumetricCloudSystem = null;
+  let volumetricCloudSystemOptimized = null;
   try {
     volumetricCloudSystem = await createVolumetricCloudSystem({
       renderer,
@@ -2316,6 +2318,20 @@ export async function startV2App(opts = {}) {
     });
   } catch (err) {
     console.warn("[V2] Volumetric cloud volume failed to init:", err);
+  }
+  try {
+    volumetricCloudSystemOptimized = await createVolumetricCloudSystemOptimized({
+      renderer,
+      scene,
+      camera,
+      toolState,
+      getSunDir: () => sunDir,
+      sun,
+      hemi,
+      getOccluderMeshes: () => chunkStream.raycastMeshes(),
+    });
+  } catch (err) {
+    console.warn("[V2] Volumetric cloud (optimized) failed to init:", err);
   }
 
   function updatePointer(event) {
@@ -3131,6 +3147,7 @@ export async function startV2App(opts = {}) {
     camera.updateMatrixWorld();
     renderer.setSize(rw, rh);
     volumetricCloudSystem?.setDepthTargetSize?.();
+    volumetricCloudSystemOptimized?.setDepthTargetSize?.();
     if (csm?.mainFrustum && toolState.csm.enabled) csm.updateFrustums();
   }
   if (_uiContainer) {
@@ -3260,7 +3277,28 @@ export async function startV2App(opts = {}) {
     // }
     riverSystem.update(dtMs * 0.001);
     splineSystem.update(dtMs * 0.001);
-    if (!volumetricCloudSystem?.tryRenderFrame?.(cloudFollowAnchor, dtSec)) {
+
+    const vcOn = toolState.volumetricCloud.enabled;
+    const vcOptOn = toolState.volumetricCloudOptimized.enabled;
+    const oOpt = volumetricCloudSystemOptimized;
+    if (!vcOptOn) {
+      if (oOpt?.cloudMesh) oOpt.cloudMesh.visible = false;
+      if (oOpt?.sunSphere) oOpt.sunSphere.visible = false;
+    }
+    let didCloudRt = false;
+    if (vcOptOn) {
+      didCloudRt = !!oOpt?.tryRenderFrame?.(cloudFollowAnchor, dtSec);
+    } else {
+      if (!vcOn) {
+        volumetricCloudSystem?.tryRenderFrame?.(cloudFollowAnchor, dtSec);
+      } else {
+        didCloudRt = !!volumetricCloudSystem?.tryRenderFrame?.(
+          cloudFollowAnchor,
+          dtSec,
+        );
+      }
+    }
+    if (!didCloudRt) {
       renderer.render(scene, camera);
     }
   });
@@ -3536,8 +3574,15 @@ export async function startV2App(opts = {}) {
     rebuildVolumetricCloudMasks() {
       volumetricCloudSystem?.rebuildMaskTextures?.();
     },
+    rebuildVolumetricCloudVolumeOptimized() {
+      volumetricCloudSystemOptimized?.rebuildVolume?.();
+    },
+    rebuildVolumetricCloudMasksOptimized() {
+      volumetricCloudSystemOptimized?.rebuildMaskTextures?.();
+    },
     resizeVolumetricCloudTargets() {
       volumetricCloudSystem?.setDepthTargetSize?.();
+      volumetricCloudSystemOptimized?.setDepthTargetSize?.();
     },
     dispose() {
       renderer.domElement.removeEventListener("wheel", onCanvasWheelBrush, { capture: true });
@@ -3556,6 +3601,8 @@ export async function startV2App(opts = {}) {
       lensFlare.dispose();
       volumetricCloudSystem?.dispose?.();
       volumetricCloudSystem = null;
+      volumetricCloudSystemOptimized?.dispose?.();
+      volumetricCloudSystemOptimized = null;
       ui.dispose();
       chunkStream.dispose();
       treeLodRenderer.dispose();
