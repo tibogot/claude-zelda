@@ -3,7 +3,7 @@
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <title>Brick arch door — WebGPU + TSL</title>
+    <title>Brick arch door + adaptive wall — WebGPU + TSL</title>
     <style>
       body {
         margin: 0;
@@ -101,6 +101,40 @@
         return { x: R, y, tx: 0, ty: -1 };
       }
 
+      function subtractIntervals(intervals, holeLo, holeHi) {
+        if (holeHi <= holeLo) return intervals;
+        const out = [];
+        for (const [a, b] of intervals) {
+          if (b <= a + 1e-6) continue;
+          if (holeHi <= a || holeLo >= b) {
+            out.push([a, b]);
+            continue;
+          }
+          if (holeLo > a + 1e-4) out.push([a, Math.min(holeLo, b)]);
+          if (holeHi < b - 1e-4) out.push([Math.max(holeHi, a), b]);
+        }
+        return out;
+      }
+
+      /** Horizontal extent (|x|) where wall field must stay outside so it does not clip the ring. */
+      function wallOpeningHalfX(y, R_out, y0, ys, seam) {
+        if (y < y0 - 1e-6) return 0;
+        if (y < ys - 1e-6) return R_out + seam;
+        const dy = y - ys;
+        if (dy > R_out + 1e-6) return 0;
+        const inner = R_out * R_out - dy * dy;
+        if (inner <= 0) return 0;
+        return Math.sqrt(inner) + seam;
+      }
+
+      /** How fast the opening boundary moves in X with Y (large near springing and haunches). */
+      function wallOpeningCurvature(y, R_out, y0, ys, seam) {
+        const e = 0.06;
+        const a = wallOpeningHalfX(y + e, R_out, y0, ys, seam);
+        const b = wallOpeningHalfX(y - e, R_out, y0, ys, seam);
+        return Math.abs(a - b) / e;
+      }
+
       const tmpO = new THREE.Object3D();
       const stoneTmp = new THREE.Color();
 
@@ -126,8 +160,20 @@
           brickRound: 0.06,
           spacingMul: 1.02,
           maxBricks: 2200,
+          maxWallBricks: 14000,
           colorSeed: 31415,
           showGrid: true,
+
+          wallEnabled: true,
+          wallWidth: 15,
+          wallHeight: 6.2,
+          wallDepth: 0.62,
+          wallZ: -0.22,
+          wallMortar: 0.024,
+          wallSeamInset: 0.038,
+          wallEdgeBlendBw: 4.2,
+          wallMinBrickScale: 0.26,
+          wallCrownSquash: 0.78,
         };
 
         const renderer = new THREE.WebGPURenderer({ antialias: true });
@@ -225,6 +271,7 @@
         let brickGeo = null;
         let brickMat = null;
         let doorMesh = null;
+        let wallMesh = null;
 
         function ringParamsFromGui() {
           const R_in = Math.max(0.08, params.doorInnerHalfW);
@@ -237,31 +284,20 @@
           };
         }
 
-        function buildDoor() {
-          const rp = ringParamsFromGui();
-          const R = rp.ringRadius;
-          const Lu = pathULength(rp);
-          const Ls = params.closeBottom ? 2 * R : 0;
-          const spacing =
-            params.brickW * Math.max(0.35, params.spacingMul) + 0.024;
-
-          let nU = Math.max(6, Math.ceil(Lu / spacing));
-          let nS =
-            Ls > 0 ? Math.max(2, Math.ceil(Ls / spacing)) : 0;
-          if (nU + nS > params.maxBricks) {
-            const room = params.maxBricks - nS;
-            nU = Math.max(4, Math.min(nU, room));
-            if (nU + nS > params.maxBricks)
-              nS = Math.max(0, params.maxBricks - nU);
-          }
-          const n = nU + nS;
-
+        function rebuildAll() {
           if (doorMesh) {
             scene.remove(doorMesh);
-            doorMesh.geometry.dispose();
             doorMesh = null;
           }
-          if (brickGeo) brickGeo.dispose();
+          if (wallMesh) {
+            scene.remove(wallMesh);
+            wallMesh = null;
+          }
+          if (brickGeo) {
+            brickGeo.dispose();
+            brickGeo = null;
+          }
+
           const rRound = Math.max(0.0001, params.brickRound);
           brickGeo = new RoundedBoxGeometry(
             params.brickW,
@@ -285,6 +321,34 @@
               return mul(color(0xb8d0ec), mul(mul(nd, edge), float(0.08)));
             })();
           }
+
+          buildDoorInstances();
+          buildWallInstances();
+
+          const rp = ringParamsFromGui();
+          const midY =
+            (rp.springY + params.sillY) * 0.5 + rp.ringRadius * 0.35;
+          controls.target.set(0, midY, 0);
+        }
+
+        function buildDoorInstances() {
+          const rp = ringParamsFromGui();
+          const R = rp.ringRadius;
+          const Lu = pathULength(rp);
+          const Ls = params.closeBottom ? 2 * R : 0;
+          const spacing =
+            params.brickW * Math.max(0.35, params.spacingMul) + 0.024;
+
+          let nU = Math.max(6, Math.ceil(Lu / spacing));
+          let nS =
+            Ls > 0 ? Math.max(2, Math.ceil(Ls / spacing)) : 0;
+          if (nU + nS > params.maxBricks) {
+            const room = params.maxBricks - nS;
+            nU = Math.max(4, Math.min(nU, room));
+            if (nU + nS > params.maxBricks)
+              nS = Math.max(0, params.maxBricks - nU);
+          }
+          const n = nU + nS;
 
           doorMesh = new THREE.InstancedMesh(
             brickGeo,
@@ -333,16 +397,161 @@
           if (doorMesh.instanceColor)
             doorMesh.instanceColor.needsUpdate = true;
           scene.add(doorMesh);
-
-          const midY = (rp.springY + params.sillY) * 0.5 + rp.ringRadius * 0.35;
-          controls.target.set(0, midY, 0);
         }
 
-        buildDoor();
+        function buildWallInstances() {
+          if (!params.wallEnabled || !brickGeo) return;
 
-        const pane = new Pane({ title: "Arch door (bricks only)" });
+          const rp = ringParamsFromGui();
+          const R_in = Math.max(0.08, params.doorInnerHalfW);
+          const R_out = R_in + Math.max(0.05, params.masonryShell);
+          const y0 = params.sillY;
+          const ys = rp.springY;
+          const seam = params.wallSeamInset;
+          const mortar = params.wallMortar;
+          const nomH = params.brickH;
+          const nomW = params.brickW;
+          const rowH = nomH + mortar;
+          const wallLo = -params.wallWidth * 0.5;
+          const wallHi = params.wallWidth * 0.5;
+          const baseY = y0 + mortar * 0.5 + nomH * 0.5;
+          const topY = y0 + Math.max(nomH * 2, params.wallHeight);
+          const ny = Math.min(220, Math.max(3, Math.ceil((topY - baseY) / rowH)));
+
+          wallMesh = new THREE.InstancedMesh(
+            brickGeo,
+            brickMat,
+            params.maxWallBricks,
+          );
+          wallMesh.castShadow = true;
+          wallMesh.receiveShadow = true;
+          wallMesh.position.set(0, 0, params.wallZ);
+
+          const rnd = mulberry32((params.colorSeed ^ 91379) | 0);
+          let k = 0;
+
+          const placeWallBrick = (cx, cy, sx, sy, sz) => {
+            if (k >= params.maxWallBricks) return false;
+            tmpO.position.set(cx, cy, 0);
+            tmpO.rotation.set(0, 0, 0);
+            tmpO.scale.set(sx, sy, sz);
+            tmpO.updateMatrix();
+            wallMesh.setMatrixAt(k, tmpO.matrix);
+            const g = 0.34 + rnd() * 0.19;
+            stoneTmp.setRGB(g * 0.85, g * 0.88, g * 0.96);
+            wallMesh.setColorAt(k, stoneTmp);
+            k++;
+            return true;
+          };
+
+          outer: for (let iy = 0; iy < ny; iy++) {
+            const yMid = baseY + iy * rowH;
+            if (yMid > topY - nomH * 0.2) break;
+
+            const openH = wallOpeningHalfX(yMid, R_out, y0, ys, seam);
+            let intervals = [[wallLo, wallHi]];
+            if (openH > 1e-5) {
+              intervals = subtractIntervals(intervals, -openH, openH);
+            }
+
+            const curv = wallOpeningCurvature(yMid, R_out, y0, ys, seam);
+            const curveT = THREE.MathUtils.smoothstep(0.06, 1.15, curv);
+            const nomWCurve =
+              nomW *
+              THREE.MathUtils.lerp(
+                1,
+                THREE.MathUtils.clamp(params.wallMinBrickScale, 0.16, 0.95),
+                Math.pow(curveT, 1.08),
+              );
+
+            const haunch =
+              yMid >= ys - mortar * 1.5 && yMid <= ys + R_out * 1.05
+                ? THREE.MathUtils.smoothstep(
+                    ys - 0.12,
+                    ys + R_out * 0.82,
+                    yMid,
+                  )
+                : 0;
+            const crownSy =
+              1 -
+              (1 - THREE.MathUtils.clamp(params.wallCrownSquash, 0.42, 1)) *
+                Math.pow(haunch, 1.28);
+
+            for (const [segLo, segHi] of intervals) {
+              const span = segHi - segLo;
+              if (span < nomW * params.wallMinBrickScale * 0.45) continue;
+
+              let L = segLo;
+              if (iy % 2 === 1) {
+                L += (nomWCurve + mortar) * 0.5;
+                while (L > segLo + 1e-5) L -= nomWCurve + mortar;
+                if (L < segLo) L = segLo;
+              }
+
+              const minW = nomW * params.wallMinBrickScale;
+              const edgeBlend = params.brickW * params.wallEdgeBlendBw;
+
+              let guard = 0;
+              while (L + minW + mortar <= segHi + 1e-5) {
+                if (++guard > 800 || k >= params.maxWallBricks) break outer;
+
+                const rem = segHi - L;
+                let w = Math.min(nomWCurve, rem - mortar);
+                const cxTry = L + w * 0.5;
+                const distToBound = Math.min(
+                  Math.abs(cxTry - segLo),
+                  Math.abs(segHi - cxTry),
+                );
+                const tEdge = THREE.MathUtils.clamp(
+                  distToBound / edgeBlend,
+                  0,
+                  1,
+                );
+                w *= THREE.MathUtils.lerp(0.58, 1, Math.pow(tEdge, 0.42));
+                w = Math.min(w, rem - mortar);
+                w = Math.max(w, minW);
+
+                if (L + w > segHi + 1e-4) {
+                  w = Math.max(minW, segHi - L - mortar);
+                  if (w < minW * 0.9 || L + w > segHi + 1e-3) break;
+                }
+
+                const cx = L + w * 0.5;
+                let tuckY = 0;
+                if (openH > 1e-4 && curveT > 0.04) {
+                  const gap = Math.abs(Math.abs(cx) - openH);
+                  const band = params.brickW * 3.8;
+                  if (gap < band) {
+                    const t = THREE.MathUtils.smoothstep(1, 0, gap / band);
+                    tuckY =
+                      -nomH * 0.12 * Math.pow(t, 1.2) * Math.pow(curveT, 0.55);
+                  }
+                }
+
+                const sx = w / nomW;
+                const sy = (0.9 + rnd() * 0.09) * crownSy;
+                const sz = 0.9 + rnd() * 0.1;
+                if (!placeWallBrick(cx, yMid + tuckY, sx, sy, sz)) break outer;
+
+                const step = w + mortar;
+                if (step < 1e-5) break;
+                L += step;
+              }
+            }
+          }
+
+          wallMesh.count = k;
+          wallMesh.instanceMatrix.needsUpdate = true;
+          if (wallMesh.instanceColor)
+            wallMesh.instanceColor.needsUpdate = true;
+          scene.add(wallMesh);
+        }
+
+        rebuildAll();
+
+        const pane = new Pane({ title: "Arch door + adaptive wall" });
         const fDoor = pane.addFolder({ title: "Door shape" });
-        const rb = () => buildDoor();
+        const rb = () => rebuildAll();
         fDoor.addBinding(params, "doorInnerHalfW", {
           min: 0.35,
           max: 2.2,
@@ -406,13 +615,67 @@
           label: "Color seed",
         }).on("change", rb);
 
+        const fWall = pane.addFolder({ title: "Wall (field masonry)" });
+        fWall.addBinding(params, "wallEnabled", { label: "Enabled" }).on("change", rb);
+        fWall.addBinding(params, "wallWidth", {
+          min: 6,
+          max: 28,
+          step: 0.1,
+        }).on("change", rb);
+        fWall.addBinding(params, "wallHeight", {
+          min: 3,
+          max: 16,
+          step: 0.05,
+          label: "Height above sill",
+        }).on("change", rb);
+        fWall.addBinding(params, "wallDepth", {
+          min: 0.35,
+          max: 1.4,
+          step: 0.01,
+        }).on("change", rb);
+        fWall.addBinding(params, "wallZ", {
+          min: -1.2,
+          max: 0.4,
+          step: 0.01,
+          label: "Wall Z offset",
+        }).on("change", rb);
+        fWall.addBinding(params, "wallMortar", {
+          min: 0.008,
+          max: 0.06,
+          step: 0.001,
+        }).on("change", rb);
+        fWall.addBinding(params, "wallSeamInset", {
+          min: 0.01,
+          max: 0.12,
+          step: 0.002,
+          label: "Ring clearance",
+        }).on("change", rb);
+        fWall.addBinding(params, "wallEdgeBlendBw", {
+          min: 1.5,
+          max: 9,
+          step: 0.1,
+          label: "Edge blend (× brick W)",
+        }).on("change", rb);
+        fWall.addBinding(params, "wallMinBrickScale", {
+          min: 0.14,
+          max: 0.55,
+          step: 0.01,
+          label: "Min brick / nominal",
+        }).on("change", rb);
+        fWall.addBinding(params, "wallCrownSquash", {
+          min: 0.45,
+          max: 1,
+          step: 0.01,
+          label: "Crown height scale",
+        }).on("change", rb);
+
         const fView = pane.addFolder({ title: "View" });
         fView.addBinding(params, "showGrid", { label: "Grid" }).on("change", () => {
           setGrid(params.showGrid);
         });
 
         pane.addButton({ title: "Rebuild" }).on("click", () => {
-          buildDoor();
+          rebuildAll();
         });
 
         function onResize() {
