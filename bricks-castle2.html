@@ -1,0 +1,2467 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Procedural Medieval Tower - Arch door + Tweakpane</title>
+
+    <style>
+      body {
+        margin: 0;
+        overflow: hidden;
+        background: #d8ecf8;
+      }
+
+      #pane {
+        position: absolute;
+        top: 0;
+        left: 0;
+        width: 340px;
+        height: 100%;
+        overflow: auto;
+        background: rgba(0, 0, 0, 0.65);
+        backdrop-filter: blur(12px);
+        border-right: 1px solid #444;
+      }
+
+      canvas {
+        display: block;
+      }
+    </style>
+  </head>
+
+  <body>
+    <div id="pane"></div>
+
+    <script type="importmap">
+      {
+        "imports": {
+          "three": "https://cdn.jsdelivr.net/npm/three@0.183.1/build/three.webgpu.js",
+          "three/webgpu": "https://cdn.jsdelivr.net/npm/three@0.183.1/build/three.webgpu.js",
+          "three/tsl": "https://cdn.jsdelivr.net/npm/three@0.183.1/build/three.tsl.js",
+          "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.183.1/examples/jsm/",
+          "tweakpane": "https://cdn.jsdelivr.net/npm/tweakpane@4.0.3/dist/tweakpane.min.js"
+        }
+      }
+    </script>
+
+    <script type="module">
+      import * as THREE from "three/webgpu";
+      import { OrbitControls } from "three/addons/controls/OrbitControls.js";
+      import { TransformControls } from "three/addons/controls/TransformControls.js";
+      import { Pane } from "tweakpane";
+
+      import {
+        Fn,
+        positionLocal,
+        normalLocal,
+        vec2,
+        vec3,
+        vec4,
+        sin,
+        cos,
+        mix,
+        normalize,
+        fract,
+        floor,
+        dot,
+        sub,
+        add,
+        mul,
+        pow,
+        smoothstep,
+        modelWorldMatrix,
+        color,
+      } from "three/tsl";
+
+      let renderer, scene, camera, controls;
+      let towerGroup;
+      let towerMesh, battlementMesh;
+      let brickGeometry, brickMaterial;
+      let groundMesh;
+      let archDoorGizmoPivot, archDoorGizmo;
+      let archDoorGizmoHelper;
+      let voussoirMesh = null;
+      let isDraggingArchDoorGizmo = false;
+      let rebuildTimer = null;
+      let qualityLevel = "high";
+      const dynamicDpr = {
+        moving: 1,
+        resting: Math.min(window.devicePixelRatio || 1, 1.5),
+        current: -1,
+        settleUntil: 0,
+      };
+      const tempObj = new THREE.Object3D();
+      const tempVec = new THREE.Vector3();
+      const tempVec2 = new THREE.Vector3();
+      const tempVec3 = new THREE.Vector3();
+      const tempVec4 = new THREE.Vector3();
+      const tempQuat = new THREE.Quaternion();
+      const tempScaleAdapt = new THREE.Vector3();
+      const archFitScaleProbe = new THREE.Vector3();
+      const basisX = new THREE.Vector3();
+      const basisY = new THREE.Vector3();
+      const basisZ = new THREE.Vector3();
+      const cornerWorld = new THREE.Vector3();
+      const archCircleCenter = new THREE.Vector3();
+      const worldUpUnit = new THREE.Vector3(0, 1, 0);
+      const towerInstanceData = [];
+      const battlementInstanceData = [];
+      const simTimer = new THREE.Timer();
+      let debrisSleepCounter = 0;
+
+      const raycaster = new THREE.Raycaster();
+      const mouse = new THREE.Vector2();
+
+      const removedBricks = new Set();
+
+      function terrainHeightCpu(wx, wz) {
+        return 0;
+      }
+
+      /** True when height field is flat (no spatial variation). */
+      function isTerrainHeightUniform() {
+        const a = terrainHeightCpu(0, 0);
+        const b = terrainHeightCpu(93.7, -41.2);
+        const c = terrainHeightCpu(-118.5, 76.4);
+        return (
+          Math.abs(a - b) < 1e-5 &&
+          Math.abs(a - c) < 1e-5 &&
+          Math.abs(b - c) < 1e-5
+        );
+      }
+
+      const hash12 = Fn(([p]) =>
+        fract(sin(dot(vec2(p), vec2(127.1, 311.7))).mul(43758.5453)),
+      );
+
+      const noise12 = Fn(([p_in]) => {
+        const p = vec2(p_in),
+          i = floor(p),
+          f = fract(p),
+          u = f.mul(f).mul(sub(3.0, f.mul(2.0)));
+        return mix(
+          mix(hash12(i), hash12(add(i, vec2(1, 0))), u.x),
+          mix(hash12(add(i, vec2(0, 1))), hash12(add(i, vec2(1, 1))), u.x),
+          u.y,
+        );
+      });
+
+      const fbmGrassColor = Fn(([p]) => {
+        const n0 = noise12(p);
+        const n1 = noise12(mul(p, 2.02));
+        const n2 = noise12(mul(p, 4.05));
+        const n3 = noise12(mul(p, 8.1));
+        const s01 = add(n0, mul(n1, 0.52));
+        const s23 = add(mul(n2, 0.26), mul(n3, 0.13));
+        const f = mul(add(s01, s23), 0.545);
+        const warmBias = color(0x524a42);
+        const deep = mix(color(0x3f443c), color(0x4a5246), smoothstep(0.12, 0.42, f));
+        const olive = mix(color(0x535a4e), color(0x5e6658), pow(f, 0.95));
+        const sage = mix(color(0x656c5f), color(0x72796b), smoothstep(0.28, 0.68, f));
+        const clay = mix(color(0x736b5f), color(0x7f776a), smoothstep(0.38, 0.82, f));
+        const dust = mix(color(0x7d7568), color(0x8a8275), smoothstep(0.52, 0.96, f));
+        const u = smoothstep(0.22, 0.55, f);
+        const v = smoothstep(0.48, 0.88, f);
+        const body = mix(mix(deep, olive, u), mix(sage, mix(clay, dust, v), 0.72), smoothstep(0.4, 0.9, f));
+        return mul(mix(body, warmBias, 0.18), 0.88);
+      });
+
+      const params = {
+        // tower
+        radius: 5,
+        height: 36,
+        bricksPerRing: 28,
+        ringHeight: 0.55,
+
+        // brick size
+        brickWidth: 1.1,
+        brickHeight: 0.5,
+        brickDepth: 0.9,
+
+        // random scaling
+        scaleRandomness: 0.3,
+        brickSegments: 3,
+
+        // shape
+        deformation: 0.06,
+        edgeWarp: 0.025,
+        inflate: 0.03,
+        normalSmooth: 0.22,
+
+        // layout
+        stagger: true,
+        radiusVariation: 0.15,
+        verticalVariation: 0.08,
+        rotationVariation: 0.05,
+
+        // destruction (click only when destructionEnabled)
+        destructionEnabled: false,
+        removeRadius: 1.2,
+        gravity: 18,
+        bounce: 0.28,
+        angularDamping: 0.985,
+        debrisMode: "fade",
+        debrisLifetime: 6,
+        maxDebrisCount: 800,
+        sleepThreshold: 0.42,
+
+        /** Procedural arched door opening at the tower base (layout + voussoirs only, not destruction). */
+        archDoorEnabled: true,
+        archDoorShowGizmo: false,
+        archDoorAngleDeg: 0,
+        archDoorWidth: 2.4,
+        archDoorHeight: 3.8,
+        archDoorDepth: 1.6,
+        archDoorGizmoMode: "rotate",
+        /** Hide tower/ground; only arch masonry (+ gizmo) for shaping/debug. Same scene. */
+        archDebugIsolate: false,
+
+        /** Intrados radius = min(halfW, doorHeight * ratio). Used for cutout + voussoirs. */
+        archRiseRatio: 0.45,
+        /** Extrados: opening radius + brickWidth * this. */
+        archExtradosBrickWidths: 0.3,
+        /** How far into the wall (fraction of half depth) voussoirs sit along door radial. */
+        archRadialDepthFrac: 0.36,
+        /**
+         * Extra half-size on opening for tower carve (m). Removes edge bricks so spline shows clean.
+         */
+        archCarveBleed: 0.07,
+        /** Shrink tower bricks near the door until corners clear the opening (reduces clipping). */
+        archBrickAutoFit: true,
+        /** Minimum uniform scale factor while fitting (smaller = more aggressive). */
+        archBrickAutoFitMin: 0.26,
+        /** Half-angle (deg) around the door azimuth where auto-fit runs. */
+        archBrickAutoFitAngleDeg: 50,
+        /**
+         * Multiplies auto shell offset (brick depth + radius variation) so spline snaps near tower brick shell.
+         */
+        archMasonryShellMul: 1,
+        /** Arc length ÷ (brickWidth × this) → brick count on full spline. */
+        archVoussoirSpacingMul: 0.86,
+        archVoussoirCountMin: 5,
+        archVoussoirCountMax: 48,
+        /** Along-spline cell × this = brick length (mortar gap, avoids overlap). */
+        archSplinePack: 0.9,
+        archScaleCross: 1,
+        archScaleAlongArc: 1,
+        archScaleDepth: 1,
+        archJambEnabled: true,
+        /** Shrinks the whole extrados spline in |u| (legs + arch together). */
+        archJambInset: 1,
+        /** Added to sill-side |u| as (masonryR - openingR) × this before taper. */
+        archJambBaseBulge: 0,
+        /** 0 = straight legs (constant |u|); 1 = flare sill → spring on spline legs. */
+        archJambTaper: 0,
+        archJambScale: 1,
+
+        // material
+        roughness: 1,
+        metalness: 0,
+        stoneDarkness: 0.45,
+        stoneLightness: 0.7,
+
+        // battlements
+        battlementHeight: 1.6,
+        battlementSkip: 2,
+
+        // lighting
+        sunIntensity: 4.2,
+        ambientIntensity: 1.85,
+
+        // quality
+        quality: "high",
+
+        rebuild: () => {
+          removedBricks.clear();
+          rebuildTower();
+        },
+      };
+
+      function getTerrainWorldYAt(wx, wz) {
+        if (!groundMesh) return -2;
+        return groundMesh.position.y + terrainHeightCpu(wx, wz);
+      }
+
+      function getTowerFootprintMeanTerrainWorldY() {
+        if (!groundMesh) return -2;
+        const r = params.radius;
+        const n = 16;
+        let acc = 0;
+        for (let i = 0; i < n; i++) {
+          const a = (i / n) * Math.PI * 2;
+          acc += terrainHeightCpu(Math.cos(a) * r, Math.sin(a) * r);
+        }
+        const ringMean = groundMesh.position.y + acc / n;
+        // Ring-only mean matches where bottom bricks sit (no mound-center sample).
+        // Tiny lift only to ease z-fighting; keep small so the tower does not hover.
+        return ringMean + params.brickHeight * 0.02;
+      }
+
+      function getTowerBaseY() {
+        return getTowerFootprintMeanTerrainWorldY() + params.brickHeight * 0.5;
+      }
+
+      init();
+
+      async function init() {
+        renderer = new THREE.WebGPURenderer({
+          antialias: true,
+        });
+
+        renderer.shadowMap.enabled = true;
+        renderer.shadowMap.type = THREE.PCFSoftShadowMap;
+        renderer.toneMapping = THREE.ACESFilmicToneMapping;
+        renderer.toneMappingExposure = 1.22;
+        renderer.outputColorSpace = THREE.SRGBColorSpace;
+
+        renderer.setSize(window.innerWidth, window.innerHeight);
+        setDynamicPixelRatio(dynamicDpr.resting);
+
+        document.body.appendChild(renderer.domElement);
+
+        await renderer.init();
+
+        scene = new THREE.Scene();
+
+        scene.background = new THREE.Color(0xb9d9f5);
+
+        scene.fog = new THREE.Fog(0xa8d4ef, 32, 150);
+
+        camera = new THREE.PerspectiveCamera(
+          50,
+          window.innerWidth / window.innerHeight,
+          0.1,
+          1000,
+        );
+
+        camera.position.set(0, 15, 30);
+
+        controls = new OrbitControls(camera, renderer.domElement);
+
+        controls.enableDamping = true;
+
+        // LIGHTS
+
+        const hemi = new THREE.HemisphereLight(
+          0xc9dce8,
+          0x5e5648,
+          params.ambientIntensity,
+        );
+
+        hemi.name = "hemi";
+
+        scene.add(hemi);
+
+        const sun = new THREE.DirectionalLight(0xfff8f0, params.sunIntensity);
+
+        sun.position.set(16, 32, 14);
+        sun.castShadow = true;
+        sun.shadow.mapSize.set(2048, 2048);
+        sun.shadow.camera.near = 1;
+        sun.shadow.camera.far = 80;
+        sun.shadow.camera.left = -30;
+        sun.shadow.camera.right = 30;
+        sun.shadow.camera.top = 30;
+        sun.shadow.camera.bottom = -30;
+        sun.shadow.bias = 0.00002;
+        sun.shadow.normalBias = 0.045;
+        sun.shadow.radius = 4;
+
+        sun.name = "sun";
+
+        scene.add(sun);
+
+        // Terrain (subdivided plane + height + TSL FBM grass color)
+        const terrainGeo = new THREE.PlaneGeometry(260, 260, 110, 110);
+        terrainGeo.rotateX(-Math.PI * 0.5);
+        const tpos = terrainGeo.attributes.position.array;
+        for (let i = 0; i < tpos.length; i += 3) {
+          const wx = tpos[i];
+          const wz = tpos[i + 2];
+          tpos[i + 1] = terrainHeightCpu(wx, wz);
+        }
+        terrainGeo.computeVertexNormals();
+
+        const terrainMat = new THREE.MeshStandardNodeMaterial({
+          roughness: 0.98,
+          metalness: 0,
+        });
+        terrainMat.colorNode = Fn(() => {
+          const wp = modelWorldMatrix.mul(vec4(positionLocal, 1)).xyz;
+          const xz = wp.xz.mul(0.088);
+          return fbmGrassColor(xz);
+        })();
+
+        groundMesh = new THREE.Mesh(terrainGeo, terrainMat);
+        groundMesh.position.y = -2;
+        groundMesh.receiveShadow = true;
+        groundMesh.name = "terrain";
+        scene.add(groundMesh);
+
+        buildTower();
+        createArchDoorGizmo();
+
+        buildPane();
+
+        animate();
+
+        window.addEventListener("resize", onResize);
+
+        window.addEventListener("pointerdown", onClick);
+
+        controls.addEventListener("start", () => {
+          dynamicDpr.settleUntil = performance.now() + 400;
+          setDynamicPixelRatio(dynamicDpr.moving);
+        });
+
+        controls.addEventListener("change", () => {
+          dynamicDpr.settleUntil = performance.now() + 250;
+        });
+      }
+
+      function createArchDoorGizmo() {
+        archDoorGizmoPivot = new THREE.Object3D();
+        scene.add(archDoorGizmoPivot);
+
+        archDoorGizmo = new TransformControls(camera, renderer.domElement);
+        archDoorGizmo.attach(archDoorGizmoPivot);
+        archDoorGizmo.setMode(params.archDoorGizmoMode);
+        archDoorGizmo.setSpace("world");
+        archDoorGizmo.setSize(0.9);
+        archDoorGizmo.enabled = false;
+        archDoorGizmo.visible = false;
+
+        archDoorGizmo.addEventListener("dragging-changed", (e) => {
+          isDraggingArchDoorGizmo = e.value;
+          controls.enabled = !e.value;
+          if (!e.value) {
+            scheduleRebuild();
+          }
+        });
+
+        archDoorGizmo.addEventListener("change", () => {
+          syncParamsFromArchDoorGizmo();
+        });
+
+        archDoorGizmoHelper = archDoorGizmo.getHelper();
+        scene.add(archDoorGizmoHelper);
+        updateArchDoorGizmoFromParams();
+      }
+
+      function buildTower() {
+        voussoirMesh = null;
+        towerGroup = new THREE.Group();
+        towerGroup.name = "towerGroup";
+        const towerBaseY = getTowerBaseY();
+
+        scene.add(towerGroup);
+        createSharedBrickResources();
+        towerInstanceData.length = 0;
+        battlementInstanceData.length = 0;
+
+        if (params.archDebugIsolate) {
+          towerMesh = new THREE.InstancedMesh(brickGeometry, brickMaterial, 1);
+          towerMesh.count = 0;
+          towerMesh.castShadow = true;
+          towerMesh.receiveShadow = true;
+          towerGroup.add(towerMesh);
+
+          battlementMesh = new THREE.InstancedMesh(brickGeometry, brickMaterial, 1);
+          battlementMesh.count = 0;
+          battlementMesh.castShadow = true;
+          battlementMesh.receiveShadow = true;
+          towerGroup.add(battlementMesh);
+        } else {
+          const ringCount = params.height;
+          const maxTowerBricks = ringCount * params.bricksPerRing;
+
+          towerMesh = new THREE.InstancedMesh(
+            brickGeometry,
+            brickMaterial,
+            maxTowerBricks,
+          );
+
+          towerMesh.castShadow = true;
+          towerMesh.receiveShadow = true;
+
+          let towerCount = 0;
+
+          let archFrameCache = null;
+          let archSillYCache = 0;
+          if (params.archDoorEnabled) {
+            archFrameCache = getArchDoorFrame();
+            archSillYCache = getArchDoorBottomY();
+          }
+
+          for (let y = 0; y < params.height; y++) {
+            for (let i = 0; i < params.bricksPerRing; i++) {
+              const id = `${i}_${y}`;
+
+              if (removedBricks.has(id)) continue;
+
+              const stagger = params.stagger && y % 2 ? 0.5 : 0;
+
+              const angle = ((i + stagger) / params.bricksPerRing) * Math.PI * 2;
+
+              const radius =
+                params.radius + (Math.random() - 0.5) * params.radiusVariation;
+
+              const px = Math.cos(angle) * radius;
+
+              const pz = Math.sin(angle) * radius;
+
+              tempObj.position.set(px, towerBaseY + y * params.ringHeight, pz);
+
+              tempObj.lookAt(px * 2, tempObj.position.y, pz * 2);
+
+              tempObj.rotateY(Math.PI * 0.5);
+
+              tempObj.rotation.x +=
+                (Math.random() - 0.5) * params.rotationVariation;
+
+              tempObj.rotation.y +=
+                (Math.random() - 0.5) * params.rotationVariation;
+
+              tempObj.rotation.z +=
+                (Math.random() - 0.5) * params.rotationVariation;
+
+              if (y > 0) {
+                tempObj.position.y +=
+                  (Math.random() - 0.5) * params.verticalVariation;
+              }
+
+              const r = params.scaleRandomness;
+              tempObj.scale.set(
+                1 + (Math.random() - 0.5) * r,
+                1 + (Math.random() - 0.5) * r,
+                1 + (Math.random() - 0.5) * r,
+              );
+
+              if (params.archDoorEnabled && archFrameCache) {
+                if (
+                  params.archBrickAutoFit &&
+                  isBrickNearArchOpening(
+                    tempObj.position,
+                    archFrameCache,
+                    archSillYCache,
+                  ) &&
+                  !shrinkBrickScaleForArchClearance(
+                    tempObj.position,
+                    tempObj.rotation,
+                    tempObj.scale,
+                    archFrameCache,
+                  )
+                ) {
+                  continue;
+                }
+                if (
+                  !applyArchDoorToPlacementBrick(
+                    tempObj.position,
+                    tempObj.rotation,
+                    tempObj.scale,
+                    archFrameCache,
+                  )
+                ) {
+                  continue;
+                }
+              }
+
+              tempObj.updateMatrix();
+
+              towerMesh.setMatrixAt(towerCount, tempObj.matrix);
+
+              const grey =
+                params.stoneDarkness +
+                Math.random() * (params.stoneLightness - params.stoneDarkness);
+
+              towerMesh.setColorAt(
+                towerCount,
+                new THREE.Color(grey * 0.92, grey * 0.95, grey),
+              );
+
+              towerInstanceData.push({
+                id,
+                ringIndex: i,
+                ringY: y,
+                position: new THREE.Vector3(
+                  tempObj.position.x,
+                  tempObj.position.y,
+                  tempObj.position.z,
+                ),
+                rotation: new THREE.Vector3(
+                  tempObj.rotation.x,
+                  tempObj.rotation.y,
+                  tempObj.rotation.z,
+                ),
+                scale: new THREE.Vector3(
+                  tempObj.scale.x,
+                  tempObj.scale.y,
+                  tempObj.scale.z,
+                ),
+                velocity: new THREE.Vector3(),
+                angularVelocity: new THREE.Vector3(),
+                removed: false,
+                hidden: false,
+                falling: false,
+                sleeping: false,
+                sleepOrder: 0,
+                ttl: 0,
+              });
+
+              towerCount++;
+            }
+          }
+
+          towerMesh.count = towerCount;
+          towerMesh.instanceMatrix.needsUpdate = true;
+          if (towerMesh.instanceColor) {
+            towerMesh.instanceColor.needsUpdate = true;
+          }
+          towerGroup.add(towerMesh);
+
+          const maxBattlements = Math.ceil(
+            params.bricksPerRing / Math.max(1, params.battlementSkip),
+          );
+
+          battlementMesh = new THREE.InstancedMesh(
+            brickGeometry,
+            brickMaterial,
+            maxBattlements,
+          );
+
+          battlementMesh.castShadow = true;
+          battlementMesh.receiveShadow = true;
+
+          let battlementCount = 0;
+
+          let battArchFrame = null;
+          let battArchSillY = 0;
+          if (params.archDoorEnabled) {
+            battArchFrame = getArchDoorFrame();
+            battArchSillY = getArchDoorBottomY();
+          }
+
+          for (let i = 0; i < params.bricksPerRing; i += params.battlementSkip) {
+            const angle = (i / params.bricksPerRing) * Math.PI * 2;
+
+            const px = Math.cos(angle) * params.radius;
+
+            const pz = Math.sin(angle) * params.radius;
+
+            tempObj.position.set(
+              px,
+              towerBaseY + params.height * params.ringHeight,
+              pz,
+            );
+
+            tempObj.scale.set(1, 1, 1);
+            tempObj.scale.y = params.battlementHeight;
+
+            tempObj.lookAt(px * 2, tempObj.position.y, pz * 2);
+
+            tempObj.rotateY(Math.PI * 0.5);
+
+            if (params.archDoorEnabled && battArchFrame) {
+              if (
+                params.archBrickAutoFit &&
+                isBrickNearArchOpening(
+                  tempObj.position,
+                  battArchFrame,
+                  battArchSillY,
+                ) &&
+                !shrinkBrickScaleForArchClearance(
+                  tempObj.position,
+                  tempObj.rotation,
+                  tempObj.scale,
+                  battArchFrame,
+                )
+              ) {
+                continue;
+              }
+              if (
+                !applyArchDoorToPlacementBrick(
+                  tempObj.position,
+                  tempObj.rotation,
+                  tempObj.scale,
+                  battArchFrame,
+                )
+              ) {
+                continue;
+              }
+            }
+
+            tempObj.updateMatrix();
+
+            battlementMesh.setMatrixAt(battlementCount, tempObj.matrix);
+
+            const grey =
+              params.stoneDarkness +
+              Math.random() * (params.stoneLightness - params.stoneDarkness);
+
+            battlementMesh.setColorAt(
+              battlementCount,
+              new THREE.Color(grey * 0.92, grey * 0.95, grey),
+            );
+
+            battlementInstanceData.push({
+              ringIndex: i,
+              position: new THREE.Vector3(
+                tempObj.position.x,
+                tempObj.position.y,
+                tempObj.position.z,
+              ),
+              rotation: new THREE.Vector3(
+                tempObj.rotation.x,
+                tempObj.rotation.y,
+                tempObj.rotation.z,
+              ),
+              scale: new THREE.Vector3(
+                tempObj.scale.x,
+                tempObj.scale.y,
+                tempObj.scale.z,
+              ),
+              velocity: new THREE.Vector3(),
+              angularVelocity: new THREE.Vector3(),
+              removed: false,
+              hidden: false,
+              falling: false,
+              sleeping: false,
+              sleepOrder: 0,
+              ttl: 0,
+            });
+
+            battlementCount++;
+          }
+
+          battlementMesh.count = battlementCount;
+          battlementMesh.instanceMatrix.needsUpdate = true;
+          if (battlementMesh.instanceColor) {
+            battlementMesh.instanceColor.needsUpdate = true;
+          }
+          towerGroup.add(battlementMesh);
+        }
+
+        applyArchDebugSceneState();
+
+        if (params.archDoorEnabled) {
+          buildArchDoorVoussoirRing();
+        }
+      }
+
+      function applyArchDebugSceneState() {
+        if (!scene) return;
+        if (params.archDebugIsolate) {
+          scene.fog = null;
+          scene.background = new THREE.Color(0x1c2030);
+          if (groundMesh) groundMesh.visible = false;
+        } else {
+          scene.fog = new THREE.Fog(0xa8d4ef, 32, 150);
+          scene.background = new THREE.Color(0xb9d9f5);
+          if (groundMesh) groundMesh.visible = true;
+        }
+      }
+
+      function createSharedBrickResources() {
+        if (brickGeometry) brickGeometry.dispose();
+        if (brickMaterial) brickMaterial.dispose();
+
+        brickGeometry = new THREE.BoxGeometry(
+          params.brickWidth,
+          params.brickHeight,
+          params.brickDepth,
+
+          params.brickSegments,
+          params.brickSegments,
+          params.brickSegments,
+        );
+
+        brickMaterial = new THREE.MeshStandardNodeMaterial({
+          color: new THREE.Color(0xb3b6bc),
+
+          roughness: params.roughness,
+          metalness: params.metalness,
+        });
+
+        // TSL deformation
+
+        brickMaterial.positionNode = Fn(() => {
+          const p = positionLocal;
+
+          const largeNoise = sin(p.x.mul(5))
+            .mul(cos(p.y.mul(7)))
+            .mul(params.deformation);
+
+          const mediumNoise = sin(p.z.mul(9))
+            .mul(cos(p.x.mul(8)))
+            .mul(params.deformation * 0.6);
+
+          const edgeWarp = sin(p.y.mul(14)).mul(params.edgeWarp);
+
+          const inflate = normalize(p).mul(params.inflate);
+
+          return vec3(
+            p.x.add(largeNoise).add(edgeWarp).add(inflate.x),
+
+            p.y.add(mediumNoise).add(inflate.y),
+
+            p.z.add(largeNoise).add(edgeWarp).add(inflate.z),
+          );
+        })();
+
+        brickMaterial.normalNode = Fn(() => {
+          return normalize(
+            mix(normalLocal, normalize(positionLocal), params.normalSmooth),
+          );
+        })();
+      }
+
+      function rebuildTower() {
+        voussoirMesh = null;
+        if (towerGroup) {
+          scene.remove(towerGroup);
+          towerGroup.clear();
+        }
+
+        buildTower();
+      }
+
+      function onClick(event) {
+        if (!params.destructionEnabled) {
+          return;
+        }
+        mouse.x = (event.clientX / window.innerWidth) * 2 - 1;
+
+        mouse.y = -(event.clientY / window.innerHeight) * 2 + 1;
+
+        raycaster.setFromCamera(mouse, camera);
+
+        const hits = raycaster.intersectObjects([towerMesh, battlementMesh]);
+
+        if (hits.length) {
+          const hitIndex = hits[0].instanceId ?? -1;
+          if (hitIndex < 0) {
+            return;
+          }
+
+          const hitObject = hits[0].object;
+          let hitPoint = null;
+
+          if (
+            hitObject === towerMesh &&
+            towerInstanceData[hitIndex] &&
+            !towerInstanceData[hitIndex].removed
+          ) {
+            hitPoint = towerInstanceData[hitIndex].position;
+          } else if (
+            hitObject === battlementMesh &&
+            battlementInstanceData[hitIndex] &&
+            !battlementInstanceData[hitIndex].removed
+          ) {
+            hitPoint = battlementInstanceData[hitIndex].position;
+          }
+
+          if (hitPoint) {
+            applyImpactFall(hitPoint);
+            triggerStructuralCollapse();
+          }
+        }
+      }
+
+      function getArchDoorCenterY() {
+        return getArchDoorBottomY() + params.archDoorHeight * 0.5;
+      }
+
+      function getArchDoorFrame() {
+        const angle = THREE.MathUtils.degToRad(params.archDoorAngleDeg);
+        const radial = new THREE.Vector3(Math.cos(angle), 0, Math.sin(angle));
+        const tangent = new THREE.Vector3(-radial.z, 0, radial.x);
+        const center = new THREE.Vector3(
+          radial.x * params.radius,
+          getArchDoorCenterY(),
+          radial.z * params.radius,
+        );
+        return { center, radial, tangent };
+      }
+
+      function syncParamsFromArchDoorGizmo() {
+        if (!archDoorGizmoPivot) return;
+
+        const rotAngle = archDoorGizmoPivot.rotation.y;
+        const planarLen = Math.hypot(
+          archDoorGizmoPivot.position.x,
+          archDoorGizmoPivot.position.z,
+        );
+
+        let angle = rotAngle;
+        if (planarLen > 1e-5) {
+          angle = Math.atan2(
+            archDoorGizmoPivot.position.z,
+            archDoorGizmoPivot.position.x,
+          );
+        }
+
+        params.archDoorAngleDeg = THREE.MathUtils.radToDeg(angle);
+        archDoorGizmoPivot.position.x = Math.cos(angle) * params.radius;
+        archDoorGizmoPivot.position.z = Math.sin(angle) * params.radius;
+        archDoorGizmoPivot.position.y = getArchDoorCenterY();
+
+        params.archDoorWidth = Math.max(
+          0.3,
+          Math.abs(archDoorGizmoPivot.scale.x),
+        );
+        params.archDoorHeight = Math.max(
+          0.3,
+          Math.abs(archDoorGizmoPivot.scale.y),
+        );
+        params.archDoorDepth = Math.max(
+          0.2,
+          Math.abs(archDoorGizmoPivot.scale.z),
+        );
+      }
+
+      function updateArchDoorGizmoFromParams() {
+        if (!archDoorGizmoPivot || isDraggingArchDoorGizmo) {
+          return;
+        }
+
+        const frame = getArchDoorFrame();
+        archDoorGizmoPivot.position.copy(frame.center);
+        archDoorGizmoPivot.rotation.set(
+          0,
+          THREE.MathUtils.degToRad(params.archDoorAngleDeg),
+          0,
+        );
+        archDoorGizmoPivot.scale.set(
+          params.archDoorWidth,
+          params.archDoorHeight,
+          params.archDoorDepth,
+        );
+      }
+
+      function getArchOpeningRadius(halfWidth, halfHeight) {
+        const totalHeight = halfHeight * 2;
+        return Math.min(halfWidth, totalHeight * params.archRiseRatio);
+      }
+
+      /**
+       * Extrados XZ radius used when snapping voussoir corners (must match
+       * buildArchDoorVoussoirRing).
+       */
+      function getArchVoussoirSnapCylinderR() {
+        const halfD = params.archDoorDepth * 0.5;
+        const rIntoWall = halfD * params.archRadialDepthFrac;
+        const towerShell =
+          (params.brickDepth * 0.48 +
+            Math.max(0, params.radiusVariation) * 0.35) *
+          params.archMasonryShellMul;
+        return params.radius + towerShell - rIntoWall;
+      }
+
+      /** Shared spline lengths / offsets for voussoir build + terrain grounding. */
+      function getArchSplineGeometryConstants() {
+        const halfW = params.archDoorWidth * 0.5;
+        const halfH = params.archDoorHeight * 0.5;
+        const halfD = params.archDoorDepth * 0.5;
+        const totalHeight = 2 * halfH;
+        const openingR = getArchOpeningRadius(halfW, halfH);
+        const archCenterYFromBottom = totalHeight - openingR;
+        const springLen = Math.max(1e-4, archCenterYFromBottom);
+
+        const masonryR =
+          openingR + params.brickWidth * params.archExtradosBrickWidths;
+        const rIntoWall = halfD * params.archRadialDepthFrac;
+        const snapCylinderR = getArchVoussoirSnapCylinderR();
+        const skinU = params.brickWidth * 0.06;
+        const ringThickness = Math.max(1e-5, masonryR - openingR);
+        const uSpringExtrados = Math.max(masonryR, halfW + skinU);
+        const uBottomExtrados =
+          halfW + skinU + ringThickness * params.archJambBaseBulge;
+
+        const Upath = uSpringExtrados * params.archJambInset;
+        const uBottomIn = uBottomExtrados * params.archJambInset;
+        const uWide = Math.max(Upath, uBottomIn);
+        const u0 = THREE.MathUtils.lerp(
+          Upath,
+          uWide,
+          THREE.MathUtils.clamp(params.archJambTaper, 0, 1),
+        );
+
+        const L2 = Math.max(Math.PI * Upath, 1e-4);
+        let L1 = 0;
+        let L3 = 0;
+        if (params.archJambEnabled && springLen > 1e-4) {
+          const duLeg = Math.abs(u0 - Upath);
+          L1 = Math.hypot(springLen, duLeg);
+          L3 = L1;
+        }
+        const Ltot = L1 + L2 + L3;
+
+        return {
+          halfW,
+          halfH,
+          halfD,
+          totalHeight,
+          openingR,
+          archCenterYFromBottom,
+          springLen,
+          masonryR,
+          rIntoWall,
+          snapCylinderR,
+          skinU,
+          ringThickness,
+          Upath,
+          u0,
+          L1,
+          L2,
+          L3,
+          Ltot,
+        };
+      }
+
+      function snapVoussoirCornerXZFromU(
+        u,
+        radial,
+        tangent,
+        rIntoWall,
+        snapCylinderR,
+      ) {
+        const cx = radial.x * params.radius;
+        const cz = radial.z * params.radius;
+        let x = cx + tangent.x * u + radial.x * (-rIntoWall);
+        let z = cz + tangent.z * u + radial.z * (-rIntoWall);
+        const len = Math.hypot(x, z);
+        if (len > 1e-6) {
+          const sc = snapCylinderR / len;
+          x *= sc;
+          z *= sc;
+        }
+        return { x, z };
+      }
+
+      function archSplineUAtS(s, L1, L2, L3, Ltot, u0, Upath, jambEnabled) {
+        const eps = 1e-5;
+        if (!jambEnabled || L1 < eps) {
+          const ss = THREE.MathUtils.clamp(s, 0, Math.max(L2 - eps, 0));
+          const alpha = -Math.PI * 0.5 + (ss / L2) * Math.PI;
+          return Upath * Math.sin(alpha);
+        }
+        if (s <= L1 - eps) {
+          const f = L1 > eps ? s / L1 : 0;
+          return THREE.MathUtils.lerp(-u0, -Upath, f);
+        }
+        if (s <= L1 + L2 - eps) {
+          const s2 = s - L1;
+          const alpha = -Math.PI * 0.5 + (s2 / L2) * Math.PI;
+          return Upath * Math.sin(alpha);
+        }
+        const s3 = s - L1 - L2;
+        const f = L3 > eps ? s3 / L3 : 1;
+        return THREE.MathUtils.lerp(Upath, u0, f);
+      }
+
+      /**
+       * Door sill world Y. When CPU terrain is uniform (flat plane), the jamb
+       * "rise" terms made min(terrain − rise) sit ~springLen×legFrac below the
+       * mesh while the tower uses getTowerFootprintMeanTerrainWorldY() — arch
+       * floated or sat wrong. In that case reuse the tower footing exactly.
+       */
+      function getArchDoorBottomY() {
+        if (!groundMesh) return -2;
+        if (isTerrainHeightUniform()) {
+          return getTowerFootprintMeanTerrainWorldY();
+        }
+        const angle = THREE.MathUtils.degToRad(params.archDoorAngleDeg);
+        const radial = new THREE.Vector3(Math.cos(angle), 0, Math.sin(angle));
+        const tangent = new THREE.Vector3(-radial.z, 0, radial.x);
+
+        const {
+          L1,
+          L2,
+          L3,
+          Ltot,
+          u0,
+          Upath,
+          rIntoWall,
+          snapCylinderR,
+          springLen,
+        } = getArchSplineGeometryConstants();
+
+        const terrainAtS = (s) => {
+          const u = archSplineUAtS(
+            s,
+            L1,
+            L2,
+            L3,
+            Ltot,
+            u0,
+            Upath,
+            params.archJambEnabled,
+          );
+          const { x, z } = snapVoussoirCornerXZFromU(
+            u,
+            radial,
+            tangent,
+            rIntoWall,
+            snapCylinderR,
+          );
+          return getTerrainWorldYAt(x, z);
+        };
+
+        const eps = 1e-4;
+        if (!params.archJambEnabled || L1 < eps) {
+          let minY = Infinity;
+          for (let i = 0; i <= 64; i++) {
+            minY = Math.min(minY, terrainAtS((i / 64) * Ltot));
+          }
+          for (const uExtra of [-u0, u0]) {
+            const { x, z } = snapVoussoirCornerXZFromU(
+              uExtra,
+              radial,
+              tangent,
+              rIntoWall,
+              snapCylinderR,
+            );
+            minY = Math.min(minY, getTerrainWorldYAt(x, z));
+          }
+          return minY;
+        }
+
+        let sillY = Infinity;
+        sillY = Math.min(sillY, terrainAtS(0), terrainAtS(Ltot));
+        for (const uExtra of [-u0, u0]) {
+          const { x, z } = snapVoussoirCornerXZFromU(
+            uExtra,
+            radial,
+            tangent,
+            rIntoWall,
+            snapCylinderR,
+          );
+          sillY = Math.min(sillY, getTerrainWorldYAt(x, z));
+        }
+
+        const legFrac = 0.34;
+        for (let i = 0; i <= 20; i++) {
+          const s = ((i / 20) * legFrac) * L1;
+          const frac = s / L1;
+          sillY = Math.min(sillY, terrainAtS(s) - frac * springLen);
+        }
+        for (let i = 0; i <= 20; i++) {
+          const t = 1 - (i / 20) * legFrac;
+          const s = L1 + L2 + t * L3;
+          const s3 = s - L1 - L2;
+          const f = L3 > eps ? s3 / L3 : 1;
+          sillY = Math.min(sillY, terrainAtS(s) - springLen * (1 - f));
+        }
+
+        return sillY;
+      }
+
+      function isInsideArchDoorProfile(
+        absX,
+        localY,
+        verticalDist,
+        halfWidth,
+        halfHeight,
+      ) {
+        const totalHeight = halfHeight * 2;
+        const yFromBottom = localY + halfHeight;
+        const radius = getArchOpeningRadius(halfWidth, halfHeight);
+        const archCenterY = totalHeight - radius;
+        const inRect =
+          absX <= halfWidth && yFromBottom >= 0 && yFromBottom <= archCenterY;
+        const dy = yFromBottom - archCenterY;
+        const inArch =
+          yFromBottom >= archCenterY &&
+          yFromBottom <= totalHeight &&
+          absX * absX + dy * dy <= radius * radius;
+        return inRect || inArch;
+      }
+
+      function archOpeningContainsWorldPoint(
+        p,
+        center,
+        radial,
+        tangent,
+        halfWidth,
+        halfHeight,
+        halfDepth,
+      ) {
+        if (!params.archDoorEnabled) return false;
+        tempVec4.subVectors(p, center);
+        const tangentDist = Math.abs(tempVec4.dot(tangent));
+        const radialDist = Math.abs(tempVec4.dot(radial));
+        const localY = tempVec4.y;
+        const verticalDist = Math.abs(localY);
+        const absX = tangentDist;
+        if (radialDist > halfDepth) return false;
+        return isInsideArchDoorProfile(
+          absX,
+          localY,
+          verticalDist,
+          halfWidth,
+          halfHeight,
+        );
+      }
+
+      function brickOpeningClassification(
+        pos,
+        rotEuler,
+        scaleMul,
+        uniformScale,
+        center,
+        radial,
+        tangent,
+        halfWidth,
+        halfHeight,
+        halfDepth,
+      ) {
+        tempScaleAdapt.set(
+          params.brickWidth * scaleMul.x * uniformScale * 0.5,
+          params.brickHeight * scaleMul.y * uniformScale * 0.5,
+          params.brickDepth * scaleMul.z * uniformScale * 0.5,
+        );
+        tempObj.rotation.set(rotEuler.x, rotEuler.y, rotEuler.z);
+        tempQuat.setFromEuler(tempObj.rotation);
+        basisX.set(1, 0, 0).applyQuaternion(tempQuat);
+        basisY.set(0, 1, 0).applyQuaternion(tempQuat);
+        basisZ.set(0, 0, 1).applyQuaternion(tempQuat);
+
+        let anyIn = false;
+        let allIn = true;
+        for (let sx = -1; sx <= 1; sx += 2) {
+          for (let sy = -1; sy <= 1; sy += 2) {
+            for (let sz = -1; sz <= 1; sz += 2) {
+              cornerWorld
+                .copy(pos)
+                .addScaledVector(basisX, sx * tempScaleAdapt.x)
+                .addScaledVector(basisY, sy * tempScaleAdapt.y)
+                .addScaledVector(basisZ, sz * tempScaleAdapt.z);
+              const ins = archOpeningContainsWorldPoint(
+                cornerWorld,
+                center,
+                radial,
+                tangent,
+                halfWidth,
+                halfHeight,
+                halfDepth,
+              );
+              anyIn = anyIn || ins;
+              allIn = allIn && ins;
+            }
+          }
+        }
+        if (!anyIn) return "outside";
+        if (allIn) return "inside";
+        return "partial";
+      }
+
+      function isBrickNearArchOpening(position, frame, sillWorldY) {
+        const brickA = Math.atan2(position.z, position.x);
+        const doorA = Math.atan2(frame.radial.z, frame.radial.x);
+        let da = Math.abs(brickA - doorA);
+        if (da > Math.PI) da = 2 * Math.PI - da;
+        if (da > THREE.MathUtils.degToRad(params.archBrickAutoFitAngleDeg)) {
+          return false;
+        }
+        const sill = sillWorldY;
+        const yLo = sill - params.brickHeight * 2.5;
+        const yHi = sill + params.archDoorHeight + params.brickHeight * 3;
+        if (position.y < yLo || position.y > yHi) return false;
+        const rr = Math.hypot(position.x, position.z);
+        if (rr < params.radius - params.brickDepth * 2.2) return false;
+        return true;
+      }
+
+      /**
+       * Uniformly shrinks brick scale (in place) so all eight corners sit outside
+       * the arch opening profile when possible (partial → outside). Returns false
+       * if the brick is fully inside or cannot clear even at min scale.
+       */
+      function shrinkBrickScaleForArchClearance(
+        position,
+        rotationEuler,
+        scaleVec,
+        frame,
+      ) {
+        if (!params.archBrickAutoFit) return true;
+
+        const bleed = Math.max(0, params.archCarveBleed);
+        const halfW = params.archDoorWidth * 0.5 + bleed;
+        const halfH = params.archDoorHeight * 0.5 + bleed;
+        const halfD = params.archDoorDepth * 0.5 + bleed;
+
+        const clsAt = (mult) => {
+          archFitScaleProbe.copy(scaleVec).multiplyScalar(mult);
+          return brickOpeningClassification(
+            position,
+            rotationEuler,
+            archFitScaleProbe,
+            1,
+            frame.center,
+            frame.radial,
+            frame.tangent,
+            halfW,
+            halfH,
+            halfD,
+          );
+        };
+
+        const c1 = clsAt(1);
+        if (c1 === "outside") return true;
+        if (c1 === "inside") return false;
+
+        const sMin = THREE.MathUtils.clamp(params.archBrickAutoFitMin, 0.12, 1);
+        if (clsAt(sMin) !== "outside") return false;
+
+        let lo = sMin;
+        let hi = 1;
+        for (let iter = 0; iter < 12; iter++) {
+          const mid = (lo + hi) * 0.5;
+          if (clsAt(mid) === "outside") lo = mid;
+          else hi = mid;
+        }
+        scaleVec.multiplyScalar(lo);
+        return true;
+      }
+
+      function applyArchDoorToPlacementBrick(position, rotationEuler, scaleVec, frame) {
+        if (!params.archDoorEnabled) return true;
+        const bleed = Math.max(0, params.archCarveBleed);
+        const halfW = params.archDoorWidth * 0.5 + bleed;
+        const halfH = params.archDoorHeight * 0.5 + bleed;
+        const halfD = params.archDoorDepth * 0.5 + bleed;
+        const cls = brickOpeningClassification(
+          position,
+          rotationEuler,
+          scaleVec,
+          1,
+          frame.center,
+          frame.radial,
+          frame.tangent,
+          halfW,
+          halfH,
+          halfD,
+        );
+        if (cls === "outside") return true;
+        return false;
+      }
+
+      function disposeVoussoirMeshIfAny() {
+        if (voussoirMesh && towerGroup) {
+          towerGroup.remove(voussoirMesh);
+        }
+        voussoirMesh = null;
+      }
+
+      function snapPointToTowerCylinderXZ(pos, targetRadiusXZ) {
+        const y = pos.y;
+        pos.y = 0;
+        const len = Math.hypot(pos.x, pos.z);
+        if (len > 1e-6) {
+          pos.multiplyScalar(targetRadiusXZ / len);
+        }
+        pos.y = y;
+      }
+
+      function buildArchDoorVoussoirRing() {
+        if (
+          !params.archDoorEnabled ||
+          !towerGroup ||
+          !brickGeometry ||
+          !brickMaterial
+        ) {
+          return;
+        }
+        disposeVoussoirMeshIfAny();
+
+        const frame = getArchDoorFrame();
+        const { center, radial, tangent } = frame;
+
+        const ag = getArchSplineGeometryConstants();
+        const {
+          halfH,
+          archCenterYFromBottom,
+          rIntoWall,
+          snapCylinderR,
+          Upath,
+          u0,
+          springLen,
+          L1,
+          L2,
+          L3,
+          Ltot,
+        } = ag;
+
+        const worldYC = center.y - halfH + archCenterYFromBottom;
+        const doorBottomY = center.y - halfH;
+        const springWorldY = worldYC;
+
+        archCircleCenter.set(center.x, worldYC, center.z);
+
+        const cntLo = Math.min(
+          params.archVoussoirCountMin,
+          params.archVoussoirCountMax,
+        );
+        const cntHi = Math.max(
+          params.archVoussoirCountMin,
+          params.archVoussoirCountMax,
+        );
+        const pitch =
+          params.brickWidth * params.archVoussoirSpacingMul;
+        let nSpline = Math.max(
+          cntLo,
+          Math.min(
+            cntHi,
+            Math.ceil(Ltot / Math.max(1e-4, pitch)),
+          ),
+        );
+        nSpline = Math.max(
+          params.archJambEnabled ? 4 : 3,
+          nSpline,
+        );
+
+        voussoirMesh = new THREE.InstancedMesh(
+          brickGeometry,
+          brickMaterial,
+          nSpline + 8,
+        );
+        voussoirMesh.castShadow = true;
+        voussoirMesh.receiveShadow = true;
+        voussoirMesh.frustumCulled = false;
+
+        const cell = Ltot / Math.max(1, nSpline);
+        const pack = THREE.MathUtils.clamp(params.archSplinePack, 0.55, 1);
+        const brickAlong = cell * pack;
+        const jm = params.archJambScale;
+
+        function sampleExtradosSpline(s) {
+          const eps = 1e-5;
+          let u;
+          let wy;
+          let tu;
+          let ty;
+          let caUx = 0;
+          if (!params.archJambEnabled || L1 < eps) {
+            const ss = THREE.MathUtils.clamp(s, 0, Math.max(L2 - eps, 0));
+            const alpha = -Math.PI * 0.5 + (ss / L2) * Math.PI;
+            const ca = Math.cos(alpha);
+            const sa = Math.sin(alpha);
+            u = Upath * sa;
+            wy = worldYC + Upath * ca;
+            const dux = Upath * ca;
+            const duy = -Upath * sa;
+            const inv = 1 / Math.hypot(dux, duy);
+            tu = dux * inv;
+            ty = duy * inv;
+            caUx = ca;
+            return { u, wy, tu, ty, caUx };
+          }
+          if (s <= L1 - eps) {
+            const f = L1 > eps ? s / L1 : 0;
+            u = THREE.MathUtils.lerp(-u0, -Upath, f);
+            wy = THREE.MathUtils.lerp(doorBottomY, springWorldY, f);
+            const du = -Upath + u0;
+            const dy = springLen;
+            const inv = 1 / Math.hypot(du, dy);
+            tu = du * inv;
+            ty = dy * inv;
+          } else if (s <= L1 + L2 - eps) {
+            const s2 = s - L1;
+            const alpha = -Math.PI * 0.5 + (s2 / L2) * Math.PI;
+            const ca = Math.cos(alpha);
+            const sa = Math.sin(alpha);
+            u = Upath * sa;
+            wy = worldYC + Upath * ca;
+            const dux = Upath * ca;
+            const duy = -Upath * sa;
+            const inv = 1 / Math.hypot(dux, duy);
+            tu = dux * inv;
+            ty = duy * inv;
+            caUx = ca;
+          } else {
+            const s3 = s - L1 - L2;
+            const f = L3 > eps ? s3 / L3 : 1;
+            u = THREE.MathUtils.lerp(Upath, u0, f);
+            wy = THREE.MathUtils.lerp(springWorldY, doorBottomY, f);
+            const du = u0 - Upath;
+            const dy = -springLen;
+            const inv = 1 / Math.hypot(du, dy);
+            tu = du * inv;
+            ty = dy * inv;
+          }
+          return { u, wy, tu, ty, caUx };
+        }
+
+        let idx = 0;
+
+        for (let i = 0; i < nSpline; i++) {
+          const sCenter = (i + 0.5) * cell;
+          const { u, wy, tu, ty, caUx } = sampleExtradosSpline(sCenter);
+
+          cornerWorld.set(archCircleCenter.x, wy, archCircleCenter.z);
+          cornerWorld.addScaledVector(tangent, u);
+          cornerWorld.addScaledVector(radial, -rIntoWall);
+          snapPointToTowerCylinderXZ(
+            cornerWorld,
+            snapCylinderR,
+          );
+
+          const splineTan = tempVec3
+            .copy(tangent)
+            .multiplyScalar(tu)
+            .addScaledVector(worldUpUnit, ty);
+          if (splineTan.lengthSq() < 1e-10) {
+            splineTan.copy(worldUpUnit);
+          } else {
+            splineTan.normalize();
+          }
+
+          const sx =
+            (0.78 + 0.12 * (1 - Math.abs(caUx))) *
+            params.archScaleCross *
+            jm;
+          const sy =
+            Math.min(
+              1.35,
+              Math.max(
+                0.52,
+                brickAlong / (params.brickHeight * 0.5),
+              ),
+            ) *
+            params.archScaleAlongArc *
+            jm;
+          const sz = 0.88 * params.archScaleDepth * jm;
+
+          tempObj.position.copy(cornerWorld);
+          tempObj.quaternion.identity();
+          tempObj.up.set(0, 1, 0);
+          tempObj.lookAt(
+            cornerWorld.x * 2,
+            cornerWorld.y,
+            cornerWorld.z * 2,
+          );
+          tempObj.rotateY(Math.PI * 0.5);
+
+          tempVec.set(0, 1, 0).applyQuaternion(tempObj.quaternion);
+          if (tempVec.dot(splineTan) < 1 - 1e-5) {
+            tempQuat.setFromUnitVectors(tempVec, splineTan);
+            tempObj.quaternion.premultiply(tempQuat);
+          }
+
+          tempObj.scale.set(sx, sy, sz);
+          tempObj.updateMatrix();
+          voussoirMesh.setMatrixAt(idx, tempObj.matrix);
+
+          const grey =
+            params.stoneDarkness +
+            Math.random() * (params.stoneLightness - params.stoneDarkness);
+          voussoirMesh.setColorAt(
+            idx,
+            new THREE.Color(grey * 0.92, grey * 0.95, grey),
+          );
+          idx++;
+        }
+
+        voussoirMesh.count = idx;
+        voussoirMesh.instanceMatrix.needsUpdate = true;
+        if (voussoirMesh.instanceColor) {
+          voussoirMesh.instanceColor.needsUpdate = true;
+        }
+        towerGroup.add(voussoirMesh);
+      }
+
+      function applyImpactFall(hitPoint) {
+        applyImpactFallToCollection(
+          towerInstanceData,
+          towerMesh,
+          hitPoint,
+          true,
+        );
+        applyImpactFallToCollection(
+          battlementInstanceData,
+          battlementMesh,
+          hitPoint,
+          false,
+        );
+      }
+
+      function applyImpactFallToCollection(
+        collection,
+        mesh,
+        hitPoint,
+        trackRemoved,
+      ) {
+        if (!mesh) return;
+        let removedAny = false;
+        for (let i = 0; i < collection.length; i++) {
+          const instance = collection[i];
+          if (instance.removed) continue;
+
+          const d = instance.position.distanceTo(hitPoint);
+          if (d < params.removeRadius) {
+            instance.removed = true;
+            if (trackRemoved && instance.id) {
+              removedBricks.add(instance.id);
+            }
+            startFallingInstance(collection, mesh, i, hitPoint);
+            removedAny = true;
+          }
+        }
+        if (removedAny) {
+          mesh.instanceMatrix.needsUpdate = true;
+        }
+      }
+
+      function startFallingInstance(collection, mesh, index, hitPoint) {
+        const instance = collection[index];
+        if (!instance || instance.hidden || instance.falling) {
+          return;
+        }
+
+        tempVec.subVectors(instance.position, hitPoint);
+
+        const lenSq = tempVec.lengthSq();
+        if (lenSq < 1e-6) {
+          tempVec.set(
+            (Math.random() - 0.5) * 0.3,
+            0,
+            (Math.random() - 0.5) * 0.3,
+          );
+        } else {
+          tempVec.normalize();
+        }
+
+        const push = 2.6 + Math.random() * 1.8;
+        instance.velocity.set(
+          tempVec.x * push,
+          2.5 + Math.random() * 2.2,
+          tempVec.z * push,
+        );
+
+        instance.angularVelocity.set(
+          (Math.random() - 0.5) * 6,
+          (Math.random() - 0.5) * 6,
+          (Math.random() - 0.5) * 6,
+        );
+
+        instance.falling = true;
+        instance.sleeping = false;
+        instance.hidden = false;
+        instance.ttl = params.debrisLifetime;
+      }
+
+      function hideInstance(collection, mesh, index) {
+        const instance = collection[index];
+        if (instance) {
+          instance.hidden = true;
+          instance.falling = false;
+          instance.sleeping = false;
+          instance.sleepOrder = 0;
+          instance.ttl = 0;
+        }
+
+        tempObj.position.set(0, -9999, 0);
+        tempObj.rotation.set(0, 0, 0);
+        tempObj.scale.set(0.001, 0.001, 0.001);
+        tempObj.updateMatrix();
+        mesh.setMatrixAt(index, tempObj.matrix);
+      }
+
+      function triggerStructuralCollapse() {
+        const stableMap = new Map();
+        const stableTower = (instance) =>
+          !instance.removed && !instance.falling && !instance.hidden;
+
+        for (let i = 0; i < towerInstanceData.length; i++) {
+          const instance = towerInstanceData[i];
+          if (stableTower(instance)) {
+            stableMap.set(`${instance.ringIndex}_${instance.ringY}`, i);
+          }
+        }
+
+        const wrapIndex = (index) => {
+          const n = params.bricksPerRing;
+          return ((index % n) + n) % n;
+        };
+
+        let changed = true;
+        let guard = 0;
+
+        while (changed && guard < params.height + 3) {
+          changed = false;
+          guard++;
+
+          for (let i = 0; i < towerInstanceData.length; i++) {
+            const instance = towerInstanceData[i];
+            if (!stableTower(instance)) {
+              continue;
+            }
+
+            if (instance.ringY <= 0) {
+              continue;
+            }
+
+            let supported = false;
+            const by = instance.ringY - 1;
+            for (let o = -1; o <= 1; o++) {
+              const key = `${wrapIndex(instance.ringIndex + o)}_${by}`;
+              if (stableMap.has(key)) {
+                supported = true;
+                break;
+              }
+            }
+
+            if (!supported) {
+              instance.removed = true;
+              if (instance.id) {
+                removedBricks.add(instance.id);
+              }
+              stableMap.delete(`${instance.ringIndex}_${instance.ringY}`);
+              startFallingInstance(
+                towerInstanceData,
+                towerMesh,
+                i,
+                instance.position,
+              );
+              changed = true;
+            }
+          }
+
+          const topRingY = params.height - 1;
+          for (let i = 0; i < battlementInstanceData.length; i++) {
+            const battlement = battlementInstanceData[i];
+            if (battlement.removed || battlement.hidden || battlement.falling) {
+              continue;
+            }
+
+            let supported = false;
+            for (let o = -1; o <= 1; o++) {
+              const key = `${wrapIndex(battlement.ringIndex + o)}_${topRingY}`;
+              if (stableMap.has(key)) {
+                supported = true;
+                break;
+              }
+            }
+
+            if (!supported) {
+              battlement.removed = true;
+              startFallingInstance(
+                battlementInstanceData,
+                battlementMesh,
+                i,
+                battlement.position,
+              );
+              changed = true;
+            }
+          }
+        }
+
+        if (towerMesh) {
+          towerMesh.instanceMatrix.needsUpdate = true;
+        }
+        if (battlementMesh) {
+          battlementMesh.instanceMatrix.needsUpdate = true;
+        }
+      }
+
+      function updateFallingBricks(dt) {
+        if (!towerMesh) return;
+
+        updateFallingCollection(towerInstanceData, towerMesh, dt);
+        updateFallingCollection(battlementInstanceData, battlementMesh, dt);
+      }
+
+      function updateFallingCollection(collection, mesh, dt) {
+        if (!mesh) return;
+        let updatedAny = false;
+
+        for (let i = 0; i < collection.length; i++) {
+          const instance = collection[i];
+          if (!instance.falling || instance.hidden) {
+            continue;
+          }
+
+          instance.velocity.y -= params.gravity * dt;
+          instance.position.addScaledVector(instance.velocity, dt);
+
+          instance.rotation.x += instance.angularVelocity.x * dt;
+          instance.rotation.y += instance.angularVelocity.y * dt;
+          instance.rotation.z += instance.angularVelocity.z * dt;
+
+          tempVec2
+            .copy(instance.angularVelocity)
+            .multiplyScalar(params.angularDamping);
+          instance.angularVelocity.copy(tempVec2);
+
+          const surfaceY = getTerrainWorldYAt(
+            instance.position.x,
+            instance.position.z,
+          );
+          const minY = surfaceY + params.brickHeight * 0.45;
+
+          if (instance.position.y < minY) {
+            instance.position.y = minY;
+            if (Math.abs(instance.velocity.y) > 0.5) {
+              instance.velocity.y = -instance.velocity.y * params.bounce;
+              instance.velocity.x *= 0.86;
+              instance.velocity.z *= 0.86;
+            } else {
+              instance.velocity.y = 0;
+              instance.velocity.x *= 0.9;
+              instance.velocity.z *= 0.9;
+            }
+
+            const horizontalSpeed = Math.hypot(
+              instance.velocity.x,
+              instance.velocity.z,
+            );
+            const speed = Math.hypot(horizontalSpeed, instance.velocity.y);
+
+            if (speed < params.sleepThreshold) {
+              instance.velocity.set(0, 0, 0);
+              instance.angularVelocity.set(0, 0, 0);
+              instance.falling = false;
+              instance.sleeping = true;
+              instance.sleepOrder = ++debrisSleepCounter;
+            }
+          }
+
+          if (instance.falling) {
+            instance.ttl -= dt;
+            if (
+              instance.position.y < surfaceY - 12 ||
+              (params.debrisMode === "fade" && instance.ttl <= 0)
+            ) {
+              hideInstance(collection, mesh, i);
+              updatedAny = true;
+              continue;
+            }
+          }
+
+          tempObj.position.copy(instance.position);
+          tempObj.rotation.set(
+            instance.rotation.x,
+            instance.rotation.y,
+            instance.rotation.z,
+          );
+          tempObj.scale.copy(instance.scale);
+          tempObj.updateMatrix();
+          mesh.setMatrixAt(i, tempObj.matrix);
+          updatedAny = true;
+        }
+
+        if (updatedAny) {
+          mesh.instanceMatrix.needsUpdate = true;
+        }
+
+        enforceDebrisLimit();
+      }
+
+      function enforceDebrisLimit() {
+        if (params.debrisMode !== "keep") {
+          return;
+        }
+
+        const sleeping = [];
+
+        for (let i = 0; i < towerInstanceData.length; i++) {
+          const instance = towerInstanceData[i];
+          if (instance.sleeping && !instance.hidden) {
+            sleeping.push({
+              collection: towerInstanceData,
+              mesh: towerMesh,
+              index: i,
+              order: instance.sleepOrder,
+            });
+          }
+        }
+
+        for (let i = 0; i < battlementInstanceData.length; i++) {
+          const instance = battlementInstanceData[i];
+          if (instance.sleeping && !instance.hidden) {
+            sleeping.push({
+              collection: battlementInstanceData,
+              mesh: battlementMesh,
+              index: i,
+              order: instance.sleepOrder,
+            });
+          }
+        }
+
+        if (sleeping.length <= params.maxDebrisCount) {
+          return;
+        }
+
+        sleeping.sort((a, b) => a.order - b.order);
+        const overflow = sleeping.length - params.maxDebrisCount;
+
+        let towerUpdated = false;
+        let battlementUpdated = false;
+
+        for (let i = 0; i < overflow; i++) {
+          const entry = sleeping[i];
+          hideInstance(entry.collection, entry.mesh, entry.index);
+          if (entry.mesh === towerMesh) {
+            towerUpdated = true;
+          } else if (entry.mesh === battlementMesh) {
+            battlementUpdated = true;
+          }
+        }
+
+        if (towerUpdated && towerMesh) {
+          towerMesh.instanceMatrix.needsUpdate = true;
+        }
+        if (battlementUpdated && battlementMesh) {
+          battlementMesh.instanceMatrix.needsUpdate = true;
+        }
+      }
+
+      function scheduleRebuild() {
+        if (rebuildTimer) {
+          clearTimeout(rebuildTimer);
+        }
+        rebuildTimer = setTimeout(() => {
+          rebuildTimer = null;
+          rebuildTower();
+        }, 120);
+      }
+
+      function setDynamicPixelRatio(value) {
+        if (Math.abs(dynamicDpr.current - value) < 0.01) {
+          return;
+        }
+        dynamicDpr.current = value;
+        renderer.setPixelRatio(value);
+      }
+
+      function buildPane() {
+        const pane = new Pane({
+          container: document.getElementById("pane"),
+          title: "Tower Generator",
+        });
+
+        // tower
+
+        const fTower = pane.addFolder({
+          title: "Tower Shape",
+        });
+
+        fTower
+          .addBinding(params, "radius", { min: 2, max: 12 })
+          .on("change", scheduleRebuild);
+
+        fTower
+          .addBinding(params, "height", { min: 8, max: 60, step: 1 })
+          .on("change", scheduleRebuild);
+
+        fTower
+          .addBinding(params, "bricksPerRing", { min: 6, max: 60, step: 1 })
+          .on("change", scheduleRebuild);
+
+        fTower
+          .addBinding(params, "ringHeight", { min: 0.2, max: 1.2 })
+          .on("change", scheduleRebuild);
+
+        // brick
+
+        const fBrick = pane.addFolder({
+          title: "Brick Size",
+        });
+
+        fBrick
+          .addBinding(params, "brickWidth", { min: 0.2, max: 3 })
+          .on("change", scheduleRebuild);
+
+        fBrick
+          .addBinding(params, "brickHeight", { min: 0.2, max: 2 })
+          .on("change", scheduleRebuild);
+
+        fBrick
+          .addBinding(params, "brickDepth", { min: 0.2, max: 3 })
+          .on("change", scheduleRebuild);
+
+        fBrick
+          .addBinding(params, "scaleRandomness", { min: 0, max: 1 })
+          .on("change", scheduleRebuild);
+
+        fBrick
+          .addBinding(params, "brickSegments", { min: 1, max: 10, step: 1 })
+          .on("change", scheduleRebuild);
+
+        // shape
+
+        const fShape = pane.addFolder({
+          title: "Stone Shape",
+        });
+
+        fShape
+          .addBinding(params, "deformation", { min: 0, max: 0.2 })
+          .on("change", scheduleRebuild);
+
+        fShape
+          .addBinding(params, "edgeWarp", { min: 0, max: 0.1 })
+          .on("change", scheduleRebuild);
+
+        fShape
+          .addBinding(params, "inflate", { min: 0, max: 0.1 })
+          .on("change", scheduleRebuild);
+
+        fShape
+          .addBinding(params, "normalSmooth", { min: 0, max: 1 })
+          .on("change", scheduleRebuild);
+
+        // randomness
+
+        const fRandom = pane.addFolder({
+          title: "Randomness",
+        });
+
+        fRandom
+          .addBinding(params, "radiusVariation", { min: 0, max: 1 })
+          .on("change", scheduleRebuild);
+
+        fRandom
+          .addBinding(params, "verticalVariation", { min: 0, max: 0.5 })
+          .on("change", scheduleRebuild);
+
+        fRandom
+          .addBinding(params, "rotationVariation", { min: 0, max: 0.2 })
+          .on("change", scheduleRebuild);
+
+        fRandom.addBinding(params, "stagger").on("change", scheduleRebuild);
+
+        // destruction
+
+        const fDestroy = pane.addFolder({
+          title: "Destruction",
+        });
+
+        fDestroy.addBinding(params, "destructionEnabled", {
+          label: "Click to destroy",
+        });
+
+        fDestroy.addBinding(params, "removeRadius", { min: 0.2, max: 6 });
+
+        fDestroy.addBinding(params, "gravity", { min: 2, max: 40 });
+
+        fDestroy.addBinding(params, "bounce", { min: 0, max: 0.9 });
+
+        fDestroy.addBinding(params, "debrisMode", {
+          options: {
+            fade: "fade",
+            keep: "keep",
+          },
+        });
+
+        fDestroy.addBinding(params, "debrisLifetime", { min: 1, max: 20 });
+
+        fDestroy.addBinding(params, "maxDebrisCount", {
+          min: 50,
+          max: 3000,
+          step: 10,
+        });
+
+        fDestroy.addBinding(params, "sleepThreshold", { min: 0.05, max: 2 });
+
+        const fArchDoor = pane.addFolder({
+          title: "Arch door (base)",
+        });
+
+        fArchDoor
+          .addBinding(params, "archDebugIsolate", {
+            label: "Debug: arch only",
+          })
+          .on("change", () => {
+            if (params.archDebugIsolate) {
+              params.archDoorEnabled = true;
+              params.archDoorShowGizmo = true;
+            }
+            scheduleRebuild();
+          });
+
+        fArchDoor
+          .addBinding(params, "archDoorEnabled")
+          .on("change", scheduleRebuild);
+
+        fArchDoor
+          .addBinding(params, "archBrickAutoFit", {
+            label: "Auto-fit bricks at arch",
+          })
+          .on("change", scheduleRebuild);
+
+        fArchDoor
+          .addBinding(params, "archBrickAutoFitMin", {
+            label: "Arch fit min scale",
+            min: 0.15,
+            max: 0.85,
+            step: 0.01,
+          })
+          .on("change", scheduleRebuild);
+
+        fArchDoor
+          .addBinding(params, "archBrickAutoFitAngleDeg", {
+            label: "Arch fit angle °",
+            min: 18,
+            max: 95,
+            step: 1,
+          })
+          .on("change", scheduleRebuild);
+
+        fArchDoor
+          .addBinding(params, "archDoorShowGizmo")
+          .on("change", () => {
+            updateArchDoorPreview();
+          });
+
+        fArchDoor
+          .addBinding(params, "archDoorAngleDeg", { min: -180, max: 180 })
+          .on("change", () => {
+            updateArchDoorGizmoFromParams();
+            scheduleRebuild();
+          });
+
+        fArchDoor
+          .addBinding(params, "archDoorWidth", { min: 0.3, max: 8 })
+          .on("change", () => {
+            updateArchDoorGizmoFromParams();
+            scheduleRebuild();
+          });
+
+        fArchDoor
+          .addBinding(params, "archDoorHeight", { min: 0.3, max: 10 })
+          .on("change", () => {
+            updateArchDoorGizmoFromParams();
+            scheduleRebuild();
+          });
+
+        fArchDoor
+          .addBinding(params, "archDoorDepth", { min: 0.2, max: 6 })
+          .on("change", () => {
+            updateArchDoorGizmoFromParams();
+            scheduleRebuild();
+          });
+
+        fArchDoor
+          .addBinding(params, "archDoorGizmoMode", {
+            options: {
+              translate: "translate",
+              rotate: "rotate",
+              scale: "scale",
+            },
+          })
+          .on("change", (e) => {
+            if (archDoorGizmo) {
+              archDoorGizmo.setMode(e.value);
+            }
+          });
+
+        const fArchMasonry = fArchDoor.addFolder({
+          title: "Masonry (fine)",
+        });
+
+        fArchMasonry
+          .addBinding(params, "archRiseRatio", {
+            label: "Arch rise (vs height)",
+            min: 0.2,
+            max: 0.55,
+            step: 0.01,
+          })
+          .on("change", scheduleRebuild);
+
+        fArchMasonry
+          .addBinding(params, "archExtradosBrickWidths", {
+            label: "Extrados +× brick W",
+            min: 0,
+            max: 0.8,
+            step: 0.02,
+          })
+          .on("change", scheduleRebuild);
+
+        fArchMasonry
+          .addBinding(params, "archRadialDepthFrac", {
+            label: "Depth in wall",
+            min: 0.15,
+            max: 0.55,
+            step: 0.01,
+          })
+          .on("change", scheduleRebuild);
+
+        fArchMasonry
+          .addBinding(params, "archMasonryShellMul", {
+            label: "Spline vs tower shell",
+            min: 0.75,
+            max: 1.35,
+            step: 0.02,
+          })
+          .on("change", scheduleRebuild);
+
+        fArchMasonry
+          .addBinding(params, "archCarveBleed", {
+            label: "Carve bleed (hide edge bricks)",
+            min: 0,
+            max: 0.2,
+            step: 0.005,
+          })
+          .on("change", scheduleRebuild);
+
+        fArchMasonry
+          .addBinding(params, "archVoussoirSpacingMul", {
+            label: "Spline brick spacing",
+            min: 0.55,
+            max: 1.25,
+            step: 0.01,
+          })
+          .on("change", scheduleRebuild);
+
+        fArchMasonry
+          .addBinding(params, "archSplinePack", {
+            label: "Along-spline pack",
+            min: 0.55,
+            max: 1,
+            step: 0.01,
+          })
+          .on("change", scheduleRebuild);
+
+        fArchMasonry
+          .addBinding(params, "archVoussoirCountMin", {
+            min: 3,
+            max: 24,
+            step: 1,
+          })
+          .on("change", scheduleRebuild);
+
+        fArchMasonry
+          .addBinding(params, "archVoussoirCountMax", {
+            min: 8,
+            max: 48,
+            step: 1,
+          })
+          .on("change", scheduleRebuild);
+
+        fArchMasonry
+          .addBinding(params, "archScaleCross", {
+            label: "Voussoir scale X",
+            min: 0.5,
+            max: 1.6,
+            step: 0.02,
+          })
+          .on("change", scheduleRebuild);
+
+        fArchMasonry
+          .addBinding(params, "archScaleAlongArc", {
+            label: "Scale along spline (Y)",
+            min: 0.5,
+            max: 1.6,
+            step: 0.02,
+          })
+          .on("change", scheduleRebuild);
+
+        fArchMasonry
+          .addBinding(params, "archScaleDepth", {
+            label: "Voussoir scale Z",
+            min: 0.5,
+            max: 1.6,
+            step: 0.02,
+          })
+          .on("change", scheduleRebuild);
+
+        fArchMasonry.addBinding(params, "archJambEnabled").on("change", scheduleRebuild);
+
+        fArchMasonry
+          .addBinding(params, "archJambInset", {
+            label: "Spline |u| trim",
+            min: 0.82,
+            max: 1.05,
+            step: 0.01,
+          })
+          .on("change", scheduleRebuild);
+
+        fArchMasonry
+          .addBinding(params, "archJambBaseBulge", {
+            label: "Jamb sill bulge × ring",
+            min: 0,
+            max: 1.2,
+            step: 0.02,
+          })
+          .on("change", scheduleRebuild);
+
+        fArchMasonry
+          .addBinding(params, "archJambTaper", {
+            label: "Sill→spring flare (legs)",
+            min: 0,
+            max: 1,
+            step: 0.02,
+          })
+          .on("change", scheduleRebuild);
+
+        fArchMasonry
+          .addBinding(params, "archJambScale", {
+            min: 0.5,
+            max: 1.5,
+            step: 0.02,
+          })
+          .on("change", scheduleRebuild);
+
+        // battlements
+
+        const fBattle = pane.addFolder({
+          title: "Battlements",
+        });
+
+        fBattle
+          .addBinding(params, "battlementHeight", { min: 0.5, max: 4 })
+          .on("change", scheduleRebuild);
+
+        fBattle
+          .addBinding(params, "battlementSkip", { min: 1, max: 6, step: 1 })
+          .on("change", scheduleRebuild);
+
+        // material
+
+        const fMaterial = pane.addFolder({
+          title: "Material",
+        });
+
+        fMaterial
+          .addBinding(params, "roughness", { min: 0, max: 1 })
+          .on("change", scheduleRebuild);
+
+        fMaterial
+          .addBinding(params, "metalness", { min: 0, max: 1 })
+          .on("change", scheduleRebuild);
+
+        fMaterial
+          .addBinding(params, "stoneDarkness", { min: 0.1, max: 1 })
+          .on("change", scheduleRebuild);
+
+        fMaterial
+          .addBinding(params, "stoneLightness", { min: 0.1, max: 1 })
+          .on("change", rebuildTower);
+
+        // lighting
+
+        const fLight = pane.addFolder({
+          title: "Lighting",
+        });
+
+        fLight
+          .addBinding(params, "sunIntensity", { min: 0, max: 10 })
+          .on("change", (e) => {
+            scene.getObjectByName("sun").intensity = e.value;
+          });
+
+        fLight
+          .addBinding(params, "ambientIntensity", { min: 0, max: 5 })
+          .on("change", (e) => {
+            scene.getObjectByName("hemi").intensity = e.value;
+          });
+
+        const fQuality = pane.addFolder({
+          title: "Quality",
+        });
+
+        fQuality
+          .addBinding(params, "quality", {
+            options: {
+              low: "low",
+              medium: "medium",
+              high: "high",
+              cinematic: "cinematic",
+            },
+          })
+          .on("change", (e) => {
+            applyQualityPreset(e.value);
+          });
+
+        pane
+          .addButton({
+            title: "REBUILD",
+          })
+          .on("click", params.rebuild);
+      }
+
+      function applyQualityPreset(level) {
+        qualityLevel = level;
+        if (level === "low") {
+          params.brickSegments = 1;
+          dynamicDpr.resting = 1;
+          renderer.toneMappingExposure = 1;
+          const sun = scene.getObjectByName("sun");
+          if (sun) sun.shadow.mapSize.set(1024, 1024);
+        } else if (level === "medium") {
+          params.brickSegments = 2;
+          dynamicDpr.resting = Math.min(window.devicePixelRatio || 1, 1.25);
+          renderer.toneMappingExposure = 1.02;
+          const sun = scene.getObjectByName("sun");
+          if (sun) sun.shadow.mapSize.set(1536, 1536);
+        } else if (level === "cinematic") {
+          params.brickSegments = 6;
+          dynamicDpr.resting = Math.min(window.devicePixelRatio || 1, 2);
+          renderer.toneMappingExposure = 1.12;
+          const sun = scene.getObjectByName("sun");
+          if (sun) sun.shadow.mapSize.set(3072, 3072);
+        } else {
+          params.brickSegments = 3;
+          dynamicDpr.resting = Math.min(window.devicePixelRatio || 1, 1.5);
+          renderer.toneMappingExposure = 1.05;
+          const sun = scene.getObjectByName("sun");
+          if (sun) sun.shadow.mapSize.set(2048, 2048);
+        }
+
+        setDynamicPixelRatio(dynamicDpr.resting);
+        scheduleRebuild();
+      }
+
+      function animate() {
+        requestAnimationFrame(animate);
+        simTimer.update();
+        const dt = Math.min(simTimer.getDelta(), 0.033);
+
+        controls.update();
+        updateFallingBricks(dt);
+        updateArchDoorPreview();
+
+        if (performance.now() > dynamicDpr.settleUntil) {
+          setDynamicPixelRatio(dynamicDpr.resting);
+        } else {
+          setDynamicPixelRatio(dynamicDpr.moving);
+        }
+
+        renderer.render(scene, camera);
+      }
+
+      function updateArchDoorPreview() {
+        const show =
+          params.archDoorEnabled &&
+          params.archDoorShowGizmo;
+        if (archDoorGizmo) {
+          archDoorGizmo.enabled = show;
+          archDoorGizmo.visible = show;
+        }
+        if (archDoorGizmoHelper) {
+          archDoorGizmoHelper.visible = show;
+        }
+
+        if (!show) {
+          return;
+        }
+
+        if (!isDraggingArchDoorGizmo) {
+          updateArchDoorGizmoFromParams();
+        }
+      }
+
+      function onResize() {
+        camera.aspect = window.innerWidth / window.innerHeight;
+
+        camera.updateProjectionMatrix();
+
+        renderer.setSize(window.innerWidth, window.innerHeight);
+        setDynamicPixelRatio(
+          dynamicDpr.current > 0 ? dynamicDpr.current : dynamicDpr.resting,
+        );
+      }
+    </script>
+  </body>
+</html>

@@ -1,0 +1,774 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width,initial-scale=1.0" />
+    <title>WebGPU Snow Editor</title>
+
+    <style>
+      html,
+      body {
+        margin: 0;
+        width: 100%;
+        height: 100%;
+        overflow: hidden;
+        background: #dfeaf5;
+        font-family: Arial, Helvetica, sans-serif;
+      }
+
+      canvas {
+        display: block;
+      }
+
+      #ui {
+        position: fixed;
+        top: 12px;
+        left: 12px;
+        width: 290px;
+        padding: 14px;
+        border-radius: 14px;
+        background: rgba(10, 15, 22, 0.92);
+        backdrop-filter: blur(12px);
+        color: white;
+        z-index: 10;
+      }
+
+      #ui h2 {
+        margin: 0 0 14px;
+        font-size: 16px;
+      }
+
+      .row {
+        margin-bottom: 12px;
+      }
+
+      .row label {
+        display: flex;
+        justify-content: space-between;
+        margin-bottom: 4px;
+        font-size: 12px;
+      }
+
+      .row input {
+        width: 100%;
+      }
+
+      .value {
+        color: #7ed4ff;
+      }
+
+      button {
+        width: 100%;
+        margin-top: 8px;
+        padding: 10px;
+        border: none;
+        border-radius: 10px;
+        background: #35485d;
+        color: white;
+        cursor: pointer;
+        font-weight: 700;
+      }
+
+      button:hover {
+        background: #486684;
+      }
+    </style>
+
+    <script type="importmap">
+      {
+        "imports": {
+          "three": "https://cdn.jsdelivr.net/npm/three@0.183.1/build/three.webgpu.js",
+          "three/webgpu": "https://cdn.jsdelivr.net/npm/three@0.183.1/build/three.webgpu.js",
+          "three/tsl": "https://cdn.jsdelivr.net/npm/three@0.183.1/build/three.tsl.js",
+          "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.183.1/examples/jsm/"
+        }
+      }
+    </script>
+  </head>
+
+  <body>
+    <div id="ui">
+      <h2>SNOW EDITOR</h2>
+
+      <div class="row">
+        <label>Snow Amount <span class="value" id="snowAmountV">1</span></label>
+        <input
+          id="snowAmount"
+          type="range"
+          min="0"
+          max="3"
+          step="0.01"
+          value="1"
+        />
+      </div>
+
+      <div class="row">
+        <label
+          >Snow Thickness
+          <span class="value" id="snowThicknessV">0.35</span></label
+        >
+        <input
+          id="snowThickness"
+          type="range"
+          min="0"
+          max="2"
+          step="0.01"
+          value="0.35"
+        />
+      </div>
+
+      <div class="row">
+        <label
+          >Snow Coverage
+          <span class="value" id="snowCoverageV">0.55</span></label
+        >
+        <input
+          id="snowCoverage"
+          type="range"
+          min="0"
+          max="1"
+          step="0.01"
+          value="0.55"
+        />
+      </div>
+
+      <div class="row">
+        <label
+          >Noise Scale <span class="value" id="snowNoiseV">3.5</span></label
+        >
+        <input
+          id="snowNoise"
+          type="range"
+          min="1"
+          max="10"
+          step="0.01"
+          value="3.5"
+        />
+      </div>
+
+      <div class="row">
+        <label>Sparkle <span class="value" id="snowSparkleV">1.2</span></label>
+        <input
+          id="snowSparkle"
+          type="range"
+          min="0"
+          max="3"
+          step="0.01"
+          value="1.2"
+        />
+      </div>
+
+      <div class="row">
+        <label
+          >Snow Quality <span class="value" id="snowQualityV">5</span></label
+        >
+        <input
+          id="snowQuality"
+          type="range"
+          min="1"
+          max="8"
+          step="1"
+          value="5"
+        />
+      </div>
+
+      <button id="addSphere">ADD SPHERE</button>
+      <button id="addBox">ADD BOX</button>
+      <button id="addTorus">ADD TORUS</button>
+    </div>
+
+    <script type="module">
+      import * as THREE from "three/webgpu";
+
+      import {
+        Fn,
+        uniform,
+        float,
+        vec2,
+        vec3,
+        mix,
+        sin,
+        fract,
+        dot,
+        normalize,
+        smoothstep,
+        pow,
+        max,
+        positionLocal,
+        positionWorld,
+        normalLocal,
+        cameraPosition,
+      } from "three/tsl";
+
+      import { OrbitControls } from "three/addons/controls/OrbitControls.js";
+
+      //
+      // RENDERER
+      //
+
+      const renderer = new THREE.WebGPURenderer({
+        antialias: true,
+      });
+
+      renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
+
+      renderer.setSize(innerWidth, innerHeight);
+
+      renderer.toneMapping = THREE.ACESFilmicToneMapping;
+
+      renderer.toneMappingExposure = 1.15;
+
+      document.body.appendChild(renderer.domElement);
+
+      await renderer.init();
+
+      //
+      // SCENE
+      //
+
+      const scene = new THREE.Scene();
+
+      scene.background = new THREE.Color(0xdfeaf5);
+
+      scene.fog = new THREE.Fog(0xdfeaf5, 35, 120);
+
+      //
+      // CAMERA
+      //
+
+      const camera = new THREE.PerspectiveCamera(
+        55,
+        innerWidth / innerHeight,
+        0.1,
+        500,
+      );
+
+      camera.position.set(12, 8, 15);
+
+      //
+      // CONTROLS
+      //
+
+      const controls = new OrbitControls(camera, renderer.domElement);
+
+      controls.enableDamping = true;
+
+      //
+      // LIGHTING
+      //
+
+      const sun = new THREE.DirectionalLight(0xffffff, 4);
+
+      sun.position.set(12, 20, 8);
+
+      scene.add(sun);
+
+      scene.add(new THREE.HemisphereLight(0xffffff, 0xbdd2e6, 1.7));
+
+      //
+      // GROUND
+      //
+
+      const ground = new THREE.Mesh(
+        new THREE.PlaneGeometry(300, 300),
+
+        new THREE.MeshStandardMaterial({
+          color: 0xf7fbff,
+          roughness: 1,
+        }),
+      );
+
+      ground.rotation.x = -Math.PI / 2;
+
+      scene.add(ground);
+
+      //
+      // UNIFORMS
+      //
+
+      const uSnowAmount = uniform(1);
+      const uSnowThickness = uniform(0.35);
+      const uSnowCoverage = uniform(0.55);
+      const uSnowNoise = uniform(3.5);
+      const uSnowSparkle = uniform(1.2);
+      const uSnowQuality = uniform(5);
+
+      //
+      // HASH
+      //
+
+      const hash = Fn(([p]) => {
+        return fract(sin(dot(p, vec2(127.1, 311.7))).mul(43758.5453123));
+      });
+
+      //
+      // NOISE
+      //
+
+      const noise = Fn(([p]) => {
+        const i = p.floor();
+
+        const f = fract(p);
+
+        const a = hash(i);
+
+        const b = hash(i.add(vec2(1, 0)));
+
+        const c = hash(i.add(vec2(0, 1)));
+
+        const d = hash(i.add(vec2(1, 1)));
+
+        const u = f.mul(f).mul(float(3).sub(f.mul(2)));
+
+        return mix(a, b, u.x)
+          .add(c.sub(a).mul(u.y).mul(float(1).sub(u.x)))
+
+          .add(d.sub(b).mul(u.x).mul(u.y));
+      });
+
+      //
+      // FBM WITH QUALITY CONTROL
+      //
+
+      const fbm = Fn(([p]) => {
+        let value = float(0);
+
+        value = value.add(noise(p.mul(1)).mul(0.5));
+
+        value = value.add(
+          noise(p.mul(2))
+            .mul(0.25)
+
+            .mul(smoothstep(1, 2, uSnowQuality)),
+        );
+
+        value = value.add(
+          noise(p.mul(4))
+            .mul(0.125)
+
+            .mul(smoothstep(2, 3, uSnowQuality)),
+        );
+
+        value = value.add(
+          noise(p.mul(8))
+            .mul(0.0625)
+
+            .mul(smoothstep(3, 4, uSnowQuality)),
+        );
+
+        value = value.add(
+          noise(p.mul(16))
+            .mul(0.03125)
+
+            .mul(smoothstep(4, 5, uSnowQuality)),
+        );
+
+        value = value.add(
+          noise(p.mul(32))
+            .mul(0.015625)
+
+            .mul(smoothstep(5, 6, uSnowQuality)),
+        );
+
+        value = value.add(
+          noise(p.mul(64))
+            .mul(0.0078125)
+
+            .mul(smoothstep(6, 7, uSnowQuality)),
+        );
+
+        value = value.add(
+          noise(p.mul(128))
+            .mul(0.00390625)
+
+            .mul(smoothstep(7, 8, uSnowQuality)),
+        );
+
+        return value;
+      });
+
+      //
+      // SNOW MASK
+      //
+
+      const snowMask = Fn(() => {
+        const N = normalize(normalLocal);
+
+        //
+        // ONLY TOP
+        //
+
+        const topMask = smoothstep(0.05, 0.9, N.y);
+
+        //
+        // WORLD UV
+        //
+
+        const uv = vec2(positionWorld.x, positionWorld.z).mul(uSnowNoise);
+
+        //
+        // DETAILED FBM
+        //
+
+        const n = fbm(uv);
+
+        //
+        // COVERAGE
+        //
+
+        const coverage = smoothstep(
+          float(1).sub(uSnowCoverage),
+
+          1,
+
+          n,
+        );
+
+        return coverage.mul(topMask).mul(uSnowAmount);
+      });
+
+      //
+      // THICK SNOW SHAPE
+      //
+
+      const snowDisplacement = Fn(() => {
+        const N = normalize(normalLocal);
+
+        const mask = snowMask();
+
+        const uv = vec2(positionWorld.x, positionWorld.z).mul(uSnowNoise);
+
+        //
+        // MULTI SHAPE
+        //
+
+        const base = fbm(uv.mul(0.6));
+
+        const detail = fbm(uv.mul(2.2));
+
+        const micro = fbm(uv.mul(7));
+
+        const shape = base
+          .mul(0.7)
+
+          .add(detail.mul(0.25))
+
+          .add(micro.mul(0.05));
+
+        //
+        // BUILDUP
+        //
+
+        const buildup = pow(shape, 1.6);
+
+        //
+        // THICKNESS
+        //
+
+        const thickness = buildup
+
+          .mul(uSnowThickness)
+
+          .mul(mask);
+
+        //
+        // DISPLACE
+        //
+
+        return positionLocal.add(N.mul(thickness));
+      });
+
+      //
+      // SNOW COLOR
+      //
+
+      const snowColor = Fn(([baseColor]) => {
+        const mask = snowMask();
+
+        const worldUV = vec2(positionWorld.x, positionWorld.z);
+
+        //
+        // BLUE SHADOWS
+        //
+
+        const shadowNoise = fbm(worldUV.mul(12));
+
+        const coldShadow = vec3(0.78, 0.86, 1.0);
+
+        const cleanSnow = vec3(1.0, 1.0, 1.0);
+
+        let finalSnow = mix(
+          coldShadow,
+
+          cleanSnow,
+
+          smoothstep(0.15, 0.8, shadowNoise),
+        );
+
+        //
+        // SPARKLES
+        //
+
+        const V = normalize(cameraPosition.sub(positionWorld));
+
+        const N = normalize(normalLocal);
+
+        const fresnel = pow(
+          float(1).sub(max(dot(N, V), 0)),
+
+          5,
+        );
+
+        const sparkleNoise = fbm(worldUV.mul(50));
+
+        const sparkle = smoothstep(0.82, 1, sparkleNoise)
+          .mul(fresnel)
+
+          .mul(uSnowSparkle);
+
+        finalSnow = finalSnow.add(vec3(1).mul(sparkle));
+
+        return mix(baseColor, finalSnow, mask);
+      });
+
+      //
+      // MATERIAL
+      //
+
+      function createSnowMaterial(baseColor) {
+        const mat = new THREE.MeshStandardNodeMaterial();
+
+        mat.positionNode = snowDisplacement();
+
+        mat.colorNode = snowColor(vec3(baseColor.r, baseColor.g, baseColor.b));
+
+        mat.roughnessNode = mix(
+          float(0.55),
+
+          float(0.98),
+
+          snowMask(),
+        );
+
+        mat.metalnessNode = float(0);
+
+        return mat;
+      }
+
+      //
+      // OBJECT CREATION
+      //
+
+      function addObject(geometry, color, x, z) {
+        const mesh = new THREE.Mesh(
+          geometry,
+
+          createSnowMaterial(new THREE.Color(color)),
+        );
+
+        mesh.position.set(x, 1, z);
+
+        scene.add(mesh);
+      }
+
+      //
+      // OBJECTS
+      //
+
+      addObject(
+        new THREE.BoxGeometry(2, 2, 2, 64, 64, 64),
+
+        0x8f4d35,
+
+        -5,
+
+        0,
+      );
+
+      addObject(
+        new THREE.SphereGeometry(1.5, 128, 128),
+
+        0x2f5d91,
+
+        0,
+
+        0,
+      );
+
+      addObject(
+        new THREE.TorusKnotGeometry(1, 0.35, 256, 32),
+
+        0x756438,
+
+        5,
+
+        0,
+      );
+
+      //
+      // TREE
+      //
+
+      function createTree() {
+        const group = new THREE.Group();
+
+        //
+        // TRUNK
+        //
+
+        const trunk = new THREE.Mesh(
+          new THREE.CylinderGeometry(0.45, 0.55, 3, 32),
+
+          createSnowMaterial(new THREE.Color(0x5b3924)),
+        );
+
+        trunk.position.y = 1.5;
+
+        group.add(trunk);
+
+        //
+        // TOP CONES
+        //
+
+        for (let i = 0; i < 4; i++) {
+          const cone = new THREE.Mesh(
+            new THREE.ConeGeometry(2.8 - i * 0.4, 3, 32, 16),
+
+            createSnowMaterial(new THREE.Color(0x2f5b39)),
+          );
+
+          cone.position.y = 3 + i * 1.2;
+
+          group.add(cone);
+        }
+
+        group.position.set(-10, 0, -6);
+
+        scene.add(group);
+      }
+
+      createTree();
+
+      //
+      // HOUSE
+      //
+
+      function createHouse() {
+        const group = new THREE.Group();
+
+        const body = new THREE.Mesh(
+          new THREE.BoxGeometry(4, 3, 4, 64, 64, 64),
+
+          createSnowMaterial(new THREE.Color(0xa27b60)),
+        );
+
+        body.position.y = 1.5;
+
+        group.add(body);
+
+        const roof = new THREE.Mesh(
+          new THREE.ConeGeometry(3.8, 2.4, 4, 1),
+
+          createSnowMaterial(new THREE.Color(0x5f2f2b)),
+        );
+
+        roof.rotation.y = Math.PI * 0.25;
+
+        roof.position.y = 4;
+
+        group.add(roof);
+
+        group.position.set(10, 0, -6);
+
+        scene.add(group);
+      }
+
+      createHouse();
+
+      //
+      // UI
+      //
+
+      function bind(id, uniformObj) {
+        const el = document.getElementById(id);
+
+        const txt = document.getElementById(id + "V");
+
+        el.addEventListener("input", () => {
+          uniformObj.value = parseFloat(el.value);
+
+          txt.textContent = el.value;
+        });
+      }
+
+      bind("snowAmount", uSnowAmount);
+      bind("snowThickness", uSnowThickness);
+      bind("snowCoverage", uSnowCoverage);
+      bind("snowNoise", uSnowNoise);
+      bind("snowSparkle", uSnowSparkle);
+      bind("snowQuality", uSnowQuality);
+
+      //
+      // BUTTONS
+      //
+
+      document.getElementById("addSphere").onclick = () => {
+        addObject(
+          new THREE.SphereGeometry(1.4, 128, 128),
+
+          Math.random() * 0xffffff,
+
+          (Math.random() - 0.5) * 16,
+
+          (Math.random() - 0.5) * 16,
+        );
+      };
+
+      document.getElementById("addBox").onclick = () => {
+        addObject(
+          new THREE.BoxGeometry(2, 2, 2, 64, 64, 64),
+
+          Math.random() * 0xffffff,
+
+          (Math.random() - 0.5) * 16,
+
+          (Math.random() - 0.5) * 16,
+        );
+      };
+
+      document.getElementById("addTorus").onclick = () => {
+        addObject(
+          new THREE.TorusKnotGeometry(1, 0.35, 256, 32),
+
+          Math.random() * 0xffffff,
+
+          (Math.random() - 0.5) * 16,
+
+          (Math.random() - 0.5) * 16,
+        );
+      };
+
+      //
+      // RENDER LOOP
+      //
+
+      renderer.setAnimationLoop(() => {
+        controls.update();
+
+        renderer.render(scene, camera);
+      });
+
+      //
+      // RESIZE
+      //
+
+      addEventListener("resize", () => {
+        camera.aspect = innerWidth / innerHeight;
+
+        camera.updateProjectionMatrix();
+
+        renderer.setSize(innerWidth, innerHeight);
+      });
+    </script>
+  </body>
+</html>
