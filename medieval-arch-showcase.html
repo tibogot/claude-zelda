@@ -1108,11 +1108,16 @@
           );
           wallMesh.castShadow = true;
           wallMesh.receiveShadow = true;
-          wallMesh.position.set(0, 0, params.wallZ);
+          /**
+           * Tower shell is authored in world space. Skip `wallZ` (single-façade slab offset):
+           * applying it here shifts ±X faces along world Z, which is their tangent `u`,
+           * so hole intervals and brick positions desync from the arch ring (jamb gap/clip).
+           */
+          wallMesh.position.set(0, 0, 0);
 
           const rnd = mulberry32((params.colorSeed ^ 91379) | 0);
           let k = 0;
-          const inset = Math.max(0.06, params.brickD * 0.48);
+          const inset = towerFaceInsetD();
 
           const placeTowerBrick = (face, u, y, sx, sy, sz) => {
             if (k >= params.maxWallBricks) return false;
@@ -1246,37 +1251,30 @@
                     Math.max(0, innerHi - innerLo - minW * 1.2) * 0.35,
                   );
                   /**
-                   * Same jamb tests as wall mode, but per opening. Cap eps relative to
-                   * each hole's openH: a fixed nomW*0.025 is huge vs a narrow springer
-                   * slice and makes `segHi <= lo + eps` true for far segments, so the
-                   * right jamb row wrongly picks up `leftOfOpening` → innerLo+=shift
-                   * (gap on the +u side) while the true left jamb over-shifts (clip).
+                   * Match wall-mode running bond: one opening center + fixed eps.
+                   * The older per-opening eps + OR logic could mis-classify jambs on
+                   * ±X faces (rotated bricks) and split shifts (gap one side, clip other).
                    */
-                  let rightOfOpening = false;
-                  let leftOfOpening = false;
-                  for (const op of opsFace) {
-                    const rp = ringParamsFromOpening(op);
-                    const openH = wallOpeningHalfX(
+                  const eps = Math.max(1e-3, nomW * 0.025);
+                  const op0 = opsFace[0];
+                  let openHJ = 0;
+                  let gxJ = 0;
+                  if (op0) {
+                    const rpJ = ringParamsFromOpening(op0);
+                    openHJ = wallOpeningHalfX(
                       yMid,
-                      rp.ringRadius,
-                      op.sillY,
-                      rp.springY,
+                      rpJ.ringRadius,
+                      op0.sillY,
+                      rpJ.springY,
                       seam,
                     );
-                    if (openH <= 1e-5) continue;
-                    const epsOp = Math.min(
-                      nomW * 0.022,
-                      Math.max(1e-3, openH * 0.38),
-                    );
-                    if (segLo >= op.uCenter + openH - epsOp)
-                      rightOfOpening = true;
-                    if (segHi <= op.uCenter - openH + epsOp)
-                      leftOfOpening = true;
+                    gxJ = op0.uCenter;
                   }
-                  if (rightOfOpening && leftOfOpening) {
-                    innerLo += shift * 0.5;
-                    innerHi -= shift * 0.5;
-                  } else if (rightOfOpening) innerHi -= shift;
+                  const rightOfOpening =
+                    openHJ > 1e-5 && segLo >= gxJ + openHJ - eps;
+                  const leftOfOpening =
+                    openHJ > 1e-5 && segHi <= gxJ - openHJ + eps;
+                  if (rightOfOpening) innerHi -= shift;
                   else if (leftOfOpening) innerLo += shift;
                   else innerLo += shift;
                 }
@@ -1483,7 +1481,12 @@
               typeof op.archAlongZ === "number" && !Number.isNaN(op.archAlongZ)
                 ? op.archAlongZ
                 : 0;
-            mesh.position.set(0, 0, ringZ);
+            /** Wall mode uses world Z; tower depth is face-normal (±X on faces 0/1, ±Z on 2/3). */
+            const ff = THREE.MathUtils.clamp(op.face | 0, 0, 3);
+            if (ff === 0) mesh.position.set(ringZ, 0, 0);
+            else if (ff === 1) mesh.position.set(-ringZ, 0, 0);
+            else if (ff === 2) mesh.position.set(0, 0, ringZ);
+            else mesh.position.set(0, 0, -ringZ);
             scene.add(mesh);
             towerDoorMeshes.push(mesh);
           });
@@ -1924,7 +1927,7 @@
           min: -1.6,
           max: 1.6,
           step: 0.01,
-          label: "Arch depth (Z, gizmo blue)",
+          label: "Arch depth in/out (gizmo blue)",
         }).on("change", rb);
         fDoor.addBinding(params, "closeBottom", {
           label: "Close bottom (threshold)",
