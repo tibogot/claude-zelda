@@ -1,0 +1,1547 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Brick arch door + adaptive wall — WebGPU + TSL</title>
+    <style>
+      body {
+        margin: 0;
+        overflow: hidden;
+        background: #1a1d24;
+      }
+      canvas {
+        display: block;
+        width: 100%;
+        height: 100vh;
+      }
+      /* Scrollable Tweakpane: body stays overflow:hidden for the canvas */
+      #tweak-root {
+        position: fixed;
+        top: 8px;
+        right: 8px;
+        z-index: 50;
+        width: min(340px, calc(100vw - 16px));
+        max-height: calc(100vh - 16px);
+        overflow-x: hidden;
+        overflow-y: auto;
+        overscroll-behavior: contain;
+        pointer-events: auto;
+        -webkit-overflow-scrolling: touch;
+      }
+      #tweak-root::-webkit-scrollbar {
+        width: 8px;
+      }
+      #tweak-root::-webkit-scrollbar-thumb {
+        background: rgba(255, 255, 255, 0.18);
+        border-radius: 4px;
+      }
+    </style>
+  </head>
+  <body>
+    <div id="tweak-root" aria-label="Settings panel"></div>
+    <script type="importmap">
+      {
+        "imports": {
+          "three": "https://cdn.jsdelivr.net/npm/three@0.183.1/build/three.webgpu.js",
+          "three/webgpu": "https://cdn.jsdelivr.net/npm/three@0.183.1/build/three.webgpu.js",
+          "three/tsl": "https://cdn.jsdelivr.net/npm/three@0.183.1/build/three.tsl.js",
+          "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.183.1/examples/jsm/",
+          "tweakpane": "https://cdn.jsdelivr.net/npm/tweakpane@4.0.3/dist/tweakpane.min.js"
+        }
+      }
+    </script>
+
+    <script type="module">
+      import * as THREE from "three/webgpu";
+      import { RoundedBoxGeometry } from "three/addons/geometries/RoundedBoxGeometry.js";
+      import { OrbitControls } from "three/addons/controls/OrbitControls.js";
+      import { TransformControls } from "three/addons/controls/TransformControls.js";
+      import { Pane } from "tweakpane";
+      import {
+        Fn,
+        float,
+        color,
+        vec2,
+        vec3,
+        sin,
+        mix,
+        smoothstep,
+        mul,
+        sub,
+        add,
+        abs,
+        max,
+        min,
+        floor,
+        fract,
+        length,
+        normalize,
+        div,
+        normalWorld,
+        normalLocal,
+        positionLocal,
+        positionWorld,
+        dot,
+        pow,
+        clamp,
+        uniform,
+        attribute,
+      } from "three/tsl";
+
+      /** Length of the ∩ outline: left jamb + semicircle + right jamb (no sill). */
+      function pathULength(p) {
+        const Lj = Math.max(1e-6, p.springY - p.sillY);
+        return 2 * Lj + Math.PI * p.ringRadius;
+      }
+
+      /** Horizontal sill from (-R,y0) → (R,y0), s ∈ [0, 2R]. */
+      function sampleSill(s, R, y0) {
+        const t = s / (2 * R);
+        const x = THREE.MathUtils.lerp(-R, R, t);
+        return { x, y: y0, tx: 1, ty: 0 };
+      }
+
+      /** ∩ path only: left jamb up → arch (left→right over crown) → right jamb down. */
+      function sampleUPath(s, p) {
+        const R = p.ringRadius;
+        const y0 = p.sillY;
+        const ys = p.springY;
+        const Lj = Math.max(1e-6, ys - y0);
+        const La = Math.PI * R;
+        let u = s;
+
+        if (u <= Lj) {
+          const t = u / Lj;
+          const y = THREE.MathUtils.lerp(y0, ys, t);
+          return { x: -R, y, tx: 0, ty: 1 };
+        }
+        u -= Lj;
+        if (u <= La) {
+          const t = u / La;
+          const ang = Math.PI * (1 - t);
+          const ca = Math.cos(ang);
+          const sa = Math.sin(ang);
+          const x = R * ca;
+          const y = ys + R * sa;
+          const tx = sa;
+          const ty = -ca;
+          const inv = 1 / Math.hypot(tx, ty);
+          return { x, y, tx: tx * inv, ty: ty * inv };
+        }
+        u -= La;
+        const t = THREE.MathUtils.clamp(u / Lj, 0, 1);
+        const y = THREE.MathUtils.lerp(ys, y0, t);
+        return { x: R, y, tx: 0, ty: -1 };
+      }
+
+      function subtractIntervals(intervals, holeLo, holeHi) {
+        if (holeHi <= holeLo) return intervals;
+        const out = [];
+        for (const [a, b] of intervals) {
+          if (b <= a + 1e-6) continue;
+          if (holeHi <= a || holeLo >= b) {
+            out.push([a, b]);
+            continue;
+          }
+          if (holeLo > a + 1e-4) out.push([a, Math.min(holeLo, b)]);
+          if (holeHi < b - 1e-4) out.push([Math.max(holeHi, a), b]);
+        }
+        return out;
+      }
+
+      /** Horizontal extent (|x|) where wall field must stay outside so it does not clip the ring. */
+      function wallOpeningHalfX(y, R_out, y0, ys, seam) {
+        if (y < y0 - 1e-6) return 0;
+        if (y < ys - 1e-6) return R_out + seam;
+        const dy = y - ys;
+        if (dy > R_out + 1e-6) return 0;
+        const inner = R_out * R_out - dy * dy;
+        if (inner <= 0) return 0;
+        return Math.sqrt(inner) + seam;
+      }
+
+      /** How fast the opening boundary moves in X with Y (large near springing and haunches). */
+      function wallOpeningCurvature(y, R_out, y0, ys, seam) {
+        const e = 0.06;
+        const a = wallOpeningHalfX(y + e, R_out, y0, ys, seam);
+        const b = wallOpeningHalfX(y - e, R_out, y0, ys, seam);
+        return Math.abs(a - b) / e;
+      }
+
+      const tmpO = new THREE.Object3D();
+
+      /** Per-instance: x=shape mix, y=warp strength, z=grey key, w=grain phase */
+      function setBrickVarAt(mesh, index, shapeMix, warp, grey, grain) {
+        const att = mesh.geometry.getAttribute("brickVar");
+        if (!att) return;
+        const a = att.array;
+        const o = index * 4;
+        a[o] = shapeMix;
+        a[o + 1] = warp;
+        a[o + 2] = grey;
+        a[o + 3] = grain;
+      }
+
+      /**
+       * Returns scale factors + shader variation keys.
+       * @param {'door'|'wall'} mode — door ring: tight coherent units; wall: subtle field variation.
+       */
+      function pickBrickVariation(rnd, baseSx, baseSy, baseSz, mode) {
+        let sx = baseSx;
+        let sy = baseSy;
+        let sz = baseSz;
+        let shapeMix = 0.5;
+        let warp = 0.25;
+        let grey = 0.45;
+        const grain = rnd();
+
+        if (mode === "door") {
+          sx *= 1 + (rnd() - 0.5) * 0.055;
+          sy *= 0.97 + rnd() * 0.05;
+          sz *= 0.97 + rnd() * 0.05;
+          shapeMix = 0.56 + rnd() * 0.07;
+          warp = 0.16 + rnd() * 0.2;
+          grey = 0.32 + rnd() * 0.34;
+          return { sx, sy, sz, shapeMix, warp, grey, grain };
+        }
+
+        const u = rnd();
+        if (u < 0.12) {
+          shapeMix = 0.38;
+          sx *= 1.04 + rnd() * 0.1;
+          sy *= 0.9 + rnd() * 0.08;
+          sz *= 0.93 + rnd() * 0.07;
+        } else if (u < 0.22) {
+          shapeMix = 0.3;
+          sx *= 0.93 + rnd() * 0.08;
+          sy *= 0.86 + rnd() * 0.08;
+          sz *= 0.91 + rnd() * 0.07;
+        } else {
+          shapeMix = 0.46 + rnd() * 0.18;
+          sx *= 0.94 + rnd() * 0.1;
+          sy *= 0.92 + rnd() * 0.09;
+          sz *= 0.92 + rnd() * 0.08;
+        }
+        warp = 0.22 + rnd() * 0.38;
+        grey = 0.3 + rnd() * 0.42;
+        return { sx, sy, sz, shapeMix, warp, grey, grain };
+      }
+
+      function createInstancedBrickGeometry(baseGeo, capacity) {
+        const g = baseGeo.clone();
+        const arr = new Float32Array(capacity * 4);
+        const att = new THREE.InstancedBufferAttribute(arr, 4);
+        att.setUsage(THREE.DynamicDrawUsage);
+        g.setAttribute("brickVar", att);
+        return g;
+      }
+
+      function mulberry32(a) {
+        return function () {
+          let t = (a += 0x6d2b79f5);
+          t = Math.imul(t ^ (t >>> 15), t | 1);
+          t ^= t + Math.imul(t ^ (t >>> 7), t | 61);
+          return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+        };
+      }
+
+      async function main() {
+        const params = {
+          doorInnerHalfW: 1.15,
+          masonryShell: 0.42,
+          legHeight: 2.35,
+          /** Door opening sill (world Y). Gizmo vertical moves this, not the wall stack. */
+          sillY: 0.02,
+          closeBottom: false,
+          brickW: 0.52,
+          brickH: 0.38,
+          brickD: 0.55,
+          brickRound: 0.01,
+          spacingMul: 1.02,
+          maxBricks: 2200,
+          maxWallBricks: 14000,
+          colorSeed: 31415,
+          showGrid: true,
+
+          wallEnabled: true,
+          wallWidth: 15,
+          wallHeight: 6.2,
+          wallDepth: 0.62,
+          wallZ: -0.22,
+          wallMortar: 0.011,
+          wallSeamInset: 0.038,
+          wallEdgeBlendBw: 4.2,
+          wallMinBrickScale: 0.26,
+          wallCrownSquash: 0.78,
+          /** Bottom anchor for wall field courses (world Y); stays fixed when moving the arch vertically. */
+          wallAnchorY: 0.02,
+
+          /** Horizontal center of the door opening on the wall (world X). */
+          archAlong: 0,
+          /** Depth offset of the arch ring mesh along world Z (gizmo blue axis). */
+          archAlongZ: 0,
+          showArchGizmo: true,
+
+          /** Key directional (shadow caster) */
+          lightKeyAz: -53,
+          lightKeyEl: 54,
+          lightKeyDist: 17,
+          lightKeyIntensity: 2.1,
+          lightKeyColor: { r: 1, g: 244 / 255, b: 232 / 255 },
+          lightShadowOrtho: 18,
+          lightShadowRadius: 4,
+          lightShadowBias: -0.00006,
+          lightShadowNormalBias: 0.028,
+          /** Cool fill from opposite side (no shadow) */
+          lightFillAz: 118,
+          lightFillEl: 24,
+          lightFillDist: 16,
+          lightFillIntensity: 0.48,
+          lightFillColor: { r: 184 / 255, g: 212 / 255, b: 1 },
+          /** Warm rim / edge read */
+          lightRimAz: 198,
+          lightRimEl: 14,
+          lightRimDist: 14,
+          lightRimIntensity: 0.26,
+          lightRimColor: { r: 1, g: 216 / 255, b: 200 / 255 },
+          /** Hemisphere sky / ground */
+          lightHemiIntensity: 0.52,
+          lightHemiSky: { r: 184 / 255, g: 201 / 255, b: 224 / 255 },
+          lightHemiGround: { r: 58 / 255, g: 53 / 255, b: 48 / 255 },
+          /** Renderer */
+          rendererExposure: 1.12,
+        };
+
+        const renderer = new THREE.WebGPURenderer({ antialias: true });
+        renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, 2));
+        renderer.setSize(window.innerWidth, window.innerHeight);
+        renderer.shadowMap.enabled = true;
+        renderer.shadowMap.type = THREE.PCFSoftShadowMap;
+        renderer.toneMapping = THREE.ACESFilmicToneMapping;
+        renderer.toneMappingExposure = params.rendererExposure;
+        renderer.outputColorSpace = THREE.SRGBColorSpace;
+        document.body.appendChild(renderer.domElement);
+        await renderer.init();
+
+        const scene = new THREE.Scene();
+        scene.background = new THREE.Color(0x2a3140);
+
+        const camera = new THREE.PerspectiveCamera(
+          42,
+          window.innerWidth / window.innerHeight,
+          0.1,
+          200,
+        );
+        camera.position.set(5.8, 3.1, 9.2);
+
+        const controls = new OrbitControls(camera, renderer.domElement);
+        controls.target.set(0, 2.2, 0);
+        controls.enableDamping = true;
+        controls.minDistance = 3;
+        controls.maxDistance = 40;
+
+        function dirFromAzimuthElevation(azDeg, elDeg, distance) {
+          const az = THREE.MathUtils.degToRad(azDeg);
+          const el = THREE.MathUtils.degToRad(elDeg);
+          const ce = Math.cos(el);
+          return new THREE.Vector3(
+            distance * ce * Math.sin(az),
+            distance * Math.sin(el),
+            distance * ce * Math.cos(az),
+          );
+        }
+
+        const hemi = new THREE.HemisphereLight(0xb8c9e0, 0x3a3530, 0.52);
+        scene.add(hemi);
+
+        const sun = new THREE.DirectionalLight(0xfff4e8, 2.1);
+        sun.castShadow = true;
+        sun.shadow.mapSize.set(2048, 2048);
+        sun.shadow.camera.near = 0.5;
+        sun.shadow.camera.far = 80;
+
+        const fill = new THREE.DirectionalLight(0xb8d4ff, 0.48);
+        fill.castShadow = false;
+
+        const rim = new THREE.DirectionalLight(0xffd8c8, 0.26);
+        rim.castShadow = false;
+
+        scene.add(sun);
+        scene.add(fill);
+        scene.add(rim);
+
+        function applyLightsFromParams() {
+          sun.position.copy(
+            dirFromAzimuthElevation(
+              params.lightKeyAz,
+              params.lightKeyEl,
+              params.lightKeyDist,
+            ),
+          );
+          sun.color.setRGB(
+            params.lightKeyColor.r,
+            params.lightKeyColor.g,
+            params.lightKeyColor.b,
+          );
+          sun.intensity = params.lightKeyIntensity;
+          const ext = Math.max(5, params.lightShadowOrtho);
+          sun.shadow.camera.left = -ext;
+          sun.shadow.camera.right = ext;
+          sun.shadow.camera.top = ext;
+          sun.shadow.camera.bottom = -ext;
+          sun.shadow.radius = params.lightShadowRadius;
+          sun.shadow.bias = params.lightShadowBias;
+          sun.shadow.normalBias = params.lightShadowNormalBias;
+          sun.shadow.camera.updateProjectionMatrix();
+
+          fill.position.copy(
+            dirFromAzimuthElevation(
+              params.lightFillAz,
+              params.lightFillEl,
+              params.lightFillDist,
+            ),
+          );
+          fill.color.setRGB(
+            params.lightFillColor.r,
+            params.lightFillColor.g,
+            params.lightFillColor.b,
+          );
+          fill.intensity = params.lightFillIntensity;
+
+          rim.position.copy(
+            dirFromAzimuthElevation(
+              params.lightRimAz,
+              params.lightRimEl,
+              params.lightRimDist,
+            ),
+          );
+          rim.color.setRGB(
+            params.lightRimColor.r,
+            params.lightRimColor.g,
+            params.lightRimColor.b,
+          );
+          rim.intensity = params.lightRimIntensity;
+
+          hemi.color.setRGB(
+            params.lightHemiSky.r,
+            params.lightHemiSky.g,
+            params.lightHemiSky.b,
+          );
+          hemi.groundColor.setRGB(
+            params.lightHemiGround.r,
+            params.lightHemiGround.g,
+            params.lightHemiGround.b,
+          );
+          hemi.intensity = params.lightHemiIntensity;
+
+          renderer.toneMappingExposure = params.rendererExposure;
+        }
+
+        applyLightsFromParams();
+
+        const sunDirUniform = uniform(new THREE.Vector3());
+
+        const groundMat = new THREE.MeshStandardNodeMaterial({
+          roughness: 0.95,
+          metalness: 0,
+        });
+        groundMat.colorNode = Fn(() => {
+          const pw = positionWorld;
+          const xz = vec2(pw.x.mul(0.12), pw.z.mul(0.12));
+          const n = sin(xz.x.mul(1.9))
+            .mul(0.5)
+            .add(0.5)
+            .mul(0.22)
+            .add(sin(xz.y.mul(1.6)).mul(0.5).add(0.5).mul(0.16));
+          const c0 = color(0x3a3d42);
+          const c1 = color(0x4f5258);
+          return mul(mix(c0, c1, smoothstep(0.15, 0.9, n)), float(1.05));
+        })();
+        groundMat.emissiveNode = Fn(() => {
+          const nd = clamp(dot(normalWorld, sunDirUniform), 0, 1);
+          return mul(color(0x2a2c30), pow(nd, float(1.35))).mul(0.1);
+        })();
+
+        const ground = new THREE.Mesh(
+          new THREE.PlaneGeometry(80, 80),
+          groundMat,
+        );
+        ground.rotation.x = -Math.PI / 2;
+        ground.receiveShadow = true;
+        scene.add(ground);
+
+        let grid = null;
+        function setGrid(vis) {
+          if (grid) {
+            scene.remove(grid);
+            grid.traverse((o) => {
+              if (o.geometry) o.geometry.dispose();
+              if (o.material) o.material.dispose();
+            });
+            grid = null;
+          }
+          if (!vis) return;
+          grid = new THREE.GridHelper(24, 24, 0x4a5560, 0x3a4152);
+          grid.position.y = 0.001;
+          scene.add(grid);
+        }
+        setGrid(params.showGrid);
+
+        let brickGeo = null;
+        let brickMat = null;
+        let doorMesh = null;
+        let wallMesh = null;
+        let archPivot = null;
+        let archGizmo = null;
+        let archGizmoHelper = null;
+        let isDraggingArchGizmo = false;
+
+        function getGateX() {
+          return params.archAlong;
+        }
+
+        function clampArchAlong() {
+          const R_in = Math.max(0.08, params.doorInnerHalfW);
+          const R_out = R_in + Math.max(0.05, params.masonryShell);
+          const halfW = params.wallWidth * 0.5;
+          const margin = 0.28;
+          const lim = Math.max(0.15, halfW - R_out - margin);
+          params.archAlong = THREE.MathUtils.clamp(params.archAlong, -lim, lim);
+        }
+
+        /** Keep arch ring Z inside a sensible slab range (matches gizmo blue axis). */
+        function clampArchAlongZ() {
+          const d = Math.max(0.06, params.wallDepth);
+          const lim = d * 0.55 + 0.42 + Math.abs(params.wallZ || 0) * 0.35;
+          params.archAlongZ = THREE.MathUtils.clamp(
+            params.archAlongZ,
+            -lim,
+            lim,
+          );
+        }
+
+        /** Keep door sill so the opening + ring stays inside the wall slab vertically. */
+        function clampDoorSillInWall() {
+          const R_in = Math.max(0.08, params.doorInnerHalfW);
+          const R_out = R_in + Math.max(0.05, params.masonryShell);
+          const leg = Math.max(0.05, params.legHeight);
+          const w0 = params.wallAnchorY;
+          const w1 = params.wallAnchorY + params.wallHeight;
+          const margin = 0.1;
+          const maxSill = w1 - margin - leg - R_out;
+          const minSill = w0 - 0.12;
+          params.sillY = THREE.MathUtils.clamp(params.sillY, minSill, maxSill);
+        }
+
+        function ringParamsFromGui() {
+          const R_in = Math.max(0.08, params.doorInnerHalfW);
+          const R_out = R_in + Math.max(0.05, params.masonryShell);
+          const springY = params.sillY + Math.max(0.05, params.legHeight);
+          return {
+            ringRadius: R_out,
+            sillY: params.sillY,
+            springY,
+          };
+        }
+
+        function brickGeometrySignature() {
+          return [
+            params.brickW,
+            params.brickH,
+            params.brickD,
+            params.brickRound,
+          ].join(",");
+        }
+        let lastBrickGeometrySignature = "";
+
+        function disposeDoorWallMeshesOnly() {
+          if (doorMesh) {
+            scene.remove(doorMesh);
+            if (doorMesh.geometry) doorMesh.geometry.dispose();
+            doorMesh = null;
+          }
+          if (wallMesh) {
+            scene.remove(wallMesh);
+            if (wallMesh.geometry) wallMesh.geometry.dispose();
+            wallMesh = null;
+          }
+        }
+
+        function ensureBrickMaterial() {
+          if (!brickMat) {
+            const brickVarA = attribute("brickVar", "vec4");
+            const shapeM = brickVarA.x;
+            const warpS = brickVarA.y;
+            const greyK = brickVarA.z;
+            const grain = brickVarA.w;
+
+            brickMat = new THREE.MeshStandardNodeMaterial({
+              metalness: 0.015,
+            });
+
+            brickMat.colorNode = Fn(() => {
+              const pw = positionWorld;
+              const seed = grain.mul(6.283).add(greyK.mul(12.7));
+              const p1 = pw
+                .mul(1.05)
+                .add(vec3(seed, seed.mul(0.71), seed.mul(0.53)));
+              const p2 = pw
+                .mul(2.35)
+                .add(vec3(seed.mul(1.3), seed.mul(0.9), seed.mul(1.1)));
+              const p3 = pw
+                .mul(5.1)
+                .add(vec3(seed.mul(2.1), seed, seed.mul(1.7)));
+              const w1 = sin(dot(p1, vec3(1.7, 2.3, 1.9)))
+                .mul(0.5)
+                .add(0.5);
+              const w2 = sin(dot(p2, vec3(2.2, 1.4, 2.6)))
+                .mul(0.5)
+                .add(0.5);
+              const w3 = sin(dot(p3, vec3(1.5, 2.8, 2.1)))
+                .mul(0.5)
+                .add(0.5);
+              const fbm = w1.mul(0.52).add(w2.mul(0.32)).add(w3.mul(0.16));
+              const streak = sin(
+                pw.x
+                  .mul(2.8)
+                  .add(pw.y.mul(4.2))
+                  .add(pw.z.mul(1.6))
+                  .add(grain.mul(24)),
+              )
+                .mul(0.5)
+                .add(0.5);
+
+              const dark = mix(color(0x1a1c20), color(0x2e3138), greyK);
+              const mid = mix(
+                color(0x42454c),
+                color(0x565a62),
+                pow(greyK, float(0.9)),
+              );
+              const light = mix(
+                color(0x65696f),
+                color(0x82868e),
+                smoothstep(0.1, 0.9, greyK),
+              );
+              const body0 = mix(dark, mix(mid, light, greyK), float(0.58));
+              const stain = smoothstep(float(0.22), float(0.78), fbm);
+              const body1 = mul(body0, mix(float(0.86), float(1.06), stain));
+              const warm = mix(color(0x5c5248), color(0x6a6056), streak);
+              const body2 = mix(
+                body1,
+                mul(body1, warm),
+                float(0.07).mul(smoothstep(0.35, 0.72, streak)),
+              );
+              const moss = smoothstep(float(0.62), float(0.94), w2.mul(w3));
+              const body3 = mix(
+                body2,
+                mul(body2, color(0x9aa898)),
+                moss.mul(0.045).mul(warpS.mul(0.4).add(0.6)),
+              );
+
+              const speck = fract(
+                sin(dot(pw.xz, vec2(12.9898, 78.233))).mul(43758.5453),
+              );
+              const freckle = smoothstep(float(0.72), float(0.96), speck).mul(
+                0.11,
+              );
+              const baseCol = mul(body3, sub(float(1), freckle));
+              const nd = clamp(dot(normalWorld, sunDirUniform), 0, 1);
+              const coolShade = mix(
+                float(0.66),
+                float(1.06),
+                nd.mul(0.6).add(0.4),
+              );
+              const ax = abs(normalWorld.x);
+              const ay = abs(normalWorld.y);
+              const az = abs(normalWorld.z);
+              const edgeFac = pow(max(ax, max(ay, az)), float(2.35));
+              const edgeLift = mix(float(1), float(1.1), edgeFac.mul(0.38));
+              const edgeCool = mix(float(1), float(0.94), edgeFac.mul(0.12));
+              const shapeTone = mix(
+                float(0.96),
+                float(1.04),
+                shapeM.mul(0.35).add(0.65),
+              );
+              return mul(
+                mul(mul(mul(baseCol, coolShade), edgeLift), edgeCool),
+                shapeTone,
+              );
+            })();
+
+            brickMat.roughnessNode = Fn(() => {
+              const pw = positionWorld
+                .mul(2.4)
+                .add(vec3(grain.mul(9), greyK.mul(6), shapeM.mul(3)));
+              const pit = sin(dot(pw, vec3(2.1, 1.7, 2.4)))
+                .mul(0.5)
+                .add(0.5);
+              const pit2 = sin(dot(pw.mul(1.7), vec3(1.6, 2.2, 1.9)))
+                .mul(0.5)
+                .add(0.5);
+              const microRough = pit.mul(0.55).add(pit2.mul(0.45));
+              const baseR = mix(
+                float(0.82),
+                float(0.97),
+                greyK.mul(0.38).add(grain.mul(0.24)),
+              );
+              return clamp(
+                baseR.add(microRough.mul(0.07)),
+                float(0.44),
+                float(0.995),
+              );
+            })();
+
+            brickMat.emissiveNode = Fn(() => {
+              const nd = clamp(dot(normalWorld, sunDirUniform), 0, 1);
+              const rim = pow(
+                sub(float(1), abs(dot(normalWorld, vec3(0, 1, 0)))),
+                float(2.15),
+              );
+              const g0 = mix(color(0x4a4d52), color(0x686c72), nd);
+              return mul(g0, mul(rim, float(0.032))).mul(
+                warpS.mul(0.55).add(0.45),
+              );
+            })();
+
+            brickMat.positionNode = Fn(() => {
+              const pl = positionLocal;
+              const nl = normalLocal;
+              const ax = abs(pl.x);
+              const ay = abs(pl.y);
+              const az = abs(pl.z);
+              const mn = min(ax, min(ay, az));
+              const mx = max(ax, max(ay, az));
+              const edgeShell = smoothstep(float(0.14), float(0.44), mx);
+              const cornerBand = smoothstep(float(0.022), float(0.095), mn).mul(
+                smoothstep(float(0.33), float(0.48), mx),
+              );
+              const plLen = length(pl);
+              const cenW = smoothstep(float(0.01), float(0.05), plLen);
+
+              const wv = warpS.mul(shapeM.mul(0.55).add(0.45));
+              const bump = sin(
+                pl.x
+                  .mul(11)
+                  .add(pl.y.mul(9))
+                  .add(pl.z.mul(7))
+                  .add(grain.mul(40)),
+              )
+                .mul(0.5)
+                .add(0.5);
+              const amp = float(0.017)
+                .mul(edgeShell)
+                .mul(wv)
+                .mul(mix(float(0.65), float(1.15), bump))
+                .mul(cenW);
+
+              const chipPick = fract(
+                grain.mul(47.13).add(greyK.mul(91.7)).add(shapeM.mul(23.1)),
+              );
+              const chipMask = smoothstep(float(0.84), float(0.96), chipPick)
+                .mul(cornerBand)
+                .mul(edgeShell)
+                .mul(cenW);
+              const chipMag = float(0.012)
+                .mul(chipMask)
+                .mul(warpS.mul(0.42).add(0.58));
+              const rlen = max(length(pl), float(1e-5));
+              const radial = normalize(div(pl, rlen));
+              const chip = mul(radial, float(-1)).mul(chipMag);
+
+              return positionLocal.add(nl.mul(amp)).add(chip);
+            })();
+          }
+        }
+
+        function ensureBrickGeometry(force) {
+          const sig = brickGeometrySignature();
+          if (!force && brickGeo && sig === lastBrickGeometrySignature) {
+            return;
+          }
+          if (brickGeo) {
+            brickGeo.dispose();
+            brickGeo = null;
+          }
+          const rRound = Math.max(0.0001, params.brickRound);
+          brickGeo = new RoundedBoxGeometry(
+            params.brickW,
+            params.brickH,
+            params.brickD,
+            2,
+            rRound,
+          );
+          lastBrickGeometrySignature = sig;
+        }
+
+        /** Rebuild door + wall instances. If `remakeGeometry` is true, also rebuild shared brick geometry. */
+        function rebuildInstances(remakeGeometry) {
+          disposeDoorWallMeshesOnly();
+          ensureBrickMaterial();
+          ensureBrickGeometry(!!remakeGeometry);
+          clampArchAlong();
+          clampArchAlongZ();
+          clampDoorSillInWall();
+          if (isDraggingArchGizmo && archPivot) {
+            archPivot.position.x = params.archAlong;
+            archPivot.position.y = params.sillY + params.legHeight * 0.35;
+            archPivot.position.z = params.archAlongZ;
+          }
+          buildDoorInstances();
+          buildWallInstances();
+          if (!isDraggingArchGizmo) updateArchGizmoFromParams();
+          const rp = ringParamsFromGui();
+          const midY = (rp.springY + params.sillY) * 0.5 + rp.ringRadius * 0.35;
+          controls.target.set(params.archAlong, midY, params.archAlongZ * 0.22);
+        }
+
+        function rebuildAll() {
+          rebuildInstances(true);
+        }
+
+        function syncFromArchPivot() {
+          if (!archPivot) return;
+          params.archAlong = archPivot.position.x;
+          params.archAlongZ = archPivot.position.z;
+          params.sillY = THREE.MathUtils.clamp(
+            archPivot.position.y - params.legHeight * 0.35,
+            -2,
+            8,
+          );
+          clampArchAlong();
+          clampArchAlongZ();
+          clampDoorSillInWall();
+          archPivot.position.x = params.archAlong;
+          archPivot.position.y = params.sillY + params.legHeight * 0.35;
+          archPivot.position.z = params.archAlongZ;
+          rebuildInstances(false);
+        }
+
+        function updateArchGizmoFromParams() {
+          if (!archPivot || isDraggingArchGizmo) return;
+          clampArchAlong();
+          clampArchAlongZ();
+          clampDoorSillInWall();
+          archPivot.position.set(
+            params.archAlong,
+            params.sillY + params.legHeight * 0.35,
+            params.archAlongZ,
+          );
+        }
+
+        let archDragRaf = 0;
+        function setupArchGizmo() {
+          if (archGizmo) return;
+          archPivot = new THREE.Object3D();
+          archPivot.name = "archPivot";
+          scene.add(archPivot);
+
+          archGizmo = new TransformControls(camera, renderer.domElement);
+          archGizmo.attach(archPivot);
+          archGizmo.setMode("translate");
+          archGizmo.setSpace("world");
+          archGizmo.size = 0.78;
+          archGizmo.enabled = params.showArchGizmo;
+          archGizmo.visible = params.showArchGizmo;
+
+          archGizmo.addEventListener("dragging-changed", (e) => {
+            isDraggingArchGizmo = e.value;
+            controls.enabled = !e.value;
+            if (!e.value) {
+              if (archDragRaf) {
+                cancelAnimationFrame(archDragRaf);
+                archDragRaf = 0;
+              }
+              clampArchAlong();
+              clampArchAlongZ();
+              clampDoorSillInWall();
+              updateArchGizmoFromParams();
+              rebuildInstances(false);
+            }
+          });
+          archGizmo.addEventListener("change", () => {
+            if (!isDraggingArchGizmo) return;
+            if (archDragRaf) cancelAnimationFrame(archDragRaf);
+            archDragRaf = requestAnimationFrame(() => {
+              archDragRaf = 0;
+              syncFromArchPivot();
+            });
+          });
+
+          archGizmoHelper = archGizmo.getHelper();
+          scene.add(archGizmoHelper);
+          updateArchGizmoFromParams();
+        }
+
+        function buildDoorInstances() {
+          const rp = ringParamsFromGui();
+          const R = rp.ringRadius;
+          const Lu = pathULength(rp);
+          const Ls = params.closeBottom ? 2 * R : 0;
+          /** Mortar along the ring path; scales with brick width, capped so joints never read huge. */
+          const jRing = THREE.MathUtils.clamp(
+            params.brickW * 0.022,
+            0.0045,
+            0.012,
+          );
+          const targetMod =
+            params.brickW *
+              THREE.MathUtils.clamp(params.spacingMul, 0.82, 1.08) +
+            jRing;
+          let nU = Math.max(5, Math.round(Lu / targetMod));
+          let nS = Ls > 0 ? Math.max(2, Math.round(Ls / targetMod)) : 0;
+          if (nU + nS > params.maxBricks) {
+            const room = params.maxBricks - nS;
+            nU = Math.max(4, Math.min(nU, room));
+            if (nU + nS > params.maxBricks)
+              nS = Math.max(0, params.maxBricks - nU);
+          }
+          const n = nU + nS;
+          const cap = Math.min(params.maxBricks, n + 8);
+          const doorGeo = createInstancedBrickGeometry(brickGeo, cap);
+
+          doorMesh = new THREE.InstancedMesh(doorGeo, brickMat, cap);
+          doorMesh.castShadow = true;
+          doorMesh.receiveShadow = true;
+
+          const rnd = mulberry32(params.colorSeed | 0);
+          let k = 0;
+          const gx = getGateX();
+
+          let alongU =
+            nU > 0 ? (Lu - Math.max(0, nU - 1) * jRing) / nU : params.brickW;
+          let alongS =
+            nS > 0 ? (Ls - Math.max(0, nS - 1) * jRing) / nS : params.brickW;
+          const minAlong = params.brickW * 0.44;
+          while (nU > 4 && alongU < minAlong) {
+            nU--;
+            alongU =
+              nU > 0 ? (Lu - Math.max(0, nU - 1) * jRing) / nU : params.brickW;
+          }
+          while (nS > 2 && alongS < minAlong) {
+            nS--;
+            alongS =
+              nS > 0 ? (Ls - Math.max(0, nS - 1) * jRing) / nS : params.brickW;
+          }
+
+          const placeBrick = (x, y, tx, ty, along) => {
+            const yaw = Math.atan2(ty, tx);
+            const baseSx = THREE.MathUtils.clamp(
+              along / params.brickW,
+              0.86,
+              1.12,
+            );
+            const baseSy = 0.94 + rnd() * 0.05;
+            const baseSz = 0.94 + rnd() * 0.05;
+            const v = pickBrickVariation(rnd, baseSx, baseSy, baseSz, "door");
+            tmpO.position.set(x + gx, y, 0);
+            tmpO.rotation.set(0, 0, yaw);
+            tmpO.scale.set(v.sx, v.sy, v.sz);
+            tmpO.updateMatrix();
+            doorMesh.setMatrixAt(k, tmpO.matrix);
+            setBrickVarAt(doorMesh, k, v.shapeMix, v.warp, v.grey, v.grain);
+            k++;
+          };
+
+          for (let i = 0; i < nU; i++) {
+            const s = jRing * i + alongU * (i + 0.5);
+            const o = sampleUPath(s, rp);
+            placeBrick(o.x, o.y, o.tx, o.ty, alongU);
+          }
+          for (let i = 0; i < nS; i++) {
+            const s = jRing * i + alongS * (i + 0.5);
+            const o = sampleSill(s, R, rp.sillY);
+            placeBrick(o.x, o.y, o.tx, o.ty, alongS);
+          }
+
+          doorMesh.count = k;
+          doorMesh.instanceMatrix.needsUpdate = true;
+          const bv = doorMesh.geometry.getAttribute("brickVar");
+          if (bv) bv.needsUpdate = true;
+          doorMesh.position.set(0, 0, params.archAlongZ);
+          scene.add(doorMesh);
+        }
+
+        function buildWallInstances() {
+          if (!params.wallEnabled || !brickGeo) return;
+
+          const rp = ringParamsFromGui();
+          const R_in = Math.max(0.08, params.doorInnerHalfW);
+          const R_out = R_in + Math.max(0.05, params.masonryShell);
+          const doorSill = params.sillY;
+          const ys = rp.springY;
+          const seam = params.wallSeamInset;
+          const mortar = params.wallMortar;
+          const nomH = params.brickH;
+          const nomW = params.brickW;
+          const rowH = nomH + mortar;
+          const wallLo = -params.wallWidth * 0.5;
+          const wallHi = params.wallWidth * 0.5;
+          const wallBase = params.wallAnchorY;
+          const baseY = wallBase + mortar * 0.5 + nomH * 0.5;
+          const topY = wallBase + Math.max(nomH * 2, params.wallHeight);
+          const ny = Math.min(
+            220,
+            Math.max(3, Math.ceil((topY - baseY) / rowH)),
+          );
+
+          wallMesh = new THREE.InstancedMesh(
+            createInstancedBrickGeometry(brickGeo, params.maxWallBricks),
+            brickMat,
+            params.maxWallBricks,
+          );
+          wallMesh.castShadow = true;
+          wallMesh.receiveShadow = true;
+          wallMesh.position.set(0, 0, params.wallZ);
+
+          const rnd = mulberry32((params.colorSeed ^ 91379) | 0);
+          let k = 0;
+          const gx = getGateX();
+
+          const placeWallBrick = (cx, cy, sx, sy, sz) => {
+            if (k >= params.maxWallBricks) return false;
+            const v = pickBrickVariation(rnd, sx, sy, sz, "wall");
+            tmpO.position.set(cx, cy, 0);
+            tmpO.rotation.set(0, 0, 0);
+            tmpO.scale.set(v.sx, v.sy, v.sz);
+            tmpO.updateMatrix();
+            wallMesh.setMatrixAt(k, tmpO.matrix);
+            setBrickVarAt(wallMesh, k, v.shapeMix, v.warp, v.grey, v.grain);
+            k++;
+            return true;
+          };
+
+          outer: for (let iy = 0; iy < ny; iy++) {
+            const yMid = baseY + iy * rowH;
+            if (yMid > topY - nomH * 0.2) break;
+
+            const openH = wallOpeningHalfX(yMid, R_out, doorSill, ys, seam);
+            let intervals = [[wallLo, wallHi]];
+            if (openH > 1e-5) {
+              intervals = subtractIntervals(intervals, gx - openH, gx + openH);
+            }
+
+            const curv = wallOpeningCurvature(yMid, R_out, doorSill, ys, seam);
+            const curveT = THREE.MathUtils.smoothstep(0.06, 1.15, curv);
+            const nomWCurve =
+              nomW *
+              THREE.MathUtils.lerp(
+                1,
+                THREE.MathUtils.clamp(params.wallMinBrickScale, 0.16, 0.95),
+                Math.pow(curveT, 1.08),
+              );
+
+            const haunch =
+              yMid >= ys - mortar * 1.5 && yMid <= ys + R_out * 1.05
+                ? THREE.MathUtils.smoothstep(ys - 0.12, ys + R_out * 0.82, yMid)
+                : 0;
+            const crownSy =
+              1 -
+              (1 - THREE.MathUtils.clamp(params.wallCrownSquash, 0.42, 1)) *
+                Math.pow(haunch, 1.28);
+
+            for (const [segLo, segHi] of intervals) {
+              const span = segHi - segLo;
+              if (span < nomW * params.wallMinBrickScale * 0.45) continue;
+
+              const minW = nomW * params.wallMinBrickScale;
+              const jMin = 0.0035;
+              const jMax = Math.min(
+                mortar,
+                Math.max(jMin, span * 0.014 + jMin * 0.6),
+              );
+              const j = THREE.MathUtils.clamp(mortar, jMin, jMax);
+              const hj = j * 0.5;
+              let innerLo = segLo + hj;
+              let innerHi = segHi - hj;
+              if (iy % 2 === 1) {
+                const shift = Math.min(
+                  (nomWCurve + j) * 0.48,
+                  Math.max(0, innerHi - innerLo - minW * 1.2) * 0.35,
+                );
+                /**
+                 * Running-bond stagger must not always grow innerLo: that pulls the
+                 * right-side segment away from the arch (gap at the seam) while the
+                 * left segment only pulls away from the far wall. Shift from the
+                 * outer wall on each side instead.
+                 */
+                const eps = Math.max(1e-3, nomW * 0.025);
+                const rightOfOpening =
+                  openH > 1e-5 && segLo >= gx + openH - eps;
+                const leftOfOpening = openH > 1e-5 && segHi <= gx - openH + eps;
+                if (rightOfOpening) innerHi -= shift;
+                else if (leftOfOpening) innerLo += shift;
+                else innerLo += shift;
+              }
+
+              const innerLen = innerHi - innerLo;
+              if (innerLen < minW * 0.72) continue;
+
+              let nBricks = Math.max(1, Math.round(innerLen / (nomWCurve + j)));
+              let wEq = (innerLen - (nBricks - 1) * j) / nBricks;
+              for (let it = 0; it < 96; it++) {
+                wEq = (innerLen - (nBricks - 1) * j) / nBricks;
+                if (wEq < minW * 0.998) {
+                  if (nBricks <= 1) break;
+                  nBricks--;
+                } else if (wEq > nomWCurve * 1.075 && nBricks < 1600) {
+                  nBricks++;
+                } else break;
+              }
+              wEq = (innerLen - (nBricks - 1) * j) / nBricks;
+              if (wEq < minW * 0.88) continue;
+
+              for (let bi = 0; bi < nBricks; bi++) {
+                if (k >= params.maxWallBricks) break outer;
+                const cx = innerLo + wEq * 0.5 + bi * (wEq + j);
+                if (cx > innerHi - wEq * 0.5 + 1e-4) break;
+
+                let tuckY = 0;
+                if (openH > 1e-4 && curveT > 0.04) {
+                  const gap = Math.max(0, Math.abs(cx - gx) - openH);
+                  const band = params.brickW * 3.8;
+                  if (gap < band) {
+                    const t = THREE.MathUtils.smoothstep(1, 0, gap / band);
+                    tuckY =
+                      -nomH * 0.12 * Math.pow(t, 1.2) * Math.pow(curveT, 0.55);
+                  }
+                }
+
+                const sx = wEq / nomW;
+                const sy = (0.91 + rnd() * 0.06) * crownSy;
+                const sz = 0.92 + rnd() * 0.06;
+                if (!placeWallBrick(cx, yMid + tuckY, sx, sy, sz)) break outer;
+              }
+            }
+          }
+
+          wallMesh.count = k;
+          wallMesh.instanceMatrix.needsUpdate = true;
+          const wbv = wallMesh.geometry.getAttribute("brickVar");
+          if (wbv) wbv.needsUpdate = true;
+          scene.add(wallMesh);
+        }
+
+        rebuildInstances(true);
+        setupArchGizmo();
+
+        const tweakRoot = document.getElementById("tweak-root");
+        const pane = new Pane({
+          title: "Arch door + adaptive wall",
+          container: tweakRoot || document.body,
+        });
+        const applyL = () => applyLightsFromParams();
+        const colorPick = { view: "color", color: { type: "float" } };
+
+        const fLight = pane.addFolder({ title: "Lighting" });
+        const fKey = fLight.addFolder({ title: "Key (casts shadow)" });
+        fKey
+          .addBinding(params, "lightKeyAz", {
+            min: -180,
+            max: 180,
+            step: 1,
+            label: "Azimuth °",
+          })
+          .on("change", applyL);
+        fKey
+          .addBinding(params, "lightKeyEl", {
+            min: -10,
+            max: 89,
+            step: 1,
+            label: "Elevation °",
+          })
+          .on("change", applyL);
+        fKey
+          .addBinding(params, "lightKeyDist", {
+            min: 6,
+            max: 48,
+            step: 0.5,
+            label: "Distance",
+          })
+          .on("change", applyL);
+        fKey
+          .addBinding(params, "lightKeyIntensity", {
+            min: 0,
+            max: 4,
+            step: 0.05,
+            label: "Intensity",
+          })
+          .on("change", applyL);
+        fKey
+          .addBinding(params, "lightKeyColor", colorPick)
+          .on("change", applyL);
+
+        const fFill = fLight.addFolder({
+          title: "Fill (no shadow)",
+          expanded: false,
+        });
+        fFill
+          .addBinding(params, "lightFillAz", {
+            min: -180,
+            max: 180,
+            step: 1,
+            label: "Azimuth °",
+          })
+          .on("change", applyL);
+        fFill
+          .addBinding(params, "lightFillEl", {
+            min: -5,
+            max: 85,
+            step: 1,
+            label: "Elevation °",
+          })
+          .on("change", applyL);
+        fFill
+          .addBinding(params, "lightFillDist", {
+            min: 6,
+            max: 40,
+            step: 0.5,
+            label: "Distance",
+          })
+          .on("change", applyL);
+        fFill
+          .addBinding(params, "lightFillIntensity", {
+            min: 0,
+            max: 2,
+            step: 0.02,
+            label: "Intensity",
+          })
+          .on("change", applyL);
+        fFill
+          .addBinding(params, "lightFillColor", colorPick)
+          .on("change", applyL);
+
+        const fRim = fLight.addFolder({
+          title: "Rim (no shadow)",
+          expanded: false,
+        });
+        fRim
+          .addBinding(params, "lightRimAz", {
+            min: -180,
+            max: 180,
+            step: 1,
+            label: "Azimuth °",
+          })
+          .on("change", applyL);
+        fRim
+          .addBinding(params, "lightRimEl", {
+            min: -5,
+            max: 85,
+            step: 1,
+            label: "Elevation °",
+          })
+          .on("change", applyL);
+        fRim
+          .addBinding(params, "lightRimDist", {
+            min: 4,
+            max: 36,
+            step: 0.5,
+            label: "Distance",
+          })
+          .on("change", applyL);
+        fRim
+          .addBinding(params, "lightRimIntensity", {
+            min: 0,
+            max: 1.2,
+            step: 0.02,
+            label: "Intensity",
+          })
+          .on("change", applyL);
+        fRim
+          .addBinding(params, "lightRimColor", colorPick)
+          .on("change", applyL);
+
+        const fHemi = fLight.addFolder({
+          title: "Hemisphere",
+          expanded: false,
+        });
+        fHemi
+          .addBinding(params, "lightHemiIntensity", {
+            min: 0,
+            max: 1.5,
+            step: 0.02,
+            label: "Intensity",
+          })
+          .on("change", applyL);
+        fHemi
+          .addBinding(params, "lightHemiSky", colorPick)
+          .on("change", applyL);
+        fHemi
+          .addBinding(params, "lightHemiGround", colorPick)
+          .on("change", applyL);
+
+        const fSh = fLight.addFolder({
+          title: "Shadow & tone",
+          expanded: false,
+        });
+        fSh
+          .addBinding(params, "lightShadowOrtho", {
+            min: 6,
+            max: 48,
+            step: 0.5,
+            label: "Ortho half-extent",
+          })
+          .on("change", applyL);
+        fSh
+          .addBinding(params, "lightShadowRadius", {
+            min: 0,
+            max: 12,
+            step: 0.25,
+            label: "Soft radius",
+          })
+          .on("change", applyL);
+        fSh
+          .addBinding(params, "lightShadowBias", {
+            min: -0.0005,
+            max: 0.0005,
+            step: 0.00001,
+            label: "Shadow bias",
+          })
+          .on("change", applyL);
+        fSh
+          .addBinding(params, "lightShadowNormalBias", {
+            min: 0,
+            max: 0.08,
+            step: 0.001,
+            label: "Normal bias",
+          })
+          .on("change", applyL);
+        fSh
+          .addBinding(params, "rendererExposure", {
+            min: 0.35,
+            max: 2.4,
+            step: 0.02,
+            label: "ACES exposure",
+          })
+          .on("change", applyL);
+
+        const fDoor = pane.addFolder({ title: "Door shape" });
+        const rb = () => rebuildInstances(false);
+        fDoor
+          .addBinding(params, "doorInnerHalfW", {
+            min: 0.35,
+            max: 2.2,
+            step: 0.01,
+            label: "Inner half-width",
+          })
+          .on("change", rb);
+        fDoor
+          .addBinding(params, "masonryShell", {
+            min: 0.12,
+            max: 1.2,
+            step: 0.01,
+            label: "Brick ring depth",
+          })
+          .on("change", rb);
+        fDoor
+          .addBinding(params, "legHeight", {
+            min: 0.4,
+            max: 5,
+            step: 0.02,
+            label: "Jamb height",
+          })
+          .on("change", rb);
+        fDoor
+          .addBinding(params, "sillY", {
+            min: -0.5,
+            max: 12,
+            step: 0.01,
+            label: "Door sill Y",
+          })
+          .on("change", rb);
+        fDoor
+          .addBinding(params, "archAlong", {
+            min: -8,
+            max: 8,
+            step: 0.02,
+            label: "Arch center X",
+          })
+          .on("change", rb);
+        fDoor
+          .addBinding(params, "archAlongZ", {
+            min: -1.6,
+            max: 1.6,
+            step: 0.01,
+            label: "Arch depth (Z, gizmo blue)",
+          })
+          .on("change", rb);
+        fDoor
+          .addBinding(params, "closeBottom", {
+            label: "Close bottom (threshold)",
+          })
+          .on("change", rb);
+
+        const fBrick = pane.addFolder({ title: "Bricks" });
+        fBrick
+          .addBinding(params, "brickW", {
+            min: 0.22,
+            max: 1.1,
+            step: 0.01,
+          })
+          .on("change", rb);
+        fBrick
+          .addBinding(params, "brickH", {
+            min: 0.18,
+            max: 0.9,
+            step: 0.01,
+          })
+          .on("change", rb);
+        fBrick
+          .addBinding(params, "brickD", {
+            min: 0.2,
+            max: 1.2,
+            step: 0.01,
+          })
+          .on("change", rb);
+        fBrick
+          .addBinding(params, "brickRound", {
+            min: 0,
+            max: 0.18,
+            step: 0.005,
+            label: "Corner radius",
+          })
+          .on("change", rb);
+        fBrick
+          .addBinding(params, "spacingMul", {
+            min: 0.55,
+            max: 1.6,
+            step: 0.01,
+            label: "Spacing",
+          })
+          .on("change", rb);
+        fBrick
+          .addBinding(params, "colorSeed", {
+            min: 0,
+            max: 999999,
+            step: 1,
+            label: "Color seed",
+          })
+          .on("change", rb);
+
+        const fWall = pane.addFolder({ title: "Wall (field masonry)" });
+        fWall
+          .addBinding(params, "wallEnabled", { label: "Enabled" })
+          .on("change", rb);
+        fWall
+          .addBinding(params, "wallAnchorY", {
+            min: -0.5,
+            max: 2,
+            step: 0.01,
+            label: "Wall base Y (fixed)",
+          })
+          .on("change", rb);
+        fWall
+          .addBinding(params, "wallWidth", {
+            min: 6,
+            max: 28,
+            step: 0.1,
+          })
+          .on("change", rb);
+        fWall
+          .addBinding(params, "wallHeight", {
+            min: 3,
+            max: 16,
+            step: 0.05,
+            label: "Height above sill",
+          })
+          .on("change", rb);
+        fWall
+          .addBinding(params, "wallDepth", {
+            min: 0.35,
+            max: 1.4,
+            step: 0.01,
+          })
+          .on("change", rb);
+        fWall
+          .addBinding(params, "wallZ", {
+            min: -1.2,
+            max: 0.4,
+            step: 0.01,
+            label: "Wall Z offset",
+          })
+          .on("change", rb);
+        fWall
+          .addBinding(params, "wallMortar", {
+            min: 0.008,
+            max: 0.06,
+            step: 0.001,
+          })
+          .on("change", rb);
+        fWall
+          .addBinding(params, "wallSeamInset", {
+            min: 0.01,
+            max: 0.12,
+            step: 0.002,
+            label: "Ring clearance",
+          })
+          .on("change", rb);
+        fWall
+          .addBinding(params, "wallEdgeBlendBw", {
+            min: 1.5,
+            max: 9,
+            step: 0.1,
+            label: "Edge blend (× brick W)",
+          })
+          .on("change", rb);
+        fWall
+          .addBinding(params, "wallMinBrickScale", {
+            min: 0.14,
+            max: 0.55,
+            step: 0.01,
+            label: "Min brick / nominal",
+          })
+          .on("change", rb);
+        fWall
+          .addBinding(params, "wallCrownSquash", {
+            min: 0.45,
+            max: 1,
+            step: 0.01,
+            label: "Crown height scale",
+          })
+          .on("change", rb);
+
+        const fView = pane.addFolder({ title: "View" });
+        fView
+          .addBinding(params, "showArchGizmo", {
+            label: "Arch gizmo",
+          })
+          .on("change", () => {
+            if (archGizmo) {
+              archGizmo.enabled = params.showArchGizmo;
+              archGizmo.visible = params.showArchGizmo;
+            }
+          });
+        fView
+          .addBinding(params, "showGrid", { label: "Grid" })
+          .on("change", () => {
+            setGrid(params.showGrid);
+          });
+
+        pane.addButton({ title: "Rebuild" }).on("click", () => {
+          rebuildAll();
+        });
+
+        function onResize() {
+          camera.aspect = window.innerWidth / window.innerHeight;
+          camera.updateProjectionMatrix();
+          renderer.setSize(window.innerWidth, window.innerHeight);
+        }
+        window.addEventListener("resize", onResize);
+
+        renderer.setAnimationLoop(() => {
+          sunDirUniform.value.copy(sun.position).normalize();
+          controls.update();
+          renderer.render(scene, camera);
+        });
+      }
+
+      main().catch((e) => {
+        console.error(e);
+        document.body.innerHTML =
+          "<pre style='color:#f8fafc;padding:16px;font:14px/1.4 system-ui'>WebGPU error: " +
+          String(e) +
+          "</pre>";
+      });
+    </script>
+  </body>
+</html>
