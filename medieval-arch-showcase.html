@@ -333,6 +333,29 @@
           archRingDepthScale: 1.09,
           showArchGizmo: true,
 
+          /** Master: run falling-brick sim + auto erosion (slider). */
+          destructionEnabled: false,
+          /** "none" | "destruct" — LMB blasts only the mesh you hit (wall vs gate ring). */
+          destructionMode: "none",
+          removeRadius: 1.05,
+          gravity: 18,
+          bounce: 0.28,
+          angularDamping: 0.985,
+          debrisMode: "fade",
+          debrisLifetime: 6,
+          maxDebrisCount: 800,
+          sleepThreshold: 0.42,
+          /**
+           * Max extra bricks that may start falling from structural collapse after one blast.
+           * 0 = auto from blast radius (tight, castle-like). Higher = bigger “first click” ripples.
+           */
+          collapseSpreadMax: 0,
+          /**
+           * 0 = off. >0 = continuous auto "virtual clicks" from the highest bricks downward,
+           * same blast radius as LMB but only on the mesh of each chosen top brick (like gentle clicking).
+           */
+          erosion: 0,
+
           /** Directional sun (shadows). Hemisphere sky/ground fill — same idea as bricks-castle3.html */
           sunIntensity: 2.35,
           ambientIntensity: 0.55,
@@ -365,6 +388,39 @@
         controls.enableDamping = true;
         controls.minDistance = 3;
         controls.maxDistance = 40;
+
+        renderer.domElement.addEventListener("pointerdown", (e) => {
+          if (e.button !== 0) return;
+          if (!params.destructionEnabled) return;
+          if (params.destructionMode !== "destruct") return;
+          if (e.target && e.target.closest && e.target.closest("#tweak-root"))
+            return;
+          if (isDraggingArchGizmo) return;
+          destructMouse.x = (e.clientX / window.innerWidth) * 2 - 1;
+          destructMouse.y = -(e.clientY / window.innerHeight) * 2 + 1;
+          destructRaycaster.setFromCamera(destructMouse, camera);
+          const targets = getDestructMeshes();
+          if (!targets.length) return;
+          const hits = destructRaycaster.intersectObjects(targets, false);
+          if (!hits.length) return;
+          const hit0 = hits[0];
+          let anchorWorld = hit0.point.clone();
+          const bi = hit0.instanceId;
+          if (
+            bi != null &&
+            bi >= 0 &&
+            hit0.object &&
+            hit0.object.isInstancedMesh
+          ) {
+            for (const br of destructBricks) {
+              if (br.mesh === hit0.object && br.index === bi) {
+                brickWorldPosition(br, anchorWorld);
+                break;
+              }
+            }
+          }
+          applyImpactAtPoint(anchorWorld, hit0.object);
+        });
 
         const hemi = new THREE.HemisphereLight(
           0xc9dce8,
@@ -456,6 +512,28 @@
         let archGizmo = null;
         let archGizmoHelper = null;
         let isDraggingArchGizmo = false;
+
+        /** bricks-castle.html–style CPU debris: wall + door + tower arch rings share one registry. */
+        const destructBricks = [];
+        let debrisSleepCounter = 0;
+        const destructTimer = new THREE.Timer();
+        destructTimer.connect(document);
+        const destructRaycaster = new THREE.Raycaster();
+        const destructMouse = new THREE.Vector2();
+        const _dMat = new THREE.Matrix4();
+        const _dPos = new THREE.Vector3();
+        const _dQuat = new THREE.Quaternion();
+        const _dScl = new THREE.Vector3();
+        const _dEul = new THREE.Euler();
+        const _dTmp = new THREE.Vector3();
+        const _dTmp2 = new THREE.Vector3();
+        const _destructObj = new THREE.Object3D();
+        const _instLocal = new THREE.Matrix4();
+        const _brickWorldMat = new THREE.Matrix4();
+        const _invMeshW = new THREE.Matrix4();
+        const _wmPos = new THREE.Vector3();
+        const _wmPos2 = new THREE.Vector3();
+        let erosionAccum = 0;
 
         function getGateX() {
           return params.archAlong;
@@ -919,6 +997,7 @@
         let lastBrickGeometrySignature = "";
 
         function disposeDoorWallMeshesOnly() {
+          destructBricks.length = 0;
           towerDoorMeshes.forEach((m) => {
             scene.remove(m);
             if (m.geometry) m.geometry.dispose();
@@ -933,6 +1012,388 @@
             scene.remove(wallMesh);
             if (wallMesh.geometry) wallMesh.geometry.dispose();
             wallMesh = null;
+          }
+        }
+
+        function getDestructMeshes() {
+          const out = [];
+          if (wallMesh && wallMesh.count > 0) out.push(wallMesh);
+          if (doorMesh && doorMesh.count > 0) out.push(doorMesh);
+          for (const m of towerDoorMeshes) {
+            if (m && m.count > 0) out.push(m);
+          }
+          return out;
+        }
+
+        /** Wall-field door ring or tower gate instanced meshes (not the masonry shell). */
+        function isArchRingInstancedMesh(mesh) {
+          if (!mesh) return false;
+          if (doorMesh && mesh === doorMesh) return true;
+          return towerDoorMeshes.includes(mesh);
+        }
+
+        function markDestructMeshesDirty() {
+          for (const m of getDestructMeshes()) {
+            m.instanceMatrix.needsUpdate = true;
+          }
+        }
+
+        /** Instance matrix from CPU state (local space). */
+        function composeBrickInstanceMatrix(b, outMat) {
+          _dQuat.setFromEuler(
+            _dEul.set(b.rotation.x, b.rotation.y, b.rotation.z, "XYZ"),
+          );
+          outMat.compose(b.position, _dQuat, b.scale);
+        }
+
+        /** Brick center in world space (accounts for mesh pose + instance R/T/S). */
+        function brickWorldPosition(b, out) {
+          b.mesh.updateMatrixWorld(true);
+          composeBrickInstanceMatrix(b, _instLocal);
+          _brickWorldMat.multiplyMatrices(b.mesh.matrixWorld, _instLocal);
+          out.setFromMatrixPosition(_brickWorldMat);
+        }
+
+        function syncWorldPosToLocalBrick(mesh, worldPos, outLocal) {
+          _invMeshW.copy(mesh.matrixWorld).invert();
+          outLocal.copy(worldPos).applyMatrix4(_invMeshW);
+        }
+
+        function rebuildDestructRegistry() {
+          destructBricks.length = 0;
+          debrisSleepCounter = 0;
+          erosionAccum = 0;
+          for (const mesh of getDestructMeshes()) {
+            const n = mesh.count;
+            for (let i = 0; i < n; i++) {
+              mesh.getMatrixAt(i, _dMat);
+              _dMat.decompose(_dPos, _dQuat, _dScl);
+              if (_dScl.x < 0.02) continue;
+              _dEul.setFromQuaternion(_dQuat, "XYZ");
+              destructBricks.push({
+                mesh,
+                index: i,
+                position: new THREE.Vector3().copy(_dPos),
+                velocity: new THREE.Vector3(),
+                angularVelocity: new THREE.Vector3(),
+                rotation: new THREE.Vector3(_dEul.x, _dEul.y, _dEul.z),
+                scale: new THREE.Vector3().copy(_dScl),
+                falling: false,
+                removed: false,
+                hidden: false,
+                sleeping: false,
+                sleepOrder: 0,
+                ttl: params.debrisLifetime,
+              });
+            }
+          }
+        }
+
+        function hideDestructEntry(b) {
+          b.hidden = true;
+          b.falling = false;
+          b.sleeping = false;
+          b.sleepOrder = 0;
+          b.ttl = 0;
+          _destructObj.position.set(0, -9999, 0);
+          _destructObj.rotation.set(0, 0, 0);
+          _destructObj.scale.set(0.001, 0.001, 0.001);
+          _destructObj.updateMatrix();
+          b.mesh.setMatrixAt(b.index, _destructObj.matrix);
+        }
+
+        /**
+         * `hitPointWorld`: world-space point (bricks-castle uses the struck brick center).
+         * `b.velocity` is integrated in **world** space; `b.position` stays instance-local.
+         */
+        function startFallEntry(b, hitPointWorld) {
+          if (!b || b.hidden || b.falling) return;
+          b.removed = true;
+          brickWorldPosition(b, _wmPos2);
+          _dTmp.subVectors(_wmPos2, hitPointWorld);
+          if (_dTmp.lengthSq() < 1e-6) {
+            _dTmp.set(
+              (Math.random() - 0.5) * 0.3,
+              0,
+              (Math.random() - 0.5) * 0.3,
+            );
+          } else {
+            _dTmp.normalize();
+          }
+          const push = 2.6 + Math.random() * 1.8;
+          b.velocity.set(
+            _dTmp.x * push,
+            2.5 + Math.random() * 2.2,
+            _dTmp.z * push,
+          );
+          b.angularVelocity.set(
+            (Math.random() - 0.5) * 6,
+            (Math.random() - 0.5) * 6,
+            (Math.random() - 0.5) * 6,
+          );
+          b.falling = true;
+          b.sleeping = false;
+          b.hidden = false;
+          b.ttl = params.debrisLifetime;
+        }
+
+        /**
+         * Geometry-based support (running-bond walls are not on an integer lattice).
+         * Uses world-space centers + a coarse 3D hash like ring adjacency in bricks-castle.
+         *
+         * bricks-castle only removes unsupported bricks **along ring columns** (narrow coupling).
+         * Our 3D hash is looser; without a per-click cap the first intact wall/tower relaxes in one
+         * huge wave, then later clicks feel “precise”. `maxCollapseStarts` limits how many *extra*
+         * bricks may begin falling from collapse after the blast (blast radius is unchanged).
+         *
+         * @param {THREE.Object3D|null} meshScope - If set, only bricks on this instanced mesh
+         *   participate. Arch rings are handled separately (no collapse).
+         * @param {number|null} maxCollapseStarts - cap on collapse-triggered falls; null = unlimited.
+         */
+        function triggerStructuralCollapseShowcase(
+          meshScope = null,
+          maxCollapseStarts = null,
+        ) {
+          const groundY = ground ? ground.position.y : 0;
+          const floorYW = groundY + params.brickH * 0.58;
+          const rowH =
+            params.brickH + Math.max(0.006, params.wallMortar || 0.012);
+          const maxDy = rowH * 1.06;
+          const minDy = 0.03;
+          const horizR = Math.max(params.brickW, params.brickD) * 0.52;
+          const cellXZ = Math.max(0.07, params.brickW * 0.45);
+          const cellY = Math.max(0.07, rowH * 0.52);
+
+          let collapseStarts = 0;
+          let changed = true;
+          let guard = 0;
+          while (changed && guard++ < 48) {
+            changed = false;
+            if (
+              maxCollapseStarts != null &&
+              collapseStarts >= maxCollapseStarts
+            ) {
+              break;
+            }
+            const stable = [];
+            for (const b of destructBricks) {
+              if (meshScope != null && b.mesh !== meshScope) continue;
+              if (b.removed || b.falling || b.hidden) continue;
+              stable.push(b);
+            }
+            const hash = new Map();
+            for (const b of stable) {
+              brickWorldPosition(b, _wmPos2);
+              const ix = Math.floor(_wmPos2.x / cellXZ);
+              const iy = Math.floor(_wmPos2.y / cellY);
+              const iz = Math.floor(_wmPos2.z / cellXZ);
+              const key = `${ix}|${iy}|${iz}`;
+              let bucket = hash.get(key);
+              if (!bucket) {
+                bucket = [];
+                hash.set(key, bucket);
+              }
+              bucket.push(b);
+            }
+            for (const b of stable) {
+              if (
+                maxCollapseStarts != null &&
+                collapseStarts >= maxCollapseStarts
+              ) {
+                break;
+              }
+              brickWorldPosition(b, _wmPos2);
+              if (_wmPos2.y <= floorYW) continue;
+              let ok = false;
+              const ix0 = Math.floor(_wmPos2.x / cellXZ);
+              const iy0 = Math.floor(_wmPos2.y / cellY);
+              const iz0 = Math.floor(_wmPos2.z / cellXZ);
+              outer: for (let diy = -3; diy <= -1; diy++) {
+                for (let dix = -1; dix <= 1; dix++) {
+                  for (let diz = -1; diz <= 1; diz++) {
+                    const bucket = hash.get(
+                      `${ix0 + dix}|${iy0 + diy}|${iz0 + diz}`,
+                    );
+                    if (!bucket) continue;
+                    for (const o of bucket) {
+                      if (o === b) continue;
+                      if (o.removed || o.falling || o.hidden) continue;
+                      brickWorldPosition(o, _wmPos);
+                      const dy = _wmPos2.y - _wmPos.y;
+                      if (dy < minDy || dy > maxDy) continue;
+                      const dx = _wmPos2.x - _wmPos.x;
+                      const dz = _wmPos2.z - _wmPos.z;
+                      if (dx * dx + dz * dz <= horizR * horizR) {
+                        ok = true;
+                        break outer;
+                      }
+                    }
+                  }
+                }
+              }
+              if (!ok) {
+                if (
+                  maxCollapseStarts != null &&
+                  collapseStarts >= maxCollapseStarts
+                ) {
+                  continue;
+                }
+                startFallEntry(b, _wmPos2);
+                collapseStarts++;
+                changed = true;
+              }
+            }
+          }
+          markDestructMeshesDirty();
+        }
+
+        /**
+         * @param {THREE.Object3D|null} blastMeshFilter - if set, only instances on this mesh
+         *   are removed in the blast (avoids wrecking the arch ring when you hit the field wall).
+         *   Structural collapse runs on masonry shells only. Arch rings skip collapse: the
+         *   vertical “support from below” test does not fit voussoirs, so one hole would delete
+         *   the whole gate regardless of blast radius.
+         */
+        function applyImpactAtPoint(hitPointWorld, blastMeshFilter = null) {
+          let any = false;
+          for (const b of destructBricks) {
+            if (blastMeshFilter != null && b.mesh !== blastMeshFilter) continue;
+            if (b.removed || b.falling || b.hidden) continue;
+            brickWorldPosition(b, _wmPos2);
+            if (_wmPos2.distanceTo(hitPointWorld) < params.removeRadius) {
+              startFallEntry(b, hitPointWorld);
+              any = true;
+            }
+          }
+          if (any) {
+            if (
+              blastMeshFilter == null ||
+              !isArchRingInstancedMesh(blastMeshFilter)
+            ) {
+              let cap;
+              if (params.collapseSpreadMax > 0) {
+                cap = Math.round(params.collapseSpreadMax);
+              } else {
+                cap = Math.min(
+                  56,
+                  Math.max(6, Math.round(4 + params.removeRadius * 14)),
+                );
+              }
+              triggerStructuralCollapseShowcase(blastMeshFilter, cap);
+            } else {
+              markDestructMeshesDirty();
+            }
+          }
+        }
+
+        function enforceDestructDebrisLimit() {
+          if (params.debrisMode !== "keep") return;
+          const sleeping = [];
+          for (const b of destructBricks) {
+            if (b.sleeping && !b.hidden) {
+              sleeping.push({ b, order: b.sleepOrder });
+            }
+          }
+          if (sleeping.length <= params.maxDebrisCount) return;
+          sleeping.sort((a, z) => a.order - z.order);
+          const overflow = sleeping.length - params.maxDebrisCount;
+          for (let i = 0; i < overflow; i++) {
+            hideDestructEntry(sleeping[i].b);
+          }
+          markDestructMeshesDirty();
+        }
+
+        function updateFallingDestruct(dt) {
+          const groundY = ground ? ground.position.y : 0;
+          const minYWorld = groundY + params.brickH * 0.45;
+          let updatedAny = false;
+          for (const b of destructBricks) {
+            if (!b.falling || b.hidden) continue;
+            b.mesh.updateMatrixWorld(true);
+            b.velocity.y -= params.gravity * dt;
+            brickWorldPosition(b, _wmPos);
+            _wmPos.addScaledVector(b.velocity, dt);
+            syncWorldPosToLocalBrick(b.mesh, _wmPos, b.position);
+            b.rotation.x += b.angularVelocity.x * dt;
+            b.rotation.y += b.angularVelocity.y * dt;
+            b.rotation.z += b.angularVelocity.z * dt;
+            _dTmp2.copy(b.angularVelocity).multiplyScalar(params.angularDamping);
+            b.angularVelocity.copy(_dTmp2);
+            brickWorldPosition(b, _wmPos);
+            if (_wmPos.y < minYWorld) {
+              syncWorldPosToLocalBrick(
+                b.mesh,
+                _wmPos.set(_wmPos.x, minYWorld, _wmPos.z),
+                b.position,
+              );
+              if (Math.abs(b.velocity.y) > 0.5) {
+                b.velocity.y = -b.velocity.y * params.bounce;
+                b.velocity.x *= 0.86;
+                b.velocity.z *= 0.86;
+              } else {
+                b.velocity.y = 0;
+                b.velocity.x *= 0.9;
+                b.velocity.z *= 0.9;
+              }
+              const horizontalSpeed = Math.hypot(b.velocity.x, b.velocity.z);
+              const speed = Math.hypot(horizontalSpeed, b.velocity.y);
+              if (speed < params.sleepThreshold) {
+                b.velocity.set(0, 0, 0);
+                b.angularVelocity.set(0, 0, 0);
+                b.falling = false;
+                b.sleeping = true;
+                b.sleepOrder = ++debrisSleepCounter;
+              }
+            }
+            if (b.falling) {
+              b.ttl -= dt;
+              if (
+                _wmPos.y < groundY - 8 ||
+                (params.debrisMode === "fade" && b.ttl <= 0)
+              ) {
+                hideDestructEntry(b);
+                updatedAny = true;
+                continue;
+              }
+            }
+            composeBrickInstanceMatrix(b, _instLocal);
+            b.mesh.setMatrixAt(b.index, _instLocal);
+            updatedAny = true;
+          }
+          if (updatedAny) markDestructMeshesDirty();
+          enforceDestructDebrisLimit();
+        }
+
+        function updateErosionTick(dt) {
+          if (!params.destructionEnabled || params.erosion < 1e-5) return;
+          /** ~0…2.2 “virtual LMB” events per second at erosion=1 (quadratic = gentler near 0). */
+          erosionAccum += dt * params.erosion * params.erosion * 2.2;
+          while (erosionAccum >= 1) {
+            erosionAccum -= 1;
+            const cand = [];
+            for (const b of destructBricks) {
+              if (b.removed || b.falling || b.hidden) continue;
+              cand.push(b);
+            }
+            if (!cand.length) {
+              erosionAccum = 0;
+              break;
+            }
+            cand.sort((a, z) => {
+              brickWorldPosition(a, _wmPos);
+              brickWorldPosition(z, _wmPos2);
+              return _wmPos2.y - _wmPos.y;
+            });
+            const b = cand[0];
+            brickWorldPosition(b, _wmPos);
+            _wmPos.add(
+              _wmPos2.set(
+                (Math.random() - 0.5) * params.brickW * 0.14,
+                (Math.random() - 0.5) * params.brickH * 0.07,
+                (Math.random() - 0.5) * params.brickD * 0.14,
+              ),
+            );
+            applyImpactAtPoint(_wmPos, b.mesh);
           }
         }
 
@@ -1122,6 +1583,7 @@
               params.archAlongZ * 0.22,
             );
           }
+          rebuildDestructRegistry();
         }
 
         function rebuildAll() {
@@ -1930,6 +2392,7 @@
               else if (ff === 2) mesh.position.set(0, 0, ringZ);
               else mesh.position.set(0, 0, -ringZ);
               mesh.updateMatrixWorld(true);
+              _invMeshDoor.copy(mesh.matrixWorld).invert();
             }
 
             const placeBrick = (x, y, tx, ty, along) => {
@@ -1978,6 +2441,7 @@
                 tmpO.scale.set(v.sx, v.sy, v.sz);
                 tmpO.updateMatrix();
                 tmpM.multiplyMatrices(ringRoot.matrixWorld, tmpO.matrix);
+                tmpM.premultiply(_invMeshDoor);
               }
               mesh.setMatrixAt(k, tmpM);
               setBrickVarAt(mesh, k, v.shapeMix, v.warp, v.grey, v.grain);
@@ -2551,6 +3015,88 @@
           label: "Crown height scale",
         }).on("change", rb);
 
+        const fDestruction = pane.addFolder({ title: "Destruction" });
+        fDestruction.addBinding(params, "destructionEnabled", {
+          label: "Sim enabled",
+        });
+        fDestruction
+          .addBinding(params, "destructionMode", {
+            label: "Click mode",
+            options: {
+              Off: "none",
+              "On (LMB)": "destruct",
+            },
+          })
+          .on("change", () => {
+            erosionAccum = 0;
+          });
+        fDestruction
+          .addBinding(params, "erosion", {
+            min: 0,
+            max: 1,
+            step: 0.01,
+            label: "Erosion (auto from top, 0=off)",
+          })
+          .on("change", () => {
+            if (params.erosion < 1e-5) erosionAccum = 0;
+          });
+        fDestruction.addBinding(params, "removeRadius", {
+          min: 0.2,
+          max: 3.5,
+          step: 0.05,
+          label: "Blast radius",
+        });
+        fDestruction.addBinding(params, "collapseSpreadMax", {
+          min: 0,
+          max: 140,
+          step: 1,
+          label: "Collapse spread (0=auto)",
+        });
+        fDestruction.addBinding(params, "gravity", {
+          min: 4,
+          max: 45,
+          step: 0.5,
+        });
+        fDestruction.addBinding(params, "bounce", {
+          min: 0,
+          max: 0.85,
+          step: 0.02,
+        });
+        fDestruction.addBinding(params, "angularDamping", {
+          min: 0.9,
+          max: 0.999,
+          step: 0.001,
+          label: "Spin damping",
+        });
+        fDestruction
+          .addBinding(params, "debrisMode", {
+            label: "Settled debris",
+            options: { Fade: "fade", Keep: "keep" },
+          })
+          .on("change", () => {
+            for (const b of destructBricks) {
+              if (!b.hidden) b.ttl = params.debrisLifetime;
+            }
+          });
+        fDestruction.addBinding(params, "debrisLifetime", {
+          min: 1,
+          max: 24,
+          step: 0.25,
+          label: "Fade time (s)",
+        });
+        fDestruction.addBinding(params, "maxDebrisCount", {
+          min: 120,
+          max: 4000,
+          step: 40,
+          label: "Max kept pieces",
+        });
+        fDestruction.addBinding(params, "sleepThreshold", {
+          min: 0.08,
+          max: 1.2,
+          step: 0.02,
+          label: "Sleep speed",
+        });
+
         const fView = pane.addFolder({ title: "View" });
         fView.addBinding(params, "showArchGizmo", {
           label: "Arch gizmo",
@@ -2575,8 +3121,14 @@
         }
         window.addEventListener("resize", onResize);
 
-        renderer.setAnimationLoop(() => {
+        renderer.setAnimationLoop((time) => {
           sunDirUniform.value.copy(sun.position).normalize();
+          destructTimer.update(time);
+          const dt = destructTimer.getDelta();
+          if (params.destructionEnabled && destructBricks.length) {
+            updateFallingDestruct(dt);
+            updateErosionTick(dt);
+          }
           controls.update();
           renderer.render(scene, camera);
         });
