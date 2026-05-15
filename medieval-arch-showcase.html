@@ -174,6 +174,17 @@
       const ringRoot = new THREE.Object3D();
       const _archGizmoWP = new THREE.Vector3();
       const _archGizmoBasisM = new THREE.Matrix4();
+      const _tmpBasisBrick = new THREE.Matrix4();
+      const _invMeshDoor = new THREE.Matrix4();
+      const _tmpDoorPos = new THREE.Vector3();
+      const _tmpDoorQuat = new THREE.Quaternion();
+      const _tmpDoorScale = new THREE.Vector3();
+      const _doorTan = new THREE.Vector3();
+      const _doorOut = new THREE.Vector3();
+      const _doorBx = new THREE.Vector3();
+      const _doorBy = new THREE.Vector3();
+      const _doorBz = new THREE.Vector3();
+      const _yAxis = new THREE.Vector3(0, 1, 0);
 
       /** Per-instance: x=shape mix, y=warp strength, z=grey key, w=grain phase */
       function setBrickVarAt(mesh, index, shapeMix, warp, grey, grain) {
@@ -283,7 +294,7 @@
           colorSeed: 31415,
           showGrid: true,
 
-          /** "wall" = single façade; "tower" = square shell with one gate (same door params as wall) */
+          /** "wall" | "tower" (square) | "towerRound" — same door params; round uses `towerHalfWidth` as cylinder radius */
           sceneMode: "wall",
           towerHalfWidth: 3.6,
           towerHeight: 10.5,
@@ -451,6 +462,22 @@
         }
 
         function clampArchAlong() {
+          if (params.sceneMode === "towerRound") {
+            const R = Math.max(0.2, params.towerHalfWidth);
+            const R_in = Math.max(0.08, params.doorInnerHalfW);
+            const R_out = R_in + Math.max(0.05, params.masonryShell);
+            const margin = 0.32;
+            const lim = Math.max(
+              0.15,
+              Math.PI * R - R_out * 1.08 - margin,
+            );
+            params.archAlong = THREE.MathUtils.clamp(
+              params.archAlong,
+              -lim,
+              lim,
+            );
+            return;
+          }
           if (params.sceneMode === "tower") {
             const R_in = Math.max(0.08, params.doorInnerHalfW);
             const R_out = R_in + Math.max(0.05, params.masonryShell);
@@ -482,12 +509,12 @@
         function clampArchAlongZ() {
           const d = Math.max(
             0.06,
-            params.sceneMode === "tower"
+            params.sceneMode === "tower" || params.sceneMode === "towerRound"
               ? params.brickD * 1.1
               : params.wallDepth,
           );
           const lim =
-            params.sceneMode === "tower"
+            params.sceneMode === "tower" || params.sceneMode === "towerRound"
               ? d * 0.65 + 0.5
               : d * 0.55 + 0.42 + Math.abs(params.wallZ || 0) * 0.35;
           params.archAlongZ = THREE.MathUtils.clamp(
@@ -503,11 +530,11 @@
           const R_out = R_in + Math.max(0.05, params.masonryShell);
           const leg = Math.max(0.05, params.legHeight);
           const w0 =
-            params.sceneMode === "tower"
+            params.sceneMode === "tower" || params.sceneMode === "towerRound"
               ? params.towerAnchorY
               : params.wallAnchorY;
           const w1 =
-            params.sceneMode === "tower"
+            params.sceneMode === "tower" || params.sceneMode === "towerRound"
               ? params.towerAnchorY +
                 params.towerHeight +
                 (params.towerBattlements ? params.towerMerlonLift * 0.35 : 0)
@@ -540,25 +567,64 @@
           };
         }
 
-        /** Single gate on `towerGateFace`; uses the same params as wall mode. */
+        function isSquareTower() {
+          return params.sceneMode === "tower";
+        }
+        function isRoundTower() {
+          return params.sceneMode === "towerRound";
+        }
+        function isAnyTower() {
+          return isSquareTower() || isRoundTower();
+        }
+
+        /** Gate azimuth (radians) on round tower; codes match `towerGateFace` (0 +X … 3 −Z). */
+        function roundTowerGateThetaRad() {
+          const f = THREE.MathUtils.clamp(
+            Math.floor(params.towerGateFace) || 0,
+            0,
+            3,
+          );
+          switch (f) {
+            case 0:
+              return 0;
+            case 1:
+              return Math.PI;
+            case 2:
+              return Math.PI * 0.5;
+            case 3:
+              return -Math.PI * 0.5;
+            default:
+              return Math.PI * 0.5;
+          }
+        }
+
         function getTowerOpeningsList() {
           const gateFace = THREE.MathUtils.clamp(
             Math.floor(params.towerGateFace) || 0,
             0,
             3,
           );
-          return [
-            {
-              face: gateFace,
-              uCenter: params.archAlong,
-              innerHalfW: params.doorInnerHalfW,
-              sillY: params.sillY,
-              legH: params.legHeight,
-              shell: params.masonryShell,
-              closeBottom: params.closeBottom,
-              archAlongZ: params.archAlongZ,
-            },
-          ];
+          const base = {
+            face: gateFace,
+            uCenter: params.archAlong,
+            innerHalfW: params.doorInnerHalfW,
+            sillY: params.sillY,
+            legH: params.legHeight,
+            shell: params.masonryShell,
+            closeBottom: params.closeBottom,
+            archAlongZ: params.archAlongZ,
+          };
+          if (params.sceneMode === "towerRound") {
+            const R = Math.max(0.2, params.towerHalfWidth);
+            const th0 = roundTowerGateThetaRad();
+            const uArc =
+              THREE.MathUtils.euclideanModulo(
+                th0 * R + params.archAlong + Math.PI * R,
+                2 * Math.PI * R,
+              ) - Math.PI * R;
+            return [{ ...base, uArc }];
+          }
+          return [base];
         }
 
         function setRingParentForFace(obj, face, halfT, uCenter, depth) {
@@ -591,7 +657,7 @@
         }
 
         function getTowerGizmoFace() {
-          if (params.sceneMode !== "tower") return 0;
+          if (!isAnyTower()) return 0;
           return THREE.MathUtils.clamp(
             Math.floor(params.towerGateFace) || 0,
             0,
@@ -613,6 +679,18 @@
         /** Tower only: local +X = along wall (+u), +Y = world up, +Z = depth (+archAlongZ). */
         function setTowerGizmoTargetBasis() {
           if (!archGizmoTarget) return;
+          if (isRoundTower() && archPivot) {
+            const th = Math.atan2(archPivot.position.z, archPivot.position.x);
+            const c = Math.cos(th);
+            const s = Math.sin(th);
+            const bx = new THREE.Vector3(-s, 0, c).normalize();
+            const bz = new THREE.Vector3(c, 0, s).normalize();
+            /** Right-handed X×Y=Z with Y≈world up: use bx×bz (not bz×bx, which flipped the frame). */
+            const by = new THREE.Vector3().crossVectors(bx, bz).normalize();
+            _archGizmoBasisM.makeBasis(bx, by, bz);
+            archGizmoTarget.quaternion.setFromRotationMatrix(_archGizmoBasisM);
+            return;
+          }
           const f = getTowerGizmoFace();
           const tan = new THREE.Vector3();
           const depth = new THREE.Vector3();
@@ -653,12 +731,14 @@
           resetArchGizmoTargetOffset();
           archPivot.rotation.set(0, 0, 0);
           archPivot.quaternion.identity();
-          if (params.sceneMode === "tower" && archGizmoTarget) {
+          if (isAnyTower() && archGizmoTarget) {
             setTowerGizmoTargetBasis();
             archGizmo.setSpace("local");
+            configureArchGizmoForTower();
           } else {
             if (archGizmoTarget) archGizmoTarget.quaternion.identity();
             archGizmo.setSpace("world");
+            configureArchGizmoForTower();
           }
           archPivot.updateMatrixWorld(true);
         }
@@ -725,6 +805,58 @@
           }
         }
 
+        function towerRoundPivotWorld() {
+          const R = Math.max(0.2, params.towerHalfWidth);
+          const inset = towerFaceInsetD();
+          const th = roundTowerGateThetaRad() + params.archAlong / R;
+          const r = R - inset + params.archAlongZ;
+          return new THREE.Vector3(
+            Math.cos(th) * r,
+            params.sillY + params.legHeight * 0.35,
+            Math.sin(th) * r,
+          );
+        }
+
+        function towerPivotWorldForMode() {
+          if (isRoundTower()) return towerRoundPivotWorld();
+          return towerPivotWorld();
+        }
+
+        function syncRoundTowerGizmoFromPivot() {
+          const p = archGizmoWorldPosition(_archGizmoWP);
+          const R = Math.max(0.2, params.towerHalfWidth);
+          const inset = towerFaceInsetD();
+          const th0 = roundTowerGateThetaRad();
+          const th = Math.atan2(p.z, p.x);
+          let dth = th - th0;
+          dth =
+            THREE.MathUtils.euclideanModulo(dth + Math.PI, 2 * Math.PI) -
+            Math.PI;
+          const limA = Math.max(0.12, Math.PI * R * 0.48);
+          params.archAlong = THREE.MathUtils.clamp(dth * R, -limA, limA);
+          /**
+           * Orbit-only coupling: horizontal motion updates azimuth (`archAlong`). Radial depth
+           * reads along the **gate outward** direction at that azimuth (not axis distance),
+           * so dragging tangent to the tower does not spuriously pump `archAlongZ` like `hypot(x,z)` does.
+           */
+          const thGate = th0 + params.archAlong / R;
+          const erx = Math.cos(thGate);
+          const erz = Math.sin(thGate);
+          const rProj = p.x * erx + p.z * erz;
+          const d = Math.max(0.06, params.brickD * 1.1);
+          const limZ = d * 0.65 + 0.5;
+          params.archAlongZ = THREE.MathUtils.clamp(
+            rProj - (R - inset),
+            -limZ,
+            limZ,
+          );
+          params.sillY = THREE.MathUtils.clamp(
+            p.y - params.legHeight * 0.35,
+            -2,
+            24,
+          );
+        }
+
         function merlonBaseIntervals(halfT, merlon, crenel, faceIdx, iy) {
           const mw = Math.max(0.14, merlon);
           const cw = Math.max(0.08, crenel);
@@ -754,8 +886,19 @@
               seam,
             );
             if (openH <= 1e-5) continue;
-            const lo = op.uCenter - openH;
-            const hi = op.uCenter + openH;
+            const uHole =
+              typeof op.uArc === "number" && !Number.isNaN(op.uArc)
+                ? op.uArc
+                : op.uCenter;
+            /** Round tower: `wallOpeningHalfX` is a flat metric; carve a hair more in arc-length so shell bricks do not bite past the jamb (often worse on one side after stagger). */
+            const arcRoundPad =
+              params.sceneMode === "towerRound" &&
+              typeof op.uArc === "number" &&
+              !Number.isNaN(op.uArc)
+                ? Math.max(0.05, params.brickW * 0.1)
+                : 0;
+            const lo = uHole - openH - arcRoundPad;
+            const hi = uHole + openH + arcRoundPad;
             const next = [];
             for (const seg of ivs) {
               next.push(...subtractIntervals([seg], lo, hi));
@@ -954,8 +1097,8 @@
           clampDoorSillInWall();
           if (isDraggingArchGizmo && archPivot) {
             resetArchGizmoTargetOffset();
-            if (params.sceneMode === "tower") {
-              archPivot.position.copy(towerPivotWorld());
+            if (isAnyTower()) {
+              archPivot.position.copy(towerPivotWorldForMode());
             } else {
               archPivot.position.x = params.archAlong;
               archPivot.position.y =
@@ -966,7 +1109,7 @@
           buildDoorInstances();
           buildWallInstances();
           if (!isDraggingArchGizmo) updateArchGizmoFromParams();
-          if (params.sceneMode === "tower") {
+          if (isAnyTower()) {
             const ty = params.towerAnchorY + params.towerHeight * 0.42;
             controls.target.set(0, ty, 0);
           } else {
@@ -987,13 +1130,14 @@
 
         function syncFromArchPivot() {
           if (!archPivot) return;
-          if (params.sceneMode === "tower") {
-            syncTowerGizmoFromPivot();
+          if (isAnyTower()) {
+            if (isRoundTower()) syncRoundTowerGizmoFromPivot();
+            else syncTowerGizmoFromPivot();
             clampArchAlong();
             clampArchAlongZ();
             clampDoorSillInWall();
             resetArchGizmoTargetOffset();
-            archPivot.position.copy(towerPivotWorld());
+            archPivot.position.copy(towerPivotWorldForMode());
             syncArchPivotOrientationAndGizmoSpace();
             rebuildInstances(false);
             return;
@@ -1022,8 +1166,8 @@
           clampArchAlong();
           clampArchAlongZ();
           clampDoorSillInWall();
-          if (params.sceneMode === "tower") {
-            archPivot.position.copy(towerPivotWorld());
+          if (isAnyTower()) {
+            archPivot.position.copy(towerPivotWorldForMode());
             syncArchPivotOrientationAndGizmoSpace();
             return;
           }
@@ -1036,6 +1180,33 @@
         }
 
         let archDragRaf = 0;
+        let archRoundOrbitDrag = false;
+        let archRoundOrbitLastX = 0;
+
+        /** TransformControls: tower = local translate; round = Y/Z only + Alt+drag orbit (see listeners). */
+        function configureArchGizmoForTower() {
+          if (!archGizmo) return;
+          if (!isAnyTower()) {
+            archGizmo.showX =
+              archGizmo.showY =
+              archGizmo.showZ =
+                true;
+            archGizmo.showXY =
+              archGizmo.showXZ =
+              archGizmo.showYZ =
+                true;
+            return;
+          }
+          archGizmo.setMode("translate");
+          archGizmo.setSpace("local");
+          archGizmo.showY = true;
+          archGizmo.showZ = true;
+          archGizmo.showXY = false;
+          archGizmo.showXZ = false;
+          archGizmo.showYZ = false;
+          /** Round: no tangent translate handle; orbit = RMB + horizontal drag on the view. */
+          archGizmo.showX = !isRoundTower();
+        }
         function setupArchGizmo() {
           if (archGizmo) return;
           archPivot = new THREE.Object3D();
@@ -1062,6 +1233,7 @@
                 cancelAnimationFrame(archDragRaf);
                 archDragRaf = 0;
               }
+              archRoundOrbitDrag = false;
               clampArchAlong();
               clampArchAlongZ();
               clampDoorSillInWall();
@@ -1076,6 +1248,41 @@
               archDragRaf = 0;
               syncFromArchPivot();
             });
+          });
+
+          /** Round tower: orbit gate around the drum (azimuth). RMB drag = orbit (no red axis). */
+          renderer.domElement.addEventListener("contextmenu", (e) => {
+            if (params.showArchGizmo && isRoundTower()) e.preventDefault();
+          });
+          renderer.domElement.addEventListener("mousedown", (e) => {
+            if (!params.showArchGizmo || !isRoundTower()) return;
+            if (e.button === 2) {
+              archRoundOrbitDrag = true;
+              archRoundOrbitLastX = e.clientX;
+              controls.enabled = false;
+            }
+          });
+          renderer.domElement.addEventListener("mousemove", (e) => {
+            if (
+              !archRoundOrbitDrag ||
+              !isRoundTower() ||
+              !params.showArchGizmo ||
+              isDraggingArchGizmo
+            )
+              return;
+            const dx = e.clientX - archRoundOrbitLastX;
+            archRoundOrbitLastX = e.clientX;
+            const R = Math.max(0.2, params.towerHalfWidth);
+            params.archAlong += dx * 0.0085 * R;
+            clampArchAlong();
+            if (!isDraggingArchGizmo) updateArchGizmoFromParams();
+            rebuildInstances(false);
+          });
+          window.addEventListener("mouseup", () => {
+            if (archRoundOrbitDrag) {
+              archRoundOrbitDrag = false;
+              if (!isDraggingArchGizmo) controls.enabled = true;
+            }
           });
 
           archGizmoHelper = archGizmo.getHelper();
@@ -1268,7 +1475,10 @@
                       rpJ.springY,
                       seam,
                     );
-                    gxJ = op0.uCenter;
+                    gxJ =
+                      typeof op0.uArc === "number" && !Number.isNaN(op0.uArc)
+                        ? op0.uArc
+                        : op0.uCenter;
                   }
                   const rightOfOpening =
                     openHJ > 1e-5 && segLo >= gxJ + openHJ - eps;
@@ -1325,7 +1535,11 @@
                     );
                     const curveT = THREE.MathUtils.smoothstep(0.06, 1.15, curv);
                     if (curveT <= 0.04) continue;
-                    const gap = Math.max(0, Math.abs(u - op.uCenter) - openH);
+                    const uRef =
+                      typeof op.uArc === "number" && !Number.isNaN(op.uArc)
+                        ? op.uArc
+                        : op.uCenter;
+                    const gap = Math.max(0, Math.abs(u - uRef) - openH);
                     const band = params.brickW * 3.8;
                     if (gap < band) {
                       const t = THREE.MathUtils.smoothstep(1, 0, gap / band);
@@ -1360,6 +1574,262 @@
                   )
                     break outer;
                 }
+              }
+            }
+          }
+
+          wallMesh.count = k;
+          wallMesh.instanceMatrix.needsUpdate = true;
+          const wbv = wallMesh.geometry.getAttribute("brickVar");
+          if (wbv) wbv.needsUpdate = true;
+          scene.add(wallMesh);
+        }
+
+        /** Cylindrical tower shell: arc-length coordinate u = θ·R on [−πR, πR], one gate via `uArc`. */
+        function buildTowerRoundShellInstances() {
+          if (!brickGeo) return;
+
+          const Rc = Math.max(0.35, params.towerHalfWidth);
+          const devHalf = Math.PI * Rc;
+          const wallBase = params.towerAnchorY;
+          const topY =
+            wallBase + Math.max(params.brickH * 2, params.towerHeight);
+          const seam = params.wallSeamInset;
+          const mortar = params.wallMortar;
+          const nomH = params.brickH;
+          const nomW = params.brickW;
+          const rowH = nomH + mortar;
+          const baseY = wallBase + mortar * 0.5 + nomH * 0.5;
+          const ny = Math.min(
+            260,
+            Math.max(3, Math.ceil((topY - baseY) / rowH)),
+          );
+
+          wallMesh = new THREE.InstancedMesh(
+            createInstancedBrickGeometry(brickGeo, params.maxWallBricks),
+            brickMat,
+            params.maxWallBricks,
+          );
+          wallMesh.castShadow = true;
+          wallMesh.receiveShadow = true;
+          wallMesh.position.set(0, 0, 0);
+
+          const rnd = mulberry32((params.colorSeed ^ 91379) | 0);
+          let k = 0;
+          const inset = towerFaceInsetD();
+
+          /**
+           * Same convention as bricks-castle3.html: `lookAt(2x,y,2z)` then `rotateY(π/2)` so
+           * local +X runs tangent, +Z points toward the tower axis (brick depth into the shell).
+           * The old `makeBasis` path used +Z outward, which flipped depth/lighting vs flat tower faces.
+           */
+          const placeRoundBrick = (theta, y, sx, sy, sz, iyRow) => {
+            if (k >= params.maxWallBricks) return false;
+            const v = pickBrickVariation(rnd, sx, sy, sz, "wall");
+            const rCyl = Rc - inset;
+            const px = Math.cos(theta) * rCyl;
+            const pz = Math.sin(theta) * rCyl;
+            const yJ =
+              iyRow > 0 ? y + (rnd() - 0.5) * rowH * 0.045 : y;
+            tmpO.position.set(px, yJ, pz);
+            tmpO.quaternion.identity();
+            tmpO.lookAt(px * 2, yJ, pz * 2);
+            tmpO.rotateY(Math.PI * 0.5);
+            tmpO.rotateX((rnd() - 0.5) * 0.028);
+            tmpO.rotateY((rnd() - 0.5) * 0.038);
+            tmpO.rotateZ((rnd() - 0.5) * 0.028);
+            tmpO.scale.set(v.sx, v.sy, v.sz);
+            tmpO.updateMatrix();
+            wallMesh.setMatrixAt(k, tmpO.matrix);
+            setBrickVarAt(wallMesh, k, v.shapeMix, v.warp, v.grey, v.grain);
+            k++;
+            return true;
+          };
+
+          const battRows = params.towerBattlements
+            ? THREE.MathUtils.clamp(
+                Math.floor(params.towerBattlementCourses) || 2,
+                1,
+                4,
+              )
+            : 0;
+          const battY0 =
+            battRows > 0 ? topY - rowH * battRows : topY + 1e6;
+
+          const opsR = getTowerOpeningsList();
+
+          outerRound: for (let iy = 0; iy < ny; iy++) {
+            const yMid = baseY + iy * rowH;
+            if (yMid > topY - nomH * 0.2) break;
+
+            const isBatRow =
+              params.towerBattlements && yMid >= battY0 - rowH * 0.02;
+            const rawIntervals = isBatRow
+              ? merlonBaseIntervals(
+                  devHalf,
+                  params.towerMerlonW,
+                  params.towerCrenelW,
+                  0,
+                  iy,
+                )
+              : [[-devHalf, devHalf]];
+            const intervals = subtractHolesFromIntervals(
+              rawIntervals,
+              opsR,
+              yMid,
+              seam,
+            );
+
+            let maxCurveT = 0;
+            for (const op of opsR) {
+              const rp = ringParamsFromOpening(op);
+              const R_out = rp.ringRadius;
+              const ohC = wallOpeningHalfX(
+                yMid,
+                R_out,
+                op.sillY,
+                rp.springY,
+                seam,
+              );
+              if (ohC <= 1e-5) continue;
+              const c = wallOpeningCurvature(
+                yMid,
+                R_out,
+                op.sillY,
+                rp.springY,
+                seam,
+              );
+              maxCurveT = Math.max(
+                maxCurveT,
+                THREE.MathUtils.smoothstep(0.06, 1.15, c),
+              );
+            }
+            const nomWCurve =
+              nomW *
+              THREE.MathUtils.lerp(
+                1,
+                THREE.MathUtils.clamp(params.wallMinBrickScale, 0.16, 0.95),
+                Math.pow(maxCurveT, 1.08),
+              );
+
+            const haunch = THREE.MathUtils.smoothstep(
+              wallBase + params.towerHeight * 0.12,
+              topY - nomH * 0.35,
+              yMid,
+            );
+            const crownSy =
+              1 -
+              (1 - THREE.MathUtils.clamp(params.wallCrownSquash, 0.42, 1)) *
+                Math.pow(haunch, 1.28);
+
+            for (const [segLo, segHi] of intervals) {
+              const span = segHi - segLo;
+              if (span < nomW * params.wallMinBrickScale * 0.45) continue;
+
+              const minW = nomW * params.wallMinBrickScale;
+              const jMin = 0.0035;
+              const jMax = Math.min(
+                mortar,
+                Math.max(jMin, span * 0.014 + jMin * 0.6),
+              );
+              const j = THREE.MathUtils.clamp(mortar, jMin, jMax);
+              const hj = j * 0.5;
+              /**
+               * Do not stagger courses in arc-length `u` on the round shell: the gate hole is cut in
+               * absolute `u`, while a global `+staggerU` on odd rows shifts every brick the same way.
+               * That slides the segment that meets the **+u (right) jamb** into the opening (always the
+               * same side); square tower avoids this because each face interval is independent.
+               */
+              const staggerU = 0;
+              let innerLo = segLo + hj + staggerU;
+              let innerHi = segHi - hj + staggerU;
+              /** Square tower only: jamb-adjacent joint jog uses face-relative `segLo`/`segHi`. On a cylinder that logic mis-classifies segments and skews one jamb; round hole carve uses padding in `subtractHolesFromIntervals` instead. */
+
+              const innerLen = innerHi - innerLo;
+              if (innerLen < minW * 0.72) continue;
+
+              let nBricks = Math.max(
+                1,
+                Math.round(innerLen / (nomWCurve + j)),
+              );
+              let wEq = (innerLen - (nBricks - 1) * j) / nBricks;
+              for (let it = 0; it < 96; it++) {
+                wEq = (innerLen - (nBricks - 1) * j) / nBricks;
+                if (wEq < minW * 0.998) {
+                  if (nBricks <= 1) break;
+                  nBricks--;
+                } else if (wEq > nomWCurve * 1.075 && nBricks < 1600) {
+                  nBricks++;
+                } else break;
+              }
+              wEq = (innerLen - (nBricks - 1) * j) / nBricks;
+              if (wEq < minW * 0.88) continue;
+
+              for (let bi = 0; bi < nBricks; bi++) {
+                if (k >= params.maxWallBricks) break outerRound;
+                const u = innerLo + wEq * 0.5 + bi * (wEq + j);
+                if (u > innerHi - wEq * 0.5 + 1e-4) break;
+
+                const theta = u / Rc;
+                let tuckY = 0;
+                for (const op of opsR) {
+                  const rp = ringParamsFromOpening(op);
+                  const R_out = rp.ringRadius;
+                  const openH = wallOpeningHalfX(
+                    yMid,
+                    R_out,
+                    op.sillY,
+                    rp.springY,
+                    seam,
+                  );
+                  if (openH <= 1e-4) continue;
+                  const curv = wallOpeningCurvature(
+                    yMid,
+                    R_out,
+                    op.sillY,
+                    rp.springY,
+                    seam,
+                  );
+                  const curveT = THREE.MathUtils.smoothstep(0.06, 1.15, curv);
+                  if (curveT <= 0.04) continue;
+                  const uRef =
+                    typeof op.uArc === "number" && !Number.isNaN(op.uArc)
+                      ? op.uArc
+                      : op.uCenter;
+                  const gap = Math.max(0, Math.abs(u - uRef) - openH);
+                  const band = params.brickW * 3.8;
+                  if (gap < band) {
+                    const t = THREE.MathUtils.smoothstep(1, 0, gap / band);
+                    const ty =
+                      -nomH *
+                      0.12 *
+                      Math.pow(t, 1.2) *
+                      Math.pow(curveT, 0.55);
+                    tuckY = Math.min(tuckY, ty);
+                  }
+                }
+
+                const sx = wEq / nomW;
+                const yMerl = isBatRow ? params.towerMerlonLift * 0.45 : 0;
+                const syBase = (0.91 + rnd() * 0.06) * crownSy;
+                const sy = isBatRow
+                  ? syBase *
+                    (1 +
+                      params.towerMerlonLift /
+                        Math.max(0.12, nomH))
+                  : syBase;
+                const sz = 0.92 + rnd() * 0.06;
+                if (
+                  !placeRoundBrick(
+                    theta,
+                    yMid + tuckY + yMerl,
+                    sx,
+                    sy,
+                    sz,
+                    iy,
+                  )
+                )
+                  break outerRound;
               }
             }
           }
@@ -1426,14 +1896,41 @@
                 nS > 0 ? (Ls - Math.max(0, nS - 1) * jRing) / nS : params.brickW;
             }
 
-            setRingParentForFace(
-              ringRoot,
-              op.face,
-              halfT,
-              op.uCenter,
-              params.brickD,
-            );
-            ringRoot.updateMatrixWorld(true);
+            const Rcyl = Math.max(0.2, halfT);
+            const ringZ =
+              typeof op.archAlongZ === "number" && !Number.isNaN(op.archAlongZ)
+                ? op.archAlongZ
+                : 0;
+            const thC = isRoundTower()
+              ? roundTowerGateThetaRad() + op.uCenter / Rcyl
+              : 0;
+            /** Matches previous flat ring + mesh radial stacking on the cylinder. */
+            let rSurfRound = 0;
+            if (isRoundTower()) {
+              const insetRl = towerFaceInsetD();
+              const rRing = Math.max(0.08, Rcyl - insetRl + ringZ);
+              rSurfRound = rRing + ringZ;
+              const c0 = Math.cos(thC);
+              const s0 = Math.sin(thC);
+              mesh.position.set(ringZ * c0, 0, ringZ * s0);
+              mesh.updateMatrixWorld(true);
+              _invMeshDoor.copy(mesh.matrixWorld).invert();
+            } else {
+              setRingParentForFace(
+                ringRoot,
+                op.face,
+                halfT,
+                op.uCenter,
+                params.brickD,
+              );
+              ringRoot.updateMatrixWorld(true);
+              const ff = THREE.MathUtils.clamp(op.face | 0, 0, 3);
+              if (ff === 0) mesh.position.set(ringZ, 0, 0);
+              else if (ff === 1) mesh.position.set(-ringZ, 0, 0);
+              else if (ff === 2) mesh.position.set(0, 0, ringZ);
+              else mesh.position.set(0, 0, -ringZ);
+              mesh.updateMatrixWorld(true);
+            }
 
             const placeBrick = (x, y, tx, ty, along) => {
               const yaw = Math.atan2(ty, tx);
@@ -1452,11 +1949,36 @@
                 "door",
                 params.archRingDepthScale,
               );
-              tmpO.position.set(x, y, 0);
-              tmpO.rotation.set(0, 0, yaw);
-              tmpO.scale.set(v.sx, v.sy, v.sz);
-              tmpO.updateMatrix();
-              tmpM.multiplyMatrices(ringRoot.matrixWorld, tmpO.matrix);
+              if (isRoundTower()) {
+                const rs = Math.max(0.08, rSurfRound);
+                const thi = thC + x / rs;
+                const ci = Math.cos(thi);
+                const si = Math.sin(thi);
+                _tmpDoorPos.set(ci * rs, y, si * rs);
+                _doorTan.set(-si, 0, ci);
+                _doorOut.set(ci, 0, si);
+                /**
+                 * Flat ring: tangent (tx, ty) lies in ring X–Y = (cylinder tangent, world up).
+                 * Build the same 3D direction on the curved shell, then a right-handed frame with
+                 * brick depth Z = outward radial (matches square `setRingParentForFace` + Rz(yaw)).
+                 */
+                _doorBx.copy(_doorTan).multiplyScalar(tx).addScaledVector(_yAxis, ty);
+                if (_doorBx.lengthSq() < 1e-10) _doorBx.copy(_doorTan);
+                _doorBx.normalize();
+                _doorBy.copy(_doorOut).cross(_doorBx).normalize();
+                _doorBz.copy(_doorBx).cross(_doorBy).normalize();
+                _tmpBasisBrick.makeBasis(_doorBx, _doorBy, _doorBz);
+                _tmpDoorQuat.setFromRotationMatrix(_tmpBasisBrick);
+                _tmpDoorScale.set(v.sx, v.sy, v.sz);
+                tmpO.matrix.compose(_tmpDoorPos, _tmpDoorQuat, _tmpDoorScale);
+                tmpM.multiplyMatrices(_invMeshDoor, tmpO.matrix);
+              } else {
+                tmpO.position.set(x, y, 0);
+                tmpO.rotation.set(0, 0, yaw);
+                tmpO.scale.set(v.sx, v.sy, v.sz);
+                tmpO.updateMatrix();
+                tmpM.multiplyMatrices(ringRoot.matrixWorld, tmpO.matrix);
+              }
               mesh.setMatrixAt(k, tmpM);
               setBrickVarAt(mesh, k, v.shapeMix, v.warp, v.grey, v.grain);
               k++;
@@ -1477,23 +1999,13 @@
             mesh.instanceMatrix.needsUpdate = true;
             const bv = mesh.geometry.getAttribute("brickVar");
             if (bv) bv.needsUpdate = true;
-            const ringZ =
-              typeof op.archAlongZ === "number" && !Number.isNaN(op.archAlongZ)
-                ? op.archAlongZ
-                : 0;
-            /** Wall mode uses world Z; tower depth is face-normal (±X on faces 0/1, ±Z on 2/3). */
-            const ff = THREE.MathUtils.clamp(op.face | 0, 0, 3);
-            if (ff === 0) mesh.position.set(ringZ, 0, 0);
-            else if (ff === 1) mesh.position.set(-ringZ, 0, 0);
-            else if (ff === 2) mesh.position.set(0, 0, ringZ);
-            else mesh.position.set(0, 0, -ringZ);
             scene.add(mesh);
             towerDoorMeshes.push(mesh);
           });
         }
 
         function buildDoorInstances() {
-          if (params.sceneMode === "tower") {
+          if (isAnyTower()) {
             buildTowerDoorRings();
             return;
           }
@@ -1595,6 +2107,10 @@
         function buildWallInstances() {
           if (params.sceneMode === "tower") {
             buildTowerShellInstances();
+            return;
+          }
+          if (params.sceneMode === "towerRound") {
+            buildTowerRoundShellInstances();
             return;
           }
           if (!params.wallEnabled || !brickGeo) return;
@@ -1779,18 +2295,25 @@
         fScene
           .addBinding(params, "sceneMode", {
             label: "Masonry mode",
-            options: { Wall: "wall", Tower: "tower" },
+            options: {
+              Wall: "wall",
+              "Square tower": "tower",
+              "Round tower": "towerRound",
+            },
           })
           .on("change", () => rebuildAll());
 
-        const fTower = pane.addFolder({ title: "Tower (square shell)", expanded: false });
+        const fTower = pane.addFolder({
+          title: "Tower (square or round)",
+          expanded: false,
+        });
         const rbTower = () => rebuildInstances(false);
         fTower
           .addBinding(params, "towerHalfWidth", {
             min: 1.8,
             max: 9,
             step: 0.05,
-            label: "Half-width (X/Z)",
+            label: "Half-width (square) / radius (round)",
           })
           .on("change", rbTower);
         fTower
@@ -1814,7 +2337,7 @@
             min: 0,
             max: 3,
             step: 1,
-            label: "Gate face 0+X 1-X 2+Z 3-Z",
+            label: "Gate face 0+X 1−X 2+Z 3−Z (azimuth on round)",
           })
           .on("change", () => {
             params.towerGateFace = THREE.MathUtils.clamp(
