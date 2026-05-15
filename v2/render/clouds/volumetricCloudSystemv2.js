@@ -256,7 +256,7 @@ export async function createVolumetricCloudSystemOptimized({
   const depthTarget = new THREE.RenderTarget(w, h);
   depthTarget.depthTexture = new THREE.DepthTexture(w, h);
   depthTarget.depthTexture.format = THREE.DepthFormat;
-  depthTarget.depthTexture.type = THREE.UnsignedShortType;
+  depthTarget.depthTexture.type = THREE.FloatType;
 
   const occlusionRT = new THREE.RenderTarget(hw, hh, effectRTDefaults);
   const godraysRT = new THREE.RenderTarget(hw, hh, effectRTDefaults);
@@ -418,6 +418,7 @@ export async function createVolumetricCloudSystemOptimized({
   const uDensityMultiplier = uniform(p0.densityMultiplier);
   const uCameraNear = uniform(camera.near);
   const uCameraFar = uniform(camera.far);
+  const uReversedDepth = uniform(camera.reversedDepth ? 1 : 0);
   const uFogVolumeEnabled = uniform(0);
   const uFogModeExp2 = uniform(0);
   const uFogNear = uniform(280);
@@ -499,8 +500,9 @@ export async function createVolumetricCloudSystemOptimized({
   );
 
   const linearizeDepth = Fn(([d, zNear, zFar]) => {
-    const lin = zNear.mul(zFar).div(zFar.add(d.mul(zNear.sub(zFar))));
-    return d.greaterThanEqual(float(0.999999)).select(zFar, lin);
+    const df = uReversedDepth.greaterThan(0.5).select(float(1.0).sub(d), d);
+    const lin = zNear.mul(zFar).div(zFar.add(df.mul(zNear.sub(zFar))));
+    return df.greaterThanEqual(float(0.999999)).select(zFar, lin);
   });
 
   const vOriginVar = varying(
@@ -588,9 +590,8 @@ export async function createVolumetricCloudSystemOptimized({
         .and(lp.y.lessThan(0.5))
         .and(lp.z.greaterThan(-0.5))
         .and(lp.z.lessThan(0.5));
-      If(inB, () => {
-        lightRayDensity.addAssign(getDensity(lp).mul(stepLength));
-      });
+      If(inB.not(), () => Break());
+      lightRayDensity.addAssign(getDensity(lp).mul(stepLength));
     });
     return exp(lightRayDensity.negate());
   });
@@ -837,6 +838,8 @@ export async function createVolumetricCloudSystemOptimized({
   const _frustum = new THREE.Frustum();
   const _camViewProj = new THREE.Matrix4();
   const _cloudCenterWorld = new THREE.Vector3();
+  const _sunNdc = new THREE.Vector3();
+  const _originalMaterials = new Map();
 
   function resizeAllRenderTargets() {
     const prevW = w;
@@ -849,7 +852,7 @@ export async function createVolumetricCloudSystemOptimized({
       if (depthTarget.depthTexture) depthTarget.depthTexture.dispose();
       depthTarget.depthTexture = new THREE.DepthTexture(w, h);
       depthTarget.depthTexture.format = THREE.DepthFormat;
-      depthTarget.depthTexture.type = THREE.UnsignedShortType;
+      depthTarget.depthTexture.type = THREE.FloatType;
       depthTexNode.value = depthTarget.depthTexture;
       finalRT.setSize(w, h);
       finalSceneTex.value = finalRT.texture;
@@ -874,6 +877,7 @@ export async function createVolumetricCloudSystemOptimized({
     uDensityMultiplier.value = p.densityMultiplier;
     uCameraNear.value = camera.near;
     uCameraFar.value = camera.far;
+    uReversedDepth.value = camera.reversedDepth ? 1 : 0;
     uLightDir.value.copy(getSunDir());
     uSunColor.value.copy(sun.color);
     uSunIntensity.value = sun.intensity;
@@ -947,12 +951,17 @@ export async function createVolumetricCloudSystemOptimized({
         12,
         Math.round(p.raymarchSteps * quality),
       );
+      uLightSteps.value = Math.max(
+        1,
+        Math.round(p.lightSteps * quality),
+      );
       godRaysSamples.value = Math.max(
         10,
         Math.round((p.godRaysSamplesUI ?? 64) * (0.52 + 0.48 * quality)),
       );
     } else {
       uMaxSteps.value = p.raymarchSteps;
+      uLightSteps.value = p.lightSteps;
       godRaysSamples.value = p.godRaysSamplesUI ?? 64;
     }
 
@@ -994,7 +1003,7 @@ export async function createVolumetricCloudSystemOptimized({
     renderer.render(scene, camera);
     depthTexNode.value = depthTarget.depthTexture;
 
-    const originalMaterials = new Map();
+    _originalMaterials.clear();
     const bgSaved = scene.background;
     const fogSaved = scene.fog;
     scene.fog = null;
@@ -1003,7 +1012,7 @@ export async function createVolumetricCloudSystemOptimized({
     cloudMesh.material = cloudOccMat;
     for (const o of getOccluderMeshes()) {
       if (o !== cloudMesh && o !== sunSphere && o.material !== undefined) {
-        originalMaterials.set(o.uuid, o.material);
+        _originalMaterials.set(o.uuid, o.material);
         if (Array.isArray(o.material)) {
           const black = o.isLineSegments
             ? occlusionLineBlack
@@ -1027,22 +1036,20 @@ export async function createVolumetricCloudSystemOptimized({
     sunSphere.material = sunMaterial;
     cloudMesh.material = cloudMat;
     for (const o of getOccluderMeshes()) {
-      if (o !== cloudMesh && o !== sunSphere && originalMaterials.has(o.uuid)) {
-        o.material = originalMaterials.get(o.uuid);
+      if (o !== cloudMesh && o !== sunSphere && _originalMaterials.has(o.uuid)) {
+        o.material = _originalMaterials.get(o.uuid);
       }
     }
-    originalMaterials.clear();
+    _originalMaterials.clear();
     scene.background = bgSaved;
     scene.fog = fogSaved;
     camera.layers.enableAll();
 
     occlusionTexForGodRays.value = occlusionRT.texture;
-    const sunNdc = new THREE.Vector3()
-      .copy(sunSphere.position)
-      .project(camera);
+    _sunNdc.copy(sunSphere.position).project(camera);
     godRaysLightUv.value.set(
-      sunNdc.x * 0.5 + 0.5,
-      1.0 - (sunNdc.y * 0.5 + 0.5),
+      _sunNdc.x * 0.5 + 0.5,
+      1.0 - (_sunNdc.y * 0.5 + 0.5),
     );
 
     postQuad.material = godRaysMat;
