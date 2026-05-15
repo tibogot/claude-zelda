@@ -3,7 +3,7 @@
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <title>Brick arch, wall, bridge — WebGPU + TSL</title>
+    <title>Brick arch, wall, bridge, house — WebGPU + TSL</title>
     <style>
       body {
         margin: 0;
@@ -305,7 +305,10 @@
           colorSeed: 31415,
           showGrid: true,
 
-          /** "wall" | "tower" | "towerRound" | "bridge" — bridge = long deck + two side walls + 3 arches each side */
+          /**
+           * "wall" | "tower" | "towerRound" | "bridge" | "house"
+           * — house = square shell like tower + two gable ends + pitched brick roof.
+           */
           sceneMode: "wall",
           towerHalfWidth: 3.6,
           towerHeight: 10.5,
@@ -319,6 +322,21 @@
           towerBattlementCourses: 2,
           /** Extra vertical rise for merlon teeth (world units) */
           towerMerlonLift: 0.26,
+
+          /** 0 = gables on ±X (triangular ends); ridge runs along X, slopes in ±Z. 1 = gables on ±Z; ridge along Z, slopes in ±X. */
+          houseGableAxis: 0,
+          /** World Y from eave line to ridge (controls roof pitch with footprint). */
+          houseGableRise: 2.65,
+          /** Extra +Y for the ridge only (nudges peak without changing eave). */
+          houseRidgeLiftY: 0,
+          /** Pulls the eave line down (more rectangular wall below the gable triangle). */
+          houseEaveLowerY: 0,
+          /** Roof half-run beyond `towerHalfWidth` along the slope horizontal (both halves). */
+          houseRoofOverhang: 0.14,
+          /** Extra half-length along the ridge line past the wall outline. */
+          houseRoofZOverhang: 0.1,
+          /** Pitched brick roof on / off (gable walls unchanged). */
+          houseRoofEnabled: true,
 
           wallEnabled: true,
           wallWidth: 15,
@@ -535,9 +553,11 @@
         groundMat.colorNode = Fn(() => {
           const pw = positionWorld;
           const xz = vec2(pw.x.mul(0.12), pw.z.mul(0.12));
-          const n = sin(xz.x.mul(1.9)).mul(0.5).add(0.5).mul(0.22).add(
-            sin(xz.y.mul(1.6)).mul(0.5).add(0.5).mul(0.16),
-          );
+          const n = sin(xz.x.mul(1.9))
+            .mul(0.5)
+            .add(0.5)
+            .mul(0.22)
+            .add(sin(xz.y.mul(1.6)).mul(0.5).add(0.5).mul(0.16));
           const c0 = color(0x3a3d42);
           const c1 = color(0x4f5258);
           return mul(mix(c0, c1, smoothstep(0.15, 0.9, n)), float(1.05));
@@ -624,10 +644,7 @@
             const R_in = Math.max(0.08, params.doorInnerHalfW);
             const R_out = R_in + Math.max(0.05, params.masonryShell);
             const margin = 0.32;
-            const lim = Math.max(
-              0.15,
-              Math.PI * R - R_out * 1.08 - margin,
-            );
+            const lim = Math.max(0.15, Math.PI * R - R_out * 1.08 - margin);
             params.archAlong = THREE.MathUtils.clamp(
               params.archAlong,
               -lim,
@@ -635,14 +652,11 @@
             );
             return;
           }
-          if (params.sceneMode === "tower") {
+          if (params.sceneMode === "tower" || params.sceneMode === "house") {
             const R_in = Math.max(0.08, params.doorInnerHalfW);
             const R_out = R_in + Math.max(0.05, params.masonryShell);
             const margin = 0.28;
-            const lim = Math.max(
-              0.12,
-              params.towerHalfWidth - R_out - margin,
-            );
+            const lim = Math.max(0.12, params.towerHalfWidth - R_out - margin);
             params.archAlong = THREE.MathUtils.clamp(
               params.archAlong,
               -lim,
@@ -668,24 +682,21 @@
           const halfW = params.wallWidth * 0.5;
           const margin = 0.28;
           const lim = Math.max(0.15, halfW - R_out - margin);
-          params.archAlong = THREE.MathUtils.clamp(
-            params.archAlong,
-            -lim,
-            lim,
-          );
+          params.archAlong = THREE.MathUtils.clamp(params.archAlong, -lim, lim);
         }
 
         /** Keep arch ring Z inside a sensible slab range (matches gizmo blue axis). */
         function clampArchAlongZ() {
           const d = Math.max(
             0.06,
-            params.sceneMode === "tower" || params.sceneMode === "towerRound"
+            params.sceneMode === "tower" ||
+              params.sceneMode === "towerRound" ||
+              params.sceneMode === "house"
               ? params.brickD * 1.1
               : params.wallDepth,
           );
           if (isBridge()) {
-            const lim =
-              params.bridgeDeckHalfW + params.wallDepth * 1.1 + 0.55;
+            const lim = params.bridgeDeckHalfW + params.wallDepth * 1.1 + 0.55;
             params.archAlongZ = THREE.MathUtils.clamp(
               params.archAlongZ,
               -lim,
@@ -694,7 +705,9 @@
             return;
           }
           const lim =
-            params.sceneMode === "tower" || params.sceneMode === "towerRound"
+            params.sceneMode === "tower" ||
+            params.sceneMode === "towerRound" ||
+            params.sceneMode === "house"
               ? d * 0.65 + 0.5
               : d * 0.55 + 0.42 + Math.abs(params.wallZ || 0) * 0.35;
           params.archAlongZ = THREE.MathUtils.clamp(
@@ -711,16 +724,27 @@
           const leg = Math.max(0.05, params.legHeight);
           const w0 =
             params.sceneMode === "tower" ||
-            params.sceneMode === "towerRound"
+            params.sceneMode === "towerRound" ||
+            params.sceneMode === "house"
               ? params.towerAnchorY
               : params.wallAnchorY;
-          const w1 =
+          let w1;
+          if (params.sceneMode === "house") {
+            w1 =
+              params.towerAnchorY +
+              Math.max(params.brickH * 2, params.towerHeight) -
+              Math.max(0, Number(params.houseEaveLowerY) || 0);
+          } else if (
             params.sceneMode === "tower" ||
             params.sceneMode === "towerRound"
-              ? params.towerAnchorY +
-                params.towerHeight +
-                (params.towerBattlements ? params.towerMerlonLift * 0.35 : 0)
-              : params.wallAnchorY + params.wallHeight;
+          ) {
+            w1 =
+              params.towerAnchorY +
+              params.towerHeight +
+              (params.towerBattlements ? params.towerMerlonLift * 0.35 : 0);
+          } else {
+            w1 = params.wallAnchorY + params.wallHeight;
+          }
           const margin = 0.1;
           const maxSill = w1 - margin - leg - R_out;
           const minSill = w0 - 0.12;
@@ -761,6 +785,41 @@
 
         function isBridge() {
           return params.sceneMode === "bridge";
+        }
+
+        function isHouse() {
+          return params.sceneMode === "house";
+        }
+
+        /** Square / round tower or house: shared door ring, arch gizmo, and slab clamps. */
+        function isTowerLike() {
+          return isAnyTower() || isHouse();
+        }
+
+        function applyHouseDefaults() {
+          params.wallEnabled = true;
+          params.closeBottom = false;
+          params.wallZ = 0;
+          params.towerHalfWidth = Math.max(params.towerHalfWidth, 3.15);
+          params.towerHeight = Math.max(params.towerHeight, 6.6);
+          params.towerAnchorY = Math.max(-0.2, params.towerAnchorY);
+          params.maxWallBricks = Math.max(params.maxWallBricks, 28000);
+          params.houseGableRise = Math.max(
+            0.35,
+            Number(params.houseGableRise) || 2.65,
+          );
+          params.houseRoofOverhang = Math.max(
+            0,
+            Number(params.houseRoofOverhang) || 0,
+          );
+          params.houseRoofZOverhang = Math.max(
+            0,
+            Number(params.houseRoofZOverhang) || 0,
+          );
+          params.houseEaveLowerY = Math.max(
+            0,
+            Number(params.houseEaveLowerY) || 0,
+          );
         }
 
         function applyBridgeDefaults() {
@@ -828,7 +887,8 @@
               THREE.MathUtils.euclideanModulo(
                 th0 * R + params.archAlong + Math.PI * R,
                 2 * Math.PI * R,
-              ) - Math.PI * R;
+              ) -
+              Math.PI * R;
             return [{ ...base, uArc }];
           }
           return [base];
@@ -864,7 +924,7 @@
         }
 
         function getTowerGizmoFace() {
-          if (!isAnyTower()) return 0;
+          if (!isTowerLike()) return 0;
           return THREE.MathUtils.clamp(
             Math.floor(params.towerGateFace) || 0,
             0,
@@ -938,7 +998,7 @@
           resetArchGizmoTargetOffset();
           archPivot.rotation.set(0, 0, 0);
           archPivot.quaternion.identity();
-          if (isAnyTower() && archGizmoTarget) {
+          if (isTowerLike() && archGizmoTarget) {
             setTowerGizmoTargetBasis();
             archGizmo.setSpace("local");
             configureArchGizmoForTower();
@@ -1356,7 +1416,7 @@
         function getErosionRubbleSpreadWorld() {
           const gy = ground ? ground.position.y : 0;
           const y = gy + Math.max(0.015, params.brickH * 0.07);
-          if (isAnyTower()) {
+          if (isTowerLike()) {
             const R = Math.max(0.45, params.towerHalfWidth) + 1.15;
             return { mode: "disk", cx: 0, cz: 0, R, y };
           }
@@ -1387,7 +1447,10 @@
           ensureBrickMaterial();
           if (!brickMat) return;
           const rubbleBox = new THREE.BoxGeometry(0.26, 0.19, 0.24);
-          const g = createInstancedBrickGeometry(rubbleBox, EROSION_RUBBLE_MESH_CAP);
+          const g = createInstancedBrickGeometry(
+            rubbleBox,
+            EROSION_RUBBLE_MESH_CAP,
+          );
           erosionRubbleMesh = new THREE.InstancedMesh(
             g,
             brickMat,
@@ -1497,13 +1560,18 @@
           ensureBrickMaterial();
           ensureBrickGeometry(false);
           if (!brickGeo || !brickMat) return;
-          const g = createInstancedBrickGeometry(brickGeo, EROSION_BRICK_DEBRIS_CAP);
+          const g = createInstancedBrickGeometry(
+            brickGeo,
+            EROSION_BRICK_DEBRIS_CAP,
+          );
           erosionBrickDebrisMesh = new THREE.InstancedMesh(
             g,
             brickMat,
             EROSION_BRICK_DEBRIS_CAP,
           );
-          erosionBrickDebrisMesh.instanceMatrix.setUsage(THREE.DynamicDrawUsage);
+          erosionBrickDebrisMesh.instanceMatrix.setUsage(
+            THREE.DynamicDrawUsage,
+          );
           erosionBrickDebrisMesh.castShadow = true;
           erosionBrickDebrisMesh.receiveShadow = true;
           erosionBrickDebrisMesh.count = 0;
@@ -1565,36 +1633,36 @@
             const baseR =
               params.brickW * (0.55 + rnd() * 1.15) +
               fallDist * (0.38 + rnd() * 0.52);
-            const capR = isAnyTower()
+            const capR = isTowerLike()
               ? params.towerHalfWidth * 1.35 + params.brickW * 2.2
               : Math.max(
                   params.wallWidth * 0.52,
                   params.brickW * 8 + params.wallDepth * 3,
                 );
-            const scatterR = Math.min(capR, baseR + rnd() * params.brickW * 1.8);
+            const scatterR = Math.min(
+              capR,
+              baseR + rnd() * params.brickW * 1.8,
+            );
             const ang = rnd() * Math.PI * 2;
             const rad = Math.sqrt(rnd()) * scatterR;
             _dPos.x += Math.cos(ang) * rad;
             _dPos.z += Math.sin(ang) * rad;
-            if (!isAnyTower()) {
+            if (!isTowerLike()) {
               _dPos.z += (rnd() - 0.22) * params.brickD * (1.15 + rnd() * 1.85);
               _dPos.x += (rnd() - 0.5) * params.brickW * (0.65 + rnd() * 1.45);
             } else {
               const cx = _dPos.x;
               const cz = _dPos.z;
               const len = Math.hypot(cx, cz) + 1e-4;
-              const push = rnd() * (params.towerHalfWidth * 0.42 + params.brickW * 1.2);
+              const push =
+                rnd() * (params.towerHalfWidth * 0.42 + params.brickW * 1.2);
               _dPos.x += (cx / len) * push * (0.45 + rnd());
               _dPos.z += (cz / len) * push * (0.45 + rnd());
             }
             _dPos.x += (rnd() - 0.5) * params.brickW * 0.55;
             _dPos.z += (rnd() - 0.5) * params.brickD * 0.55;
-            const halfH = (params.brickH * 0.5) * Math.abs(_dScl.y);
-            _dPos.y =
-              gy +
-              halfH +
-              0.012 +
-              (rnd() - 0.5) * params.brickH * 0.06;
+            const halfH = params.brickH * 0.5 * Math.abs(_dScl.y);
+            _dPos.y = gy + halfH + 0.012 + (rnd() - 0.5) * params.brickH * 0.06;
             _layoutEuler.setFromQuaternion(_dQuat, "XYZ");
             _layoutEuler.x += (rnd() - 0.5) * 1.05;
             _layoutEuler.y += (rnd() - 0.5) * 1.12;
@@ -1839,7 +1907,9 @@
             b.rotation.x += b.angularVelocity.x * dt;
             b.rotation.y += b.angularVelocity.y * dt;
             b.rotation.z += b.angularVelocity.z * dt;
-            _dTmp2.copy(b.angularVelocity).multiplyScalar(params.angularDamping);
+            _dTmp2
+              .copy(b.angularVelocity)
+              .multiplyScalar(params.angularDamping);
             b.angularVelocity.copy(_dTmp2);
             brickWorldPosition(b, _wmPos);
             if (_wmPos.y < minYWorld) {
@@ -1913,22 +1983,46 @@
             brickMat.colorNode = Fn(() => {
               const pw = positionWorld;
               const seed = grain.mul(6.283).add(greyK.mul(12.7));
-              const p1 = pw.mul(1.05).add(vec3(seed, seed.mul(0.71), seed.mul(0.53)));
-              const p2 = pw.mul(2.35).add(vec3(seed.mul(1.3), seed.mul(0.9), seed.mul(1.1)));
-              const p3 = pw.mul(5.1).add(vec3(seed.mul(2.1), seed, seed.mul(1.7)));
-              const w1 = sin(dot(p1, vec3(1.7, 2.3, 1.9))).mul(0.5).add(0.5);
-              const w2 = sin(dot(p2, vec3(2.2, 1.4, 2.6))).mul(0.5).add(0.5);
-              const w3 = sin(dot(p3, vec3(1.5, 2.8, 2.1))).mul(0.5).add(0.5);
+              const p1 = pw
+                .mul(1.05)
+                .add(vec3(seed, seed.mul(0.71), seed.mul(0.53)));
+              const p2 = pw
+                .mul(2.35)
+                .add(vec3(seed.mul(1.3), seed.mul(0.9), seed.mul(1.1)));
+              const p3 = pw
+                .mul(5.1)
+                .add(vec3(seed.mul(2.1), seed, seed.mul(1.7)));
+              const w1 = sin(dot(p1, vec3(1.7, 2.3, 1.9)))
+                .mul(0.5)
+                .add(0.5);
+              const w2 = sin(dot(p2, vec3(2.2, 1.4, 2.6)))
+                .mul(0.5)
+                .add(0.5);
+              const w3 = sin(dot(p3, vec3(1.5, 2.8, 2.1)))
+                .mul(0.5)
+                .add(0.5);
               const fbm = w1.mul(0.52).add(w2.mul(0.32)).add(w3.mul(0.16));
               const streak = sin(
-                pw.x.mul(2.8).add(pw.y.mul(4.2)).add(pw.z.mul(1.6)).add(grain.mul(24)),
+                pw.x
+                  .mul(2.8)
+                  .add(pw.y.mul(4.2))
+                  .add(pw.z.mul(1.6))
+                  .add(grain.mul(24)),
               )
                 .mul(0.5)
                 .add(0.5);
 
               const dark = mix(color(0x1a1c20), color(0x2e3138), greyK);
-              const mid = mix(color(0x42454c), color(0x565a62), pow(greyK, float(0.9)));
-              const light = mix(color(0x65696f), color(0x82868e), smoothstep(0.1, 0.9, greyK));
+              const mid = mix(
+                color(0x42454c),
+                color(0x565a62),
+                pow(greyK, float(0.9)),
+              );
+              const light = mix(
+                color(0x65696f),
+                color(0x82868e),
+                smoothstep(0.1, 0.9, greyK),
+              );
               const body0 = mix(dark, mix(mid, light, greyK), float(0.58));
               const stain = smoothstep(float(0.22), float(0.78), fbm);
               const body1 = mul(body0, mix(float(0.86), float(1.06), stain));
@@ -1945,23 +2039,40 @@
                 moss.mul(0.045).mul(warpS.mul(0.4).add(0.6)),
               );
 
-              const speck = fract(sin(dot(pw.xz, vec2(12.9898, 78.233))).mul(43758.5453));
-              const freckle = smoothstep(float(0.72), float(0.96), speck).mul(0.11);
+              const speck = fract(
+                sin(dot(pw.xz, vec2(12.9898, 78.233))).mul(43758.5453),
+              );
+              const freckle = smoothstep(float(0.72), float(0.96), speck).mul(
+                0.11,
+              );
               const baseCol = mul(body3, sub(float(1), freckle));
               const nd = clamp(dot(normalWorld, sunDirUniform), 0, 1);
-              const coolShade = mix(float(0.66), float(1.06), nd.mul(0.6).add(0.4));
+              const coolShade = mix(
+                float(0.66),
+                float(1.06),
+                nd.mul(0.6).add(0.4),
+              );
               const ax = abs(normalWorld.x);
               const ay = abs(normalWorld.y);
               const az = abs(normalWorld.z);
               const edgeFac = pow(max(ax, max(ay, az)), float(2.35));
               const edgeLift = mix(float(1), float(1.1), edgeFac.mul(0.38));
               const edgeCool = mix(float(1), float(0.94), edgeFac.mul(0.12));
-              const shapeTone = mix(float(0.96), float(1.04), shapeM.mul(0.35).add(0.65));
-              return mul(mul(mul(mul(baseCol, coolShade), edgeLift), edgeCool), shapeTone);
+              const shapeTone = mix(
+                float(0.96),
+                float(1.04),
+                shapeM.mul(0.35).add(0.65),
+              );
+              return mul(
+                mul(mul(mul(baseCol, coolShade), edgeLift), edgeCool),
+                shapeTone,
+              );
             })();
 
             brickMat.roughnessNode = Fn(() => {
-              const pw = positionWorld.mul(2.4).add(vec3(grain.mul(9), greyK.mul(6), shapeM.mul(3)));
+              const pw = positionWorld
+                .mul(2.4)
+                .add(vec3(grain.mul(9), greyK.mul(6), shapeM.mul(3)));
               const pit = sin(dot(pw, vec3(2.1, 1.7, 2.4)))
                 .mul(0.5)
                 .add(0.5);
@@ -1969,8 +2080,16 @@
                 .mul(0.5)
                 .add(0.5);
               const microRough = pit.mul(0.55).add(pit2.mul(0.45));
-              const baseR = mix(float(0.82), float(0.97), greyK.mul(0.38).add(grain.mul(0.24)));
-              return clamp(baseR.add(microRough.mul(0.07)), float(0.44), float(0.995));
+              const baseR = mix(
+                float(0.82),
+                float(0.97),
+                greyK.mul(0.38).add(grain.mul(0.24)),
+              );
+              return clamp(
+                baseR.add(microRough.mul(0.07)),
+                float(0.44),
+                float(0.995),
+              );
             })();
 
             brickMat.emissiveNode = Fn(() => {
@@ -1980,7 +2099,9 @@
                 float(2.15),
               );
               const g0 = mix(color(0x4a4d52), color(0x686c72), nd);
-              return mul(g0, mul(rim, float(0.032))).mul(warpS.mul(0.55).add(0.45));
+              return mul(g0, mul(rim, float(0.032))).mul(
+                warpS.mul(0.55).add(0.45),
+              );
             })();
 
             brickMat.positionNode = Fn(() => {
@@ -2000,7 +2121,11 @@
 
               const wv = warpS.mul(shapeM.mul(0.55).add(0.45));
               const bump = sin(
-                pl.x.mul(11).add(pl.y.mul(9)).add(pl.z.mul(7)).add(grain.mul(40)),
+                pl.x
+                  .mul(11)
+                  .add(pl.y.mul(9))
+                  .add(pl.z.mul(7))
+                  .add(grain.mul(40)),
               )
                 .mul(0.5)
                 .add(0.5);
@@ -2059,20 +2184,31 @@
           clampDoorSillInWall();
           if (isDraggingArchGizmo && archPivot) {
             resetArchGizmoTargetOffset();
-            if (isAnyTower()) {
+            if (isTowerLike()) {
               archPivot.position.copy(towerPivotWorldForMode());
             } else {
               archPivot.position.x = params.archAlong;
-              archPivot.position.y =
-                params.sillY + params.legHeight * 0.35;
+              archPivot.position.y = params.sillY + params.legHeight * 0.35;
               archPivot.position.z = params.archAlongZ;
             }
           }
           buildDoorInstances();
           buildWallInstances();
           if (!isDraggingArchGizmo) updateArchGizmoFromParams();
-          if (isAnyTower()) {
-            const ty = params.towerAnchorY + params.towerHeight * 0.42;
+          if (isTowerLike()) {
+            let ty = params.towerAnchorY + params.towerHeight * 0.42;
+            if (isHouse()) {
+              const wb = params.towerAnchorY;
+              const eY =
+                wb +
+                Math.max(params.brickH * 2, params.towerHeight) -
+                Math.max(0, Number(params.houseEaveLowerY) || 0);
+              const ridgeY =
+                eY +
+                Math.max(0.12, Number(params.houseGableRise) || 0) +
+                (Number(params.houseRidgeLiftY) || 0);
+              ty = eY + (ridgeY - eY) * 0.58;
+            }
             controls.target.set(0, ty, 0);
           } else if (isBridge()) {
             const rp = ringParamsFromGui();
@@ -2103,7 +2239,7 @@
 
         function syncFromArchPivot() {
           if (!archPivot) return;
-          if (isAnyTower()) {
+          if (isTowerLike()) {
             if (isRoundTower()) syncRoundTowerGizmoFromPivot();
             else syncTowerGizmoFromPivot();
             clampArchAlong();
@@ -2139,7 +2275,7 @@
           clampArchAlong();
           clampArchAlongZ();
           clampDoorSillInWall();
-          if (isAnyTower()) {
+          if (isTowerLike()) {
             archPivot.position.copy(towerPivotWorldForMode());
             syncArchPivotOrientationAndGizmoSpace();
             return;
@@ -2159,15 +2295,9 @@
         /** TransformControls: tower = local translate; round = Y/Z only + Alt+drag orbit (see listeners). */
         function configureArchGizmoForTower() {
           if (!archGizmo) return;
-          if (!isAnyTower()) {
-            archGizmo.showX =
-              archGizmo.showY =
-              archGizmo.showZ =
-                true;
-            archGizmo.showXY =
-              archGizmo.showXZ =
-              archGizmo.showYZ =
-                true;
+          if (!isTowerLike()) {
+            archGizmo.showX = archGizmo.showY = archGizmo.showZ = true;
+            archGizmo.showXY = archGizmo.showXZ = archGizmo.showYZ = true;
             return;
           }
           archGizmo.setMode("translate");
@@ -2344,11 +2474,12 @@
                 4,
               )
             : 0;
-          const battY0 =
-            battRows > 0 ? topY - rowH * battRows : topY + 1e6;
+          const battY0 = battRows > 0 ? topY - rowH * battRows : topY + 1e6;
 
           for (let face = 0; face < 4; face++) {
-            const opsFace = getTowerOpeningsList().filter((o) => o.face === face);
+            const opsFace = getTowerOpeningsList().filter(
+              (o) => o.face === face,
+            );
             outer: for (let iy = 0; iy < ny; iy++) {
               const yMid = baseY + iy * rowH;
               if (yMid > topY - nomH * 0.2) break;
@@ -2532,22 +2663,431 @@
                   const syBase = (0.91 + rnd() * 0.06) * crownSy;
                   const sy = isBatRow
                     ? syBase *
-                      (1 +
-                        params.towerMerlonLift /
-                          Math.max(0.12, nomH))
+                      (1 + params.towerMerlonLift / Math.max(0.12, nomH))
                     : syBase;
                   const sz = 0.92 + rnd() * 0.06;
                   if (
-                    !placeTowerBrick(
-                      face,
-                      u,
-                      yMid + tuckY + yMerl,
-                      sx,
-                      sy,
-                      sz,
-                    )
+                    !placeTowerBrick(face, u, yMid + tuckY + yMerl, sx, sy, sz)
                   )
                     break outer;
+                }
+              }
+            }
+          }
+
+          wallMesh.count = k;
+          wallMesh.instanceMatrix.needsUpdate = true;
+          const wbv = wallMesh.geometry.getAttribute("brickVar");
+          if (wbv) wbv.needsUpdate = true;
+          scene.add(wallMesh);
+        }
+
+        /**
+         * Square footprint like the flat tower shell, with triangular gables on two opposite faces
+         * and a pitched roof of instanced bricks (ridge parallel to the long eaves).
+         */
+        function buildHouseShellInstances() {
+          if (!brickGeo) return;
+
+          const halfT = params.towerHalfWidth;
+          const wallBase = params.towerAnchorY;
+          const eaveY =
+            wallBase +
+            Math.max(params.brickH * 2, params.towerHeight) -
+            Math.max(0, Number(params.houseEaveLowerY) || 0);
+          const kRise =
+            Math.max(0.12, Number(params.houseGableRise) || 0) +
+            (Number(params.houseRidgeLiftY) || 0);
+          const ridgeY = eaveY + kRise;
+          const gableAxis = Math.floor(Number(params.houseGableAxis) || 0) & 1;
+          const isGableFace = (face) =>
+            gableAxis === 0
+              ? face === 0 || face === 1
+              : face === 2 || face === 3;
+
+          const run =
+            halfT + Math.max(0, Number(params.houseRoofOverhang) || 0);
+          const zOv = Math.max(0, Number(params.houseRoofZOverhang) || 0);
+          const riseSpan = Math.max(1e-3, ridgeY - eaveY);
+
+          const seam = params.wallSeamInset;
+          const mortar = params.wallMortar;
+          const nomH = params.brickH;
+          const nomW = params.brickW;
+          const rowH = nomH + mortar;
+          const baseY = wallBase + mortar * 0.5 + nomH * 0.5;
+          const ny = Math.min(
+            300,
+            Math.max(3, Math.ceil((ridgeY + nomH * 0.55 - baseY) / rowH)),
+          );
+
+          wallMesh = new THREE.InstancedMesh(
+            createInstancedBrickGeometry(brickGeo, params.maxWallBricks),
+            brickMat,
+            params.maxWallBricks,
+          );
+          wallMesh.castShadow = true;
+          wallMesh.receiveShadow = true;
+          wallMesh.position.set(0, 0, 0);
+
+          const rnd = mulberry32((params.colorSeed ^ 0x91a2bc7d) | 0);
+          let k = 0;
+          const inset = towerFaceInsetD();
+
+          const placeTowerBrick = (face, u, y, sx, sy, sz) => {
+            if (k >= params.maxWallBricks) return false;
+            const v = pickBrickVariation(rnd, sx, sy, sz, "wall");
+            let bx;
+            let by;
+            let bz;
+            if (face === 0) {
+              bx = halfT - inset;
+              by = y;
+              bz = u;
+              tmpO.rotation.set(0, -Math.PI / 2, 0);
+            } else if (face === 1) {
+              bx = -halfT + inset;
+              by = y;
+              bz = u;
+              tmpO.rotation.set(0, Math.PI / 2, 0);
+            } else if (face === 2) {
+              bx = u;
+              by = y;
+              bz = halfT - inset;
+              tmpO.rotation.set(0, 0, 0);
+            } else {
+              bx = u;
+              by = y;
+              bz = -halfT + inset;
+              tmpO.rotation.set(0, Math.PI, 0);
+            }
+            tmpO.position.set(bx, by, bz);
+            tmpO.scale.set(v.sx, v.sy, v.sz);
+            applyBrickAxisScaleNoise(tmpO, rnd, false);
+            applyBrickPlacementNoise(tmpO, rnd, false);
+            tmpO.updateMatrix();
+            wallMesh.setMatrixAt(k, tmpO.matrix);
+            setBrickVarAt(wallMesh, k, v.shapeMix, v.warp, v.grey, v.grain);
+            k++;
+            return true;
+          };
+
+          for (let face = 0; face < 4; face++) {
+            const opsFace = getTowerOpeningsList().filter(
+              (o) => o.face === face,
+            );
+            outer: for (let iy = 0; iy < ny; iy++) {
+              const yMid = baseY + iy * rowH;
+              if (yMid > ridgeY - nomH * 0.12) break;
+
+              if (!isGableFace(face) && yMid > eaveY - nomH * 0.2) break;
+
+              const rawIntervals = [[-halfT, halfT]];
+              let intervals = subtractHolesFromIntervals(
+                rawIntervals,
+                opsFace,
+                yMid,
+                seam,
+              );
+
+              if (isGableFace(face) && yMid > eaveY - rowH * 0.02) {
+                const uCap = THREE.MathUtils.clamp(
+                  (halfT * (ridgeY - yMid)) / riseSpan,
+                  0,
+                  halfT,
+                );
+                if (uCap < nomW * params.wallMinBrickScale * 0.35) continue;
+                const clipped = [];
+                for (const [a0, b0] of intervals) {
+                  const lo = Math.max(a0, -uCap + 1e-4);
+                  const hi = Math.min(b0, uCap - 1e-4);
+                  if (hi - lo > nomW * params.wallMinBrickScale * 0.42) {
+                    clipped.push([lo, hi]);
+                  }
+                }
+                intervals = clipped;
+                if (!intervals.length) continue;
+              }
+
+              let maxCurveT = 0;
+              for (const op of opsFace) {
+                const rp = ringParamsFromOpening(op);
+                const R_out = rp.ringRadius;
+                const ohC = wallOpeningHalfX(
+                  yMid,
+                  R_out,
+                  op.sillY,
+                  rp.springY,
+                  seam,
+                );
+                if (ohC <= 1e-5) continue;
+                const c = wallOpeningCurvature(
+                  yMid,
+                  R_out,
+                  op.sillY,
+                  rp.springY,
+                  seam,
+                );
+                maxCurveT = Math.max(
+                  maxCurveT,
+                  THREE.MathUtils.smoothstep(0.06, 1.15, c),
+                );
+              }
+              const nomWCurve =
+                nomW *
+                THREE.MathUtils.lerp(
+                  1,
+                  THREE.MathUtils.clamp(params.wallMinBrickScale, 0.16, 0.95),
+                  Math.pow(maxCurveT, 1.08),
+                );
+
+              const haunch = THREE.MathUtils.smoothstep(
+                wallBase + params.towerHeight * 0.12,
+                eaveY - nomH * 0.35,
+                yMid,
+              );
+              const crownSy =
+                1 -
+                (1 - THREE.MathUtils.clamp(params.wallCrownSquash, 0.42, 1)) *
+                  Math.pow(haunch, 1.28);
+
+              for (const [segLo, segHi] of intervals) {
+                const span = segHi - segLo;
+                if (span < nomW * params.wallMinBrickScale * 0.45) continue;
+
+                const minW = nomW * params.wallMinBrickScale;
+                const jMin = 0.0035;
+                const jMax = Math.min(
+                  mortar,
+                  Math.max(jMin, span * 0.014 + jMin * 0.6),
+                );
+                const j = THREE.MathUtils.clamp(mortar, jMin, jMax);
+                const hj = j * 0.5;
+                let innerLo = segLo + hj;
+                let innerHi = segHi - hj;
+                if (iy % 2 === 1) {
+                  const shift = Math.min(
+                    (nomWCurve + j) * 0.48,
+                    Math.max(0, innerHi - innerLo - minW * 1.2) * 0.35,
+                  );
+                  const eps = Math.max(1e-3, nomW * 0.025);
+                  const op0 = opsFace[0];
+                  let openHJ = 0;
+                  let gxJ = 0;
+                  if (op0) {
+                    const rpJ = ringParamsFromOpening(op0);
+                    openHJ = wallOpeningHalfX(
+                      yMid,
+                      rpJ.ringRadius,
+                      op0.sillY,
+                      rpJ.springY,
+                      seam,
+                    );
+                    gxJ =
+                      typeof op0.uArc === "number" && !Number.isNaN(op0.uArc)
+                        ? op0.uArc
+                        : op0.uCenter;
+                  }
+                  const rightOfOpening =
+                    openHJ > 1e-5 && segLo >= gxJ + openHJ - eps;
+                  const leftOfOpening =
+                    openHJ > 1e-5 && segHi <= gxJ - openHJ + eps;
+                  if (rightOfOpening) innerHi -= shift;
+                  else if (leftOfOpening) innerLo += shift;
+                  else innerLo += shift;
+                }
+
+                const innerLen = innerHi - innerLo;
+                if (innerLen < minW * 0.72) continue;
+
+                let nBricks = Math.max(
+                  1,
+                  Math.round(innerLen / (nomWCurve + j)),
+                );
+                let wEq = (innerLen - (nBricks - 1) * j) / nBricks;
+                for (let it = 0; it < 96; it++) {
+                  wEq = (innerLen - (nBricks - 1) * j) / nBricks;
+                  if (wEq < minW * 0.998) {
+                    if (nBricks <= 1) break;
+                    nBricks--;
+                  } else if (wEq > nomWCurve * 1.075 && nBricks < 1600) {
+                    nBricks++;
+                  } else break;
+                }
+                wEq = (innerLen - (nBricks - 1) * j) / nBricks;
+                if (wEq < minW * 0.88) continue;
+
+                for (let bi = 0; bi < nBricks; bi++) {
+                  if (k >= params.maxWallBricks) break outer;
+                  const u = innerLo + wEq * 0.5 + bi * (wEq + j);
+                  if (u > innerHi - wEq * 0.5 + 1e-4) break;
+
+                  let tuckY = 0;
+                  for (const op of opsFace) {
+                    const rp = ringParamsFromOpening(op);
+                    const R_out = rp.ringRadius;
+                    const openH = wallOpeningHalfX(
+                      yMid,
+                      R_out,
+                      op.sillY,
+                      rp.springY,
+                      seam,
+                    );
+                    if (openH <= 1e-4) continue;
+                    const curv = wallOpeningCurvature(
+                      yMid,
+                      R_out,
+                      op.sillY,
+                      rp.springY,
+                      seam,
+                    );
+                    const curveT = THREE.MathUtils.smoothstep(0.06, 1.15, curv);
+                    if (curveT <= 0.04) continue;
+                    const uRef =
+                      typeof op.uArc === "number" && !Number.isNaN(op.uArc)
+                        ? op.uArc
+                        : op.uCenter;
+                    const gap = Math.max(0, Math.abs(u - uRef) - openH);
+                    const band = params.brickW * 3.8;
+                    if (gap < band) {
+                      const t = THREE.MathUtils.smoothstep(1, 0, gap / band);
+                      const ty =
+                        -nomH *
+                        0.12 *
+                        Math.pow(t, 1.2) *
+                        Math.pow(curveT, 0.55);
+                      tuckY = Math.min(tuckY, ty);
+                    }
+                  }
+
+                  const sx = wEq / nomW;
+                  const syBase = (0.91 + rnd() * 0.06) * crownSy;
+                  const sy = syBase;
+                  const sz = 0.92 + rnd() * 0.06;
+                  if (!placeTowerBrick(face, u, yMid + tuckY, sx, sy, sz)) {
+                    break outer;
+                  }
+                }
+              }
+            }
+          }
+
+          const hypoRun = Math.hypot(run, kRise);
+          const cosP = run / Math.max(1e-6, hypoRun);
+          const jRoof = THREE.MathUtils.clamp(mortar * 0.88, 0.0045, 0.012);
+          const stepAlong = Math.max(nomW * 0.74 + jRoof, nomW * 0.38) * cosP;
+          const dxRidge = nomW + jRoof;
+
+          const placeRoofBrick = (wx, wy, wz, bx, by, bz) => {
+            if (k >= params.maxWallBricks) return false;
+            const v = pickBrickVariation(
+              rnd,
+              1,
+              0.94 + rnd() * 0.05,
+              0.94 + rnd() * 0.05,
+              "wall",
+            );
+            /**
+             * Match wall +Z face: local X = width, Y = height, Z = depth outward.
+             * Ridge tangent = bx; course-up-slope = by; tile outward = bz = bx × by.
+             */
+            _tmpBasisBrick.makeBasis(bx, by, bz);
+            _tmpDoorQuat.setFromRotationMatrix(_tmpBasisBrick);
+            tmpO.position.set(wx, wy, wz);
+            tmpO.quaternion.copy(_tmpDoorQuat);
+            tmpO.scale.set(v.sx, v.sy, v.sz);
+            applyBrickAxisScaleNoise(tmpO, rnd, false);
+            applyBrickPlacementNoise(tmpO, rnd, false);
+            tmpO.updateMatrix();
+            wallMesh.setMatrixAt(k, tmpO.matrix);
+            setBrickVarAt(wallMesh, k, v.shapeMix, v.warp, v.grey, v.grain);
+            k++;
+            return true;
+          };
+
+          if (params.houseRoofEnabled) {
+            roof: {
+              /**
+               * Roof ridge must match gable ends: ±X gables → ridge parallel to X (apex to apex);
+               * ±Z gables → ridge parallel to Z. (Earlier build used the swapped pairing.)
+               */
+              if (gableAxis === 0) {
+                const xMin = -halfT - zOv;
+                const xMax = halfT + zOv;
+                for (let side = -1; side <= 1; side += 2) {
+                  const z0 = side < 0 ? -run + nomW * 0.12 : nomW * 0.1;
+                  const z1 = side < 0 ? -nomW * 0.12 : run - nomW * 0.08;
+                  for (
+                    let rz = z0;
+                    side < 0 ? rz < z1 : rz < z1;
+                    rz += stepAlong
+                  ) {
+                    const t =
+                      side < 0 ? (-rz) / run : rz / run;
+                    const y = eaveY + (1 - t) * kRise;
+                    let row = 0;
+                    for (let qx = xMin; qx < xMax + 1e-6; qx += dxRidge) {
+                      const off =
+                        (row +
+                          (side < 0 ? 0 : 1) +
+                          Math.floor((rz + run * 3) / stepAlong)) %
+                        2;
+                      row++;
+                      const qx0 = qx + off * dxRidge * 0.5;
+                      if (qx0 > xMax - nomW * 0.18) continue;
+                      _doorBx.set(1, 0, 0);
+                      if (side < 0) {
+                        _doorBy.set(0, kRise, run).normalize();
+                      } else {
+                        _doorBy.set(0, kRise, -run).normalize();
+                      }
+                      _doorBz.crossVectors(_doorBx, _doorBy).normalize();
+                      if (
+                        !placeRoofBrick(qx0, y, rz, _doorBx, _doorBy, _doorBz)
+                      ) {
+                        break roof;
+                      }
+                    }
+                  }
+                }
+              } else {
+                const zMin = -halfT - zOv;
+                const zMax = halfT + zOv;
+                for (let side = -1; side <= 1; side += 2) {
+                  const x0 = side < 0 ? -run + nomW * 0.12 : nomW * 0.1;
+                  const x1 = side < 0 ? -nomW * 0.12 : run - nomW * 0.08;
+                  for (
+                    let rx = x0;
+                    side < 0 ? rx < x1 : rx < x1;
+                    rx += stepAlong
+                  ) {
+                    const t =
+                      side < 0 ? (rx + run) / run : (run - rx) / run;
+                    const y = eaveY + t * kRise;
+                    let row = 0;
+                    for (let qz = zMin; qz < zMax + 1e-6; qz += dxRidge) {
+                      const off =
+                        (row +
+                          (side < 0 ? 0 : 1) +
+                          Math.floor((rx + run * 3) / stepAlong)) %
+                        2;
+                      row++;
+                      const qz0 = qz + off * dxRidge * 0.5;
+                      if (qz0 > zMax - nomW * 0.18) continue;
+                      _doorBx.set(0, 0, 1);
+                      if (side < 0) {
+                        _doorBy.set(run, kRise, 0).normalize();
+                      } else {
+                        _doorBy.set(-run, kRise, 0).normalize();
+                      }
+                      _doorBz.crossVectors(_doorBx, _doorBy).normalize();
+                      if (
+                        !placeRoofBrick(rx, y, qz0, _doorBx, _doorBy, _doorBz)
+                      ) {
+                        break roof;
+                      }
+                    }
+                  }
                 }
               }
             }
@@ -2606,7 +3146,8 @@
             const rUse = Math.max(0.06, rCyl + rJ);
             const px = Math.cos(theta) * rUse;
             const pz = Math.sin(theta) * rUse;
-            const yExtra = (params.brickVerticalVariation || 0) * (rnd() - 0.5) * 0.75;
+            const yExtra =
+              (params.brickVerticalVariation || 0) * (rnd() - 0.5) * 0.75;
             const yJ =
               (iyRow > 0 ? y + (rnd() - 0.5) * rowH * 0.045 : y) + yExtra;
             tmpO.position.set(px, yJ, pz);
@@ -2638,8 +3179,7 @@
                 4,
               )
             : 0;
-          const battY0 =
-            battRows > 0 ? topY - rowH * battRows : topY + 1e6;
+          const battY0 = battRows > 0 ? topY - rowH * battRows : topY + 1e6;
 
           const opsR = getTowerOpeningsList();
 
@@ -2733,10 +3273,7 @@
               const innerLen = innerHi - innerLo;
               if (innerLen < minW * 0.72) continue;
 
-              let nBricks = Math.max(
-                1,
-                Math.round(innerLen / (nomWCurve + j)),
-              );
+              let nBricks = Math.max(1, Math.round(innerLen / (nomWCurve + j)));
               let wEq = (innerLen - (nBricks - 1) * j) / nBricks;
               for (let it = 0; it < 96; it++) {
                 wEq = (innerLen - (nBricks - 1) * j) / nBricks;
@@ -2786,10 +3323,7 @@
                   if (gap < band) {
                     const t = THREE.MathUtils.smoothstep(1, 0, gap / band);
                     const ty =
-                      -nomH *
-                      0.12 *
-                      Math.pow(t, 1.2) *
-                      Math.pow(curveT, 0.55);
+                      -nomH * 0.12 * Math.pow(t, 1.2) * Math.pow(curveT, 0.55);
                     tuckY = Math.min(tuckY, ty);
                   }
                 }
@@ -2798,21 +3332,11 @@
                 const yMerl = isBatRow ? params.towerMerlonLift * 0.45 : 0;
                 const syBase = (0.91 + rnd() * 0.06) * crownSy;
                 const sy = isBatRow
-                  ? syBase *
-                    (1 +
-                      params.towerMerlonLift /
-                        Math.max(0.12, nomH))
+                  ? syBase * (1 + params.towerMerlonLift / Math.max(0.12, nomH))
                   : syBase;
                 const sz = 0.92 + rnd() * 0.06;
                 if (
-                  !placeRoundBrick(
-                    theta,
-                    yMid + tuckY + yMerl,
-                    sx,
-                    sy,
-                    sz,
-                    iy,
-                  )
+                  !placeRoundBrick(theta, yMid + tuckY + yMerl, sx, sy, sz, iy)
                 )
                   break outerRound;
               }
@@ -2846,8 +3370,7 @@
                 THREE.MathUtils.clamp(params.spacingMul, 0.82, 1.08) +
               jRing;
             let nU = Math.max(5, Math.round(Lu / targetMod));
-            let nS =
-              Ls > 0 ? Math.max(2, Math.round(Ls / targetMod)) : 0;
+            let nS = Ls > 0 ? Math.max(2, Math.round(Ls / targetMod)) : 0;
             if (nU + nS > params.maxBricks) {
               const room = params.maxBricks - nS;
               nU = Math.max(4, Math.min(nU, room));
@@ -2873,12 +3396,16 @@
             while (nU > 4 && alongU < minAlong) {
               nU--;
               alongU =
-                nU > 0 ? (Lu - Math.max(0, nU - 1) * jRing) / nU : params.brickW;
+                nU > 0
+                  ? (Lu - Math.max(0, nU - 1) * jRing) / nU
+                  : params.brickW;
             }
             while (nS > 2 && alongS < minAlong) {
               nS--;
               alongS =
-                nS > 0 ? (Ls - Math.max(0, nS - 1) * jRing) / nS : params.brickW;
+                nS > 0
+                  ? (Ls - Math.max(0, nS - 1) * jRing) / nS
+                  : params.brickW;
             }
 
             const Rcyl = Math.max(0.2, halfT);
@@ -2951,7 +3478,10 @@
                 const vy = (params.brickVerticalVariation || 0) * 0.42;
                 if (ps > 0 || vy > 0) {
                   _tmpDoorPos.addScaledVector(_doorTan, (rnd() - 0.5) * ps);
-                  _tmpDoorPos.addScaledVector(_doorOut, (rnd() - 0.5) * ps * 0.55);
+                  _tmpDoorPos.addScaledVector(
+                    _doorOut,
+                    (rnd() - 0.5) * ps * 0.55,
+                  );
                   _tmpDoorPos.y += (rnd() - 0.5) * vy;
                 }
                 /**
@@ -2959,7 +3489,10 @@
                  * Build the same 3D direction on the curved shell, then a right-handed frame with
                  * brick depth Z = outward radial (matches square `setRingParentForFace` + Rz(yaw)).
                  */
-                _doorBx.copy(_doorTan).multiplyScalar(tx).addScaledVector(_yAxis, ty);
+                _doorBx
+                  .copy(_doorTan)
+                  .multiplyScalar(tx)
+                  .addScaledVector(_yAxis, ty);
                 if (_doorBx.lengthSq() < 1e-10) _doorBx.copy(_doorTan);
                 _doorBx.normalize();
                 _doorBy.copy(_doorOut).cross(_doorBx).normalize();
@@ -3029,11 +3562,9 @@
           const usable = Math.max(L - 2 * margin, L * 0.42);
           const step = usable / 4;
           const x0 = -L * 0.5 + margin + step;
-          return [
-            x0,
-            x0 + step,
-            x0 + step * 2,
-          ].map((x) => x + params.archAlong);
+          return [x0, x0 + step, x0 + step * 2].map(
+            (x) => x + params.archAlong,
+          );
         }
 
         /**
@@ -3176,14 +3707,15 @@
           const wallBase = params.wallAnchorY;
           const baseY = wallBase + mortar * 0.5 + nomH * 0.5;
           const topY = wallBase + Math.max(nomH * 2, params.wallHeight);
-          const ny = Math.min(260, Math.max(3, Math.ceil((topY - baseY) / rowH)));
+          const ny = Math.min(
+            260,
+            Math.max(3, Math.ceil((topY - baseY) / rowH)),
+          );
           const gxs = computeBridgeArchCentersWorldX();
           const zn = -(params.bridgeDeckHalfW + params.wallDepth * 0.5);
           const zs = params.bridgeDeckHalfW + params.wallDepth * 0.5;
-          const zLoD =
-            -params.bridgeDeckHalfW + Math.max(0.006, seam * 0.85);
-          const zHiD =
-            params.bridgeDeckHalfW - Math.max(0.006, seam * 0.85);
+          const zLoD = -params.bridgeDeckHalfW + Math.max(0.006, seam * 0.85);
+          const zHiD = params.bridgeDeckHalfW - Math.max(0.006, seam * 0.85);
           const deckCourses = THREE.MathUtils.clamp(
             Math.round(params.bridgeDeckCourses) || 4,
             1,
@@ -3209,7 +3741,13 @@
 
           const placeWorldBrick = (wx, wy, wz, sx, sy, sz, doorTight) => {
             if (k >= params.maxWallBricks) return false;
-            const v = pickBrickVariation(rnd, sx, sy, sz, doorTight ? "door" : "wall");
+            const v = pickBrickVariation(
+              rnd,
+              sx,
+              sy,
+              sz,
+              doorTight ? "door" : "wall",
+            );
             tmpO.position.set(wx, wy, wz);
             tmpO.rotation.set(0, 0, 0);
             tmpO.scale.set(v.sx, v.sy, v.sz);
@@ -3231,13 +3769,7 @@
               let intervals = [[wallLo, wallHi]];
               if (oh0 > 1e-5) {
                 for (const gxc of gxs) {
-                  const oh = wallOpeningHalfX(
-                    yMid,
-                    R_out,
-                    doorSill,
-                    ys,
-                    seam,
-                  );
+                  const oh = wallOpeningHalfX(yMid, R_out, doorSill, ys, seam);
                   if (oh > 1e-5) {
                     intervals = subtractIntervals(
                       intervals,
@@ -3247,7 +3779,13 @@
                   }
                 }
               }
-              const curv = wallOpeningCurvature(yMid, R_out, doorSill, ys, seam);
+              const curv = wallOpeningCurvature(
+                yMid,
+                R_out,
+                doorSill,
+                ys,
+                seam,
+              );
               const curveT = THREE.MathUtils.smoothstep(0.06, 1.15, curv);
               const nomWCurve =
                 nomW *
@@ -3362,15 +3900,7 @@
                   const sy = (0.91 + rndW() * 0.06) * crownSy;
                   const sz = 0.92 + rndW() * 0.06;
                   if (
-                    !placeWorldBrick(
-                      cx,
-                      yMid + tuckY,
-                      zWall,
-                      sx,
-                      sy,
-                      sz,
-                      false,
-                    )
+                    !placeWorldBrick(cx, yMid + tuckY, zWall, sx, sy, sz, false)
                   ) {
                     break outer;
                   }
@@ -3384,10 +3914,7 @@
 
           const rowZ = nomW + mortar;
           const zSpan = Math.max(0.15, zHiD - zLoD);
-          const nz = Math.min(
-            120,
-            Math.max(2, Math.ceil(zSpan / rowZ)),
-          );
+          const nz = Math.min(120, Math.max(2, Math.ceil(zSpan / rowZ)));
           deckOuter: for (let di = 0; di < deckCourses; di++) {
             const yDeck =
               topY -
@@ -3467,7 +3994,7 @@
             buildBridgeArchRings();
             return;
           }
-          if (isAnyTower()) {
+          if (isTowerLike()) {
             buildTowerDoorRings();
             return;
           }
@@ -3482,11 +4009,11 @@
             0.012,
           );
           const targetMod =
-            params.brickW * THREE.MathUtils.clamp(params.spacingMul, 0.82, 1.08) +
+            params.brickW *
+              THREE.MathUtils.clamp(params.spacingMul, 0.82, 1.08) +
             jRing;
           let nU = Math.max(5, Math.round(Lu / targetMod));
-          let nS =
-            Ls > 0 ? Math.max(2, Math.round(Ls / targetMod)) : 0;
+          let nS = Ls > 0 ? Math.max(2, Math.round(Ls / targetMod)) : 0;
           if (nU + nS > params.maxBricks) {
             const room = params.maxBricks - nS;
             nU = Math.max(4, Math.min(nU, room));
@@ -3573,6 +4100,10 @@
             buildTowerShellInstances();
             return;
           }
+          if (params.sceneMode === "house") {
+            buildHouseShellInstances();
+            return;
+          }
           if (params.sceneMode === "towerRound") {
             buildTowerRoundShellInstances();
             return;
@@ -3598,7 +4129,10 @@
           const wallBase = params.wallAnchorY;
           const baseY = wallBase + mortar * 0.5 + nomH * 0.5;
           const topY = wallBase + Math.max(nomH * 2, params.wallHeight);
-          const ny = Math.min(220, Math.max(3, Math.ceil((topY - baseY) / rowH)));
+          const ny = Math.min(
+            220,
+            Math.max(3, Math.ceil((topY - baseY) / rowH)),
+          );
 
           wallMesh = new THREE.InstancedMesh(
             createInstancedBrickGeometry(brickGeo, params.maxWallBricks),
@@ -3635,11 +4169,7 @@
             const openH = wallOpeningHalfX(yMid, R_out, doorSill, ys, seam);
             let intervals = [[wallLo, wallHi]];
             if (openH > 1e-5) {
-              intervals = subtractIntervals(
-                intervals,
-                gx - openH,
-                gx + openH,
-              );
+              intervals = subtractIntervals(intervals, gx - openH, gx + openH);
             }
 
             const curv = wallOpeningCurvature(yMid, R_out, doorSill, ys, seam);
@@ -3654,11 +4184,7 @@
 
             const haunch =
               yMid >= ys - mortar * 1.5 && yMid <= ys + R_out * 1.05
-                ? THREE.MathUtils.smoothstep(
-                    ys - 0.12,
-                    ys + R_out * 0.82,
-                    yMid,
-                  )
+                ? THREE.MathUtils.smoothstep(ys - 0.12, ys + R_out * 0.82, yMid)
                 : 0;
             const crownSy =
               1 -
@@ -3693,8 +4219,7 @@
                 const eps = Math.max(1e-3, nomW * 0.025);
                 const rightOfOpening =
                   openH > 1e-5 && segLo >= gx + openH - eps;
-                const leftOfOpening =
-                  openH > 1e-5 && segHi <= gx - openH + eps;
+                const leftOfOpening = openH > 1e-5 && segHi <= gx - openH + eps;
                 if (rightOfOpening) innerHi -= shift;
                 else if (leftOfOpening) innerLo += shift;
                 else innerLo += shift;
@@ -3703,10 +4228,7 @@
               const innerLen = innerHi - innerLo;
               if (innerLen < minW * 0.72) continue;
 
-              let nBricks = Math.max(
-                1,
-                Math.round(innerLen / (nomWCurve + j)),
-              );
+              let nBricks = Math.max(1, Math.round(innerLen / (nomWCurve + j)));
               let wEq = (innerLen - (nBricks - 1) * j) / nBricks;
               for (let it = 0; it < 96; it++) {
                 wEq = (innerLen - (nBricks - 1) * j) / nBricks;
@@ -3756,7 +4278,7 @@
 
         const tweakRoot = document.getElementById("tweak-root");
         const pane = new Pane({
-          title: "Arch · wall · bridge",
+          title: "Arch · wall · bridge · house",
           container: tweakRoot || document.body,
         });
         const applyL = () => applyLightsFromParams();
@@ -3770,10 +4292,12 @@
               "Square tower": "tower",
               "Round tower": "towerRound",
               Bridge: "bridge",
+              House: "house",
             },
           })
           .on("change", () => {
             if (isBridge()) applyBridgeDefaults();
+            else if (isHouse()) applyHouseDefaults();
             rebuildAll();
           });
 
@@ -3814,6 +4338,64 @@
             label: "Lower deck (walls stay tall)",
           })
           .on("change", rbBridge);
+
+        const fHouse = pane.addFolder({
+          title: "House (gable + brick roof)",
+          expanded: false,
+        });
+        const rbHouse = () => rebuildInstances(false);
+        fHouse
+          .addBinding(params, "houseRoofEnabled", { label: "Brick roof" })
+          .on("change", rbHouse);
+        fHouse
+          .addBinding(params, "houseGableAxis", {
+            label: "Gable ends",
+            options: {
+              "±X (ridge along X)": 0,
+              "±Z (ridge along Z)": 1,
+            },
+          })
+          .on("change", rbHouse);
+        fHouse
+          .addBinding(params, "houseGableRise", {
+            min: 0.35,
+            max: 12,
+            step: 0.05,
+            label: "Roof rise (eave → ridge)",
+          })
+          .on("change", rbHouse);
+        fHouse
+          .addBinding(params, "houseRidgeLiftY", {
+            min: -1.5,
+            max: 2.5,
+            step: 0.02,
+            label: "Ridge lift (+Y only)",
+          })
+          .on("change", rbHouse);
+        fHouse
+          .addBinding(params, "houseEaveLowerY", {
+            min: 0,
+            max: 4,
+            step: 0.02,
+            label: "Lower eave (taller wall below)",
+          })
+          .on("change", rbHouse);
+        fHouse
+          .addBinding(params, "houseRoofOverhang", {
+            min: 0,
+            max: 1.8,
+            step: 0.02,
+            label: "Roof overhang (slope run)",
+          })
+          .on("change", rbHouse);
+        fHouse
+          .addBinding(params, "houseRoofZOverhang", {
+            min: 0,
+            max: 1.6,
+            step: 0.02,
+            label: "Ridge-line overhang",
+          })
+          .on("change", rbHouse);
 
         const fTower = pane.addFolder({
           title: "Tower (square or round)",
@@ -3920,18 +4502,22 @@
 
         const fDoor = pane.addFolder({ title: "Door shape" });
         const rb = () => rebuildInstances(false);
-        fDoor.addBinding(params, "doorInnerHalfW", {
-          min: 0.35,
-          max: 2.2,
-          step: 0.01,
-          label: "Inner half-width",
-        }).on("change", rb);
-        fDoor.addBinding(params, "masonryShell", {
-          min: 0.12,
-          max: 1.2,
-          step: 0.01,
-          label: "Brick ring depth",
-        }).on("change", rb);
+        fDoor
+          .addBinding(params, "doorInnerHalfW", {
+            min: 0.35,
+            max: 2.2,
+            step: 0.01,
+            label: "Inner half-width",
+          })
+          .on("change", rb);
+        fDoor
+          .addBinding(params, "masonryShell", {
+            min: 0.12,
+            max: 1.2,
+            step: 0.01,
+            label: "Brick ring depth",
+          })
+          .on("change", rb);
         fDoor
           .addBinding(params, "archRingDepthScale", {
             min: 1.0,
@@ -3940,68 +4526,90 @@
             label: "Arch brick depth × (vs wall)",
           })
           .on("change", rb);
-        fDoor.addBinding(params, "legHeight", {
-          min: 0.4,
-          max: 5,
-          step: 0.02,
-          label: "Jamb height",
-        }).on("change", rb);
-        fDoor.addBinding(params, "sillY", {
-          min: -0.5,
-          max: 24,
-          step: 0.01,
-          label: "Door sill Y",
-        }).on("change", rb);
-        fDoor.addBinding(params, "archAlong", {
-          min: -8,
-          max: 8,
-          step: 0.02,
-          label: "Arch center X",
-        }).on("change", rb);
-        fDoor.addBinding(params, "archAlongZ", {
-          min: -1.6,
-          max: 1.6,
-          step: 0.01,
-          label: "Arch depth in/out (gizmo blue)",
-        }).on("change", rb);
-        fDoor.addBinding(params, "closeBottom", {
-          label: "Close bottom (threshold)",
-        }).on("change", rb);
+        fDoor
+          .addBinding(params, "legHeight", {
+            min: 0.4,
+            max: 5,
+            step: 0.02,
+            label: "Jamb height",
+          })
+          .on("change", rb);
+        fDoor
+          .addBinding(params, "sillY", {
+            min: -0.5,
+            max: 24,
+            step: 0.01,
+            label: "Door sill Y",
+          })
+          .on("change", rb);
+        fDoor
+          .addBinding(params, "archAlong", {
+            min: -8,
+            max: 8,
+            step: 0.02,
+            label: "Arch center X",
+          })
+          .on("change", rb);
+        fDoor
+          .addBinding(params, "archAlongZ", {
+            min: -1.6,
+            max: 1.6,
+            step: 0.01,
+            label: "Arch depth in/out (gizmo blue)",
+          })
+          .on("change", rb);
+        fDoor
+          .addBinding(params, "closeBottom", {
+            label: "Close bottom (threshold)",
+          })
+          .on("change", rb);
 
         const fBrick = pane.addFolder({ title: "Bricks" });
-        fBrick.addBinding(params, "brickW", {
-          min: 0.22,
-          max: 1.1,
-          step: 0.01,
-        }).on("change", rb);
-        fBrick.addBinding(params, "brickH", {
-          min: 0.18,
-          max: 0.9,
-          step: 0.01,
-        }).on("change", rb);
-        fBrick.addBinding(params, "brickD", {
-          min: 0.2,
-          max: 1.2,
-          step: 0.01,
-        }).on("change", rb);
-        fBrick.addBinding(params, "brickRound", {
-          min: 0,
-          max: 0.18,
-          step: 0.005,
-          label: "Corner radius",
-        }).on("change", rb);
-        fBrick.addBinding(params, "spacingMul", {
-          min: 0.55,
-          max: 1.6,
-          step: 0.01,
-          label: "Spacing",
-        }).on("change", rb);
-        fBrick.addBinding(params, "colorSeed", {
-          min: 0,
-          max: 999999,
-          step: 1,
-          label: "Color seed",
-        }).on("change", rb);
+        fBrick
+          .addBinding(params, "brickW", {
+            min: 0.22,
+            max: 1.1,
+            step: 0.01,
+          })
+          .on("change", rb);
+        fBrick
+          .addBinding(params, "brickH", {
+            min: 0.18,
+            max: 0.9,
+            step: 0.01,
+          })
+          .on("change", rb);
+        fBrick
+          .addBinding(params, "brickD", {
+            min: 0.2,
+            max: 1.2,
+            step: 0.01,
+          })
+          .on("change", rb);
+        fBrick
+          .addBinding(params, "brickRound", {
+            min: 0,
+            max: 0.18,
+            step: 0.005,
+            label: "Corner radius",
+          })
+          .on("change", rb);
+        fBrick
+          .addBinding(params, "spacingMul", {
+            min: 0.55,
+            max: 1.6,
+            step: 0.01,
+            label: "Spacing",
+          })
+          .on("change", rb);
+        fBrick
+          .addBinding(params, "colorSeed", {
+            min: 0,
+            max: 999999,
+            step: 1,
+            label: "Color seed",
+          })
+          .on("change", rb);
 
         const fBrickLayout = fBrick.addFolder({
           title: "Layout noise (castle-like)",
@@ -4048,64 +4656,86 @@
           })
           .on("change", rb);
         const fWall = pane.addFolder({ title: "Wall (field masonry)" });
-        fWall.addBinding(params, "wallEnabled", { label: "Enabled" }).on("change", rb);
-        fWall.addBinding(params, "wallAnchorY", {
-          min: -0.5,
-          max: 2,
-          step: 0.01,
-          label: "Wall base Y (fixed)",
-        }).on("change", rb);
-        fWall.addBinding(params, "wallWidth", {
-          min: 6,
-          max: 28,
-          step: 0.1,
-        }).on("change", rb);
-        fWall.addBinding(params, "wallHeight", {
-          min: 3,
-          max: 16,
-          step: 0.05,
-          label: "Height above sill",
-        }).on("change", rb);
-        fWall.addBinding(params, "wallDepth", {
-          min: 0.35,
-          max: 1.4,
-          step: 0.01,
-        }).on("change", rb);
-        fWall.addBinding(params, "wallZ", {
-          min: -1.2,
-          max: 0.4,
-          step: 0.01,
-          label: "Wall Z offset",
-        }).on("change", rb);
-        fWall.addBinding(params, "wallMortar", {
-          min: 0.008,
-          max: 0.06,
-          step: 0.001,
-        }).on("change", rb);
-        fWall.addBinding(params, "wallSeamInset", {
-          min: 0.01,
-          max: 0.12,
-          step: 0.002,
-          label: "Ring clearance",
-        }).on("change", rb);
-        fWall.addBinding(params, "wallEdgeBlendBw", {
-          min: 1.5,
-          max: 9,
-          step: 0.1,
-          label: "Edge blend (× brick W)",
-        }).on("change", rb);
-        fWall.addBinding(params, "wallMinBrickScale", {
-          min: 0.14,
-          max: 0.55,
-          step: 0.01,
-          label: "Min brick / nominal",
-        }).on("change", rb);
-        fWall.addBinding(params, "wallCrownSquash", {
-          min: 0.45,
-          max: 1,
-          step: 0.01,
-          label: "Crown height scale",
-        }).on("change", rb);
+        fWall
+          .addBinding(params, "wallEnabled", { label: "Enabled" })
+          .on("change", rb);
+        fWall
+          .addBinding(params, "wallAnchorY", {
+            min: -0.5,
+            max: 2,
+            step: 0.01,
+            label: "Wall base Y (fixed)",
+          })
+          .on("change", rb);
+        fWall
+          .addBinding(params, "wallWidth", {
+            min: 6,
+            max: 28,
+            step: 0.1,
+          })
+          .on("change", rb);
+        fWall
+          .addBinding(params, "wallHeight", {
+            min: 3,
+            max: 16,
+            step: 0.05,
+            label: "Height above sill",
+          })
+          .on("change", rb);
+        fWall
+          .addBinding(params, "wallDepth", {
+            min: 0.35,
+            max: 1.4,
+            step: 0.01,
+          })
+          .on("change", rb);
+        fWall
+          .addBinding(params, "wallZ", {
+            min: -1.2,
+            max: 0.4,
+            step: 0.01,
+            label: "Wall Z offset",
+          })
+          .on("change", rb);
+        fWall
+          .addBinding(params, "wallMortar", {
+            min: 0.008,
+            max: 0.06,
+            step: 0.001,
+          })
+          .on("change", rb);
+        fWall
+          .addBinding(params, "wallSeamInset", {
+            min: 0.01,
+            max: 0.12,
+            step: 0.002,
+            label: "Ring clearance",
+          })
+          .on("change", rb);
+        fWall
+          .addBinding(params, "wallEdgeBlendBw", {
+            min: 1.5,
+            max: 9,
+            step: 0.1,
+            label: "Edge blend (× brick W)",
+          })
+          .on("change", rb);
+        fWall
+          .addBinding(params, "wallMinBrickScale", {
+            min: 0.14,
+            max: 0.55,
+            step: 0.01,
+            label: "Min brick / nominal",
+          })
+          .on("change", rb);
+        fWall
+          .addBinding(params, "wallCrownSquash", {
+            min: 0.45,
+            max: 1,
+            step: 0.01,
+            label: "Crown height scale",
+          })
+          .on("change", rb);
 
         const fDestruction = pane.addFolder({ title: "Destruction" });
         fDestruction
@@ -4115,14 +4745,13 @@
           .on("change", () => {
             applyLiveErosionFromSlider();
           });
-        fDestruction
-          .addBinding(params, "destructionMode", {
-            label: "Click mode",
-            options: {
-              Off: "none",
-              "On (LMB)": "destruct",
-            },
-          });
+        fDestruction.addBinding(params, "destructionMode", {
+          label: "Click mode",
+          options: {
+            Off: "none",
+            "On (LMB)": "destruct",
+          },
+        });
         fDestruction
           .addBinding(params, "erosion", {
             min: 0,
@@ -4240,17 +4869,21 @@
         });
 
         const fView = pane.addFolder({ title: "View" });
-        fView.addBinding(params, "showArchGizmo", {
-          label: "Arch gizmo",
-        }).on("change", () => {
-          if (archGizmo) {
-            archGizmo.enabled = params.showArchGizmo;
-            archGizmo.visible = params.showArchGizmo;
-          }
-        });
-        fView.addBinding(params, "showGrid", { label: "Grid" }).on("change", () => {
-          setGrid(params.showGrid);
-        });
+        fView
+          .addBinding(params, "showArchGizmo", {
+            label: "Arch gizmo",
+          })
+          .on("change", () => {
+            if (archGizmo) {
+              archGizmo.enabled = params.showArchGizmo;
+              archGizmo.visible = params.showArchGizmo;
+            }
+          });
+        fView
+          .addBinding(params, "showGrid", { label: "Grid" })
+          .on("change", () => {
+            setGrid(params.showGrid);
+          });
 
         pane.addButton({ title: "Rebuild" }).on("click", () => {
           rebuildAll();
