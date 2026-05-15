@@ -143,51 +143,6 @@ function createNoiseGeneratorFromPermutation(permTable) {
   };
 }
 
-function buildMaskTexture3D(maskSize, freq, seed) {
-  const rnd = createSeededRandom(seed);
-  const p = new Uint8Array(256);
-  for (let i = 0; i < 256; i++) p[i] = i;
-  for (let i = 255; i > 0; i--) {
-    const j = Math.floor(rnd() * (i + 1));
-    [p[i], p[j]] = [p[j], p[i]];
-  }
-  const permTable = new Uint8Array(512);
-  for (let i = 0; i < 256; i++) permTable[i] = permTable[i + 256] = p[i];
-  const noiseGen = createNoiseGeneratorFromPermutation(permTable);
-  const noiseMaskData = new Uint8Array(maskSize * maskSize * maskSize);
-  const directionVector = new THREE.Vector3();
-  for (let z = 0; z < maskSize; z++) {
-    for (let y = 0; y < maskSize; y++) {
-      for (let x = 0; x < maskSize; x++) {
-        directionVector.set(
-          (x / (maskSize - 1)) * 2.0 - 1.0,
-          (y / (maskSize - 1)) * 2.0 - 1.0,
-          (z / (maskSize - 1)) * 2.0 - 1.0,
-        );
-        if (directionVector.lengthSq() > 0) {
-          directionVector.normalize();
-          const noiseValue = noiseGen(
-            directionVector.multiplyScalar(freq),
-          );
-          noiseMaskData[z * maskSize * maskSize + y * maskSize + x] =
-            noiseValue * 128 + 128;
-        }
-      }
-    }
-  }
-  const t = new THREE.Data3DTexture(
-    noiseMaskData,
-    maskSize,
-    maskSize,
-    maskSize,
-  );
-  t.format = THREE.RedFormat;
-  t.minFilter = THREE.LinearFilter;
-  t.magFilter = THREE.LinearFilter;
-  t.unpackAlignment = 1;
-  t.needsUpdate = true;
-  return t;
-}
 
 /**
  * @param {object} opts
@@ -262,6 +217,17 @@ export async function createVolumetricCloudSystemOptimized({
   const godraysRT = new THREE.RenderTarget(hw, hh, effectRTDefaults);
   const finalRT = new THREE.RenderTarget(w, h, finalRTDefaults);
   const cloudRT = new THREE.RenderTarget(cw, ch, finalRTDefaults);
+  const historyRT_A = new THREE.RenderTarget(cw, ch, finalRTDefaults);
+  const historyRT_B = new THREE.RenderTarget(cw, ch, finalRTDefaults);
+  let pingPongIndex = 0;
+  let temporalFrameCount = 0;
+
+  const prevVPMatrix = new THREE.Matrix4();
+  const prevCloudWorldMatrix = new THREE.Matrix4();
+  const _reprojectMatrix = new THREE.Matrix4();
+  const _invCurrentVP = new THREE.Matrix4();
+  const _invCurrCloudWorld = new THREE.Matrix4();
+  const _currentVP = new THREE.Matrix4();
 
   const occBgBlack = new THREE.Color(0x000000);
 
@@ -296,6 +262,13 @@ export async function createVolumetricCloudSystemOptimized({
   volumeTexture.magFilter = THREE.LinearFilter;
   volumeTexture.needsUpdate = true;
   const volumeTex = texture3D(volumeTexture, null, 0);
+
+  let maskVolumeTexture = new THREE.Data3DTexture(new Uint8Array(8), 2, 2, 2);
+  maskVolumeTexture.format = THREE.RedFormat;
+  maskVolumeTexture.minFilter = THREE.LinearFilter;
+  maskVolumeTexture.magFilter = THREE.LinearFilter;
+  maskVolumeTexture.needsUpdate = true;
+  const maskVolumeTex = texture3D(maskVolumeTexture, null, 0);
 
   function bakeVolume3D() {
     const p = toolState.volumetricCloudOptimized;
@@ -370,12 +343,87 @@ export async function createVolumetricCloudSystemOptimized({
 
   bakeVolume3D();
 
-  let maskTexture = buildMaskTexture3D(128, p0.frequenciaRuido, p0.maskSeed);
-  let detailMaskTexture = buildMaskTexture3D(
-    128,
-    p0.frequenciaRuidoDetalhe,
-    p0.seedDetalhe,
-  );
+  function bakeMaskVolume3D() {
+    const p = toolState.volumetricCloudOptimized;
+    const size = Math.max(8, Math.min(192, Math.round(p.textureSize)));
+    const data = new Uint8Array(size * size * size);
+
+    function makeNoiseGen(seed) {
+      const rnd = createSeededRandom(seed);
+      const perm = new Uint8Array(256);
+      for (let i = 0; i < 256; i++) perm[i] = i;
+      for (let i = 255; i > 0; i--) {
+        const j = Math.floor(rnd() * (i + 1));
+        [perm[i], perm[j]] = [perm[j], perm[i]];
+      }
+      const pt = new Uint8Array(512);
+      for (let i = 0; i < 256; i++) pt[i] = pt[i + 256] = perm[i];
+      return createNoiseGeneratorFromPermutation(pt);
+    }
+
+    const mainNoise = makeNoiseGen(p.maskSeed);
+    const detailNoise = makeNoiseGen(p.seedDetalhe);
+    const _v = new THREE.Vector3();
+
+    let index = 0;
+    for (let z = 0; z < size; z++) {
+      for (let y = 0; y < size; y++) {
+        for (let x = 0; x < size; x++) {
+          const px = x / (size - 1) - 0.5;
+          const py = y / (size - 1) - 0.5;
+          const pz = z / (size - 1) - 0.5;
+
+          const sy = Math.max(0.05,
+            (p.achatamentoCima + p.achatamentoBaixo) * 0.5 +
+            Math.sign(py) * (p.achatamentoCima - p.achatamentoBaixo) * 0.5);
+          const sx = Math.max(0.05,
+            (p.achatamentoXpos + p.achatamentoXneg) * 0.5 +
+            Math.sign(px) * (p.achatamentoXpos - p.achatamentoXneg) * 0.5);
+          const sz = Math.max(0.05,
+            (p.achatamentoZpos + p.achatamentoZneg) * 0.5 +
+            Math.sign(pz) * (p.achatamentoZpos - p.achatamentoZneg) * 0.5);
+
+          const dx = px / sx;
+          const dy = py / sy;
+          const dz = pz / sz;
+          const dist = Math.sqrt(dx * dx + dy * dy + dz * dz);
+
+          const ex = dx + 0.0001;
+          const ey = dy + 0.0001;
+          const ez = dz + 0.0001;
+          const len = Math.sqrt(ex * ex + ey * ey + ez * ez);
+          const dirX = ex / len;
+          const dirY = ey / len;
+          const dirZ = ez / len;
+
+          const nP = mainNoise(_v.set(
+            dirX * p.frequenciaRuido,
+            dirY * p.frequenciaRuido,
+            dirZ * p.frequenciaRuido,
+          ));
+          const nD = detailNoise(_v.set(
+            dirX * p.frequenciaRuidoDetalhe,
+            dirY * p.frequenciaRuidoDetalhe,
+            dirZ * p.frequenciaRuidoDetalhe,
+          ));
+
+          const sdf = p.raio + nP * p.forcaRuido + nD * p.forcaRuidoDetalhe - dist;
+          data[index++] = Math.floor(smoothstepJS(0, p.maskSoftness, sdf) * 255);
+        }
+      }
+    }
+
+    if (maskVolumeTexture) maskVolumeTexture.dispose();
+    maskVolumeTexture = new THREE.Data3DTexture(data, size, size, size);
+    maskVolumeTexture.format = THREE.RedFormat;
+    maskVolumeTexture.minFilter = THREE.LinearFilter;
+    maskVolumeTexture.magFilter = THREE.LinearFilter;
+    maskVolumeTexture.unpackAlignment = 1;
+    maskVolumeTexture.needsUpdate = true;
+    maskVolumeTex.value = maskVolumeTexture;
+  }
+
+  bakeMaskVolume3D();
 
   const textureLoader = new THREE.TextureLoader();
   const blueNoiseUrl = new URL("../../../assets/HDR_L_0.png", import.meta.url).href;
@@ -437,34 +485,15 @@ export async function createVolumetricCloudSystemOptimized({
   const uOccMaxSteps = uniform(
     Math.max(4, Math.min(MAX_OCC_LOOP, Math.round(p0.occlusionRaymarchSteps ?? 12))),
   );
+  const uTemporalBlendFactor = uniform(p0.temporalBlendFactor ?? 0.92);
+  const uTemporalFrame = uniform(0);
+  const uReprojectMatrix = uniform(new THREE.Matrix4());
+  const uCloudResolution = uniform(new THREE.Vector2(cw, ch));
 
-  const u_mask_raio = uniform(p0.raio);
-  const u_mask_achatamentoCima = uniform(p0.achatamentoCima);
-  const u_mask_achatamentoBaixo = uniform(p0.achatamentoBaixo);
-  const u_mask_achatamentoXpos = uniform(p0.achatamentoXpos);
-  const u_mask_achatamentoXneg = uniform(p0.achatamentoXneg);
-  const u_mask_achatamentoZpos = uniform(p0.achatamentoZpos);
-  const u_mask_achatamentoZneg = uniform(p0.achatamentoZneg);
-  const u_mask_softness = uniform(p0.maskSoftness);
-  const u_mask_forcaRuido = uniform(p0.forcaRuido);
-  const u_mask_forcaRuidoDetalhe = uniform(p0.forcaRuidoDetalhe);
   const u_mask_visualize = uniform(p0.visualizeMask ? 1 : 0);
 
-  const maskTex = texture3D(maskTexture, null, 0);
-  const detailMaskTex = texture3D(detailMaskTexture, null, 0);
-
   function rebuildMaskTextures() {
-    const p = toolState.volumetricCloudOptimized;
-    if (maskTexture) maskTexture.dispose();
-    if (detailMaskTexture) detailMaskTexture.dispose();
-    maskTexture = buildMaskTexture3D(128, p.frequenciaRuido, p.maskSeed);
-    detailMaskTexture = buildMaskTexture3D(
-      128,
-      p.frequenciaRuidoDetalhe,
-      p.seedDetalhe,
-    );
-    maskTex.value = maskTexture;
-    detailMaskTex.value = detailMaskTexture;
+    bakeMaskVolume3D();
   }
 
   const hitBox = Fn(({ orig, dir }) => {
@@ -510,55 +539,8 @@ export async function createVolumetricCloudSystemOptimized({
   );
   const vDirectionVar = varying(positionGeometry.sub(vOriginVar));
 
-  const getMaskFactor = Fn(([p]) => {
-    const sy = u_mask_achatamentoCima
-      .add(u_mask_achatamentoBaixo)
-      .mul(0.5)
-      .add(
-        p.y
-          .sign()
-          .mul(u_mask_achatamentoCima.sub(u_mask_achatamentoBaixo))
-          .mul(0.5),
-      )
-      .max(0.05);
-    const sx = u_mask_achatamentoXpos
-      .add(u_mask_achatamentoXneg)
-      .mul(0.5)
-      .add(
-        p.x
-          .sign()
-          .mul(u_mask_achatamentoXpos.sub(u_mask_achatamentoXneg))
-          .mul(0.5),
-      )
-      .max(0.05);
-    const sz = u_mask_achatamentoZpos
-      .add(u_mask_achatamentoZneg)
-      .mul(0.5)
-      .add(
-        p.z
-          .sign()
-          .mul(u_mask_achatamentoZpos.sub(u_mask_achatamentoZneg))
-          .mul(0.5),
-      )
-      .max(0.05);
-    const pDistorted = vec3(p.x.div(sx), p.y.div(sy), p.z.div(sz));
-    const dist = length(pDistorted);
-    const dir = normalize(pDistorted.add(vec3(0.0001)));
-    const tex_coord = dir
-      .mul(u_mask_raio)
-      .mul(0.5)
-      .add(0.5)
-      .clamp(0.0, 1.0);
-    const noisePrincipal = maskTex.sample(tex_coord).r.mul(2.0).sub(1.0);
-    const noiseDet = detailMaskTex.sample(tex_coord).r.mul(2.0).sub(1.0);
-    const dispP = noisePrincipal.mul(u_mask_forcaRuido);
-    const dispD = noiseDet.mul(u_mask_forcaRuidoDetalhe);
-    const sdf = u_mask_raio.add(dispP).add(dispD).sub(dist);
-    return smoothstep(float(0.0), u_mask_softness, sdf);
-  });
-
   const getDensity = Fn(([p]) => {
-    const maskFactor = getMaskFactor(p);
+    const maskFactor = maskVolumeTex.sample(p.add(0.5)).r;
     const texCoord = p
       .add(0.5)
       .mul(uTextureTiling)
@@ -596,9 +578,10 @@ export async function createVolumetricCloudSystemOptimized({
     return exp(lightRayDensity.negate());
   });
 
+  const goldenRatio = float(0.61803398875);
   const blueNoiseSample = texture(
     blueNoise2D,
-    fract(screenUV.mul(uResolution).div(uBlueNoiseSize)),
+    fract(screenUV.mul(uResolution).div(uBlueNoiseSize).add(goldenRatio.mul(uTemporalFrame))),
   );
 
   const cloudColorNode = Fn(() => {
@@ -811,6 +794,61 @@ export async function createVolumetricCloudSystemOptimized({
   cloudCompositeMat.depthWrite = false;
   cloudCompositeMat.toneMapped = false;
 
+  const currentCloudTexRef = texture(cloudRT.texture);
+  const historyCloudTexRef = texture(historyRT_A.texture);
+
+  const temporalResolveNode = Fn(() => {
+    const rawUV = uv();
+    const flippedUV = vec2(rawUV.x, float(1.0).sub(rawUV.y));
+    const currentColor = texture(currentCloudTexRef, flippedUV).toVar();
+
+    const ndcXY = flippedUV.mul(2.0).sub(1.0);
+    const clipPos = vec4(ndcXY.x, ndcXY.y, float(0.0), float(1.0));
+    const prevClip = uReprojectMatrix.mul(clipPos);
+    const prevNDC = prevClip.xy.div(prevClip.w);
+    const prevScreenUV = prevNDC.mul(0.5).add(0.5);
+
+    const inBounds = prevScreenUV.x.greaterThanEqual(0.0)
+      .and(prevScreenUV.x.lessThanEqual(1.0))
+      .and(prevScreenUV.y.greaterThanEqual(0.0))
+      .and(prevScreenUV.y.lessThanEqual(1.0));
+
+    const velocity = length(prevScreenUV.sub(flippedUV));
+    const velocityReject = smoothstep(float(0.2), float(0.4), velocity);
+
+    const prevHistUV = vec2(prevScreenUV.x, float(1.0).sub(prevScreenUV.y));
+    const historyColor = texture(historyCloudTexRef, prevHistUV);
+
+    const texel = vec2(1.0).div(uCloudResolution);
+    const s00 = texture(currentCloudTexRef, flippedUV.add(vec2(-1, -1).mul(texel)));
+    const s10 = texture(currentCloudTexRef, flippedUV.add(vec2(0, -1).mul(texel)));
+    const s20 = texture(currentCloudTexRef, flippedUV.add(vec2(1, -1).mul(texel)));
+    const s01 = texture(currentCloudTexRef, flippedUV.add(vec2(-1, 0).mul(texel)));
+    const s11 = currentColor;
+    const s21 = texture(currentCloudTexRef, flippedUV.add(vec2(1, 0).mul(texel)));
+    const s02 = texture(currentCloudTexRef, flippedUV.add(vec2(-1, 1).mul(texel)));
+    const s12 = texture(currentCloudTexRef, flippedUV.add(vec2(0, 1).mul(texel)));
+    const s22 = texture(currentCloudTexRef, flippedUV.add(vec2(1, 1).mul(texel)));
+
+    const nMin = min(s00, min(s10, min(s20, min(s01, min(s11, min(s21, min(s02, min(s12, s22))))))));
+    const nMax = max(s00, max(s10, max(s20, max(s01, max(s11, max(s21, max(s02, max(s12, s22))))))));
+
+    const clampedHist = historyColor.clamp(nMin, nMax);
+
+    const blendFactor = uTemporalBlendFactor
+      .mul(inBounds.select(float(1.0), float(0.0)))
+      .mul(float(1.0).sub(velocityReject));
+
+    return mix(currentColor, clampedHist, blendFactor);
+  });
+
+  const temporalResolveMat = new THREE.MeshBasicNodeMaterial();
+  temporalResolveMat.colorNode = temporalResolveNode();
+  temporalResolveMat.blending = THREE.NoBlending;
+  temporalResolveMat.depthTest = false;
+  temporalResolveMat.depthWrite = false;
+  temporalResolveMat.toneMapped = false;
+
   const sunMaterial = new THREE.MeshBasicMaterial({
     color: 0xffe8cc,
     transparent: true,
@@ -863,8 +901,12 @@ export async function createVolumetricCloudSystemOptimized({
     occlusionTexForGodRays.value = occlusionRT.texture;
     godraysResultTex.value = godraysRT.texture;
     cloudRT.setSize(cw, ch);
+    historyRT_A.setSize(cw, ch);
+    historyRT_B.setSize(cw, ch);
     cloudTexForComposite.value = cloudRT.texture;
     uResolution.value.set(w, h);
+    uCloudResolution.value.set(cw, ch);
+    temporalFrameCount = 0;
   }
 
   function syncUniformsFromToolState() {
@@ -893,16 +935,6 @@ export async function createVolumetricCloudSystemOptimized({
     } else {
       uFogVolumeEnabled.value = 0;
     }
-    u_mask_raio.value = p.raio;
-    u_mask_achatamentoCima.value = p.achatamentoCima;
-    u_mask_achatamentoBaixo.value = p.achatamentoBaixo;
-    u_mask_achatamentoXpos.value = p.achatamentoXpos;
-    u_mask_achatamentoXneg.value = p.achatamentoXneg;
-    u_mask_achatamentoZpos.value = p.achatamentoZpos;
-    u_mask_achatamentoZneg.value = p.achatamentoZneg;
-    u_mask_softness.value = p.maskSoftness;
-    u_mask_forcaRuido.value = p.forcaRuido;
-    u_mask_forcaRuidoDetalhe.value = p.forcaRuidoDetalhe;
     u_mask_visualize.value = p.visualizeMask ? 1 : 0;
     cloudMesh.scale.setScalar(p.containerScale);
     const pv = toolState.volumetricCloudOptimized;
@@ -913,6 +945,7 @@ export async function createVolumetricCloudSystemOptimized({
     godRaysDensity.value = pv.godRaysDensity ?? 0.98;
     godRaysDecay.value = pv.godRaysDecay ?? 0.975;
     godRaysWeight.value = pv.godRaysWeight ?? 0.55;
+    uTemporalBlendFactor.value = pv.temporalBlendFactor ?? 0.92;
   }
 
   /**
@@ -1077,7 +1110,47 @@ export async function createVolumetricCloudSystemOptimized({
     scene.background = savedBg2;
     uResolution.value.set(w, h);
 
-    cloudTexForComposite.value = cloudRT.texture;
+    _currentVP.multiplyMatrices(camera.projectionMatrix, camera.matrixWorldInverse);
+
+    if (p.temporalEnabled) {
+      uTemporalFrame.value = temporalFrameCount % 16;
+      const writeRT = pingPongIndex === 0 ? historyRT_A : historyRT_B;
+      const readRT = pingPongIndex === 0 ? historyRT_B : historyRT_A;
+
+      currentCloudTexRef.value = cloudRT.texture;
+      historyCloudTexRef.value = readRT.texture;
+
+      if (temporalFrameCount > 0) {
+        _invCurrentVP.copy(_currentVP).invert();
+        _invCurrCloudWorld.copy(cloudMesh.matrixWorld).invert();
+        _reprojectMatrix.copy(prevVPMatrix)
+          .multiply(prevCloudWorldMatrix)
+          .multiply(_invCurrCloudWorld)
+          .multiply(_invCurrentVP);
+        uReprojectMatrix.value.copy(_reprojectMatrix);
+      }
+
+      const savedBlend = uTemporalBlendFactor.value;
+      if (temporalFrameCount === 0) uTemporalBlendFactor.value = 0;
+
+      postQuad.material = temporalResolveMat;
+      renderer.setRenderTarget(writeRT);
+      renderer.clear();
+      renderer.render(postScene, postCam);
+
+      if (temporalFrameCount === 0) uTemporalBlendFactor.value = savedBlend;
+
+      cloudTexForComposite.value = writeRT.texture;
+      prevVPMatrix.copy(_currentVP);
+      prevCloudWorldMatrix.copy(cloudMesh.matrixWorld);
+      pingPongIndex = 1 - pingPongIndex;
+      temporalFrameCount++;
+    } else {
+      cloudTexForComposite.value = cloudRT.texture;
+      temporalFrameCount = 0;
+      uTemporalFrame.value = 0;
+    }
+
     postQuad.material = cloudCompositeMat;
     renderer.autoClear = false;
     renderer.setRenderTarget(finalRT);
@@ -1118,11 +1191,18 @@ export async function createVolumetricCloudSystemOptimized({
     cloudCompositeMat.dispose();
     postQuad.geometry.dispose();
     volumeTexture.dispose();
-    maskTexture.dispose();
-    detailMaskTexture.dispose();
+    maskVolumeTexture.dispose();
     depthPlaceholder.dispose();
     cloudRT.dispose();
+    historyRT_A.dispose();
+    historyRT_B.dispose();
+    temporalResolveMat.dispose();
     if (blueNoise2D?.dispose) blueNoise2D.dispose();
+  }
+
+  function resetTemporalHistory() {
+    temporalFrameCount = 0;
+    pingPongIndex = 0;
   }
 
   return {
@@ -1132,6 +1212,7 @@ export async function createVolumetricCloudSystemOptimized({
     setDepthTargetSize: resizeAllRenderTargets,
     rebuildVolume: bakeVolume3D,
     rebuildMaskTextures,
+    resetTemporalHistory,
     dispose,
   };
 }

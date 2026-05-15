@@ -287,6 +287,9 @@ export const V2_CONFIG = {
     cloudBufferScale: 0.5,
     /** Occlusion-only raymarch steps (≤32, shader loop cap). */
     occlusionRaymarchSteps: 12,
+    /** Temporal reprojection: reuse previous frame's cloud result where valid. */
+    temporalEnabled: true,
+    temporalBlendFactor: 0.92,
   },
 };
 

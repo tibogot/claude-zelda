@@ -3584,6 +3584,9 @@ export async function startV2App(opts = {}) {
       volumetricCloudSystem?.setDepthTargetSize?.();
       volumetricCloudSystemOptimized?.setDepthTargetSize?.();
     },
+    resetTemporalCloudHistory() {
+      volumetricCloudSystemOptimized?.resetTemporalHistory?.();
+    },
     dispose() {
       renderer.domElement.removeEventListener("wheel", onCanvasWheelBrush, { capture: true });
       if (csm) {
