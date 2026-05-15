@@ -3,7 +3,7 @@
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <title>Brick arch door + adaptive wall — WebGPU + TSL</title>
+    <title>Brick arch, wall, bridge — WebGPU + TSL</title>
     <style>
       body {
         margin: 0;
@@ -185,6 +185,7 @@
       const _doorBy = new THREE.Vector3();
       const _doorBz = new THREE.Vector3();
       const _yAxis = new THREE.Vector3(0, 1, 0);
+      const _layoutEuler = new THREE.Euler();
 
       /** Per-instance: x=shape mix, y=warp strength, z=grey key, w=grain phase */
       function setBrickVarAt(mesh, index, shapeMix, warp, grey, grain) {
@@ -289,12 +290,22 @@
           brickD: 0.55,
           brickRound: 0.01,
           spacingMul: 1.02,
+          /**
+           * bricks-castle–like masonry noise (repeatably seeded via colorSeed).
+           * Independent random per axis on scale; small rotation / position slip.
+           */
+          brickScaleRandomness: 0.26,
+          brickRotationVariation: 0.05,
+          brickVerticalVariation: 0.065,
+          brickPlanarSlop: 0.02,
+          /** Cylinder / round gate: in–out radius wobble (world units). */
+          brickRadiusVariation: 0.09,
           maxBricks: 2200,
           maxWallBricks: 22000,
           colorSeed: 31415,
           showGrid: true,
 
-          /** "wall" | "tower" (square) | "towerRound" — same door params; round uses `towerHalfWidth` as cylinder radius */
+          /** "wall" | "tower" | "towerRound" | "bridge" — bridge = long deck + two side walls + 3 arches each side */
           sceneMode: "wall",
           towerHalfWidth: 3.6,
           towerHeight: 10.5,
@@ -314,6 +325,18 @@
           wallHeight: 6.2,
           wallDepth: 0.62,
           wallZ: -0.22,
+          /** Total span along X (three arches + piers) for `sceneMode === "bridge"`. */
+          bridgeLength: 34,
+          /** Half clear width between inner wall faces (walkable deck in Z). */
+          bridgeDeckHalfW: 2.4,
+          /** Vertical courses for the flat deck slab (running bond in XZ). */
+          bridgeDeckCourses: 4,
+          /**
+           * Lowers the walkable deck from the pier crown (world +Y). Side walls stay full `wallHeight`;
+           * use for parapet / walls above the deck. 0 = deck flush with top courses (current default).
+           */
+          bridgeDeckDropY: 0,
+
           wallMortar: 0.011,
           wallSeamInset: 0.038,
           wallEdgeBlendBw: 4.2,
@@ -333,7 +356,7 @@
           archRingDepthScale: 1.09,
           showArchGizmo: true,
 
-          /** Master: run falling-brick sim + auto erosion (slider). */
+          /** Master: falling-brick sim + live erosion slider (no time-based erosion animation). */
           destructionEnabled: false,
           /** "none" | "destruct" — LMB blasts only the mesh you hit (wall vs gate ring). */
           destructionMode: "none",
@@ -346,20 +369,69 @@
           maxDebrisCount: 800,
           sleepThreshold: 0.42,
           /**
-           * Max extra bricks that may start falling from structural collapse after one blast.
-           * 0 = auto from blast radius (tight, castle-like). Higher = bigger “first click” ripples.
+           * When false, blast / collapse debris (falling + settled) is drawn off-screen at tiny scale;
+           * physics keeps running. Erosion brick copies and decorative gravel are separate.
+           */
+          showRubble: true,
+          /**
+           * Max bricks that may **start** falling from structural collapse in one blast (0 = unlimited,
+           * same idea as bricks-castle). Lower values reduce huge chain reactions on intact walls.
            */
           collapseSpreadMax: 0,
           /**
-           * 0 = off. >0 = continuous auto "virtual clicks" from the highest bricks downward,
-           * same blast radius as LMB but only on the mesh of each chosen top brick (like gentle clicking).
+           * 0…1 = fraction of bricks removed **instantly** (top → bottom by world Y), live with the slider.
+           * Does not use the physics step; sim can be off. Rebuild resets order / originals.
            */
           erosion: 0,
+          /**
+           * When true, each brick removed by the erosion slider is drawn again as a full brick instance
+           * on the ground (same shape/material/shader variation as LMB debris, but placed at rest — no sim).
+           */
+          erosionPlaceBrickDebris: true,
+          /** Max instanced brick copies for erosion ground debris (performance cap). */
+          erosionBrickDebrisMax: 2800,
+          /**
+           * Optional extra: small decorative gravel instanced as boxes (not the same as brick debris).
+           * Off by default; kept for later experiments.
+           */
+          erosionGroundRubble: false,
+          /** Decorative gravel: chunks per hidden brick at erosion = 1 (capped by `erosionRubbleMax`). */
+          erosionRubblePerBrick: 2.35,
+          /** Decorative gravel: max instanced pieces. */
+          erosionRubbleMax: 720,
 
           /** Directional sun (shadows). Hemisphere sky/ground fill — same idea as bricks-castle3.html */
           sunIntensity: 2.35,
           ambientIntensity: 0.55,
         };
+
+        /** bricks-castle.html–style per-brick layout noise (uses `params`, `rnd` from builders). */
+        function applyBrickAxisScaleNoise(tmpO, rnd, doorTight) {
+          const r = params.brickScaleRandomness || 0;
+          if (r <= 0) return;
+          const t = doorTight ? 0.55 : 1;
+          const f = () => 1 + (rnd() - 0.5) * r * t;
+          tmpO.scale.x *= f();
+          tmpO.scale.y *= f();
+          tmpO.scale.z *= f();
+        }
+
+        function applyBrickPlacementNoise(tmpO, rnd, doorTight) {
+          const t = doorTight ? 0.52 : 1;
+          const rv = (params.brickRotationVariation || 0) * t;
+          if (rv > 0) {
+            tmpO.rotation.x += (rnd() - 0.5) * rv;
+            tmpO.rotation.y += (rnd() - 0.5) * rv;
+            tmpO.rotation.z += (rnd() - 0.5) * rv;
+          }
+          const vy = (params.brickVerticalVariation || 0) * t;
+          if (vy > 0) tmpO.position.y += (rnd() - 0.5) * vy;
+          const ps = (params.brickPlanarSlop || 0) * t;
+          if (ps > 0) {
+            tmpO.position.x += (rnd() - 0.5) * ps;
+            tmpO.position.z += (rnd() - 0.5) * ps;
+          }
+        }
 
         const renderer = new THREE.WebGPURenderer({ antialias: true });
         renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, 2));
@@ -506,6 +578,8 @@
         let wallMesh = null;
         /** Instanced arch ring in tower mode (single gate). */
         let towerDoorMeshes = [];
+        /** Three arch rings × two sides for `sceneMode === "bridge"`. */
+        let bridgeArchMeshes = [];
         let archPivot = null;
         /** Child of `archPivot`; TransformControls attach here so local Z = depth (wall-like). */
         let archGizmoTarget = null;
@@ -533,7 +607,12 @@
         const _invMeshW = new THREE.Matrix4();
         const _wmPos = new THREE.Vector3();
         const _wmPos2 = new THREE.Vector3();
-        let erosionAccum = 0;
+        /** Top→down order for live erosion (rebuilt with destruct registry). */
+        let erosionOrderBricks = [];
+        /** Instanced decorative chunks for erosion (not part of destruct sim). */
+        let erosionRubbleMesh = null;
+        /** Full-brick copies on the ground for erosion (same geo/mat as masonry; no physics). */
+        let erosionBrickDebrisMesh = null;
 
         function getGateX() {
           return params.archAlong;
@@ -571,6 +650,19 @@
             );
             return;
           }
+          if (isBridge()) {
+            const R_in = Math.max(0.08, params.doorInnerHalfW);
+            const R_out = R_in + Math.max(0.05, params.masonryShell);
+            const halfL = Math.max(2, params.bridgeLength) * 0.5;
+            const margin = 0.35;
+            const lim = Math.max(0.2, halfL - R_out - margin);
+            params.archAlong = THREE.MathUtils.clamp(
+              params.archAlong,
+              -lim,
+              lim,
+            );
+            return;
+          }
           const R_in = Math.max(0.08, params.doorInnerHalfW);
           const R_out = R_in + Math.max(0.05, params.masonryShell);
           const halfW = params.wallWidth * 0.5;
@@ -591,6 +683,16 @@
               ? params.brickD * 1.1
               : params.wallDepth,
           );
+          if (isBridge()) {
+            const lim =
+              params.bridgeDeckHalfW + params.wallDepth * 1.1 + 0.55;
+            params.archAlongZ = THREE.MathUtils.clamp(
+              params.archAlongZ,
+              -lim,
+              lim,
+            );
+            return;
+          }
           const lim =
             params.sceneMode === "tower" || params.sceneMode === "towerRound"
               ? d * 0.65 + 0.5
@@ -608,11 +710,13 @@
           const R_out = R_in + Math.max(0.05, params.masonryShell);
           const leg = Math.max(0.05, params.legHeight);
           const w0 =
-            params.sceneMode === "tower" || params.sceneMode === "towerRound"
+            params.sceneMode === "tower" ||
+            params.sceneMode === "towerRound"
               ? params.towerAnchorY
               : params.wallAnchorY;
           const w1 =
-            params.sceneMode === "tower" || params.sceneMode === "towerRound"
+            params.sceneMode === "tower" ||
+            params.sceneMode === "towerRound"
               ? params.towerAnchorY +
                 params.towerHeight +
                 (params.towerBattlements ? params.towerMerlonLift * 0.35 : 0)
@@ -653,6 +757,31 @@
         }
         function isAnyTower() {
           return isSquareTower() || isRoundTower();
+        }
+
+        function isBridge() {
+          return params.sceneMode === "bridge";
+        }
+
+        function applyBridgeDefaults() {
+          params.wallEnabled = true;
+          params.closeBottom = false;
+          params.wallZ = 0;
+          params.bridgeLength = Math.max(params.bridgeLength, 32);
+          params.bridgeDeckHalfW = Math.max(params.bridgeDeckHalfW, 2.35);
+          params.bridgeDeckCourses = THREE.MathUtils.clamp(
+            Math.round(params.bridgeDeckCourses) || 4,
+            2,
+            12,
+          );
+          params.wallWidth = Math.max(params.wallWidth, params.bridgeLength);
+          params.maxWallBricks = Math.max(params.maxWallBricks, 52000);
+          params.doorInnerHalfW = Math.max(params.doorInnerHalfW, 1.85);
+          params.legHeight = Math.max(params.legHeight, 1.45);
+          params.masonryShell = Math.max(params.masonryShell, 0.48);
+          params.wallHeight = Math.max(params.wallHeight, 7.4);
+          params.wallDepth = Math.max(params.wallDepth, 0.68);
+          params.archRingDepthScale = Math.max(params.archRingDepthScale, 1.06);
         }
 
         /** Gate azimuth (radians) on round tower; codes match `towerGateFace` (0 +X … 3 −Z). */
@@ -1003,6 +1132,11 @@
             if (m.geometry) m.geometry.dispose();
           });
           towerDoorMeshes = [];
+          bridgeArchMeshes.forEach((m) => {
+            scene.remove(m);
+            if (m.geometry) m.geometry.dispose();
+          });
+          bridgeArchMeshes = [];
           if (doorMesh) {
             scene.remove(doorMesh);
             if (doorMesh.geometry) doorMesh.geometry.dispose();
@@ -1013,6 +1147,24 @@
             if (wallMesh.geometry) wallMesh.geometry.dispose();
             wallMesh = null;
           }
+          disposeErosionRubbleMesh();
+          disposeErosionBrickDebrisMesh();
+        }
+
+        function disposeErosionBrickDebrisMesh() {
+          if (!erosionBrickDebrisMesh) return;
+          scene.remove(erosionBrickDebrisMesh);
+          if (erosionBrickDebrisMesh.geometry) {
+            erosionBrickDebrisMesh.geometry.dispose();
+          }
+          erosionBrickDebrisMesh = null;
+        }
+
+        function disposeErosionRubbleMesh() {
+          if (!erosionRubbleMesh) return;
+          scene.remove(erosionRubbleMesh);
+          if (erosionRubbleMesh.geometry) erosionRubbleMesh.geometry.dispose();
+          erosionRubbleMesh = null;
         }
 
         function getDestructMeshes() {
@@ -1022,6 +1174,9 @@
           for (const m of towerDoorMeshes) {
             if (m && m.count > 0) out.push(m);
           }
+          for (const m of bridgeArchMeshes) {
+            if (m && m.count > 0) out.push(m);
+          }
           return out;
         }
 
@@ -1029,7 +1184,8 @@
         function isArchRingInstancedMesh(mesh) {
           if (!mesh) return false;
           if (doorMesh && mesh === doorMesh) return true;
-          return towerDoorMeshes.includes(mesh);
+          if (towerDoorMeshes.includes(mesh)) return true;
+          return bridgeArchMeshes.includes(mesh);
         }
 
         function markDestructMeshesDirty() {
@@ -1062,7 +1218,7 @@
         function rebuildDestructRegistry() {
           destructBricks.length = 0;
           debrisSleepCounter = 0;
-          erosionAccum = 0;
+          erosionOrderBricks = [];
           for (const mesh of getDestructMeshes()) {
             const n = mesh.count;
             for (let i = 0; i < n; i++) {
@@ -1078,6 +1234,11 @@
                 angularVelocity: new THREE.Vector3(),
                 rotation: new THREE.Vector3(_dEul.x, _dEul.y, _dEul.z),
                 scale: new THREE.Vector3().copy(_dScl),
+                origPosition: new THREE.Vector3().copy(_dPos),
+                origRotation: new THREE.Vector3(_dEul.x, _dEul.y, _dEul.z),
+                origScale: new THREE.Vector3().copy(_dScl),
+                userBlast: false,
+                erosionHidden: false,
                 falling: false,
                 removed: false,
                 hidden: false,
@@ -1087,6 +1248,60 @@
               });
             }
           }
+          erosionOrderBricks = destructBricks.slice();
+          for (const m of getDestructMeshes()) {
+            m.updateMatrixWorld(true);
+          }
+          erosionOrderBricks.sort((a, z) => {
+            brickWorldPosition(a, _wmPos);
+            brickWorldPosition(z, _wmPos2);
+            return _wmPos2.y - _wmPos.y;
+          });
+          applyLiveErosionFromSlider();
+        }
+
+        /**
+         * Slider `params.erosion` in [0,1]: instant hide of the highest bricks (no blast / collapse / frame animation).
+         * Bricks removed by LMB (`userBlast`) are left alone. Dragging down restores erosion-only bricks.
+         */
+        function applyLiveErosionFromSlider() {
+          if (!erosionOrderBricks.length) {
+            syncErosionBrickDebrisOnGround();
+            syncErosionGroundRubble();
+            return;
+          }
+          const frac = THREE.MathUtils.clamp(params.erosion, 0, 1);
+          const n = erosionOrderBricks.length;
+          const target = Math.round(frac * n);
+          for (let i = 0; i < n; i++) {
+            const b = erosionOrderBricks[i];
+            if (b.userBlast) continue;
+            if (i < target) {
+              if (!b.erosionHidden && !b.falling) {
+                b.removed = true;
+                b.falling = false;
+                b.erosionHidden = true;
+                hideDestructEntry(b);
+              }
+            } else if (b.erosionHidden) {
+              b.position.copy(b.origPosition);
+              b.rotation.copy(b.origRotation);
+              b.scale.copy(b.origScale);
+              b.removed = false;
+              b.hidden = false;
+              b.erosionHidden = false;
+              b.velocity.set(0, 0, 0);
+              b.angularVelocity.set(0, 0, 0);
+              b.sleeping = false;
+              b.sleepOrder = 0;
+              b.ttl = params.debrisLifetime;
+              composeBrickInstanceMatrix(b, _instLocal);
+              b.mesh.setMatrixAt(b.index, _instLocal);
+            }
+          }
+          markDestructMeshesDirty();
+          syncErosionBrickDebrisOnGround();
+          syncErosionGroundRubble();
         }
 
         function hideDestructEntry(b) {
@@ -1102,12 +1317,325 @@
           b.mesh.setMatrixAt(b.index, _destructObj.matrix);
         }
 
+        /** Visual-only hide for debris when `showRubble` is off (does not set `b.hidden`). */
+        function writeRubbleHiddenMatrix(b) {
+          _destructObj.position.set(0, -9999, 0);
+          _destructObj.rotation.set(0, 0, 0);
+          _destructObj.scale.set(0.001, 0.001, 0.001);
+          _destructObj.updateMatrix();
+          b.mesh.setMatrixAt(b.index, _destructObj.matrix);
+        }
+
+        function isPhysicalDebrisBrick(b) {
+          return (
+            b.removed &&
+            !b.erosionHidden &&
+            !b.hidden &&
+            (b.falling || b.sleeping)
+          );
+        }
+
+        function refreshRubbleMatrices() {
+          if (!destructBricks.length) return;
+          let updatedAny = false;
+          for (const b of destructBricks) {
+            if (!isPhysicalDebrisBrick(b)) continue;
+            if (params.showRubble) {
+              composeBrickInstanceMatrix(b, _instLocal);
+              b.mesh.setMatrixAt(b.index, _instLocal);
+            } else {
+              writeRubbleHiddenMatrix(b);
+            }
+            updatedAny = true;
+          }
+          if (updatedAny) markDestructMeshesDirty();
+        }
+
+        const EROSION_RUBBLE_MESH_CAP = 1400;
+
+        function getErosionRubbleSpreadWorld() {
+          const gy = ground ? ground.position.y : 0;
+          const y = gy + Math.max(0.015, params.brickH * 0.07);
+          if (isAnyTower()) {
+            const R = Math.max(0.45, params.towerHalfWidth) + 1.15;
+            return { mode: "disk", cx: 0, cz: 0, R, y };
+          }
+          return {
+            mode: "box",
+            cx: params.archAlong,
+            cz: params.wallZ,
+            halfWx: Math.max(1.1, params.wallWidth * 0.5 + params.brickW * 1.1),
+            halfZ: isBridge()
+              ? Math.max(
+                  1.0,
+                  params.bridgeDeckHalfW +
+                    params.wallDepth * 1.25 +
+                    params.brickD * 1.1,
+                )
+              : Math.max(
+                  0.55,
+                  params.wallDepth * 0.5 +
+                    Math.abs(params.wallZ) * 0.35 +
+                    params.brickD * 0.75,
+                ),
+            y,
+          };
+        }
+
+        function ensureErosionRubbleMesh() {
+          if (erosionRubbleMesh) return;
+          ensureBrickMaterial();
+          if (!brickMat) return;
+          const rubbleBox = new THREE.BoxGeometry(0.26, 0.19, 0.24);
+          const g = createInstancedBrickGeometry(rubbleBox, EROSION_RUBBLE_MESH_CAP);
+          erosionRubbleMesh = new THREE.InstancedMesh(
+            g,
+            brickMat,
+            EROSION_RUBBLE_MESH_CAP,
+          );
+          erosionRubbleMesh.instanceMatrix.setUsage(THREE.DynamicDrawUsage);
+          erosionRubbleMesh.castShadow = true;
+          erosionRubbleMesh.receiveShadow = true;
+          erosionRubbleMesh.count = 0;
+          erosionRubbleMesh.name = "erosionGroundRubble";
+          scene.add(erosionRubbleMesh);
+        }
+
+        /**
+         * Decorative ground rubble count/poses from erosion slider (deterministic per index).
+         * No CPU physics; same brick material as masonry.
+         */
+        function syncErosionGroundRubble() {
+          if (!params.erosionGroundRubble || !erosionOrderBricks.length) {
+            if (erosionRubbleMesh) {
+              erosionRubbleMesh.count = 0;
+              erosionRubbleMesh.visible = false;
+            }
+            return;
+          }
+          const frac = THREE.MathUtils.clamp(params.erosion, 0, 1);
+          const n = erosionOrderBricks.length;
+          const capCount = THREE.MathUtils.clamp(
+            Math.round(params.erosionRubbleMax) || 720,
+            1,
+            EROSION_RUBBLE_MESH_CAP,
+          );
+          let count = Math.round(frac * n * params.erosionRubblePerBrick);
+          count = Math.min(count, capCount);
+          if (frac > 1e-6 && count < 1) count = 1;
+          if (frac < 1e-6) count = 0;
+          if (count < 1) {
+            if (erosionRubbleMesh) {
+              erosionRubbleMesh.count = 0;
+              erosionRubbleMesh.visible = false;
+            }
+            return;
+          }
+          ensureBrickMaterial();
+          ensureErosionRubbleMesh();
+          if (!erosionRubbleMesh) return;
+          const spread = getErosionRubbleSpreadWorld();
+          for (let k = 0; k < count; k++) {
+            const rnd = mulberry32(
+              ((params.colorSeed ^ 0x9e3779b9) >>> 0) + k * 2654435761,
+            );
+            let x;
+            let z;
+            if (spread.mode === "disk") {
+              const u = rnd() * Math.PI * 2;
+              const r = Math.sqrt(rnd()) * spread.R;
+              x = spread.cx + Math.cos(u) * r;
+              z = spread.cz + Math.sin(u) * r;
+            } else {
+              x = spread.cx + (rnd() * 2 - 1) * spread.halfWx;
+              z = spread.cz + (rnd() * 2 - 1) * spread.halfZ;
+            }
+            const y = spread.y + (rnd() - 0.5) * 0.05;
+            tmpO.position.set(x, y, z);
+            tmpO.rotation.set(
+              (rnd() - 0.5) * 0.85,
+              rnd() * Math.PI * 2,
+              (rnd() - 0.5) * 0.85,
+            );
+            const s = params.brickW * (0.2 + rnd() * 0.38);
+            tmpO.scale.set(
+              s * (0.82 + rnd() * 0.36),
+              s * (0.5 + rnd() * 0.42),
+              s * (0.78 + rnd() * 0.34),
+            );
+            tmpO.updateMatrix();
+            erosionRubbleMesh.setMatrixAt(k, tmpO.matrix);
+            setBrickVarAt(
+              erosionRubbleMesh,
+              k,
+              rnd() * 0.38 + 0.18,
+              0.22 + rnd() * 0.42,
+              0.28 + rnd() * 0.52,
+              rnd(),
+            );
+          }
+          erosionRubbleMesh.count = count;
+          erosionRubbleMesh.visible = true;
+          erosionRubbleMesh.instanceMatrix.needsUpdate = true;
+          const bv = erosionRubbleMesh.geometry.getAttribute("brickVar");
+          if (bv) bv.needsUpdate = true;
+        }
+
+        const EROSION_BRICK_DEBRIS_CAP = 8000;
+
+        function erosionBrickDebrisMeshTag(b) {
+          if (b.mesh === wallMesh) return 1;
+          if (b.mesh === doorMesh) return 2;
+          let ti = towerDoorMeshes.indexOf(b.mesh);
+          if (ti >= 0) return 20 + ti;
+          ti = bridgeArchMeshes.indexOf(b.mesh);
+          return 40 + (ti >= 0 ? ti : 0);
+        }
+
+        function ensureErosionBrickDebrisMesh() {
+          if (erosionBrickDebrisMesh) return;
+          ensureBrickMaterial();
+          ensureBrickGeometry(false);
+          if (!brickGeo || !brickMat) return;
+          const g = createInstancedBrickGeometry(brickGeo, EROSION_BRICK_DEBRIS_CAP);
+          erosionBrickDebrisMesh = new THREE.InstancedMesh(
+            g,
+            brickMat,
+            EROSION_BRICK_DEBRIS_CAP,
+          );
+          erosionBrickDebrisMesh.instanceMatrix.setUsage(THREE.DynamicDrawUsage);
+          erosionBrickDebrisMesh.castShadow = true;
+          erosionBrickDebrisMesh.receiveShadow = true;
+          erosionBrickDebrisMesh.count = 0;
+          erosionBrickDebrisMesh.name = "erosionBrickDebris";
+          scene.add(erosionBrickDebrisMesh);
+        }
+
+        /**
+         * Full-brick copies on the ground for erosion-hidden bricks (same geometry/material/brickVar
+         * as the source instance; tumbled pose + XZ jitter; no physics).
+         */
+        function syncErosionBrickDebrisOnGround() {
+          if (!params.erosionPlaceBrickDebris || !erosionOrderBricks.length) {
+            if (erosionBrickDebrisMesh) {
+              erosionBrickDebrisMesh.count = 0;
+              erosionBrickDebrisMesh.visible = false;
+            }
+            return;
+          }
+          const list = [];
+          for (const b of erosionOrderBricks) {
+            if (!b.erosionHidden || b.userBlast) continue;
+            list.push(b);
+          }
+          const capCount = THREE.MathUtils.clamp(
+            Math.round(params.erosionBrickDebrisMax) || 2800,
+            1,
+            EROSION_BRICK_DEBRIS_CAP,
+          );
+          const show = list.slice(0, capCount);
+          if (show.length === 0) {
+            if (erosionBrickDebrisMesh) {
+              erosionBrickDebrisMesh.count = 0;
+              erosionBrickDebrisMesh.visible = false;
+            }
+            return;
+          }
+          ensureBrickMaterial();
+          ensureBrickGeometry(false);
+          ensureErosionBrickDebrisMesh();
+          if (!erosionBrickDebrisMesh) return;
+          const gy = ground ? ground.position.y : 0;
+          for (let k = 0; k < show.length; k++) {
+            const b = show[k];
+            b.mesh.updateMatrixWorld(true);
+            composeBrickInstanceMatrix(b, _instLocal);
+            _tmpBasisBrick.copy(b.mesh.matrixWorld).multiply(_instLocal);
+            _tmpBasisBrick.decompose(_dPos, _dQuat, _dScl);
+            const srcY = _dPos.y;
+            const rnd = mulberry32(
+              (((params.colorSeed ^ 0x3c6ef372) >>> 0) +
+                b.index * 1103515245 +
+                erosionBrickDebrisMeshTag(b) * 524287 +
+                k * 131071) >>>
+                0,
+            );
+            const fallDist = Math.max(0.08, srcY - gy);
+            /** Mimic LMB fallout: wider spread, farther for higher bricks, roll-out from façade / tower. */
+            const baseR =
+              params.brickW * (0.55 + rnd() * 1.15) +
+              fallDist * (0.38 + rnd() * 0.52);
+            const capR = isAnyTower()
+              ? params.towerHalfWidth * 1.35 + params.brickW * 2.2
+              : Math.max(
+                  params.wallWidth * 0.52,
+                  params.brickW * 8 + params.wallDepth * 3,
+                );
+            const scatterR = Math.min(capR, baseR + rnd() * params.brickW * 1.8);
+            const ang = rnd() * Math.PI * 2;
+            const rad = Math.sqrt(rnd()) * scatterR;
+            _dPos.x += Math.cos(ang) * rad;
+            _dPos.z += Math.sin(ang) * rad;
+            if (!isAnyTower()) {
+              _dPos.z += (rnd() - 0.22) * params.brickD * (1.15 + rnd() * 1.85);
+              _dPos.x += (rnd() - 0.5) * params.brickW * (0.65 + rnd() * 1.45);
+            } else {
+              const cx = _dPos.x;
+              const cz = _dPos.z;
+              const len = Math.hypot(cx, cz) + 1e-4;
+              const push = rnd() * (params.towerHalfWidth * 0.42 + params.brickW * 1.2);
+              _dPos.x += (cx / len) * push * (0.45 + rnd());
+              _dPos.z += (cz / len) * push * (0.45 + rnd());
+            }
+            _dPos.x += (rnd() - 0.5) * params.brickW * 0.55;
+            _dPos.z += (rnd() - 0.5) * params.brickD * 0.55;
+            const halfH = (params.brickH * 0.5) * Math.abs(_dScl.y);
+            _dPos.y =
+              gy +
+              halfH +
+              0.012 +
+              (rnd() - 0.5) * params.brickH * 0.06;
+            _layoutEuler.setFromQuaternion(_dQuat, "XYZ");
+            _layoutEuler.x += (rnd() - 0.5) * 1.05;
+            _layoutEuler.y += (rnd() - 0.5) * 1.12;
+            _layoutEuler.z += (rnd() - 0.5) * 1.05;
+            if (rnd() > 0.38) {
+              _layoutEuler.x += (rnd() - 0.5) * 0.55;
+              _layoutEuler.z += (rnd() - 0.5) * 0.55;
+            }
+            _dQuat.setFromEuler(_layoutEuler);
+            _instLocal.compose(_dPos, _dQuat, _dScl);
+            erosionBrickDebrisMesh.setMatrixAt(k, _instLocal);
+            const att = b.mesh.geometry.getAttribute("brickVar");
+            if (att && att.array) {
+              const o = b.index * 4;
+              const a = att.array;
+              setBrickVarAt(
+                erosionBrickDebrisMesh,
+                k,
+                a[o],
+                a[o + 1],
+                a[o + 2],
+                a[o + 3],
+              );
+            } else {
+              setBrickVarAt(erosionBrickDebrisMesh, k, 0.5, 0.28, 0.4, 0.5);
+            }
+          }
+          erosionBrickDebrisMesh.count = show.length;
+          erosionBrickDebrisMesh.visible = true;
+          erosionBrickDebrisMesh.instanceMatrix.needsUpdate = true;
+          const bvb = erosionBrickDebrisMesh.geometry.getAttribute("brickVar");
+          if (bvb) bvb.needsUpdate = true;
+        }
+
         /**
          * `hitPointWorld`: world-space point (bricks-castle uses the struck brick center).
          * `b.velocity` is integrated in **world** space; `b.position` stays instance-local.
          */
-        function startFallEntry(b, hitPointWorld) {
+        function startFallEntry(b, hitPointWorld, fromUserBlast = false) {
           if (!b || b.hidden || b.falling) return;
+          if (fromUserBlast) b.userBlast = true;
           b.removed = true;
           brickWorldPosition(b, _wmPos2);
           _dTmp.subVectors(_wmPos2, hitPointWorld);
@@ -1141,10 +1669,8 @@
          * Geometry-based support (running-bond walls are not on an integer lattice).
          * Uses world-space centers + a coarse 3D hash like ring adjacency in bricks-castle.
          *
-         * bricks-castle only removes unsupported bricks **along ring columns** (narrow coupling).
-         * Our 3D hash is looser; without a per-click cap the first intact wall/tower relaxes in one
-         * huge wave, then later clicks feel “precise”. `maxCollapseStarts` limits how many *extra*
-         * bricks may begin falling from collapse after the blast (blast radius is unchanged).
+         * bricks-castle runs this until nothing changes (no per-click cap). Optional
+         * `maxCollapseStarts` limits extra falls for performance / artistic control only.
          *
          * @param {THREE.Object3D|null} meshScope - If set, only bricks on this instanced mesh
          *   participate. Arch rings are handled separately (no collapse).
@@ -1158,16 +1684,16 @@
           const floorYW = groundY + params.brickH * 0.58;
           const rowH =
             params.brickH + Math.max(0.006, params.wallMortar || 0.012);
-          const maxDy = rowH * 1.06;
-          const minDy = 0.03;
-          const horizR = Math.max(params.brickW, params.brickD) * 0.52;
+          const maxDy = rowH * 1.12;
+          const minDy = 0.025;
+          const horizR = Math.max(params.brickW, params.brickD) * 0.56;
           const cellXZ = Math.max(0.07, params.brickW * 0.45);
           const cellY = Math.max(0.07, rowH * 0.52);
 
           let collapseStarts = 0;
           let changed = true;
           let guard = 0;
-          while (changed && guard++ < 48) {
+          while (changed && guard++ < 160) {
             changed = false;
             if (
               maxCollapseStarts != null &&
@@ -1208,7 +1734,7 @@
               const ix0 = Math.floor(_wmPos2.x / cellXZ);
               const iy0 = Math.floor(_wmPos2.y / cellY);
               const iz0 = Math.floor(_wmPos2.z / cellXZ);
-              outer: for (let diy = -3; diy <= -1; diy++) {
+              outer: for (let diy = -4; diy <= -1; diy++) {
                 for (let dix = -1; dix <= 1; dix++) {
                   for (let diz = -1; diz <= 1; diz++) {
                     const bucket = hash.get(
@@ -1261,7 +1787,7 @@
             if (b.removed || b.falling || b.hidden) continue;
             brickWorldPosition(b, _wmPos2);
             if (_wmPos2.distanceTo(hitPointWorld) < params.removeRadius) {
-              startFallEntry(b, hitPointWorld);
+              startFallEntry(b, hitPointWorld, true);
               any = true;
             }
           }
@@ -1270,15 +1796,11 @@
               blastMeshFilter == null ||
               !isArchRingInstancedMesh(blastMeshFilter)
             ) {
-              let cap;
-              if (params.collapseSpreadMax > 0) {
-                cap = Math.round(params.collapseSpreadMax);
-              } else {
-                cap = Math.min(
-                  56,
-                  Math.max(6, Math.round(4 + params.removeRadius * 14)),
-                );
-              }
+              /** null = bricks-castle style (run until stable). >0 caps collapse-initiated falls per blast. */
+              const cap =
+                params.collapseSpreadMax > 0
+                  ? Math.round(params.collapseSpreadMax)
+                  : null;
               triggerStructuralCollapseShowcase(blastMeshFilter, cap);
             } else {
               markDestructMeshesDirty();
@@ -1357,44 +1879,23 @@
               }
             }
             composeBrickInstanceMatrix(b, _instLocal);
-            b.mesh.setMatrixAt(b.index, _instLocal);
+            if (!params.showRubble && isPhysicalDebrisBrick(b)) {
+              writeRubbleHiddenMatrix(b);
+            } else {
+              b.mesh.setMatrixAt(b.index, _instLocal);
+            }
             updatedAny = true;
+          }
+          if (!params.showRubble) {
+            for (const b of destructBricks) {
+              if (!b.sleeping || b.hidden) continue;
+              if (!isPhysicalDebrisBrick(b)) continue;
+              writeRubbleHiddenMatrix(b);
+              updatedAny = true;
+            }
           }
           if (updatedAny) markDestructMeshesDirty();
           enforceDestructDebrisLimit();
-        }
-
-        function updateErosionTick(dt) {
-          if (!params.destructionEnabled || params.erosion < 1e-5) return;
-          /** ~0…2.2 “virtual LMB” events per second at erosion=1 (quadratic = gentler near 0). */
-          erosionAccum += dt * params.erosion * params.erosion * 2.2;
-          while (erosionAccum >= 1) {
-            erosionAccum -= 1;
-            const cand = [];
-            for (const b of destructBricks) {
-              if (b.removed || b.falling || b.hidden) continue;
-              cand.push(b);
-            }
-            if (!cand.length) {
-              erosionAccum = 0;
-              break;
-            }
-            cand.sort((a, z) => {
-              brickWorldPosition(a, _wmPos);
-              brickWorldPosition(z, _wmPos2);
-              return _wmPos2.y - _wmPos.y;
-            });
-            const b = cand[0];
-            brickWorldPosition(b, _wmPos);
-            _wmPos.add(
-              _wmPos2.set(
-                (Math.random() - 0.5) * params.brickW * 0.14,
-                (Math.random() - 0.5) * params.brickH * 0.07,
-                (Math.random() - 0.5) * params.brickD * 0.14,
-              ),
-            );
-            applyImpactAtPoint(_wmPos, b.mesh);
-          }
         }
 
         function ensureBrickMaterial() {
@@ -1573,6 +2074,16 @@
           if (isAnyTower()) {
             const ty = params.towerAnchorY + params.towerHeight * 0.42;
             controls.target.set(0, ty, 0);
+          } else if (isBridge()) {
+            const rp = ringParamsFromGui();
+            const midY =
+              (rp.springY + params.sillY) * 0.5 + rp.ringRadius * 0.42;
+            controls.target.set(0, midY, 0);
+            camera.position.set(
+              Math.max(10, params.bridgeLength * 0.48),
+              midY + 3.2,
+              params.bridgeDeckHalfW * 2.8 + 11,
+            );
           } else {
             const rp = ringParamsFromGui();
             const midY =
@@ -1817,6 +2328,8 @@
             }
             tmpO.position.set(bx, by, bz);
             tmpO.scale.set(v.sx, v.sy, v.sz);
+            applyBrickAxisScaleNoise(tmpO, rnd, false);
+            applyBrickPlacementNoise(tmpO, rnd, false);
             tmpO.updateMatrix();
             wallMesh.setMatrixAt(k, tmpO.matrix);
             setBrickVarAt(wallMesh, k, v.shapeMix, v.warp, v.grey, v.grain);
@@ -2089,10 +2602,13 @@
             if (k >= params.maxWallBricks) return false;
             const v = pickBrickVariation(rnd, sx, sy, sz, "wall");
             const rCyl = Rc - inset;
-            const px = Math.cos(theta) * rCyl;
-            const pz = Math.sin(theta) * rCyl;
+            const rJ = (params.brickRadiusVariation || 0) * (rnd() - 0.5);
+            const rUse = Math.max(0.06, rCyl + rJ);
+            const px = Math.cos(theta) * rUse;
+            const pz = Math.sin(theta) * rUse;
+            const yExtra = (params.brickVerticalVariation || 0) * (rnd() - 0.5) * 0.75;
             const yJ =
-              iyRow > 0 ? y + (rnd() - 0.5) * rowH * 0.045 : y;
+              (iyRow > 0 ? y + (rnd() - 0.5) * rowH * 0.045 : y) + yExtra;
             tmpO.position.set(px, yJ, pz);
             tmpO.quaternion.identity();
             tmpO.lookAt(px * 2, yJ, pz * 2);
@@ -2100,7 +2616,14 @@
             tmpO.rotateX((rnd() - 0.5) * 0.028);
             tmpO.rotateY((rnd() - 0.5) * 0.038);
             tmpO.rotateZ((rnd() - 0.5) * 0.028);
+            const rvExtra = params.brickRotationVariation || 0;
+            if (rvExtra > 0) {
+              tmpO.rotateX((rnd() - 0.5) * rvExtra);
+              tmpO.rotateY((rnd() - 0.5) * rvExtra);
+              tmpO.rotateZ((rnd() - 0.5) * rvExtra);
+            }
             tmpO.scale.set(v.sx, v.sy, v.sz);
+            applyBrickAxisScaleNoise(tmpO, rnd, false);
             tmpO.updateMatrix();
             wallMesh.setMatrixAt(k, tmpO.matrix);
             setBrickVarAt(wallMesh, k, v.shapeMix, v.warp, v.grey, v.grain);
@@ -2413,13 +2936,24 @@
                 params.archRingDepthScale,
               );
               if (isRoundTower()) {
-                const rs = Math.max(0.08, rSurfRound);
-                const thi = thC + x / rs;
+                const rs0 = Math.max(0.08, rSurfRound);
+                const rs = Math.max(
+                  0.06,
+                  rs0 + (rnd() - 0.5) * (params.brickRadiusVariation || 0),
+                );
+                const thi = thC + x / rs0;
                 const ci = Math.cos(thi);
                 const si = Math.sin(thi);
                 _tmpDoorPos.set(ci * rs, y, si * rs);
                 _doorTan.set(-si, 0, ci);
                 _doorOut.set(ci, 0, si);
+                const ps = (params.brickPlanarSlop || 0) * 0.38;
+                const vy = (params.brickVerticalVariation || 0) * 0.42;
+                if (ps > 0 || vy > 0) {
+                  _tmpDoorPos.addScaledVector(_doorTan, (rnd() - 0.5) * ps);
+                  _tmpDoorPos.addScaledVector(_doorOut, (rnd() - 0.5) * ps * 0.55);
+                  _tmpDoorPos.y += (rnd() - 0.5) * vy;
+                }
                 /**
                  * Flat ring: tangent (tx, ty) lies in ring X–Y = (cylinder tangent, world up).
                  * Build the same 3D direction on the curved shell, then a right-handed frame with
@@ -2432,13 +2966,33 @@
                 _doorBz.copy(_doorBx).cross(_doorBy).normalize();
                 _tmpBasisBrick.makeBasis(_doorBx, _doorBy, _doorBz);
                 _tmpDoorQuat.setFromRotationMatrix(_tmpBasisBrick);
+                const rv = (params.brickRotationVariation || 0) * 0.42;
+                if (rv > 0) {
+                  _layoutEuler.set(
+                    (rnd() - 0.5) * rv,
+                    (rnd() - 0.5) * rv,
+                    (rnd() - 0.5) * rv,
+                  );
+                  tmpO.quaternion.setFromEuler(_layoutEuler);
+                  _tmpDoorQuat.multiply(tmpO.quaternion);
+                }
                 _tmpDoorScale.set(v.sx, v.sy, v.sz);
+                const sr = params.brickScaleRandomness || 0;
+                if (sr > 0) {
+                  const t = 0.55;
+                  const f = () => 1 + (rnd() - 0.5) * sr * t;
+                  _tmpDoorScale.x *= f();
+                  _tmpDoorScale.y *= f();
+                  _tmpDoorScale.z *= f();
+                }
                 tmpO.matrix.compose(_tmpDoorPos, _tmpDoorQuat, _tmpDoorScale);
                 tmpM.multiplyMatrices(_invMeshDoor, tmpO.matrix);
               } else {
                 tmpO.position.set(x, y, 0);
                 tmpO.rotation.set(0, 0, yaw);
                 tmpO.scale.set(v.sx, v.sy, v.sz);
+                applyBrickAxisScaleNoise(tmpO, rnd, true);
+                applyBrickPlacementNoise(tmpO, rnd, true);
                 tmpO.updateMatrix();
                 tmpM.multiplyMatrices(ringRoot.matrixWorld, tmpO.matrix);
                 tmpM.premultiply(_invMeshDoor);
@@ -2468,7 +3022,451 @@
           });
         }
 
+        function computeBridgeArchCentersWorldX() {
+          const L = Math.max(6, params.bridgeLength);
+          const R_in = Math.max(0.08, params.doorInnerHalfW);
+          const margin = params.brickW * 2.5 + R_in * 0.25;
+          const usable = Math.max(L - 2 * margin, L * 0.42);
+          const step = usable / 4;
+          const x0 = -L * 0.5 + margin + step;
+          return [
+            x0,
+            x0 + step,
+            x0 + step * 2,
+          ].map((x) => x + params.archAlong);
+        }
+
+        /**
+         * One ∩ arch ring on a bridge side wall (local XY, mesh Z = wall plane + archAlongZ).
+         * @param {boolean} flipX — south wall: mirror ring in X about the pier center `gxc`.
+         */
+        function pushBridgeArchRingMesh(rp, gxc, zWorld, flipX, seedOff) {
+          if (!brickGeo) return;
+          const R = rp.ringRadius;
+          const Lu = pathULength(rp);
+          const Ls = params.closeBottom ? 2 * R : 0;
+          const jRing = THREE.MathUtils.clamp(
+            params.brickW * 0.022,
+            0.0045,
+            0.012,
+          );
+          const targetMod =
+            params.brickW *
+              THREE.MathUtils.clamp(params.spacingMul, 0.82, 1.08) +
+            jRing;
+          let nU = Math.max(5, Math.round(Lu / targetMod));
+          let nS = Ls > 0 ? Math.max(2, Math.round(Ls / targetMod)) : 0;
+          if (nU + nS > params.maxBricks) {
+            const room = params.maxBricks - nS;
+            nU = Math.max(4, Math.min(nU, room));
+            if (nU + nS > params.maxBricks)
+              nS = Math.max(0, params.maxBricks - nU);
+          }
+          const n = nU + nS;
+          const cap = Math.min(params.maxBricks, n + 8);
+          const doorGeo = createInstancedBrickGeometry(brickGeo, cap);
+          const mesh = new THREE.InstancedMesh(doorGeo, brickMat, cap);
+          mesh.castShadow = true;
+          mesh.receiveShadow = true;
+          const rnd = mulberry32(
+            ((params.colorSeed ^ 0x85ebca6b) + seedOff * 977) >>> 0,
+          );
+          let k = 0;
+          let alongU =
+            nU > 0 ? (Lu - Math.max(0, nU - 1) * jRing) / nU : params.brickW;
+          let alongS =
+            nS > 0 ? (Ls - Math.max(0, nS - 1) * jRing) / nS : params.brickW;
+          const minAlong = params.brickW * 0.44;
+          while (nU > 4 && alongU < minAlong) {
+            nU--;
+            alongU =
+              nU > 0 ? (Lu - Math.max(0, nU - 1) * jRing) / nU : params.brickW;
+          }
+          while (nS > 2 && alongS < minAlong) {
+            nS--;
+            alongS =
+              nS > 0 ? (Ls - Math.max(0, nS - 1) * jRing) / nS : params.brickW;
+          }
+          const placeBrick = (ox, y, tx, ty, along) => {
+            /**
+             * South wall (`flipX`): world X = gxc − ox mirrors the north ring about the pier.
+             * Tangents must mirror too: (tx, ty) → (−tx, ty) in the wall plane, else voussoirs
+             * stay north‑oriented and read as wrong twist / gaps.
+             */
+            const yaw = flipX ? Math.atan2(ty, -tx) : Math.atan2(ty, tx);
+            const baseSx = THREE.MathUtils.clamp(
+              along / params.brickW,
+              0.86,
+              1.12,
+            );
+            const baseSy = 0.94 + rnd() * 0.05;
+            const baseSz = 0.94 + rnd() * 0.05;
+            const v = pickBrickVariation(
+              rnd,
+              baseSx,
+              baseSy,
+              baseSz,
+              "door",
+              params.archRingDepthScale,
+            );
+            const lx = flipX ? gxc - ox : ox + gxc;
+            tmpO.position.set(lx, y, 0);
+            tmpO.rotation.set(0, 0, yaw);
+            tmpO.scale.set(v.sx, v.sy, v.sz);
+            applyBrickAxisScaleNoise(tmpO, rnd, true);
+            applyBrickPlacementNoise(tmpO, rnd, true);
+            tmpO.updateMatrix();
+            mesh.setMatrixAt(k, tmpO.matrix);
+            setBrickVarAt(mesh, k, v.shapeMix, v.warp, v.grey, v.grain);
+            k++;
+          };
+          for (let i = 0; i < nU; i++) {
+            const s = jRing * i + alongU * (i + 0.5);
+            const o = sampleUPath(s, rp);
+            placeBrick(o.x, o.y, o.tx, o.ty, alongU);
+          }
+          for (let i = 0; i < nS; i++) {
+            const s = jRing * i + alongS * (i + 0.5);
+            const o = sampleSill(s, R, rp.sillY);
+            placeBrick(o.x, o.y, o.tx, o.ty, alongS);
+          }
+          mesh.count = k;
+          mesh.instanceMatrix.needsUpdate = true;
+          const bv = mesh.geometry.getAttribute("brickVar");
+          if (bv) bv.needsUpdate = true;
+          mesh.position.set(0, 0, zWorld + params.archAlongZ);
+          mesh.rotation.set(0, 0, 0);
+          scene.add(mesh);
+          bridgeArchMeshes.push(mesh);
+        }
+
+        function buildBridgeArchRings() {
+          if (!brickGeo) return;
+          bridgeArchMeshes.forEach((m) => {
+            scene.remove(m);
+            if (m.geometry) m.geometry.dispose();
+          });
+          bridgeArchMeshes = [];
+          const rp = ringParamsFromGui();
+          const gxs = computeBridgeArchCentersWorldX();
+          const zn = -(params.bridgeDeckHalfW + params.wallDepth * 0.5);
+          const zs = params.bridgeDeckHalfW + params.wallDepth * 0.5;
+          let seed = 0;
+          for (const gxc of gxs) {
+            pushBridgeArchRingMesh(rp, gxc, zn, false, seed++);
+            pushBridgeArchRingMesh(rp, gxc, zs, true, seed++);
+          }
+        }
+
+        function buildBridgeInstances() {
+          if (!brickGeo) return;
+          const rp = ringParamsFromGui();
+          const R_in = Math.max(0.08, params.doorInnerHalfW);
+          const R_out = R_in + Math.max(0.05, params.masonryShell);
+          const doorSill = params.sillY;
+          const ys = rp.springY;
+          const seam = params.wallSeamInset;
+          const mortar = params.wallMortar;
+          const nomH = params.brickH;
+          const nomW = params.brickW;
+          const rowH = nomH + mortar;
+          const L = Math.max(6, params.bridgeLength);
+          const wallLo = -L * 0.5;
+          const wallHi = L * 0.5;
+          const wallBase = params.wallAnchorY;
+          const baseY = wallBase + mortar * 0.5 + nomH * 0.5;
+          const topY = wallBase + Math.max(nomH * 2, params.wallHeight);
+          const ny = Math.min(260, Math.max(3, Math.ceil((topY - baseY) / rowH)));
+          const gxs = computeBridgeArchCentersWorldX();
+          const zn = -(params.bridgeDeckHalfW + params.wallDepth * 0.5);
+          const zs = params.bridgeDeckHalfW + params.wallDepth * 0.5;
+          const zLoD =
+            -params.bridgeDeckHalfW + Math.max(0.006, seam * 0.85);
+          const zHiD =
+            params.bridgeDeckHalfW - Math.max(0.006, seam * 0.85);
+          const deckCourses = THREE.MathUtils.clamp(
+            Math.round(params.bridgeDeckCourses) || 4,
+            1,
+            14,
+          );
+          const deckDrop = THREE.MathUtils.clamp(
+            Math.max(0, Number(params.bridgeDeckDropY) || 0),
+            0,
+            Math.max(0, topY - baseY - nomH * 2.2),
+          );
+
+          wallMesh = new THREE.InstancedMesh(
+            createInstancedBrickGeometry(brickGeo, params.maxWallBricks),
+            brickMat,
+            params.maxWallBricks,
+          );
+          wallMesh.castShadow = true;
+          wallMesh.receiveShadow = true;
+          wallMesh.position.set(0, 0, 0);
+
+          const rnd = mulberry32((params.colorSeed ^ 0x4f1bbcdc) | 0);
+          let k = 0;
+
+          const placeWorldBrick = (wx, wy, wz, sx, sy, sz, doorTight) => {
+            if (k >= params.maxWallBricks) return false;
+            const v = pickBrickVariation(rnd, sx, sy, sz, doorTight ? "door" : "wall");
+            tmpO.position.set(wx, wy, wz);
+            tmpO.rotation.set(0, 0, 0);
+            tmpO.scale.set(v.sx, v.sy, v.sz);
+            applyBrickAxisScaleNoise(tmpO, rnd, !!doorTight);
+            applyBrickPlacementNoise(tmpO, rnd, !!doorTight);
+            tmpO.updateMatrix();
+            wallMesh.setMatrixAt(k, tmpO.matrix);
+            setBrickVarAt(wallMesh, k, v.shapeMix, v.warp, v.grey, v.grain);
+            k++;
+            return true;
+          };
+
+          const fillSideWallAtZ = (zWall, outerSeed) => {
+            const rndW = mulberry32((outerSeed ^ params.colorSeed) | 0);
+            outer: for (let iy = 0; iy < ny; iy++) {
+              const yMid = baseY + iy * rowH;
+              if (yMid > topY - nomH * 0.2) break;
+              const oh0 = wallOpeningHalfX(yMid, R_out, doorSill, ys, seam);
+              let intervals = [[wallLo, wallHi]];
+              if (oh0 > 1e-5) {
+                for (const gxc of gxs) {
+                  const oh = wallOpeningHalfX(
+                    yMid,
+                    R_out,
+                    doorSill,
+                    ys,
+                    seam,
+                  );
+                  if (oh > 1e-5) {
+                    intervals = subtractIntervals(
+                      intervals,
+                      gxc - oh,
+                      gxc + oh,
+                    );
+                  }
+                }
+              }
+              const curv = wallOpeningCurvature(yMid, R_out, doorSill, ys, seam);
+              const curveT = THREE.MathUtils.smoothstep(0.06, 1.15, curv);
+              const nomWCurve =
+                nomW *
+                THREE.MathUtils.lerp(
+                  1,
+                  THREE.MathUtils.clamp(params.wallMinBrickScale, 0.16, 0.95),
+                  Math.pow(curveT, 1.08),
+                );
+              const haunch =
+                yMid >= ys - mortar * 1.5 && yMid <= ys + R_out * 1.05
+                  ? THREE.MathUtils.smoothstep(
+                      ys - 0.12,
+                      ys + R_out * 0.82,
+                      yMid,
+                    )
+                  : 0;
+              const crownSy =
+                1 -
+                (1 - THREE.MathUtils.clamp(params.wallCrownSquash, 0.42, 1)) *
+                  Math.pow(haunch, 1.28);
+
+              for (const [segLo, segHi] of intervals) {
+                const span = segHi - segLo;
+                if (span < nomW * params.wallMinBrickScale * 0.45) continue;
+                const minW = nomW * params.wallMinBrickScale;
+                const jMin = 0.0035;
+                const jMax = Math.min(
+                  mortar,
+                  Math.max(jMin, span * 0.014 + jMin * 0.6),
+                );
+                const j = THREE.MathUtils.clamp(mortar, jMin, jMax);
+                const hj = j * 0.5;
+                let innerLo = segLo + hj;
+                let innerHi = segHi - hj;
+                if (iy % 2 === 1) {
+                  const shift = Math.min(
+                    (nomWCurve + j) * 0.48,
+                    Math.max(0, innerHi - innerLo - minW * 1.2) * 0.35,
+                  );
+                  const eps = Math.max(1e-3, nomW * 0.025);
+                  const segCx = (innerLo + innerHi) * 0.5;
+                  let nearestGx = gxs[0] ?? 0;
+                  for (const gxc of gxs) {
+                    if (Math.abs(gxc - segCx) < Math.abs(nearestGx - segCx)) {
+                      nearestGx = gxc;
+                    }
+                  }
+                  const nearestOpenH = wallOpeningHalfX(
+                    yMid,
+                    R_out,
+                    doorSill,
+                    ys,
+                    seam,
+                  );
+                  const rightOfOpening =
+                    nearestOpenH > 1e-5 &&
+                    segLo >= nearestGx + nearestOpenH - eps;
+                  const leftOfOpening =
+                    nearestOpenH > 1e-5 &&
+                    segHi <= nearestGx - nearestOpenH + eps;
+                  if (rightOfOpening) innerHi -= shift;
+                  else if (leftOfOpening) innerLo += shift;
+                  else innerLo += shift;
+                }
+                const innerLen = innerHi - innerLo;
+                if (innerLen < minW * 0.72) continue;
+                let nBricks = Math.max(
+                  1,
+                  Math.round(innerLen / (nomWCurve + j)),
+                );
+                let wEq = (innerLen - (nBricks - 1) * j) / nBricks;
+                for (let it = 0; it < 96; it++) {
+                  wEq = (innerLen - (nBricks - 1) * j) / nBricks;
+                  if (wEq < minW * 0.998) {
+                    if (nBricks <= 1) break;
+                    nBricks--;
+                  } else if (wEq > nomWCurve * 1.075 && nBricks < 1600) {
+                    nBricks++;
+                  } else break;
+                }
+                wEq = (innerLen - (nBricks - 1) * j) / nBricks;
+                if (wEq < minW * 0.88) continue;
+                for (let bi = 0; bi < nBricks; bi++) {
+                  if (k >= params.maxWallBricks) break outer;
+                  const cx = innerLo + wEq * 0.5 + bi * (wEq + j);
+                  if (cx > innerHi - wEq * 0.5 + 1e-4) break;
+                  let tuckY = 0;
+                  if (oh0 > 1e-4 && curveT > 0.04) {
+                    for (const gxc of gxs) {
+                      const openH = wallOpeningHalfX(
+                        yMid,
+                        R_out,
+                        doorSill,
+                        ys,
+                        seam,
+                      );
+                      if (openH <= 1e-4) continue;
+                      const gap = Math.max(0, Math.abs(cx - gxc) - openH);
+                      const band = params.brickW * 3.8;
+                      if (gap < band) {
+                        const t = THREE.MathUtils.smoothstep(1, 0, gap / band);
+                        const ty =
+                          -nomH *
+                          0.12 *
+                          Math.pow(t, 1.2) *
+                          Math.pow(curveT, 0.55);
+                        tuckY = Math.min(tuckY, ty);
+                      }
+                    }
+                  }
+                  const sx = wEq / nomW;
+                  const sy = (0.91 + rndW() * 0.06) * crownSy;
+                  const sz = 0.92 + rndW() * 0.06;
+                  if (
+                    !placeWorldBrick(
+                      cx,
+                      yMid + tuckY,
+                      zWall,
+                      sx,
+                      sy,
+                      sz,
+                      false,
+                    )
+                  ) {
+                    break outer;
+                  }
+                }
+              }
+            }
+          };
+
+          fillSideWallAtZ(zn, 0x51ead);
+          fillSideWallAtZ(zs, 0x2f693);
+
+          const rowZ = nomW + mortar;
+          const zSpan = Math.max(0.15, zHiD - zLoD);
+          const nz = Math.min(
+            120,
+            Math.max(2, Math.ceil(zSpan / rowZ)),
+          );
+          deckOuter: for (let di = 0; di < deckCourses; di++) {
+            const yDeck =
+              topY -
+              mortar * 0.5 -
+              nomH * 0.5 -
+              di * rowH -
+              di * mortar * 0.02 -
+              deckDrop;
+            if (yDeck < wallBase + nomH * 0.35) break;
+            for (let iz = 0; iz < nz; iz++) {
+              const zMid = zLoD + nomW * 0.5 + mortar * 0.5 + iz * rowZ;
+              if (zMid > zHiD - nomW * 0.18) break;
+              let intervals = [[wallLo, wallHi]];
+              const nomWDeck = nomW;
+              for (const [segLo, segHi] of intervals) {
+                const span = segHi - segLo;
+                if (span < nomWDeck * params.wallMinBrickScale * 0.45) continue;
+                const minW = nomWDeck * params.wallMinBrickScale;
+                const jMin = 0.0035;
+                const jMax = Math.min(
+                  mortar,
+                  Math.max(jMin, span * 0.014 + jMin * 0.6),
+                );
+                const j = THREE.MathUtils.clamp(mortar, jMin, jMax);
+                const hj = j * 0.5;
+                let innerLo = segLo + hj;
+                let innerHi = segHi - hj;
+                if ((iz + di) % 2 === 1) {
+                  const shift = Math.min(
+                    (nomWDeck + j) * 0.48,
+                    Math.max(0, innerHi - innerLo - minW * 1.2) * 0.35,
+                  );
+                  innerLo += shift;
+                }
+                const innerLen = innerHi - innerLo;
+                if (innerLen < minW * 0.72) continue;
+                let nBricks = Math.max(
+                  1,
+                  Math.round(innerLen / (nomWDeck + j)),
+                );
+                let wEq = (innerLen - (nBricks - 1) * j) / nBricks;
+                for (let it = 0; it < 96; it++) {
+                  wEq = (innerLen - (nBricks - 1) * j) / nBricks;
+                  if (wEq < minW * 0.998) {
+                    if (nBricks <= 1) break;
+                    nBricks--;
+                  } else if (wEq > nomWDeck * 1.075 && nBricks < 1600) {
+                    nBricks++;
+                  } else break;
+                }
+                wEq = (innerLen - (nBricks - 1) * j) / nBricks;
+                if (wEq < minW * 0.88) continue;
+                for (let bi = 0; bi < nBricks; bi++) {
+                  if (k >= params.maxWallBricks) break deckOuter;
+                  const cx = innerLo + wEq * 0.5 + bi * (wEq + j);
+                  if (cx > innerHi - wEq * 0.5 + 1e-4) break;
+                  const sx = wEq / nomWDeck;
+                  const sy = 0.91 + rnd() * 0.06;
+                  const sz = 0.92 + rnd() * 0.06;
+                  if (!placeWorldBrick(cx, yDeck, zMid, sx, sy, sz, false)) {
+                    break deckOuter;
+                  }
+                }
+              }
+            }
+          }
+
+          wallMesh.count = k;
+          wallMesh.instanceMatrix.needsUpdate = true;
+          const wbv = wallMesh.geometry.getAttribute("brickVar");
+          if (wbv) wbv.needsUpdate = true;
+          scene.add(wallMesh);
+        }
+
         function buildDoorInstances() {
+          if (isBridge()) {
+            buildBridgeArchRings();
+            return;
+          }
           if (isAnyTower()) {
             buildTowerDoorRings();
             return;
@@ -2543,6 +3541,8 @@
             tmpO.position.set(x + gx, y, 0);
             tmpO.rotation.set(0, 0, yaw);
             tmpO.scale.set(v.sx, v.sy, v.sz);
+            applyBrickAxisScaleNoise(tmpO, rnd, true);
+            applyBrickPlacementNoise(tmpO, rnd, true);
             tmpO.updateMatrix();
             doorMesh.setMatrixAt(k, tmpO.matrix);
             setBrickVarAt(doorMesh, k, v.shapeMix, v.warp, v.grey, v.grain);
@@ -2577,7 +3577,11 @@
             buildTowerRoundShellInstances();
             return;
           }
-          if (!params.wallEnabled || !brickGeo) return;
+          if (isBridge()) {
+            buildBridgeInstances();
+            return;
+          }
+          if (!brickGeo || (!params.wallEnabled && !isBridge())) return;
 
           const rp = ringParamsFromGui();
           const R_in = Math.max(0.08, params.doorInnerHalfW);
@@ -2615,6 +3619,8 @@
             tmpO.position.set(cx, cy, 0);
             tmpO.rotation.set(0, 0, 0);
             tmpO.scale.set(v.sx, v.sy, v.sz);
+            applyBrickAxisScaleNoise(tmpO, rnd, false);
+            applyBrickPlacementNoise(tmpO, rnd, false);
             tmpO.updateMatrix();
             wallMesh.setMatrixAt(k, tmpO.matrix);
             setBrickVarAt(wallMesh, k, v.shapeMix, v.warp, v.grey, v.grain);
@@ -2750,7 +3756,7 @@
 
         const tweakRoot = document.getElementById("tweak-root");
         const pane = new Pane({
-          title: "Arch door + adaptive wall",
+          title: "Arch · wall · bridge",
           container: tweakRoot || document.body,
         });
         const applyL = () => applyLightsFromParams();
@@ -2763,9 +3769,51 @@
               Wall: "wall",
               "Square tower": "tower",
               "Round tower": "towerRound",
+              Bridge: "bridge",
             },
           })
-          .on("change", () => rebuildAll());
+          .on("change", () => {
+            if (isBridge()) applyBridgeDefaults();
+            rebuildAll();
+          });
+
+        const fBridge = pane.addFolder({
+          title: "Bridge (3 arches + deck)",
+          expanded: false,
+        });
+        const rbBridge = () => rebuildInstances(false);
+        fBridge
+          .addBinding(params, "bridgeLength", {
+            min: 14,
+            max: 58,
+            step: 0.5,
+            label: "Span along X",
+          })
+          .on("change", rbBridge);
+        fBridge
+          .addBinding(params, "bridgeDeckHalfW", {
+            min: 0.85,
+            max: 5.5,
+            step: 0.05,
+            label: "Half deck width (Z)",
+          })
+          .on("change", rbBridge);
+        fBridge
+          .addBinding(params, "bridgeDeckCourses", {
+            min: 1,
+            max: 10,
+            step: 1,
+            label: "Deck layers",
+          })
+          .on("change", rbBridge);
+        fBridge
+          .addBinding(params, "bridgeDeckDropY", {
+            min: 0,
+            max: 5.5,
+            step: 0.05,
+            label: "Lower deck (walls stay tall)",
+          })
+          .on("change", rbBridge);
 
         const fTower = pane.addFolder({
           title: "Tower (square or round)",
@@ -2955,6 +4003,50 @@
           label: "Color seed",
         }).on("change", rb);
 
+        const fBrickLayout = fBrick.addFolder({
+          title: "Layout noise (castle-like)",
+          expanded: false,
+        });
+        fBrickLayout
+          .addBinding(params, "brickScaleRandomness", {
+            min: 0,
+            max: 0.55,
+            step: 0.01,
+            label: "Scale spread / axis",
+          })
+          .on("change", rb);
+        fBrickLayout
+          .addBinding(params, "brickRotationVariation", {
+            min: 0,
+            max: 0.18,
+            step: 0.005,
+            label: "Rotation wobble (rad)",
+          })
+          .on("change", rb);
+        fBrickLayout
+          .addBinding(params, "brickVerticalVariation", {
+            min: 0,
+            max: 0.18,
+            step: 0.005,
+            label: "Course slip (Y)",
+          })
+          .on("change", rb);
+        fBrickLayout
+          .addBinding(params, "brickPlanarSlop", {
+            min: 0,
+            max: 0.08,
+            step: 0.002,
+            label: "In-plane slip (XZ)",
+          })
+          .on("change", rb);
+        fBrickLayout
+          .addBinding(params, "brickRadiusVariation", {
+            min: 0,
+            max: 0.28,
+            step: 0.01,
+            label: "Cylinder / ring radius wobble",
+          })
+          .on("change", rb);
         const fWall = pane.addFolder({ title: "Wall (field masonry)" });
         fWall.addBinding(params, "wallEnabled", { label: "Enabled" }).on("change", rb);
         fWall.addBinding(params, "wallAnchorY", {
@@ -3016,9 +4108,13 @@
         }).on("change", rb);
 
         const fDestruction = pane.addFolder({ title: "Destruction" });
-        fDestruction.addBinding(params, "destructionEnabled", {
-          label: "Sim enabled",
-        });
+        fDestruction
+          .addBinding(params, "destructionEnabled", {
+            label: "Sim enabled",
+          })
+          .on("change", () => {
+            applyLiveErosionFromSlider();
+          });
         fDestruction
           .addBinding(params, "destructionMode", {
             label: "Click mode",
@@ -3026,19 +4122,65 @@
               Off: "none",
               "On (LMB)": "destruct",
             },
-          })
-          .on("change", () => {
-            erosionAccum = 0;
           });
         fDestruction
           .addBinding(params, "erosion", {
             min: 0,
             max: 1,
             step: 0.01,
-            label: "Erosion (auto from top, 0=off)",
+            label: "Erosion (live, top→down)",
           })
           .on("change", () => {
-            if (params.erosion < 1e-5) erosionAccum = 0;
+            applyLiveErosionFromSlider();
+          });
+        fDestruction
+          .addBinding(params, "showRubble", { label: "Show rubble" })
+          .on("change", () => {
+            refreshRubbleMatrices();
+          });
+        fDestruction
+          .addBinding(params, "erosionPlaceBrickDebris", {
+            label: "Erosion → brick debris (ground)",
+          })
+          .on("change", () => {
+            syncErosionBrickDebrisOnGround();
+          });
+        fDestruction
+          .addBinding(params, "erosionBrickDebrisMax", {
+            min: 120,
+            max: 8000,
+            step: 40,
+            label: "Max erosion brick copies",
+          })
+          .on("change", () => {
+            syncErosionBrickDebrisOnGround();
+          });
+        fDestruction
+          .addBinding(params, "erosionGroundRubble", {
+            label: "Decorative gravel (extra, OFF)",
+          })
+          .on("change", () => {
+            syncErosionGroundRubble();
+          });
+        fDestruction
+          .addBinding(params, "erosionRubblePerBrick", {
+            min: 0.35,
+            max: 6,
+            step: 0.05,
+            label: "Gravel × / erosion brick",
+          })
+          .on("change", () => {
+            syncErosionGroundRubble();
+          });
+        fDestruction
+          .addBinding(params, "erosionRubbleMax", {
+            min: 40,
+            max: 1400,
+            step: 20,
+            label: "Gravel max pieces",
+          })
+          .on("change", () => {
+            syncErosionGroundRubble();
           });
         fDestruction.addBinding(params, "removeRadius", {
           min: 0.2,
@@ -3048,9 +4190,9 @@
         });
         fDestruction.addBinding(params, "collapseSpreadMax", {
           min: 0,
-          max: 140,
-          step: 1,
-          label: "Collapse spread (0=auto)",
+          max: 4000,
+          step: 20,
+          label: "Collapse cap (0 = unlimited, castle)",
         });
         fDestruction.addBinding(params, "gravity", {
           min: 4,
@@ -3127,7 +4269,6 @@
           const dt = destructTimer.getDelta();
           if (params.destructionEnabled && destructBricks.length) {
             updateFallingDestruct(dt);
-            updateErosionTick(dt);
           }
           controls.update();
           renderer.render(scene, camera);
