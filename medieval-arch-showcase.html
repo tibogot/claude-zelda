@@ -335,8 +335,14 @@
           houseRoofOverhang: 0.14,
           /** Extra half-length along the ridge line past the wall outline. */
           houseRoofZOverhang: 0.1,
-          /** Pitched brick roof on / off (gable walls unchanged). */
+          /** Pitched roof on / off (gable walls unchanged). */
           houseRoofEnabled: true,
+          /** "brick" = instanced brick courses; "timber" = ridge + wall plates + rafters (log cylinders). */
+          houseRoofKind: "brick",
+          /** Mean radius of timber members (world units). */
+          houseTimberRadius: 0.09,
+          /** Approximate spacing of rafter pairs along the ridge (world units). */
+          houseTimberRafterSpacing: 0.52,
 
           wallEnabled: true,
           wallWidth: 15,
@@ -594,12 +600,15 @@
 
         let brickGeo = null;
         let brickMat = null;
+        let timberMat = null;
         let doorMesh = null;
         let wallMesh = null;
         /** Instanced arch ring in tower mode (single gate). */
         let towerDoorMeshes = [];
         /** Three arch rings × two sides for `sceneMode === "bridge"`. */
         let bridgeArchMeshes = [];
+        /** House timber ridge / plates / rafters when `houseRoofKind === "timber"`. */
+        let houseTimberMeshes = [];
         let archPivot = null;
         /** Child of `archPivot`; TransformControls attach here so local Z = depth (wall-like). */
         let archGizmoTarget = null;
@@ -1207,6 +1216,11 @@
             if (wallMesh.geometry) wallMesh.geometry.dispose();
             wallMesh = null;
           }
+          houseTimberMeshes.forEach((m) => {
+            scene.remove(m);
+            if (m.geometry) m.geometry.dispose();
+          });
+          houseTimberMeshes = [];
           disposeErosionRubbleMesh();
           disposeErosionBrickDebrisMesh();
         }
@@ -2154,6 +2168,31 @@
           }
         }
 
+        function ensureTimberMaterial() {
+          if (timberMat) return;
+          timberMat = new THREE.MeshStandardNodeMaterial({
+            metalness: 0.05,
+            roughness: 0.9,
+          });
+          timberMat.colorNode = Fn(() => {
+            const pw = positionWorld;
+            const ring = sin(
+              pw.y.mul(36).add(pw.x.mul(5.5)).add(pw.z.mul(2.8)),
+            )
+              .mul(0.5)
+              .add(0.5);
+            const grain = sin(dot(pw, vec3(11.3, 19.1, 7.6)))
+              .mul(0.5)
+              .add(0.5);
+            const c0 = color(0x4a3728);
+            const c1 = color(0x7a5c42);
+            const c2 = color(0x5d4633);
+            const c = mix(mix(c0, c1, ring), c2, grain.mul(0.38));
+            const nd = clamp(dot(normalWorld, sunDirUniform), 0, 1);
+            return mul(c, mix(float(0.7), float(1.04), nd.mul(0.6).add(0.2)));
+          })();
+        }
+
         function ensureBrickGeometry(force) {
           const sig = brickGeometrySignature();
           if (!force && brickGeo && sig === lastBrickGeometrySignature) {
@@ -2734,6 +2773,117 @@
           let k = 0;
           const inset = towerFaceInsetD();
 
+          const buildHouseTimberFrame = () => {
+            ensureTimberMaterial();
+            const beamR = THREE.MathUtils.clamp(
+              Number(params.houseTimberRadius) || 0.09,
+              0.034,
+              0.22,
+            );
+            const spacing = Math.max(
+              0.26,
+              Number(params.houseTimberRafterSpacing) || 0.52,
+            );
+            const yPlate = eaveY + nomH * 0.16;
+            const xExt = halfT + zOv;
+            const zExt = halfT + zOv;
+            const plateRad = 1.1;
+
+            const place = (mesh, ki, ax, ay, az, bx, by, bz, radMul) => {
+              _dTmp.set(ax, ay, az);
+              _dTmp2.set(bx, by, bz);
+              _wmPos.copy(_dTmp).add(_dTmp2).multiplyScalar(0.5);
+              _wmPos2.copy(_dTmp2).sub(_dTmp);
+              const L = Math.max(1e-5, _wmPos2.length());
+              _wmPos2.multiplyScalar(1 / L);
+              tmpO.position.copy(_wmPos);
+              const r = beamR * radMul;
+              tmpO.scale.set(r, L, r);
+              tmpO.quaternion.setFromUnitVectors(_yAxis, _wmPos2);
+              tmpO.updateMatrix();
+              mesh.setMatrixAt(ki, tmpO.matrix);
+              return ki + 1;
+            };
+
+            const nRidgeSt =
+              gableAxis === 0
+                ? Math.max(3, Math.ceil((2 * xExt) / spacing) + 1)
+                : Math.max(3, Math.ceil((2 * zExt) / spacing) + 1);
+            const cap = Math.min(640, Math.max(40, 3 + 2 * nRidgeSt * 2 + 8));
+            const cylGeo = new THREE.CylinderGeometry(1, 1, 1, 10, 1, false);
+            const mesh = new THREE.InstancedMesh(cylGeo, timberMat, cap);
+            mesh.castShadow = true;
+            mesh.receiveShadow = true;
+            let tk = 0;
+            if (gableAxis === 0) {
+              tk = place(mesh, tk, -xExt, ridgeY, 0, xExt, ridgeY, 0, 1);
+              tk = place(
+                mesh,
+                tk,
+                -xExt,
+                yPlate,
+                halfT,
+                xExt,
+                yPlate,
+                halfT,
+                plateRad,
+              );
+              tk = place(
+                mesh,
+                tk,
+                -xExt,
+                yPlate,
+                -halfT,
+                xExt,
+                yPlate,
+                -halfT,
+                plateRad,
+              );
+              const nR = Math.max(3, Math.ceil((2 * xExt) / spacing) + 1);
+              for (let i = 0; i < nR; i++) {
+                const u = nR <= 1 ? 0.5 : i / (nR - 1);
+                const xi = -xExt + u * (2 * xExt);
+                tk = place(mesh, tk, xi, yPlate, halfT, xi, ridgeY, 0, 1);
+                tk = place(mesh, tk, xi, yPlate, -halfT, xi, ridgeY, 0, 1);
+              }
+            } else {
+              tk = place(mesh, tk, 0, ridgeY, -zExt, 0, ridgeY, zExt, 1);
+              tk = place(
+                mesh,
+                tk,
+                halfT,
+                yPlate,
+                -zExt,
+                halfT,
+                yPlate,
+                zExt,
+                plateRad,
+              );
+              tk = place(
+                mesh,
+                tk,
+                -halfT,
+                yPlate,
+                -zExt,
+                -halfT,
+                yPlate,
+                zExt,
+                plateRad,
+              );
+              const nR = Math.max(3, Math.ceil((2 * zExt) / spacing) + 1);
+              for (let j = 0; j < nR; j++) {
+                const u = nR <= 1 ? 0.5 : j / (nR - 1);
+                const zi = -zExt + u * (2 * zExt);
+                tk = place(mesh, tk, halfT, yPlate, zi, 0, ridgeY, zi, 1);
+                tk = place(mesh, tk, -halfT, yPlate, zi, 0, ridgeY, zi, 1);
+              }
+            }
+            mesh.count = tk;
+            mesh.instanceMatrix.needsUpdate = true;
+            scene.add(mesh);
+            houseTimberMeshes.push(mesh);
+          };
+
           const placeTowerBrick = (face, u, y, sx, sy, sz) => {
             if (k >= params.maxWallBricks) return false;
             const v = pickBrickVariation(rnd, sx, sy, sz, "wall");
@@ -3006,6 +3156,9 @@
           };
 
           if (params.houseRoofEnabled) {
+            if (params.houseRoofKind === "timber") {
+              buildHouseTimberFrame();
+            } else {
             roof: {
               /**
                * Roof ridge must match gable ends: ±X gables → ridge parallel to X (apex to apex);
@@ -3090,6 +3243,7 @@
                   }
                 }
               }
+            }
             }
           }
 
@@ -4340,12 +4494,34 @@
           .on("change", rbBridge);
 
         const fHouse = pane.addFolder({
-          title: "House (gable + brick roof)",
+          title: "House (gable + roof)",
           expanded: false,
         });
         const rbHouse = () => rebuildInstances(false);
         fHouse
-          .addBinding(params, "houseRoofEnabled", { label: "Brick roof" })
+          .addBinding(params, "houseRoofEnabled", { label: "Roof on" })
+          .on("change", rbHouse);
+        fHouse
+          .addBinding(params, "houseRoofKind", {
+            label: "Roof type",
+            options: { Brick: "brick", Timber: "timber" },
+          })
+          .on("change", rbHouse);
+        fHouse
+          .addBinding(params, "houseTimberRadius", {
+            min: 0.04,
+            max: 0.2,
+            step: 0.005,
+            label: "Timber radius",
+          })
+          .on("change", rbHouse);
+        fHouse
+          .addBinding(params, "houseTimberRafterSpacing", {
+            min: 0.28,
+            max: 1.4,
+            step: 0.02,
+            label: "Timber rafter spacing",
+          })
           .on("change", rbHouse);
         fHouse
           .addBinding(params, "houseGableAxis", {
