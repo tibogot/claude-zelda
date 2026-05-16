@@ -981,7 +981,22 @@ export async function run() {
     sourceGroundY = -bounds.box.min.y;
     const firstMat = bakeMeshData[0].material;
     const displayGroup = new THREE.Group();
-    gltf.scene.traverse((c) => { if (c.isMesh) displayGroup.add(c.clone()); });
+    gltf.scene.traverse((c) => {
+      if (!c.isMesh) return;
+      const clone = c.clone();
+      // GLB foliage often ships with transparent:true which kills depth sorting
+      // when seen from above (alpha-blended leaves can't z-test each other,
+      // back leaves render in front of nearer ones). Force alpha cutout +
+      // double-sided so the reference looks right from any angle.
+      if (clone.material && (clone.material.map || clone.material.alphaMap)) {
+        clone.material = clone.material.clone();
+        clone.material.transparent = false;
+        clone.material.alphaTest = 0.5;
+        clone.material.depthWrite = true;
+        clone.material.side = THREE.DoubleSide;
+      }
+      displayGroup.add(clone);
+    });
     sourceGroup = displayGroup;
     sourceGroup.position.set(-3, sourceGroundY, 0);
     scene.add(sourceGroup);
