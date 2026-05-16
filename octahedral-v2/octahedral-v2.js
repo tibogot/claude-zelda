@@ -824,7 +824,10 @@ export async function run() {
   // ── Scene ──────────────────────────────────────────────────────────────
   const scene = new THREE.Scene();
   scene.background = new THREE.Color(0x87ceeb);
-  scene.fog = new THREE.Fog(0x87ceeb, 60, 220);
+  // Fog is kept on the scene; the GUI toggle attaches/detaches it so changes
+  // are free of recompile cost.
+  const sceneFog = new THREE.Fog(0x87ceeb, 60, 220);
+  scene.fog = sceneFog;
 
   const camera = new THREE.PerspectiveCamera(50, innerWidth / innerHeight, 0.1, 500);
   camera.position.set(0, 3, 10);
@@ -1316,6 +1319,9 @@ export async function run() {
     sunElevation: 56,
     sunIntensity: 3.0,
     exposure: 1.0,
+    fog: true,
+    fogNear: 60,
+    fogFar: 220,
     roughness: 0.35,
     metalness: 0.15,
     normalStr: 1.0,
@@ -1347,6 +1353,10 @@ export async function run() {
     dirLight.target.position.copy(controls.target);
     dirLight.intensity = P.sunIntensity;
     renderer.toneMappingExposure = P.exposure;
+
+    scene.fog = P.fog ? sceneFog : null;
+    sceneFog.near = P.fogNear;
+    sceneFog.far = P.fogFar;
 
     // Apply quality preset onto rendering uniforms
     const preset = QUALITY_PRESETS[P.quality] || QUALITY_PRESETS.High;
@@ -1507,6 +1517,9 @@ export async function run() {
   fSun.add(P, "sunElevation", 5, 90, 0.5).name("Sun elevation").onChange(syncParams);
   fSun.add(P, "sunIntensity", 0.2, 5, 0.1).name("Sun intensity").onChange(syncParams);
   fSun.add(P, "exposure", 0.2, 3, 0.05).name("Exposure").onChange(syncParams);
+  fSun.add(P, "fog").name("Fog").onChange(syncParams);
+  fSun.add(P, "fogNear", 0, 200, 1).name("Fog near").onChange(syncParams);
+  fSun.add(P, "fogFar", 50, 500, 1).name("Fog far").onChange(syncParams);
 
   // Material (original)
   const fMat = gui.addFolder("Original material");
