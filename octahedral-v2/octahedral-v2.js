@@ -69,12 +69,17 @@ function countTris(meshData) {
 //  Per-cell alpha-weighted mipmaps + sRGB + dilation
 // ═══════════════════════════════════════════════════════════════════════════
 
+// Stop generating mip levels once cells drop below this many pixels — past
+// here the per-cell averages become noise and just confuse trilinear filtering.
+const MIN_CELL_PIXELS_FOR_MIP = 4;
+
 function generatePerCellMipmaps(pixels, atlasSize, grid) {
   const levels = [pixels];
   let prevSize = atlasSize;
   while (prevSize > 1) {
     const nextSize = prevSize >> 1;
     if (nextSize < 1) break;
+    if (nextSize / grid < MIN_CELL_PIXELS_FOR_MIP) break;
     const prev = levels[levels.length - 1];
     const next = new Uint8Array(nextSize * nextSize * 4);
     const prevCS = prevSize / grid, nextCS = nextSize / grid;
@@ -386,16 +391,16 @@ async function bakeAtlases(renderer, meshData, opts) {
 
   linearToSrgb(colorPixels);
 
-  dilateAtlasEdges(colorPixels, atlasSize, grid, 8);
+  dilateAtlasEdges(colorPixels,  atlasSize, grid, 8);
   dilateAtlasEdges(normalPixels, atlasSize, grid, 8);
-  dilateAtlasEdges(rmPixels, atlasSize, grid, 8);
-  dilateAtlasEdges(depthPixels, atlasSize, grid, 8);
+  dilateAtlasEdges(rmPixels,     atlasSize, grid, 8);
+  dilateAtlasEdges(depthPixels,  atlasSize, grid, 8);
 
   return {
-    colorTex: makeTexWithMips(generatePerCellMipmaps(colorPixels, atlasSize, grid), atlasSize, maxAniso, true),
+    colorTex:  makeTexWithMips(generatePerCellMipmaps(colorPixels,  atlasSize, grid), atlasSize, maxAniso, true),
     normalTex: makeTexWithMips(generatePerCellMipmaps(normalPixels, atlasSize, grid), atlasSize, maxAniso, false),
-    rmTex: makeTexWithMips(generatePerCellMipmaps(rmPixels, atlasSize, grid), atlasSize, maxAniso, false),
-    depthTex: makeTexWithMips(generatePerCellMipmaps(depthPixels, atlasSize, grid), atlasSize, maxAniso, false),
+    rmTex:     makeTexWithMips(generatePerCellMipmaps(rmPixels,     atlasSize, grid), atlasSize, maxAniso, false),
+    depthTex:  makeTexWithMips(generatePerCellMipmaps(depthPixels,  atlasSize, grid), atlasSize, maxAniso, false),
     colorPixels, normalPixels, rmPixels, depthPixels,
     radius, center, grid, atlasSize, cellPad: pad,
   };
@@ -685,6 +690,9 @@ function createImpostorMaterials(textures, opts) {
   mainMat.side = THREE.FrontSide;
   mainMat.transparent = false;
   mainMat.alphaTest = 0.5;
+  // alphaToCoverage default OFF — when ON, MSAA stippling on the fwidth-smoothed
+  // alpha shatters foliage silhouettes without TAA to resolve. Toggle from GUI.
+  mainMat.alphaToCoverage = false;
   mainMat.depthWrite = true;
   mainMat.positionNode  = positionFn();
   mainMat.colorNode     = displayColor;
@@ -694,14 +702,14 @@ function createImpostorMaterials(textures, opts) {
   mainMat.aoNode        = ao;
   mainMat.opacityNode   = smoothAlpha;
   mainMat.emissiveNode  = displayEmissive;
-  // When debug viz active, kill the PBR contribution by forcing roughness/metal flat.
-  // (We can't easily bypass lighting on StandardNodeMaterial, so the "raw" mode
-  //  still gets shaded — acceptable trade-off for full PBR integration.)
 
-  // Shadow pass note: three.js WebGPU re-uses the main material's positionNode +
-  // opacityNode + alphaTest in the shadow render automatically. cameraPosition
-  // becomes the sun position during that pass, so the billboard faces the sun
-  // and the atlas alpha samples at sun direction → correct silhouette shadow.
+  // Shadow casting — Renderer._getShadowNodes() picks these up per-draw and
+  // patches them onto the shared ShadowPassMaterial. cameraPosition during the
+  // shadow pass IS the sun position, so positionFn() orients the billboard
+  // toward the sun and the atlas alpha samples at the sun's view direction →
+  // the shadow silhouette matches what the sun actually sees.
+  mainMat.castShadowPositionNode = positionFn();
+  mainMat.castShadowNode         = vec4(float(0), float(0), float(0), smoothAlpha);
 
   return {
     mainMat,
@@ -804,6 +812,10 @@ export async function run() {
   renderer.toneMappingExposure = 1.0;
   renderer.shadowMap.enabled = true;
   renderer.shadowMap.type = THREE.PCFSoftShadowMap;
+  // Required to enable per-mesh castShadowNode / castShadowPositionNode overrides.
+  // Without this, the shadow pass uses the shared ShadowPassMaterial as-is and our
+  // impostor casts a flat-quad shadow instead of the sun-view silhouette.
+  renderer.shadowMap.transmitted = true;
   document.body.insertBefore(renderer.domElement, document.body.firstChild);
   renderer.domElement.style.touchAction = "none";
 
@@ -1311,6 +1323,7 @@ export async function run() {
     edgeSmooth: 1.5,
     parallaxStr: 0.05,
     dither: false,
+    alphaToCoverage: false,
     windAmp: 0.0,
     windFreq: 1.5,
     translucency: 0.0,
@@ -1371,7 +1384,16 @@ export async function run() {
         }
       });
     }
-    if (impostor) impostor.visible = P.showImpostor;
+    if (impostor) {
+      impostor.visible = P.showImpostor;
+      // alphaToCoverage flips between the binary cutout pipeline and the
+      // MSAA-stochastic-coverage pipeline. Toggling requires a recompile,
+      // which three.js triggers via needsUpdate.
+      if (impostor.material.alphaToCoverage !== P.alphaToCoverage) {
+        impostor.material.alphaToCoverage = P.alphaToCoverage;
+        impostor.material.needsUpdate = true;
+      }
+    }
     if (dock) dock.style.display = P.showAtlas ? "flex" : "none";
 
     // Save and refresh topbar
@@ -1469,6 +1491,7 @@ export async function run() {
   fQual.add(P, "parallaxStr", 0, 0.3, 0.005).name("Parallax depth").onChange(syncParams);
   fQual.add(P, "normalStr", 0, 1, 0.02).name("Normal strength").onChange(syncParams);
   fQual.add(P, "dither").name("Dither cross-fade").onChange(syncParams);
+  fQual.add(P, "alphaToCoverage").name("Alpha-to-coverage MSAA").onChange(syncParams);
 
   // Trees
   const fTree = gui.addFolder("Trees & foliage");
