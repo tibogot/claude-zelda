@@ -1022,8 +1022,8 @@ export class PlayMode {
       driftLag: 1.8,
       fov: 70,
       speedPullBack: 1,
-      chassisRollClamp: 0.01,
-      chassisPitchClamp: 0.44,
+      chassisRollClamp: 0.2,
+      chassisPitchClamp: 0.3,
     };
     this._lotusCamDistSmooth = 0;
     this._lotusBlinkerSide = 0;
@@ -2758,7 +2758,6 @@ export class PlayMode {
         mz = -Math.cos(this.flyHeading) * sg;
       }
     } else if (this.carMode) {
-      const isLotus = this.moveMode === "lotus";
       const forward = keys.KeyW || keys.ArrowUp;
       const backward = keys.KeyS || keys.ArrowDown;
       const leftKey = keys.KeyA || keys.ArrowLeft;
@@ -2767,39 +2766,8 @@ export class PlayMode {
       const nitroHeld = !!keys[CAR_NITRO_KEY];
       const boostKeys = keys.ShiftLeft || keys.ShiftRight;
 
-      if (isLotus) {
-        // ── Lotus drift physics ──
-        const result = this._lotusPhysics.updateDriving(
-          {
-            vx: this.carVx, vz: this.carVz,
-            heading: this.carHeading,
-            nitro: this.carNitro,
-            drifting: this.carDrifting,
-            driftAngle: this.carDriftAngle,
-            boostBlend: this._carBoostBlend,
-            nitroFxBlend: this._carNitroFxBlend,
-            wheelSpin: this.carWheelSpin,
-            onSteepSlope: this.carOnSteepSlope,
-          },
-          { forward, backward, leftKey, rightKey, handbrake, nitroHeld, boostKeys },
-          dtSec,
-        );
-        this.carVx = result.vx;
-        this.carVz = result.vz;
-        this.carHeading = result.heading;
-        this.carNitro = result.nitro;
-        this.carDrifting = result.drifting;
-        this.carDriftAngle = result.driftAngle;
-        this._carBoostBlend = result.boostBlend;
-        this._carNitroFxBlend = result.nitroFxBlend;
-        this.carWheelSpin = result.wheelSpin;
-        this.carBodyRoll += (result.bodyRollTarget - this.carBodyRoll) * result.bodySmooth;
-        this.carBodyPitch += (result.bodyPitchTarget - this.carBodyPitch) * result.bodySmooth;
-        this._driftBoostMeter = result.driftBoostMeter;
-        this._driftBoostActive = result.driftBoostActive;
-      } else {
-        // ── Bruno arcade drift: heading + world velocity model ──
-        const carFeel = this.carSettings;
+      // ── Shared arcade drift model (Bruno + Lotus) ──
+      const carFeel = this.carSettings;
         const accelScale = carFeel.accelScale ?? 1;
         const maxSpeedScale = carFeel.maxSpeedScale ?? 1;
 
@@ -2993,7 +2961,6 @@ export class PlayMode {
 
         // Wheel spin
         this.carWheelSpin -= (fwdDot / CAR_WHEEL_RADIUS) * dtSec;
-      }
 
       // Movement output
       mx = this.carVx;
@@ -3941,17 +3908,15 @@ export class PlayMode {
             terrainSmooth,
           );
         }
-        const _lotusRollMax = this.lotusCam.chassisRollClamp;
-        const _lotusPitchMax = this.lotusCam.chassisPitchClamp;
         const finalPitch = THREE.MathUtils.clamp(
           this.carTerrainPitch + this.carBodyPitch,
-          -_lotusPitchMax * 2,
-          _lotusPitchMax * 2,
+          -CAR_BODY_PITCH_MAX * 1.2,
+          CAR_BODY_PITCH_MAX * 1.2,
         );
         const finalRoll = THREE.MathUtils.clamp(
           this.carTerrainRoll + this.carBodyRoll,
-          -_lotusRollMax,
-          _lotusRollMax,
+          -CAR_BODY_ROLL_MAX,
+          CAR_BODY_ROLL_MAX,
         );
         this.lotusChassis.rotation.set(-finalRoll, 0, finalPitch);
 

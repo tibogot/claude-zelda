@@ -1,0 +1,325 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Octahedral v2 — MeshStandardNodeMaterial</title>
+    <style>
+      @import url("https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;600;700&display=swap");
+      :root {
+        --bg: #0a0a12;
+        --panel: rgba(14, 14, 24, 0.94);
+        --panel-solid: #14141e;
+        --border: rgba(255, 255, 255, 0.08);
+        --border-hi: rgba(255, 255, 255, 0.18);
+        --accent: #5bf;
+        --accent-dim: #3a6f8a;
+        --good: #6e6;
+        --warn: #fb6;
+        --bad: #f66;
+        --text: #c8d0e0;
+        --text-dim: #6a7080;
+        --text-mute: #4a5060;
+        --mono: "JetBrains Mono", "SF Mono", "Fira Code", monospace;
+        --r: 6px;
+      }
+      * { margin: 0; padding: 0; box-sizing: border-box; }
+      html, body { height: 100%; }
+      body {
+        overflow: hidden;
+        background: var(--bg);
+        font-family: var(--mono);
+        color: var(--text);
+        font-size: 11px;
+      }
+      body > canvas {
+        position: fixed; inset: 0; z-index: 0;
+        display: block; width: 100vw; height: 100vh;
+      }
+
+      /* ── Top status bar ── */
+      #topbar {
+        position: fixed; top: 0; left: 0; right: 0;
+        z-index: 30;
+        height: 32px;
+        display: flex; align-items: center;
+        padding: 0 12px; gap: 12px;
+        background: linear-gradient(180deg, rgba(10,10,18,0.95), rgba(10,10,18,0.7));
+        border-bottom: 1px solid var(--border);
+        font: 500 10px/1 var(--mono);
+      }
+      #topbar .brand {
+        color: var(--accent); font-weight: 700; letter-spacing: 0.06em;
+      }
+      #topbar .sep { color: var(--text-mute); }
+      #topbar .pill {
+        padding: 3px 8px;
+        background: rgba(255,255,255,0.04);
+        border: 1px solid var(--border);
+        border-radius: 3px;
+        color: var(--text-dim);
+      }
+      #topbar .pill.on { color: var(--good); border-color: rgba(110,230,110,0.3); background: rgba(110,230,110,0.08); }
+      #topbar .pill.warn { color: var(--warn); border-color: rgba(255,180,100,0.3); background: rgba(255,180,100,0.08); }
+      #topbar .model { color: var(--text); font-weight: 600; }
+
+      /* ── Column labels ── */
+      .col-label {
+        position: fixed; top: 44px; z-index: 15;
+        font: 700 10px/1 var(--mono);
+        text-transform: uppercase; letter-spacing: 0.14em;
+        padding: 5px 10px;
+        border-radius: 3px;
+        pointer-events: none;
+      }
+      #lbl-ref { left: calc(25% - 44px); color: var(--good); background: rgba(110,230,110,0.1); border: 1px solid rgba(110,230,110,0.25); }
+      #lbl-imp { left: calc(75% - 48px); color: var(--accent); background: rgba(91,170,255,0.1); border: 1px solid rgba(91,170,255,0.25); }
+      #divider {
+        position: fixed; left: 50%; top: 32px; width: 1px; height: calc(100vh - 32px);
+        background: linear-gradient(180deg, transparent 0%, rgba(255,255,255,0.08) 12%, rgba(255,255,255,0.08) 88%, transparent 100%);
+        pointer-events: none; z-index: 4;
+      }
+
+      /* ── Stats panel ── */
+      #stats {
+        position: fixed; left: 50%; bottom: 12px;
+        transform: translateX(-50%);
+        z-index: 25;
+        background: var(--panel);
+        border: 1px solid var(--border);
+        border-radius: var(--r);
+        backdrop-filter: blur(12px);
+        padding: 8px 12px;
+        font-size: 10px;
+        display: flex;
+        gap: 18px;
+        align-items: center;
+        min-width: 480px;
+      }
+      #stats .group { display: flex; gap: 6px; align-items: baseline; }
+      #stats .lbl { color: var(--text-mute); text-transform: uppercase; letter-spacing: 0.06em; font-size: 9px; }
+      #stats .val { color: var(--accent); font-weight: 600; }
+      #stats .val.g { color: var(--good); }
+      #stats .val.w { color: var(--warn); }
+
+      /* ── Atlas dock (left) ── */
+      #dock {
+        position: fixed; left: 8px; top: 44px;
+        z-index: 25;
+        max-height: calc(100vh - 70px);
+        overflow-y: auto;
+        background: var(--panel);
+        border: 1px solid var(--border);
+        border-radius: var(--r);
+        backdrop-filter: blur(12px);
+        padding: 8px;
+        display: flex; flex-direction: column; gap: 6px;
+      }
+      #dock::-webkit-scrollbar { width: 4px; }
+      #dock::-webkit-scrollbar-thumb { background: rgba(255,255,255,0.12); border-radius: 2px; }
+      .dock-row { display: flex; gap: 6px; align-items: center; }
+      .dock-axis {
+        writing-mode: vertical-lr; text-orientation: mixed;
+        font-size: 8px; font-weight: 700; letter-spacing: 0.08em;
+        color: var(--text-dim); text-transform: uppercase;
+        width: 14px; flex-shrink: 0;
+      }
+      #dock canvas {
+        border-radius: 3px;
+        border: 1px solid var(--border);
+        width: 148px; height: 148px;
+        image-rendering: auto;
+        cursor: zoom-in;
+      }
+      #dock-hint {
+        font-size: 8px; color: var(--text-mute);
+        text-align: center; margin-top: 2px;
+        letter-spacing: 0.04em;
+      }
+
+      /* ── Hotkeys panel ── */
+      #keys {
+        position: fixed; bottom: 12px; right: 8px;
+        z-index: 26;
+        background: var(--panel);
+        border: 1px solid var(--border);
+        border-radius: var(--r);
+        backdrop-filter: blur(12px);
+        padding: 8px 10px;
+        font-size: 10px;
+        line-height: 1.7;
+        max-width: 240px;
+      }
+      #keys .k {
+        display: inline-block;
+        padding: 1px 5px; margin-right: 4px;
+        background: rgba(255,255,255,0.06);
+        border: 1px solid var(--border-hi);
+        border-radius: 3px;
+        font-weight: 600;
+        color: var(--accent);
+        min-width: 16px; text-align: center;
+      }
+      #keys .dim { color: var(--text-mute); font-size: 9px; }
+      #keys h4 {
+        font-size: 9px; text-transform: uppercase; letter-spacing: 0.12em;
+        color: var(--text-mute); margin-bottom: 4px; font-weight: 700;
+      }
+
+      /* ── Loading overlay ── */
+      #loading {
+        position: fixed; inset: 0;
+        background: rgba(6, 6, 12, 0.9);
+        display: none; align-items: center; justify-content: center;
+        flex-direction: column; gap: 14px;
+        z-index: 100;
+        color: var(--accent);
+        font-size: 13px; font-weight: 500;
+        backdrop-filter: blur(4px);
+      }
+      #loading.show { display: flex; }
+      .spinner {
+        width: 32px; height: 32px;
+        border: 2px solid rgba(91,170,255,0.15);
+        border-top-color: var(--accent);
+        border-radius: 50%;
+        animation: spin 0.8s linear infinite;
+      }
+      @keyframes spin { to { transform: rotate(360deg); } }
+      #loading-sub {
+        font-size: 11px; color: var(--text-dim); max-width: 80vw; text-align: center;
+      }
+
+      /* ── Cell zoom popup ── */
+      #zoom {
+        position: fixed; z-index: 50;
+        background: var(--panel-solid);
+        border: 2px solid var(--accent);
+        border-radius: var(--r);
+        padding: 4px;
+        display: none;
+        box-shadow: 0 8px 24px rgba(0,0,0,0.5);
+      }
+      #zoom canvas {
+        width: 220px; height: 220px;
+        image-rendering: pixelated;
+        border-radius: 3px;
+      }
+      #zoom-label {
+        font-size: 9px; color: var(--accent);
+        text-align: center; margin-top: 3px;
+        font-weight: 600; letter-spacing: 0.04em;
+      }
+
+      /* ── Drop overlay ── */
+      #drop {
+        position: fixed; inset: 0; z-index: 200;
+        display: none; align-items: center; justify-content: center;
+        background: rgba(20, 60, 120, 0.55);
+        backdrop-filter: blur(6px);
+        border: 3px dashed rgba(91, 170, 255, 0.6);
+      }
+      #drop span {
+        color: #fff; font-size: 22px; font-weight: 700;
+        background: rgba(0,0,0,0.55);
+        padding: 16px 32px;
+        border-radius: 10px;
+        letter-spacing: 0.04em;
+      }
+
+      .tp-dfwv { z-index: 40 !important; }
+    </style>
+    <script type="importmap">
+      {
+        "imports": {
+          "three": "https://cdn.jsdelivr.net/npm/three@0.183.1/build/three.webgpu.js",
+          "three/webgpu": "https://cdn.jsdelivr.net/npm/three@0.183.1/build/three.webgpu.js",
+          "three/tsl": "https://cdn.jsdelivr.net/npm/three@0.183.1/build/three.tsl.js",
+          "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.183.1/examples/jsm/"
+        }
+      }
+    </script>
+  </head>
+  <body>
+    <div id="topbar">
+      <span class="brand">OCTA · v2</span>
+      <span class="sep">│</span>
+      <span class="model" id="tb-model">—</span>
+      <span class="sep">│</span>
+      <span class="pill" id="tb-quality">High</span>
+      <span class="pill" id="tb-mode">PBR</span>
+      <span class="pill" id="tb-freeze">Live</span>
+      <span class="pill" id="tb-orbit">Manual</span>
+      <span class="sep">│</span>
+      <span class="pill" id="tb-status">Initializing WebGPU…</span>
+    </div>
+
+    <div id="divider"></div>
+    <div class="col-label" id="lbl-ref">Reference</div>
+    <div class="col-label" id="lbl-imp">Impostor</div>
+
+    <div id="dock">
+      <div class="dock-row">
+        <span class="dock-axis">Color</span>
+        <canvas id="dock-color" width="148" height="148"></canvas>
+      </div>
+      <div class="dock-row">
+        <span class="dock-axis">Normal</span>
+        <canvas id="dock-normal" width="148" height="148"></canvas>
+      </div>
+      <div class="dock-row">
+        <span class="dock-axis">R/M</span>
+        <canvas id="dock-rm" width="148" height="148"></canvas>
+      </div>
+      <div class="dock-row">
+        <span class="dock-axis">Depth</span>
+        <canvas id="dock-depth" width="148" height="148"></canvas>
+      </div>
+      <div id="dock-hint">Click cell to zoom · Active triplet highlighted</div>
+    </div>
+
+    <div id="stats">
+      <div class="group"><span class="lbl">FPS</span><span class="val g" id="s-fps">—</span></div>
+      <div class="group"><span class="lbl">Atlas</span><span class="val" id="s-atlas">—</span></div>
+      <div class="group"><span class="lbl">Grid</span><span class="val" id="s-grid">—</span></div>
+      <div class="group"><span class="lbl">Cell</span><span class="val" id="s-cell">—</span></div>
+      <div class="group"><span class="lbl">Tris</span><span class="val w" id="s-tris">—</span></div>
+      <div class="group"><span class="lbl">Yaw</span><span class="val" id="s-yaw">—</span></div>
+      <div class="group"><span class="lbl">Active</span><span class="val" id="s-active">—</span></div>
+    </div>
+
+    <div id="keys">
+      <h4>Hotkeys</h4>
+      <span class="k">N</span>Normals
+      <span class="k">R</span>Raw atlas<br />
+      <span class="k">F</span>Freeze
+      <span class="k">O</span>Auto-orbit<br />
+      <span class="k">B</span>Rebake
+      <span class="k">H</span>Hide UI<br />
+      <span class="k">1</span><span class="k">2</span><span class="k">3</span><span class="k">4</span><span class="dim">cam presets</span><br />
+      <span class="k">Q</span><span class="dim">cycle quality</span>
+    </div>
+
+    <div id="loading" aria-live="polite">
+      <div class="spinner"></div>
+      <span id="loading-msg">Working…</span>
+      <div id="loading-sub"></div>
+    </div>
+
+    <div id="zoom">
+      <canvas id="zoom-canvas" width="220" height="220"></canvas>
+      <div id="zoom-label">Cell</div>
+    </div>
+
+    <div id="drop"><span>Drop .glb file to load</span></div>
+
+    <script type="module">
+      import { run } from "./octahedral-v2.js";
+      run().catch((err) => {
+        const el = document.getElementById("tb-status");
+        if (el) { el.textContent = "Error: " + err.message; el.classList.add("warn"); }
+        console.error(err);
+      });
+    </script>
+  </body>
+</html>

@@ -1771,6 +1771,7 @@
           const horizR = Math.max(params.brickW, params.brickD) * 1.15;
           const cellXZ = Math.max(0.07, params.brickW * 0.45);
           const cellY = Math.max(0.07, rowH * 0.52);
+          const hashRangeXZ = Math.ceil(horizR / cellXZ) + 1;
 
           let collapseStarts = 0;
           let changed = true;
@@ -1817,8 +1818,8 @@
               const iy0 = Math.floor(_wmPos2.y / cellY);
               const iz0 = Math.floor(_wmPos2.z / cellXZ);
               outer: for (let diy = -4; diy <= -1; diy++) {
-                for (let dix = -1; dix <= 1; dix++) {
-                  for (let diz = -1; diz <= 1; diz++) {
+                for (let dix = -hashRangeXZ; dix <= hashRangeXZ; dix++) {
+                  for (let diz = -hashRangeXZ; diz <= hashRangeXZ; diz++) {
                     const bucket = hash.get(
                       `${ix0 + dix}|${iy0 + diy}|${iz0 + diz}`,
                     );
@@ -3413,16 +3414,8 @@
               );
               const j = THREE.MathUtils.clamp(mortar, jMin, jMax);
               const hj = j * 0.5;
-              /**
-               * Do not stagger courses in arc-length `u` on the round shell: the gate hole is cut in
-               * absolute `u`, while a global `+staggerU` on odd rows shifts every brick the same way.
-               * That slides the segment that meets the **+u (right) jamb** into the opening (always the
-               * same side); square tower avoids this because each face interval is independent.
-               */
-              const staggerU = 0;
-              let innerLo = segLo + hj + staggerU;
-              let innerHi = segHi - hj + staggerU;
-              /** Square tower only: jamb-adjacent joint jog uses face-relative `segLo`/`segHi`. On a cylinder that logic mis-classifies segments and skews one jamb; round hole carve uses padding in `subtractHolesFromIntervals` instead. */
+              let innerLo = segLo + hj;
+              let innerHi = segHi - hj;
 
               const innerLen = innerHi - innerLo;
               if (innerLen < minW * 0.72) continue;
@@ -3441,10 +3434,12 @@
               wEq = (innerLen - (nBricks - 1) * j) / nBricks;
               if (wEq < minW * 0.88) continue;
 
+              const staggerU = (iy % 2 === 1) ? (wEq + j) * 0.5 : 0;
+
               for (let bi = 0; bi < nBricks; bi++) {
                 if (k >= params.maxWallBricks) break outerRound;
-                const u = innerLo + wEq * 0.5 + bi * (wEq + j);
-                if (u > innerHi - wEq * 0.5 + 1e-4) break;
+                const u = innerLo + wEq * 0.5 + bi * (wEq + j) + staggerU;
+                if (u > innerHi - wEq * 0.25) break;
 
                 const theta = u / Rc;
                 let tuckY = 0;
