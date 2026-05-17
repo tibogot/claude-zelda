@@ -115,6 +115,27 @@ export class LivePropManager {
     return this._live.get(instIdx) ?? null;
   }
 
+  /** Iterate every live entry whose factory result has `kind` matching the test. */
+  forEachByKind(kindTest, cb) {
+    for (const [instIdx, entry] of this._live) {
+      const k = entry.obj?.kind;
+      if (k && kindTest(k)) cb(entry, instIdx);
+    }
+  }
+
+  /** Toggle group visibility (used by collectible runtime to "consume" without mutating the store). */
+  setEntryVisible(instIdx, visible) {
+    const entry = this._live.get(instIdx);
+    if (entry?.obj?.group) entry.obj.group.visible = !!visible;
+  }
+
+  /** Force all live entries visible — called when leaving play mode so collected items reappear. */
+  showAll() {
+    for (const entry of this._live.values()) {
+      if (entry?.obj?.group) entry.obj.group.visible = true;
+    }
+  }
+
   updateParamSnap(instIdx) {
     const entry = this._live.get(instIdx);
     if (!entry) return;

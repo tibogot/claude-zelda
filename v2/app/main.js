@@ -74,6 +74,14 @@ import { PropInstancer } from "../core/props/propInstancer.js";
 import { PropSystem } from "../tools/props/propSystem.js";
 import { LivePropManager } from "../core/props/livePropManager.js";
 import { createFlagProp, flagBoundingBox, FLAG_DEFAULTS } from "../core/props/flagFactory.js";
+import {
+  createCoinProp, coinBoundingBox, COIN_DEFAULTS,
+  createHeartProp, heartBoundingBox, HEART_DEFAULTS,
+  createKeyProp, keyBoundingBox, KEY_DEFAULTS,
+} from "../core/props/collectibleFactory.js";
+import { createCollectibleBurst } from "../effects/collectibleBurst.js";
+import { createCollectibleRuntime } from "../play/collectibleRuntime.js";
+import { createCollectibleSfx } from "../play/collectibleSfx.js";
 import { TransformControls } from "three/addons/controls/TransformControls.js";
 import { WaterStore } from "../core/water/waterStore.js";
 import { createWaterMaterials } from "../render/water/waterMaterial.js";
@@ -720,6 +728,11 @@ export async function startV2App(opts = {}) {
 
   const livePropManager = new LivePropManager(scene, propStore);
   livePropManager.registerFactory("flag", (params) => createFlagProp(params));
+  livePropManager.registerFactory("coin", (params) => createCoinProp(params));
+  livePropManager.registerFactory("heart", (params) => createHeartProp(params));
+  livePropManager.registerFactory("key", (params) => createKeyProp(params));
+
+  const collectibleBurst = createCollectibleBurst(scene);
   const splineSystem = new SplineSystem({
     scene,
     toolState,
@@ -944,6 +957,12 @@ export async function startV2App(opts = {}) {
   }
 
   const audioSystem = createV2AudioSystem({ toolState });
+  const collectibleSfx = createCollectibleSfx(audioSystem);
+  const collectibleRuntime = createCollectibleRuntime({
+    livePropManager,
+    burst: collectibleBurst,
+    playSfx: (kind) => collectibleSfx.play(kind),
+  });
   const playMode = new PlayMode({
     scene, camera, renderer, controls,
     getWorldHeight,
@@ -1054,10 +1073,12 @@ export async function startV2App(opts = {}) {
       const immersive = _pendingPlayImmersive === true;
       _pendingPlayImmersive = false;
       playMode.enter({ editorRelaxedPointer: !immersive });
+      collectibleRuntime.start();
       syncPlayEditorChrome(immersive);
       document.getElementById("play-stop-bar")?.classList.add("visible");
     } else if (playMode.active) {
       playMode.exit();
+      collectibleRuntime.stop();
       syncPlayEditorChrome(false);
       document.getElementById("play-stop-bar")?.classList.remove("visible");
     }
@@ -1707,7 +1728,10 @@ export async function startV2App(opts = {}) {
     }),
     onAddLiveProp: (_addLiveProp = (livePropName) => {
       const defs = {
-        Flag: { factoryId: "flag", defaults: FLAG_DEFAULTS, bbox: flagBoundingBox },
+        Flag:  { factoryId: "flag",  defaults: FLAG_DEFAULTS,  bbox: flagBoundingBox },
+        Coin:  { factoryId: "coin",  defaults: COIN_DEFAULTS,  bbox: coinBoundingBox },
+        Heart: { factoryId: "heart", defaults: HEART_DEFAULTS, bbox: heartBoundingBox },
+        Key:   { factoryId: "key",   defaults: KEY_DEFAULTS,   bbox: keyBoundingBox },
       };
       const def = defs[livePropName];
       if (!def) return;
@@ -2137,6 +2161,7 @@ export async function startV2App(opts = {}) {
   playMode.onExit = () => {
     toolState.mode = "view";
     playMode.exit();
+    collectibleRuntime.stop();
     syncPlayEditorChrome(false);
     document.getElementById("play-stop-bar")?.classList.remove("visible");
     syncPlaySpawnMarker();
@@ -3225,6 +3250,10 @@ export async function startV2App(opts = {}) {
     cliffInstancer.update();
     propInstancer.update(camera, toolState.propLod);
     livePropManager.update(dtSec);
+    collectibleBurst.update(dtSec);
+    if (playMode.active) {
+      collectibleRuntime.update(dtSec, playMode.playerPos, playMode.moveMode);
+    }
     treeLodRenderer.update(treeStore, camera, toolState.treeLod);
     foliageLodRenderer.update(treeStore, camera, toolState.foliageLod);
     foliageLodRenderer.updateTime(now * 0.001);
@@ -3612,6 +3641,7 @@ export async function startV2App(opts = {}) {
       cliffInstancer.dispose();
       propInstancer.dispose();
       livePropManager.dispose();
+      collectibleBurst.dispose();
       transformControls.dispose();
       grassManager.dispose();
       ambientFxStore.clear();

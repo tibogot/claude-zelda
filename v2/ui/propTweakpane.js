@@ -29,6 +29,9 @@ export function addPropFolder(pane, toolState, callbacks) {
 
   const liveFolder = folder.addFolder({ title: "Add Live Prop", expanded: false });
   liveFolder.addButton({ title: "Flag" }).on("click", () => callbacks.onAddLiveProp?.("Flag"));
+  liveFolder.addButton({ title: "Coin (collectible)" }).on("click", () => callbacks.onAddLiveProp?.("Coin"));
+  liveFolder.addButton({ title: "Heart (collectible)" }).on("click", () => callbacks.onAddLiveProp?.("Heart"));
+  liveFolder.addButton({ title: "Key (collectible)" }).on("click", () => callbacks.onAddLiveProp?.("Key"));
 
   const slotsFolder = folder.addFolder({ title: "Loaded Props", expanded: false });
 
