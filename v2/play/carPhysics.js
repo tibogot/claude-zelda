@@ -401,6 +401,18 @@ export class CarPhysics {
       this._initialized = true;
     }
 
+    // Full-overhang detection: ALL 4 wheels report ground above the body. This
+    // only happens when step-over let the car phase under a slope and the body
+    // is geometrically beneath an overhanging surface. In that case the spring
+    // force at clamped-max-compression on 4 wheels rocket-launches the car.
+    // Partial cases (slope climbing where only front wheels are slightly above
+    // body in transients) are untouched — at least one wheel is always below
+    // body on real slopes.
+    let fullOverhang = true;
+    for (let i = 0; i < 4; i++) {
+      if (this.wheelContactYs[i] <= bodyY) { fullOverhang = false; break; }
+    }
+
     let totalForce = 0;
     let groundedCount = 0;
     const wheelF = this.telemetry.wheelForce;
@@ -416,6 +428,14 @@ export class CarPhysics {
       if (compression > 0) {
         this.wheelGrounded[i] = true;
         groundedCount++;
+
+        // Full overhang: don't fire the spring. Body integrates with gravity;
+        // maxGroundY clamp will lift it (also suppressed below to a smooth rate).
+        if (fullOverhang) {
+          compDbg[i] = maxTravel;
+          this.wheelSuspLengths[i] = 0;
+          continue;
+        }
 
         const clampedComp = Math.min(compression, maxTravel);
         compDbg[i] = clampedComp;
@@ -452,8 +472,15 @@ export class CarPhysics {
       if (this.wheelContactYs[i] > maxGroundY) maxGroundY = this.wheelContactYs[i];
     }
     if (newBodyY < maxGroundY) {
-      newBodyY = maxGroundY;
-      if (this.velY < 0) this.velY = 0;
+      if (fullOverhang) {
+        // Smooth lift instead of teleport — avoids carrying upward inertia
+        // when the body needs to step up out of a low overhang.
+        newBodyY = Math.min(maxGroundY, newBodyY + maxTravel);
+        this.velY = 0;
+      } else {
+        newBodyY = maxGroundY;
+        if (this.velY < 0) this.velY = 0;
+      }
     }
 
     this.inAir = groundedCount === 0;

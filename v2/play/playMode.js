@@ -322,9 +322,11 @@ class DriftMarks {
     this.states[1].active = false;
   }
 
-  update(rearPoints, emit, intensity) {
-    this._track(rearPoints[0], emit, intensity, this.states[0]);
-    this._track(rearPoints[1], emit, intensity, this.states[1]);
+  update(rearPoints, emit, intensity, rearGrounded = null) {
+    const e0 = emit && (!rearGrounded || rearGrounded[0]);
+    const e1 = emit && (!rearGrounded || rearGrounded[1]);
+    this._track(rearPoints[0], e0, intensity, this.states[0]);
+    this._track(rearPoints[1], e1, intensity, this.states[1]);
   }
 
   _track(point, emit, intensity, state) {
@@ -992,6 +994,7 @@ export class PlayMode {
     this.smokeSettings = smokeSettings || {};
     this.driftSmoke = new DriftSmoke(scene, this.smokeSettings);
     this._carRearContactPoints = [new THREE.Vector3(), new THREE.Vector3()];
+    this._carRearContactGrounded = [false, false];
     this._carHud = null;
     this._carHudSpd = null;
     this._carHudAngle = null;
@@ -3843,8 +3846,11 @@ export class PlayMode {
           const contactY = grounded ? this._carPhysics.wheelContactYs[i] : this.playerPos.y;
           w.contactWorld.set(wx, contactY + DRIFT_MARK_Y_OFFSET, wz);
           if (!w.steer) {
-            if (rearIdx < this._carRearContactPoints.length)
-              this._carRearContactPoints[rearIdx++].copy(w.contactWorld);
+            if (rearIdx < this._carRearContactPoints.length) {
+              this._carRearContactPoints[rearIdx].copy(w.contactWorld);
+              this._carRearContactGrounded[rearIdx] = grounded;
+              rearIdx++;
+            }
           }
         }
 
@@ -3947,8 +3953,11 @@ export class PlayMode {
           const h = this._carPhysics.wheelContactYs[i];
           w.contactWorld.set(wx, h + DRIFT_MARK_Y_OFFSET, wz);
           if (!w.steer) {
-            if (rearIdx < this._carRearContactPoints.length)
-              this._carRearContactPoints[rearIdx++].copy(w.contactWorld);
+            if (rearIdx < this._carRearContactPoints.length) {
+              this._carRearContactPoints[rearIdx].copy(w.contactWorld);
+              this._carRearContactGrounded[rearIdx] = grounded;
+              rearIdx++;
+            }
           }
         }
 
@@ -4073,6 +4082,7 @@ export class PlayMode {
         this._carRearContactPoints,
         emitMarks,
         driftIntensity,
+        this._carRearContactGrounded,
       );
       this.driftSmoke.update(
         dtSec,
