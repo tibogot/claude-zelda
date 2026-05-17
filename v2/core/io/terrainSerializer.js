@@ -388,7 +388,7 @@ function extractSerializableSettings(toolState) {
     cliffs: { ...toolState.cliffs },
     cliffInstances: toolState._cliffExportData?.() ?? null,
     props: { ...toolState.props },
-    propSlots: toolState.propSlots.map((s) => ({ name: s.name, ...(s.builtin ? { builtin: true } : {}), ...(s.live ? { live: true, factoryId: s.factoryId } : {}) })),
+    propSlots: toolState.propSlots.map((s) => ({ name: s.name, ...(s.builtin ? { builtin: true } : {}), ...(s.live ? { live: true, factoryId: s.factoryId } : {}), ...(s.glbFile ? { glbFile: s.glbFile } : {}) })),
     propInstances: toolState._propExportData?.() ?? null,
     road: { ...toolState.road },
     roads: toolState._roadExportData?.() ?? null,
