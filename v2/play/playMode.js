@@ -4537,6 +4537,7 @@ export class PlayMode {
       this.carVelY = 0;
       this.carInAir = false;
       this.carOnSteepSlope = false;
+      this._carPhysics._initialized = false;
       this.driftMarks.reset();
       this.driftSmoke.reset();
       this._clearTrails();
@@ -4554,6 +4555,7 @@ export class PlayMode {
         this.playerPos.x,
         this.playerPos.z,
       );
+      this._carPhysics._initialized = false;
       this._driftBoostMeter = 0;
       this._driftBoostActive = false;
       this._lotusPhysics._handbrakeBlend = 0;

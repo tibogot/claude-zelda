@@ -419,7 +419,8 @@ export class CarPhysics {
 
         const clampedComp = Math.min(compression, maxTravel);
         compDbg[i] = clampedComp;
-        const groundVelY = (groundY - this._prevGroundYs[i]) / Math.max(dtSec, 0.001);
+        const rawGroundVelY = (groundY - this._prevGroundYs[i]) / Math.max(dtSec, 0.001);
+        const groundVelY = Math.max(-80, Math.min(80, rawGroundVelY));
         const compVel = -(this.velY - groundVelY);
         const dampRate =
           compVel > 0 ? j.suspDampCompress : j.suspDampRelax;
