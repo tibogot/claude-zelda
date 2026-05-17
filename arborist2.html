@@ -830,43 +830,7 @@
 
       // ─── LEAF TEXTURE ────────────────────────────────────────────────────────────
       const leafMapNode = texture(new THREE.Texture());
-      // 0 = sample mask from .r (grayscale/RGB-only PNGs), 1 = sample from .a (RGBA PNGs).
-      // Set per-texture by detectAlphaChannel() after load.
-      const uMaskInAlpha = uniform(0.0);
-      // Built-in texture: activeLeafTexPath = "textures/leaves/...".
-      // User-loaded texture: activeLeafTexDataUrl = "data:image/...;base64,...".
-      // At most one is non-empty; both are serialized as `leafTexture` in the preset.
       let activeLeafTexPath = "";
-      let activeLeafTexDataUrl = "";
-
-      // Detects whether an image's alpha channel carries meaningful (<255) data.
-      // Used to decide which channel holds the leaf mask.
-      function detectAlphaChannel(image) {
-        try {
-          const w = image.width || image.naturalWidth;
-          const h = image.height || image.naturalHeight;
-          if (!w || !h) return false;
-          const c = document.createElement("canvas");
-          c.width = w;
-          c.height = h;
-          const ctx = c.getContext("2d", { willReadFrequently: true });
-          ctx.drawImage(image, 0, 0);
-          const data = ctx.getImageData(0, 0, w, h).data;
-          // Sample every 4th pixel for speed; bail on first sub-opaque alpha.
-          for (let i = 3; i < data.length; i += 16) {
-            if (data[i] < 255) return true;
-          }
-          return false;
-        } catch (e) {
-          // Cross-origin tainted canvas etc. — fall back to red-channel.
-          return false;
-        }
-      }
-
-      function applyMaskChannelFor(tex) {
-        const img = tex.image;
-        uMaskInAlpha.value = detectAlphaChannel(img) ? 1.0 : 0.0;
-      }
 
       function loadLeafTexFromPath(path) {
         const loader = new THREE.TextureLoader();
@@ -874,9 +838,7 @@
           tex.colorSpace = THREE.SRGBColorSpace;
           tex.needsUpdate = true;
           leafMapNode.value = tex;
-          applyMaskChannelFor(tex);
           activeLeafTexPath = path;
-          activeLeafTexDataUrl = "";
           params.leafTexFile = path;
           updateGallerySelection();
         });
@@ -885,27 +847,19 @@
       function loadLeafTexFromFile(file) {
         const reader = new FileReader();
         reader.onload = (ev) => {
-          const dataUrl = ev.target.result;
-          loadLeafTexFromDataUrl(dataUrl, file.name);
+          const img = new Image();
+          img.onload = () => {
+            const tex = new THREE.Texture(img);
+            tex.colorSpace = THREE.SRGBColorSpace;
+            tex.needsUpdate = true;
+            leafMapNode.value = tex;
+            activeLeafTexPath = "";
+            params.leafTexFile = file.name;
+            updateGallerySelection();
+          };
+          img.src = ev.target.result;
         };
         reader.readAsDataURL(file);
-      }
-
-      // Used both by file uploads and by preset loads that embedded the texture.
-      function loadLeafTexFromDataUrl(dataUrl, displayName) {
-        const img = new Image();
-        img.onload = () => {
-          const tex = new THREE.Texture(img);
-          tex.colorSpace = THREE.SRGBColorSpace;
-          tex.needsUpdate = true;
-          leafMapNode.value = tex;
-          applyMaskChannelFor(tex);
-          activeLeafTexPath = "";
-          activeLeafTexDataUrl = dataUrl;
-          params.leafTexFile = displayName || "(embedded)";
-          updateGallerySelection();
-        };
-        img.src = dataUrl;
       }
 
       // ─── TEXTURE GALLERY ─────────────────────────────────────────────────────────
@@ -945,30 +899,27 @@
       const uTopColor = uniform(new THREE.Color("#5aaa2a"));
       const uColorVar = uniform(0.12);
       const uAlphaCutoff = uniform(0.45);
-      const uSssColor = uniform(new THREE.Color("#c8e070"));
-      const uSssStr = uniform(0.0);
+      const uSssColor = uniform(new THREE.Color("#ffee55"));
+      const uSssStr = uniform(0.55);
       const uSssPow = uniform(2.0);
       const uRimColor = uniform(new THREE.Color("#c8ffaa"));
-      const uRimStr = uniform(0.07);
+      const uRimStr = uniform(0.38);
       const uRimPow = uniform(2.5);
-      const uAoStr = uniform(0.70);
+      const uAoStr = uniform(0.45);
       const uSunDir = uniform(new THREE.Vector3(5, 12, 4).normalize());
       const uWindSpeed = uniform(0.9);
-      const uWindStr = uniform(0.0);
-      const uWindMicro = uniform(0.0);
+      const uWindStr = uniform(0.13);
+      const uWindMicro = uniform(0.04);
       const uCanopyCenter = uniform(new THREE.Vector3(0, 4, 0));
       const uAoRadius = uniform(6.0);
-      const uNormalBias = uniform(1.0);
+      const uNormalBias = uniform(0.75);
       const uLeafWarp = uniform(0.28);
-      const uBillboard = uniform(1.0);
-      const uBillboardYaw = uniform(0.0);
+      const uBillboard = uniform(0.0);
+      const uBillboardYaw = uniform(1.0);
 
       // ─── LEAF MATERIAL (TSL) ─────────────────────────────────────────────────────
       const aRand = attribute("aRand", "vec2");
       const aLeafScale = attribute("aLeafScale", "float");
-      const aLeafCenter = attribute("aLeafCenter", "vec3");
-      // Per-instance world-space center — instance-aware (modelWorldMatrix * leaf center)
-      const instanceCenterW = modelWorldMatrix.mul(vec4(aLeafCenter, 1)).xyz;
 
       const leafWindOffset = Fn(() => {
         const phase = aRand.x.mul(6.2832);
@@ -986,10 +937,8 @@
       });
 
       const positionNode = Fn(() => {
-        // Wind is a world-space delta (sway along world X, swayZ along world Z).
-        // Must NOT be projected into the camera basis or it appears to rotate with the camera.
-        const wo = leafWindOffset();
-        const pivotW = instanceCenterW;
+        const windy = positionLocal.add(leafWindOffset());
+        const pivotW = modelWorldMatrix.mul(vec4(0, 0, 0, 1)).xyz;
         const toCam = normalize(sub(cameraPosition, pivotW));
         const horiz = vec3(toCam.x, float(0), toCam.z);
         const hLen = length(horiz);
@@ -1002,44 +951,23 @@
         );
         const face = normalize(mix(toCam, yawDir, uBillboardYaw));
         const worldUp = vec3(0, 1, 0);
-        // NaN-safe basis: pick the non-degenerate cross BEFORE normalizing.
-        const cA = cross(worldUp, face);
-        const cB = cross(vec3(-1, 0, 0), face);
-        const right = normalize(mix(cA, cB, step(float(0.99), abs(face.y))));
+        const rA = normalize(cross(worldUp, face));
+        const rB = normalize(cross(vec3(-1, 0, 0), face));
+        const right = normalize(mix(rA, rB, step(float(0.99), abs(face.y))));
         const upv = normalize(cross(face, right));
-        // Per-leaf 2D rotation of the camera-aligned quad around the face axis.
-        // Breaks up the "all billboards point the same way" tell. Uses aRand.x
-        // (already deterministic per leaf and shared with v2).
-        const ang = aRand.x.mul(6.2831853);
-        const cosA = cos(ang);
-        const sinA = sin(ang);
-        const rRight = right.mul(cosA).add(upv.mul(sinA));
-        const rUp = upv.mul(cosA).sub(right.mul(sinA));
-        // Camera-aligned quad from positionLocal only (no wind in the basis).
-        const bbQuad = add(
-          mul(rRight, mul(positionLocal.x, aLeafScale)),
-          mul(rUp, mul(positionLocal.y, aLeafScale)),
+        const bb = add(
+          mul(right, mul(windy.x, aLeafScale)),
+          mul(upv, mul(windy.y, aLeafScale)),
         );
-        // World-space wind, scaled with leaf size.
-        const windWorld = mul(wo, aLeafScale);
-        const bb3 = bbQuad.add(windWorld);
-        // Non-billboard branch: wind added in local space (rotates with the leaf — acceptable).
-        return mix(positionLocal.add(wo), bb3, uBillboard);
+        const bb3 = add(bb, mul(face, mul(windy.z, aLeafScale)));
+        return mix(windy, bb3, uBillboard);
       })();
 
-      // Stylized foliage lighting: every leaf uses world-up as its normal so the
-      // entire canopy lights as one uniform "puff." Per-leaf sphereDir variation
-      // produces visible per-leaf shading noise that swings as the camera orbits
-      // (different leaves come to the front). Uniform world-up gives a stable,
-      // angle-independent appearance; shape comes from AO and the height gradient,
-      // not from per-leaf normal variation. Matches the BotW/Genshin stylized look.
-      const sphereDir = vec3(0, 1, 0);
-      // SSS uses the per-leaf outward direction (not the uniform sphereDir) so
-      // backlit leaves on the anti-sun hemisphere still glow with the SSS color.
-      // Kept separate so Lambert stays uniform but SSS gives the stylized highlight.
-      const sphereDirForSSS = normalize(instanceCenterW.sub(uCanopyCenter));
+      // Sphere normal trick: leaves face outward from canopy center for uniform lighting
+      const wPos = modelWorldMatrix.mul(positionLocal);
+      const sphereDir = normalize(wPos.xyz.sub(uCanopyCenter));
       const leafBillboardFace = Fn(() => {
-        const pivotW = instanceCenterW;
+        const pivotW = modelWorldMatrix.mul(vec4(0, 0, 0, 1)).xyz;
         const toCam = normalize(sub(cameraPosition, pivotW));
         const horiz = vec3(toCam.x, float(0), toCam.z);
         const hLen = length(horiz);
@@ -1098,25 +1026,14 @@
         col = col.mul(aoSphere);
         const viewDir = normalize(cameraPosition.sub(positionWorld));
         const n = normalWorld;
-        // SSS uses per-leaf sphere direction so backlit anti-sun leaves glow,
-        // while Lambert (via normalWorld = uniform world-up) stays stable.
-        const backDot = max(dot(negate(uSunDir), sphereDirForSSS), float(0));
+        const backDot = max(dot(negate(uSunDir), n), float(0));
         const sss = pow(backDot, uSssPow).mul(uSssStr);
         col = col.add(uSssColor.mul(sss));
-        // Rim uses per-leaf sphere direction (not the uniform up normal) so it
-        // activates on leaves whose outward direction is perpendicular to view —
-        // i.e. the canopy silhouette from any camera angle. Without this, rim
-        // would be a "horizon glow" tied to camera height and would only show
-        // up on the AO-darkened bottom, looking like SSS instead of edge rim.
-        const rimDot = float(1.0).sub(max(dot(sphereDirForSSS, viewDir), float(0)));
+        const rimDot = float(1.0).sub(max(dot(n, viewDir), float(0)));
         const rim = pow(rimDot, uRimPow).mul(uRimStr);
         col = col.add(uRimColor.mul(rim));
         return clamp(col, float(0), float(2));
       })();
-
-      // Selects the leaf mask channel based on the loaded texture format.
-      // uMaskInAlpha = 0 -> .r (grayscale / RGB-only PNGs), = 1 -> .a (RGBA PNGs).
-      const leafMaskCh = mix(leafMapNode.r, leafMapNode.a, uMaskInAlpha);
 
       const opacityNode = Fn(() => {
         const camDist = length(cameraPosition.sub(positionWorld));
@@ -1125,7 +1042,7 @@
         return smoothstep(
           adaptiveCutoff.sub(0.05),
           adaptiveCutoff.add(0.05),
-          leafMaskCh,
+          leafMapNode.r,
         );
       })();
 
@@ -1143,14 +1060,12 @@
       leafMat.opacityNode = opacityNode;
       leafMat.envMapIntensity = 0;
       leafMat.castShadowNode = Fn(() => {
-        // Match the visible pass: same channel select and same alphaTest threshold (0.3),
-        // so the shadow silhouette aligns with the leaf silhouette.
         const a = smoothstep(
           uAlphaCutoff.sub(0.05),
           uAlphaCutoff.add(0.05),
-          leafMaskCh,
+          leafMapNode.r,
         );
-        a.lessThan(float(0.3)).discard();
+        a.lessThan(float(0.5)).discard();
         return vec4(0, 0, 0, 1);
       })();
 
@@ -1269,7 +1184,6 @@
           params.colorVar = m.colorVar;
           uColorVar.value = m.colorVar;
           params.roughness = m.roughness;
-          leafMat.roughness = m.roughness;
           params.alphaCutoff = m.alphaCutoff;
           uAlphaCutoff.value = m.alphaCutoff;
           params.sssColor = m.sssColor;
@@ -1365,18 +1279,6 @@
         }, 400);
       }
 
-      // ─── DETERMINISTIC RNG ──────────────────────────────────────────────────────
-      // LCG matching v2/core/foliage/foliageSampler.js exactly. The aRand and
-      // per-leaf jitter use the SAME fixed seeds as v2 (77777 and 42) so that
-      // the JSON preset reproduces the same tree in arborist and v2.
-      function createLcg(seed) {
-        let s = (seed * 1664525 + 1013904223) >>> 0;
-        return () => {
-          s = (s * 1664525 + 1013904223) >>> 0;
-          return s / 0xffffffff;
-        };
-      }
-
       // ─── ELLIPSOID SAMPLER ───────────────────────────────────────────────────────
       function sampleCluster(c, seedOffset) {
         let lcg = (seedOffset * 1664525 + 1013904223) >>> 0;
@@ -1416,27 +1318,17 @@
       function sampleAllPositions() {
         const allPos = [];
         const allRands = [];
-        // 4 jitter values per leaf, in v2's consumption order: [rotY01, tiltX01, tiltZ01, scale01].
-        // Pre-computed so LOD0/LOD1/LOD2 share identical per-leaf jitter for the same leaf index.
-        const allJitter = [];
-        // First pass: positions + aRand. Mirrors v2/foliageSampler.sampleAllClusters().
-        const randRng = createLcg(77777);
         clusterDefs.forEach((c, ci) => {
           if (!c.enabled) return;
           sampleCluster(c, ci * 999983 + 12345).forEach((p) => {
             allPos.push(p);
-            allRands.push(randRng(), randRng());
+            allRands.push(Math.random(), Math.random());
           });
         });
-        // Second pass: per-leaf jitter. Mirrors v2/foliageSampler.buildAllFoliageLods().
-        const jitterRng = createLcg(42);
-        for (let i = 0; i < allPos.length; i++) {
-          allJitter.push(jitterRng(), jitterRng(), jitterRng(), jitterRng());
-        }
-        return { allPos, allRands, allJitter };
+        return { allPos, allRands };
       }
 
-      function buildLeafMesh(positions, rands, jitter, scaleMul, xOffset) {
+      function buildLeafMesh(positions, rands, scaleMul, xOffset) {
         const n = positions.length;
         if (n === 0) return null;
 
@@ -1455,18 +1347,6 @@
           new THREE.InstancedBufferAttribute(scaleData, 1),
         );
 
-        const centerData = new Float32Array(n * 3);
-        for (let i = 0; i < n; i++) {
-          const p = positions[i];
-          centerData[i * 3] = p.x + xOffset;
-          centerData[i * 3 + 1] = p.y;
-          centerData[i * 3 + 2] = p.z;
-        }
-        geo.setAttribute(
-          "aLeafCenter",
-          new THREE.InstancedBufferAttribute(centerData, 3),
-        );
-
         const mesh = new THREE.InstancedMesh(geo, leafMat, n);
         mesh.frustumCulled = false;
         mesh.castShadow = true;
@@ -1476,16 +1356,12 @@
         const DEG2RAD = Math.PI / 180;
 
         positions.forEach((p, i) => {
-          // Jitter consumption order matches v2/foliageSampler.buildAllFoliageLods:
-          // j0 = rotY, j1 = tiltX, j2 = tiltZ, j3 = scale.
-          const j0 = jitter[i * 4];
-          const j1 = jitter[i * 4 + 1];
-          const j2 = jitter[i * 4 + 2];
-          const j3 = jitter[i * 4 + 3];
           dummy.position.set(p.x + xOffset, p.y, p.z);
           const s = Math.max(
             0.05,
-            p.leafSize * scaleMul * (1 + (j3 - 0.5) * 2 * p.scaleVar),
+            p.leafSize *
+              scaleMul *
+              (1 + (Math.random() - 0.5) * 2 * p.scaleVar),
           );
           if (useBillboard) {
             dummy.rotation.set(0, 0, 0);
@@ -1493,9 +1369,9 @@
             scaleData[i] = s;
           } else {
             dummy.rotation.order = "YXZ";
-            dummy.rotation.y = j0 * Math.PI * 2;
-            dummy.rotation.x = (j1 - 0.5) * p.tiltMax * DEG2RAD * 2;
-            dummy.rotation.z = (j2 - 0.5) * p.tiltMax * DEG2RAD * 2;
+            dummy.rotation.y = Math.random() * Math.PI * 2;
+            dummy.rotation.x = (Math.random() - 0.5) * p.tiltMax * DEG2RAD * 2;
+            dummy.rotation.z = (Math.random() - 0.5) * p.tiltMax * DEG2RAD * 2;
             dummy.scale.setScalar(s);
             scaleData[i] = 1;
           }
@@ -1521,7 +1397,7 @@
         // Clean up LOD previews
         clearLodPreviews();
 
-        const { allPos, allRands, allJitter } = sampleAllPositions();
+        const { allPos, allRands } = sampleAllPositions();
         const n = allPos.length;
 
         if (n > 0) {
@@ -1552,12 +1428,12 @@
 
           // Build main tree (LOD0) — at origin or offset if LOD preview
           const xOff = lodPreview ? -LOD_SPACING : 0;
-          leavesMesh = buildLeafMesh(allPos, allRands, allJitter, 1.0, xOff);
+          leavesMesh = buildLeafMesh(allPos, allRands, 1.0, xOff);
           if (leavesMesh) scene.add(leavesMesh);
 
           // Build LOD previews if active
           if (lodPreview) {
-            buildLodPreviews(allPos, allRands, allJitter);
+            buildLodPreviews(allPos, allRands);
           }
         }
 
@@ -1579,45 +1455,26 @@
       const lodTag1 = document.getElementById("lod-tag-1");
       const lodTag2 = document.getElementById("lod-tag-2");
 
-      function decimatePositions(allPos, allRands, allJitter, keep) {
+      function decimatePositions(allPos, allRands, keep) {
         const subPos = [];
         const subRands = [];
-        const subJitter = [];
         const step = Math.max(1, Math.round(1 / keep));
         for (let i = 0; i < allPos.length; i += step) {
           subPos.push(allPos[i]);
           subRands.push(allRands[i * 2], allRands[i * 2 + 1]);
-          subJitter.push(
-            allJitter[i * 4],
-            allJitter[i * 4 + 1],
-            allJitter[i * 4 + 2],
-            allJitter[i * 4 + 3],
-          );
         }
-        return { subPos, subRands, subJitter };
+        return { subPos, subRands };
       }
 
-      function buildLodPreviews(allPos, allRands, allJitter) {
+      function buildLodPreviews(allPos, allRands) {
         // LOD1: 50% leaves, 1.414× bigger
-        const lod1 = decimatePositions(allPos, allRands, allJitter, 0.5);
-        lodMesh1 = buildLeafMesh(
-          lod1.subPos,
-          lod1.subRands,
-          lod1.subJitter,
-          1.414,
-          0,
-        );
+        const lod1 = decimatePositions(allPos, allRands, 0.5);
+        lodMesh1 = buildLeafMesh(lod1.subPos, lod1.subRands, 1.414, 0);
         if (lodMesh1) scene.add(lodMesh1);
 
         // LOD2: 25% leaves, 2× bigger
-        const lod2 = decimatePositions(allPos, allRands, allJitter, 0.25);
-        lodMesh2 = buildLeafMesh(
-          lod2.subPos,
-          lod2.subRands,
-          lod2.subJitter,
-          2.0,
-          LOD_SPACING,
-        );
+        const lod2 = decimatePositions(allPos, allRands, 0.25);
+        lodMesh2 = buildLeafMesh(lod2.subPos, lod2.subRands, 2.0, LOD_SPACING);
         if (lodMesh2) scene.add(lodMesh2);
 
         // Update stats
@@ -1979,18 +1836,18 @@
         colorVar: 0.12,
         roughness: 0.88,
         alphaCutoff: 0.45,
-        sssColor: "#c8e070",
-        sssStr: 0.0,
+        sssColor: "#ffee55",
+        sssStr: 0.55,
         sssPow: 2.0,
         rimColor: "#c8ffaa",
-        rimStr: 0.07,
+        rimStr: 0.38,
         rimPow: 2.5,
-        aoStr: 0.70,
-        normalBias: 1.0,
+        aoStr: 0.45,
+        normalBias: 0.75,
         leafWarp: 0.28,
         windSpeed: 0.9,
-        windStr: 0.0,
-        windMicro: 0.0,
+        windStr: 0.13,
+        windMicro: 0.04,
         presetName: "my_tree",
         leafTexFile: "",
         trunkTris: 0,
@@ -2003,8 +1860,8 @@
         lodPreview: false,
         lodDist1: 80,
         lodDist2: 200,
-        billboardLeaves: true,
-        billboardYawOnly: false,
+        billboardLeaves: false,
+        billboardYawOnly: true,
       };
 
       function updateStats() {
@@ -2051,9 +1908,7 @@
           presetName: params.presetName,
           trunkFile: trunkFileName,
           trunkLod1File: trunkLod1FileName,
-          // Either "textures/leaves/..." (built-in, light) or "data:image/...;base64,..." (embedded, self-contained).
-          leafTexture: activeLeafTexPath || activeLeafTexDataUrl || "",
-          leafTextureName: params.leafTexFile || "",
+          leafTexture: activeLeafTexPath || params.leafTexFile,
           clusters: clusterDefs.map((c) => ({ ...c })),
           material: {
             bottomColor: params.bottomColor,
@@ -2143,7 +1998,6 @@
           }
           if (m.roughness != null) {
             params.roughness = m.roughness;
-            leafMat.roughness = m.roughness;
           }
           if (m.alphaCutoff != null) {
             params.alphaCutoff = m.alphaCutoff;
@@ -2221,15 +2075,8 @@
             params.lodDist2 = data.lodDistances.lod2;
         }
         if (data.presetName) params.presetName = data.presetName;
-        if (data.leafTexture) {
-          if (data.leafTexture.startsWith("data:")) {
-            loadLeafTexFromDataUrl(
-              data.leafTexture,
-              data.leafTextureName || "(embedded)",
-            );
-          } else if (data.leafTexture.startsWith("textures/")) {
-            loadLeafTexFromPath(data.leafTexture);
-          }
+        if (data.leafTexture && data.leafTexture.startsWith("textures/")) {
+          loadLeafTexFromPath(data.leafTexture);
         }
         if (data.bushMode != null) {
           params.bushMode = data.bushMode;

@@ -14,7 +14,16 @@ const TRUNK_SEARCH_PATHS = [
 ];
 
 export async function loadFoliagePreset(presetJson) {
-  const foliageMat = createFoliageMaterial(presetJson.material);
+  const matOpts = presetJson.material || {};
+  // Pass billboard intent through both as createFoliageMaterial opts (so the
+  // shader is constructed with the right initial uniform values) and into the
+  // sampler (so instance matrices match what the billboard shader path expects).
+  const billboard = !!matOpts.billboardLeaves;
+  const foliageMat = createFoliageMaterial({
+    ...matOpts,
+    billboard,
+    billboardYawOnly: matOpts.billboardYawOnly,
+  });
   applyPresetMaterial(foliageMat, presetJson);
 
   if (presetJson.leafTexture) {
@@ -55,7 +64,7 @@ export async function loadFoliagePreset(presetJson) {
   const bounds = computeFoliageBounds(allPos);
   updateFoliageBounds(foliageMat, bounds.yMin, bounds.yMax, bounds.canopyCenter, bounds.aoRadius);
 
-  const lods = buildAllFoliageLods(allPos, allRands);
+  const lods = buildAllFoliageLods(allPos, allRands, { billboard });
 
   return {
     material: foliageMat.material,
@@ -63,6 +72,7 @@ export async function loadFoliagePreset(presetJson) {
     uniforms: foliageMat.uniforms,
     lods,
     bounds,
+    billboard,
   };
 }
 

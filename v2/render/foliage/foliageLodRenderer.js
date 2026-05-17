@@ -48,6 +48,8 @@ export class FoliageLodRenderer {
     this._quat = new THREE.Quaternion();
     this._scl = new THREE.Vector3();
     this._yAxis = new THREE.Vector3(0, 1, 0);
+    this._tmpCenter = new THREE.Vector3();
+    this._tmpTreeCenter = new THREE.Vector3();
   }
 
   setSlotPreset(slotIdx, preset) {
@@ -106,7 +108,26 @@ export class FoliageLodRenderer {
 
     const geo = lodData.geometry.clone();
     const randSrc = lodData.randData;
+    const centerSrc = lodData.centerData;
+    const scaleSrc = lodData.scaleData;
+    const billboard = !!lodData.billboard;
+    // Trunk-local canopy center for this preset (same for every tree of this slot).
+    // Applied per-tree via treeMat below to get the world-space canopy center.
+    const canopyLocal = (preset.bounds && preset.bounds.canopyCenter) || null;
     const randData = new Float32Array(cappedTotal * 2);
+    // Per-instance world center for the per-instance sphere normal. Without this
+    // the chunked InstancedMesh would reuse aLeafCenter from the cloned geometry,
+    // which only has lodData.count entries — out-of-bounds for trees > 1 in chunk.
+    const centerData = new Float32Array(cappedTotal * 3);
+    // Per-instance world canopy center of the tree this leaf belongs to.
+    // sphereDir = leafCenter - treeCenter must use world-space endpoints; otherwise
+    // trees placed away from world origin get wrong outward directions and the
+    // whole canopy flat-shades + flickers as the camera orbits.
+    const treeCenterData = new Float32Array(cappedTotal * 3);
+    // Per-instance scale; consulted by the shader's billboard path
+    // (in non-billboard mode the matrix already carries scale; we still
+    // upload aLeafScale per-instance to keep attribute layout consistent).
+    const scaleData = new Float32Array(cappedTotal);
 
     const im = new THREE.InstancedMesh(geo, preset.material, cappedTotal);
     im.count = cappedTotal;
@@ -126,19 +147,64 @@ export class FoliageLodRenderer {
       this._scl.setScalar(t.scale);
       this._treeMat.compose(this._pos, this._quat, this._scl);
 
+      // Tree's world canopy center — computed once per tree, written for every leaf below.
+      if (canopyLocal) {
+        this._tmpTreeCenter.copy(canopyLocal).applyMatrix4(this._treeMat);
+      } else {
+        this._tmpTreeCenter.copy(this._pos);
+      }
+      const tcx = this._tmpTreeCenter.x;
+      const tcy = this._tmpTreeCenter.y;
+      const tcz = this._tmpTreeCenter.z;
+
       for (let li = 0; li < leavesPerTree && idx < cappedTotal; li++, idx++) {
-        const off = li * 16;
-        this._tmpMat.fromArray(localMats, off);
-        this._tmpMat.premultiply(this._treeMat);
-        im.setMatrixAt(idx, this._tmpMat);
+        if (billboard) {
+          // Leaf world center first (treeMat applied to trunk-local center).
+          this._tmpCenter.set(
+            centerSrc[li * 3],
+            centerSrc[li * 3 + 1],
+            centerSrc[li * 3 + 2],
+          ).applyMatrix4(this._treeMat);
+          // Instance matrix = pure translation to that world center.
+          // No rotation (so the camera-aligned quad in the shader isn't
+          // re-rotated by tree rotation) and no scale (carried by aLeafScale).
+          this._tmpMat.makeTranslation(this._tmpCenter.x, this._tmpCenter.y, this._tmpCenter.z);
+          im.setMatrixAt(idx, this._tmpMat);
+          centerData[idx * 3]     = this._tmpCenter.x;
+          centerData[idx * 3 + 1] = this._tmpCenter.y;
+          centerData[idx * 3 + 2] = this._tmpCenter.z;
+          // Effective size = tree scale × per-leaf base size.
+          scaleData[idx] = scaleSrc[li] * t.scale;
+        } else {
+          const off = li * 16;
+          this._tmpMat.fromArray(localMats, off);
+          this._tmpMat.premultiply(this._treeMat);
+          im.setMatrixAt(idx, this._tmpMat);
+          // Leaf center in trunk-local -> world via this tree's matrix.
+          this._tmpCenter.set(
+            centerSrc[li * 3],
+            centerSrc[li * 3 + 1],
+            centerSrc[li * 3 + 2],
+          ).applyMatrix4(this._treeMat);
+          centerData[idx * 3]     = this._tmpCenter.x;
+          centerData[idx * 3 + 1] = this._tmpCenter.y;
+          centerData[idx * 3 + 2] = this._tmpCenter.z;
+          scaleData[idx] = scaleSrc[li]; // not consulted by non-billboard shader
+        }
         randData[idx * 2] = randSrc[li * 2];
         randData[idx * 2 + 1] = randSrc[li * 2 + 1];
+        treeCenterData[idx * 3]     = tcx;
+        treeCenterData[idx * 3 + 1] = tcy;
+        treeCenterData[idx * 3 + 2] = tcz;
       }
     }
 
     im.count = idx;
     im.instanceMatrix.needsUpdate = true;
     geo.setAttribute("aRand", new THREE.InstancedBufferAttribute(randData.slice(0, idx * 2), 2));
+    geo.setAttribute("aLeafCenter", new THREE.InstancedBufferAttribute(centerData.slice(0, idx * 3), 3));
+    geo.setAttribute("aTreeCenter", new THREE.InstancedBufferAttribute(treeCenterData.slice(0, idx * 3), 3));
+    geo.setAttribute("aLeafScale", new THREE.InstancedBufferAttribute(scaleData.slice(0, idx), 1));
 
     return im;
   }

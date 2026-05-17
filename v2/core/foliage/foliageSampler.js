@@ -95,39 +95,78 @@ export function computeFoliageBounds(positions) {
  * LOD0: all leaves, base size
  * LOD1: every 2nd leaf, 1.414× size
  * LOD2: every 4th leaf, 2× size
+ *
+ * options.billboard — when true, per-leaf rotation/scale is NOT baked into the
+ * instance matrix; instead the matrix is pure translation and the per-leaf
+ * size is exposed on `scaleData` for the shader's billboard path. The chunked
+ * renderer is responsible for skipping the tree's rotation/scale composition
+ * in billboard mode and uploading aLeafScale per instance.
+ *
+ * RNG consumption is identical in both modes (rotY, tiltX, tiltZ, scale) so
+ * the byte-for-byte determinism contract with arborist still holds.
  */
-export function buildAllFoliageLods(positions, rands) {
+export function buildAllFoliageLods(positions, rands, options = {}) {
   const n = positions.length;
   if (n === 0) return [null, null, null];
 
+  const billboard = !!options.billboard;
   const dummy = new THREE.Object3D();
   const DEG2RAD = Math.PI / 180;
   const rng = createLcg(42);
 
   const lod0Mats = new Float32Array(n * 16);
   const lod0Rands = new Float32Array(n * 2);
+  const lod0Centers = new Float32Array(n * 3);
+  const lod0Scales = new Float32Array(n);
   const baseSizes = new Float32Array(n);
 
   for (let i = 0; i < n; i++) {
     const p = positions[i];
     lod0Rands[i * 2] = rands[i * 2];
     lod0Rands[i * 2 + 1] = rands[i * 2 + 1];
+    lod0Centers[i * 3]     = p.x;
+    lod0Centers[i * 3 + 1] = p.y;
+    lod0Centers[i * 3 + 2] = p.z;
 
-    dummy.position.set(p.x, p.y, p.z);
-    dummy.rotation.order = "YXZ";
-    dummy.rotation.y = rng() * Math.PI * 2;
-    dummy.rotation.x = (rng() - 0.5) * p.tiltMax * DEG2RAD * 2;
-    dummy.rotation.z = (rng() - 0.5) * p.tiltMax * DEG2RAD * 2;
+    // Always consume 4 rng() in this order: rotY, tiltX, tiltZ, scale.
+    const rotY  = rng() * Math.PI * 2;
+    const tiltX = (rng() - 0.5) * p.tiltMax * DEG2RAD * 2;
+    const tiltZ = (rng() - 0.5) * p.tiltMax * DEG2RAD * 2;
     const s = Math.max(0.05, p.leafSize * (1 + (rng() - 0.5) * 2 * p.scaleVar));
     baseSizes[i] = s;
-    dummy.scale.setScalar(s);
+    lod0Scales[i] = s;
+
+    dummy.position.set(p.x, p.y, p.z);
+    if (billboard) {
+      // Pure translation; the shader builds a camera-facing quad sized by aLeafScale.
+      dummy.rotation.set(0, 0, 0);
+      dummy.scale.set(1, 1, 1);
+    } else {
+      dummy.rotation.order = "YXZ";
+      dummy.rotation.y = rotY;
+      dummy.rotation.x = tiltX;
+      dummy.rotation.z = tiltZ;
+      dummy.scale.setScalar(s);
+    }
     dummy.updateMatrix();
     dummy.matrix.toArray(lod0Mats, i * 16);
   }
 
   const geo0 = new THREE.PlaneGeometry(1, 1);
   geo0.setAttribute("aRand", new THREE.InstancedBufferAttribute(lod0Rands, 2));
-  const lod0 = { geometry: geo0, matrices: lod0Mats, count: n, randData: lod0Rands };
+  geo0.setAttribute("aLeafCenter", new THREE.InstancedBufferAttribute(lod0Centers, 3));
+  geo0.setAttribute("aLeafScale", new THREE.InstancedBufferAttribute(lod0Scales, 1));
+  // randData / centerData / scaleData are exposed so chunked renderers can
+  // re-upload per-instance values when batching many trees into one InstancedMesh.
+  const lod0 = {
+    geometry: geo0,
+    matrices: lod0Mats,
+    count: n,
+    randData: lod0Rands,
+    centerData: lod0Centers,
+    scaleData: lod0Scales,
+    billboard,
+  };
 
   const scaleMuls = [1.0, Math.SQRT2, 2.0];
   const steps = [1, 2, 4];
@@ -143,6 +182,8 @@ export function buildAllFoliageLods(positions, rands) {
 
     const mats = new Float32Array(count * 16);
     const rd = new Float32Array(count * 2);
+    const cd = new Float32Array(count * 3);
+    const sd = new Float32Array(count);
     const scaleRatio = sMul;
 
     for (let j = 0; j < count; j++) {
@@ -152,26 +193,46 @@ export function buildAllFoliageLods(positions, rands) {
 
       for (let k = 0; k < 16; k++) mats[dstOff + k] = lod0Mats[srcOff + k];
 
-      const origS = baseSizes[srcIdx];
-      const newS = origS * scaleRatio;
-      const ratio = newS / origS;
-      mats[dstOff + 0] *= ratio;
-      mats[dstOff + 1] *= ratio;
-      mats[dstOff + 2] *= ratio;
-      mats[dstOff + 4] *= ratio;
-      mats[dstOff + 5] *= ratio;
-      mats[dstOff + 6] *= ratio;
-      mats[dstOff + 8] *= ratio;
-      mats[dstOff + 9] *= ratio;
-      mats[dstOff + 10] *= ratio;
+      if (billboard) {
+        // Matrices are pure translation in billboard mode — don't bake scale
+        // into them; the bigger LOD leaf size goes on aLeafScale instead.
+        sd[j] = lod0Scales[srcIdx] * scaleRatio;
+      } else {
+        const origS = baseSizes[srcIdx];
+        const newS = origS * scaleRatio;
+        const ratio = newS / origS;
+        mats[dstOff + 0] *= ratio;
+        mats[dstOff + 1] *= ratio;
+        mats[dstOff + 2] *= ratio;
+        mats[dstOff + 4] *= ratio;
+        mats[dstOff + 5] *= ratio;
+        mats[dstOff + 6] *= ratio;
+        mats[dstOff + 8] *= ratio;
+        mats[dstOff + 9] *= ratio;
+        mats[dstOff + 10] *= ratio;
+        sd[j] = lod0Scales[srcIdx]; // unused by non-billboard shader path
+      }
 
       rd[j * 2] = lod0Rands[srcIdx * 2];
       rd[j * 2 + 1] = lod0Rands[srcIdx * 2 + 1];
+      cd[j * 3]     = lod0Centers[srcIdx * 3];
+      cd[j * 3 + 1] = lod0Centers[srcIdx * 3 + 1];
+      cd[j * 3 + 2] = lod0Centers[srcIdx * 3 + 2];
     }
 
     const geo = new THREE.PlaneGeometry(1, 1);
     geo.setAttribute("aRand", new THREE.InstancedBufferAttribute(rd, 2));
-    lods[tier] = { geometry: geo, matrices: mats, count, randData: rd };
+    geo.setAttribute("aLeafCenter", new THREE.InstancedBufferAttribute(cd, 3));
+    geo.setAttribute("aLeafScale", new THREE.InstancedBufferAttribute(sd, 1));
+    lods[tier] = {
+      geometry: geo,
+      matrices: mats,
+      count,
+      randData: rd,
+      centerData: cd,
+      scaleData: sd,
+      billboard,
+    };
   }
 
   return lods;
