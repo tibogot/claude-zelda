@@ -2429,10 +2429,16 @@ export async function startV2App(opts = {}) {
     getParams: () => toolState.lensFlare,
   });
 
+  // Both cloud systems bake heavy 3D textures (~96³ / 128³ voxels) on the CPU at
+  // construction time. Defer creation until the user actually enables one — the
+  // render loop / API methods below already null-check with `?.`.
   let volumetricCloudSystem = null;
   let volumetricCloudSystemOptimized = null;
-  try {
-    volumetricCloudSystem = await createVolumetricCloudSystem({
+  let _vcInitPromise = null;
+  let _vcOptInitPromise = null;
+  function ensureVolumetricCloudSystem() {
+    if (volumetricCloudSystem || _vcInitPromise) return _vcInitPromise;
+    _vcInitPromise = createVolumetricCloudSystem({
       renderer,
       scene,
       camera,
@@ -2441,12 +2447,16 @@ export async function startV2App(opts = {}) {
       sun,
       hemi,
       getOccluderMeshes: () => chunkStream.raycastMeshes(),
+    }).then((sys) => {
+      volumetricCloudSystem = sys;
+    }).catch((err) => {
+      console.warn("[V2] Volumetric cloud volume failed to init:", err);
     });
-  } catch (err) {
-    console.warn("[V2] Volumetric cloud volume failed to init:", err);
+    return _vcInitPromise;
   }
-  try {
-    volumetricCloudSystemOptimized = await createVolumetricCloudSystemOptimized({
+  function ensureVolumetricCloudSystemOptimized() {
+    if (volumetricCloudSystemOptimized || _vcOptInitPromise) return _vcOptInitPromise;
+    _vcOptInitPromise = createVolumetricCloudSystemOptimized({
       renderer,
       scene,
       camera,
@@ -2455,9 +2465,12 @@ export async function startV2App(opts = {}) {
       sun,
       hemi,
       getOccluderMeshes: () => chunkStream.raycastMeshes(),
+    }).then((sys) => {
+      volumetricCloudSystemOptimized = sys;
+    }).catch((err) => {
+      console.warn("[V2] Volumetric cloud (optimized) failed to init:", err);
     });
-  } catch (err) {
-    console.warn("[V2] Volumetric cloud (optimized) failed to init:", err);
+    return _vcOptInitPromise;
   }
 
   function updatePointer(event) {
@@ -3410,6 +3423,8 @@ export async function startV2App(opts = {}) {
 
     const vcOn = toolState.volumetricCloud.enabled;
     const vcOptOn = toolState.volumetricCloudOptimized.enabled;
+    if (vcOn && !volumetricCloudSystem) ensureVolumetricCloudSystem();
+    if (vcOptOn && !volumetricCloudSystemOptimized) ensureVolumetricCloudSystemOptimized();
     const oOpt = volumetricCloudSystemOptimized;
     if (!vcOptOn) {
       if (oOpt?.cloudMesh) oOpt.cloudMesh.visible = false;
