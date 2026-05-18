@@ -420,6 +420,19 @@
           /** Approximate spacing of rafter pairs along the ridge (world units). */
           houseTimberRafterSpacing: 0.52,
 
+          /**
+           * Chapel mode reuses the house gable shell with multiple pointed openings:
+           * a big door on the front face (+X) and a row of lancet windows on each long
+           * side. Front-door geometry comes from the standard `door*` params (so the
+           * existing Door folder controls work). Window-only proportions live here.
+           */
+          chapelWindowCountSide: 2,
+          chapelWindowInnerHalfW: 0.42,
+          chapelWindowLegH: 2.2,
+          chapelWindowSillY: 3.4,
+          chapelWindowArchPointedness: 1.25,
+          chapelBackWindow: true,
+
           wallEnabled: true,
           wallWidth: 15,
           wallHeight: 6.2,
@@ -750,7 +763,11 @@
             );
             return;
           }
-          if (params.sceneMode === "tower" || params.sceneMode === "house") {
+          if (
+            params.sceneMode === "tower" ||
+            params.sceneMode === "house" ||
+            params.sceneMode === "chapel"
+          ) {
             const R_in = Math.max(0.08, params.doorInnerHalfW);
             const R_out = R_in + Math.max(0.05, params.masonryShell);
             const margin = 0.28;
@@ -785,13 +802,14 @@
 
         /** Keep arch ring Z inside a sensible slab range (matches gizmo blue axis). */
         function clampArchAlongZ() {
+          const isTowerOrHouseLike =
+            params.sceneMode === "tower" ||
+            params.sceneMode === "towerRound" ||
+            params.sceneMode === "house" ||
+            params.sceneMode === "chapel";
           const d = Math.max(
             0.06,
-            params.sceneMode === "tower" ||
-              params.sceneMode === "towerRound" ||
-              params.sceneMode === "house"
-              ? params.brickD * 1.1
-              : params.wallDepth,
+            isTowerOrHouseLike ? params.brickD * 1.1 : params.wallDepth,
           );
           if (isBridge()) {
             const lim = params.bridgeDeckHalfW + params.wallDepth * 1.1 + 0.55;
@@ -802,12 +820,9 @@
             );
             return;
           }
-          const lim =
-            params.sceneMode === "tower" ||
-            params.sceneMode === "towerRound" ||
-            params.sceneMode === "house"
-              ? d * 0.65 + 0.5
-              : d * 0.55 + 0.42 + Math.abs(params.wallZ || 0) * 0.35;
+          const lim = isTowerOrHouseLike
+            ? d * 0.65 + 0.5
+            : d * 0.55 + 0.42 + Math.abs(params.wallZ || 0) * 0.35;
           params.archAlongZ = THREE.MathUtils.clamp(
             params.archAlongZ,
             -lim,
@@ -823,11 +838,12 @@
           const w0 =
             params.sceneMode === "tower" ||
             params.sceneMode === "towerRound" ||
-            params.sceneMode === "house"
+            params.sceneMode === "house" ||
+            params.sceneMode === "chapel"
               ? params.towerAnchorY
               : params.wallAnchorY;
           let w1;
-          if (params.sceneMode === "house") {
+          if (params.sceneMode === "house" || params.sceneMode === "chapel") {
             w1 =
               params.towerAnchorY +
               Math.max(params.brickH * 2, params.towerHeight) -
@@ -905,9 +921,18 @@
           return params.sceneMode === "house";
         }
 
-        /** Square / round tower or house: shared door ring, arch gizmo, and slab clamps. */
+        function isChapel() {
+          return params.sceneMode === "chapel";
+        }
+
+        /** Chapel reuses the house shell, so it shares all house-shaped checks. */
+        function isHouseOrChapel() {
+          return isHouse() || isChapel();
+        }
+
+        /** Square / round tower, house, or chapel: shared door ring, arch gizmo, and slab clamps. */
         function isTowerLike() {
-          return isAnyTower() || isHouse();
+          return isAnyTower() || isHouse() || isChapel();
         }
 
         function applyHouseDefaults() {
@@ -934,6 +959,58 @@
             0,
             Number(params.houseEaveLowerY) || 0,
           );
+        }
+
+        /** Chapel: house shell with Gothic proportions, pointed arches default, more bricks for many openings. */
+        function applyChapelDefaults() {
+          params.wallEnabled = true;
+          params.closeBottom = false;
+          params.wallZ = 0;
+          params.towerHalfWidth = 3.2;
+          params.towerHeight = 8.6;
+          params.towerAnchorY = Math.max(-0.2, params.towerAnchorY);
+          params.maxWallBricks = Math.max(params.maxWallBricks, 36000);
+          params.maxBricks = Math.max(params.maxBricks || 0, 2400);
+          params.houseGableRise = 3.8;
+          params.houseRoofOverhang = 0.18;
+          params.houseRoofZOverhang = 0.1;
+          params.houseEaveLowerY = 0;
+          params.houseRoofEnabled = true;
+          params.houseRoofKind = "brick";
+          /** Gable on ±X (face 0,1) so the long-side window rows sit on ±Z (face 2,3). */
+          params.houseGableAxis = 0;
+          /** Front door (face 0) — bigger pointed entrance. */
+          params.towerGateFace = 0;
+          params.archShape = "pointed";
+          params.archPointedness = Math.max(0.95, params.archPointedness || 1.0);
+          params.doorInnerHalfW = 0.95;
+          params.legHeight = 2.6;
+          params.sillY = 0.02;
+          params.masonryShell = Math.max(0.3, params.masonryShell || 0.36);
+          /** Window-row controls. */
+          params.chapelWindowCountSide = THREE.MathUtils.clamp(
+            Math.round(Number(params.chapelWindowCountSide) || 2),
+            1,
+            6,
+          );
+          params.chapelWindowInnerHalfW = Math.max(
+            0.2,
+            Number(params.chapelWindowInnerHalfW) || 0.42,
+          );
+          params.chapelWindowLegH = Math.max(
+            0.8,
+            Number(params.chapelWindowLegH) || 2.2,
+          );
+          params.chapelWindowSillY = Math.max(
+            0,
+            Number(params.chapelWindowSillY) || 3.4,
+          );
+          params.chapelWindowArchPointedness = Math.max(
+            0.5,
+            Number(params.chapelWindowArchPointedness) || 1.25,
+          );
+          params.chapelBackWindow =
+            params.chapelBackWindow == null ? true : !!params.chapelBackWindow;
         }
 
         function applyBridgeDefaults() {
@@ -979,6 +1056,7 @@
         }
 
         function getTowerOpeningsList() {
+          if (isChapel()) return getChapelOpeningsList();
           const gateFace = THREE.MathUtils.clamp(
             Math.floor(params.towerGateFace) || 0,
             0,
@@ -1010,6 +1088,77 @@
             return [{ ...base, uArc }];
           }
           return [base];
+        }
+
+        /**
+         * Chapel openings: a pointed door on the front (face 0), an optional tall pointed
+         * window on the back (face 1), and a row of N lancet windows on each long side
+         * (faces 2, 3). The front-door geometry follows the standard `door*` params (so
+         * existing Door folder sliders keep working); window geometry is chapel-specific.
+         */
+        function getChapelOpeningsList() {
+          const ops = [];
+          const halfT = params.towerHalfWidth;
+          const pointedness = Number.isFinite(params.archPointedness)
+            ? params.archPointedness
+            : 1.0;
+          const winPointedness = Number.isFinite(
+            params.chapelWindowArchPointedness,
+          )
+            ? params.chapelWindowArchPointedness
+            : 1.25;
+
+          ops.push({
+            face: 0,
+            uCenter: params.archAlong,
+            innerHalfW: params.doorInnerHalfW,
+            sillY: params.sillY,
+            legH: params.legHeight,
+            shell: params.masonryShell,
+            closeBottom: params.closeBottom,
+            archAlongZ: params.archAlongZ,
+            archShape: "pointed",
+            archPointedness: pointedness,
+          });
+
+          if (params.chapelBackWindow) {
+            ops.push({
+              face: 1,
+              uCenter: 0,
+              innerHalfW: params.chapelWindowInnerHalfW * 1.35,
+              sillY: params.chapelWindowSillY * 0.7,
+              legH: params.chapelWindowLegH * 1.15,
+              shell: params.masonryShell,
+              closeBottom: false,
+              archAlongZ: 0,
+              archShape: "pointed",
+              archPointedness: winPointedness,
+            });
+          }
+
+          const N = THREE.MathUtils.clamp(
+            Math.round(Number(params.chapelWindowCountSide) || 2),
+            1,
+            6,
+          );
+          for (let face = 2; face <= 3; face++) {
+            for (let i = 0; i < N; i++) {
+              const u = -halfT + (2 * halfT * (i + 0.5)) / N;
+              ops.push({
+                face,
+                uCenter: u,
+                innerHalfW: params.chapelWindowInnerHalfW,
+                sillY: params.chapelWindowSillY,
+                legH: params.chapelWindowLegH,
+                shell: params.masonryShell,
+                closeBottom: false,
+                archAlongZ: 0,
+                archShape: "pointed",
+                archPointedness: winPointedness,
+              });
+            }
+          }
+          return ops;
         }
 
         function setRingParentForFace(obj, face, halfT, uCenter, depth) {
@@ -2348,7 +2497,7 @@
           if (!isDraggingArchGizmo) updateArchGizmoFromParams();
           if (isTowerLike()) {
             let ty = params.towerAnchorY + params.towerHeight * 0.42;
-            if (isHouse()) {
+            if (isHouseOrChapel()) {
               const wb = params.towerAnchorY;
               const eY =
                 wb +
@@ -4418,7 +4567,7 @@
             buildTowerShellInstances();
             return;
           }
-          if (params.sceneMode === "house") {
+          if (params.sceneMode === "house" || params.sceneMode === "chapel") {
             buildHouseShellInstances();
             return;
           }
@@ -4627,11 +4776,13 @@
               "Round tower": "towerRound",
               Bridge: "bridge",
               House: "house",
+              "Chapel (Gothic)": "chapel",
             },
           })
           .on("change", () => {
             if (isBridge()) applyBridgeDefaults();
             else if (isHouse()) applyHouseDefaults();
+            else if (isChapel()) applyChapelDefaults();
             rebuildAll();
           });
 
@@ -4752,6 +4903,57 @@
             label: "Ridge-line overhang",
           })
           .on("change", rbHouse);
+
+        const fChapel = pane.addFolder({
+          title: "Chapel (Gothic windows)",
+          expanded: false,
+        });
+        const rbChapel = () => rebuildInstances(false);
+        fChapel
+          .addBinding(params, "chapelWindowCountSide", {
+            min: 1,
+            max: 6,
+            step: 1,
+            label: "Windows per long side",
+          })
+          .on("change", rbChapel);
+        fChapel
+          .addBinding(params, "chapelWindowInnerHalfW", {
+            min: 0.2,
+            max: 0.9,
+            step: 0.01,
+            label: "Window half-width",
+          })
+          .on("change", rbChapel);
+        fChapel
+          .addBinding(params, "chapelWindowLegH", {
+            min: 0.8,
+            max: 4.5,
+            step: 0.05,
+            label: "Window jamb height",
+          })
+          .on("change", rbChapel);
+        fChapel
+          .addBinding(params, "chapelWindowSillY", {
+            min: 0.5,
+            max: 6.0,
+            step: 0.05,
+            label: "Window sill Y",
+          })
+          .on("change", rbChapel);
+        fChapel
+          .addBinding(params, "chapelWindowArchPointedness", {
+            min: 0.4,
+            max: 1.8,
+            step: 0.02,
+            label: "Window pointedness",
+          })
+          .on("change", rbChapel);
+        fChapel
+          .addBinding(params, "chapelBackWindow", {
+            label: "Window on back wall",
+          })
+          .on("change", rbChapel);
 
         const fTower = pane.addFolder({
           title: "Tower (square or round)",
