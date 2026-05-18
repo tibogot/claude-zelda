@@ -343,6 +343,47 @@
         return g;
       }
 
+      /**
+       * Unit pyramid (halfW=halfD=1, height=1) used for buttress caps. Square base at
+       * Y=0, apex at (0,1,0). Per-instance scale picks the actual cap size, so a single
+       * geometry serves every buttress cap. Open at the bottom (the base is hidden by
+       * the buttress brick column beneath).
+       */
+      function createButtressCapBaseGeometry() {
+        const positions = new Float32Array([
+          -1, 0, +1,
+          +1, 0, +1,
+          +1, 0, -1,
+          -1, 0, -1,
+          0, 1, 0,
+        ]);
+        const indices = new Uint16Array([
+          0, 1, 4,
+          1, 2, 4,
+          2, 3, 4,
+          3, 0, 4,
+        ]);
+        const g = new THREE.BufferGeometry();
+        g.setAttribute("position", new THREE.BufferAttribute(positions, 3));
+        g.setIndex(new THREE.BufferAttribute(indices, 1));
+        g.computeVertexNormals();
+        return g;
+      }
+
+      /**
+       * Width/depth multiplier at a given height fraction for stepped buttress tapering.
+       *   stepCount=1 → always 1.0 (flat pilaster, no taper).
+       *   stepCount=2 → 1.0 below 50%, topScale above.
+       *   stepCount=3 → 1.0 / mid / topScale across thirds (mid is the average).
+       */
+      function getButtressStepScale(yFrac, stepCount, topScale) {
+        if (stepCount <= 1) return 1.0;
+        const f = Math.min(0.999, Math.max(0, yFrac));
+        const step = Math.floor(f * stepCount);
+        const t = step / (stepCount - 1);
+        return 1.0 - t * (1.0 - topScale);
+      }
+
 
       function mulberry32(a) {
         return function () {
@@ -440,6 +481,23 @@
           chapelButtressesEnabled: true,
           chapelButtressWidth: 0.55,
           chapelButtressDepth: 0.55,
+          /**
+           * Stepped tapering: each buttress narrows in N discrete steps from full
+           * width at the base to `topScale × full` at the top. 1 = no taper (flat
+           * pilaster), 2 or 3 = classic stepped Gothic buttress.
+           */
+          chapelButtressStepCount: 3,
+          chapelButtressTopScale: 0.7,
+          /** Pyramid cap on top of each buttress that sheds rain (matches top step W/D). */
+          chapelButtressCapEnabled: true,
+          chapelButtressCapHeight: 0.42,
+          /**
+           * Set-back corner buttresses on the gable-end walls (faces 0/1): one pilaster
+           * at each of the 4 building corners sticking out perpendicular to the gable wall.
+           * Forms an L-shape with the existing long-side corner buttress so each corner
+           * reads as a chunky Gothic pier.
+           */
+          chapelGableCornerButtressesEnabled: true,
           /**
            * Half-length along the ridge (long axis, X) for chapel mode. `towerHalfWidth`
            * still represents the short axis (Z, nave width). Defaults to ~2.7× the width
@@ -721,6 +779,8 @@
         let wallMesh = null;
         /** Single InstancedMesh holding every chapel buttress brick (one column per buttress). */
         let chapelButtressMesh = null;
+        /** Pyramid caps on top of chapel buttresses (one instance per buttress, shared unit pyramid). */
+        let chapelButtressCapMesh = null;
         /** Instanced arch ring in tower mode (single gate). */
         let towerDoorMeshes = [];
         /** Three arch rings × two sides for `sceneMode === "bridge"`. */
@@ -1053,6 +1113,28 @@
             params.towerHalfWidth + 0.5,
             Number(params.chapelNaveHalfLength) || 8.5,
           );
+          params.chapelButtressStepCount = THREE.MathUtils.clamp(
+            Math.round(Number(params.chapelButtressStepCount) || 3),
+            1,
+            3,
+          );
+          params.chapelButtressTopScale = THREE.MathUtils.clamp(
+            Number(params.chapelButtressTopScale) || 0.7,
+            0.4,
+            1.0,
+          );
+          params.chapelButtressCapEnabled =
+            params.chapelButtressCapEnabled == null
+              ? true
+              : !!params.chapelButtressCapEnabled;
+          params.chapelButtressCapHeight = Math.max(
+            0.08,
+            Number(params.chapelButtressCapHeight) || 0.42,
+          );
+          params.chapelGableCornerButtressesEnabled =
+            params.chapelGableCornerButtressesEnabled == null
+              ? true
+              : !!params.chapelGableCornerButtressesEnabled;
         }
 
         function applyBridgeDefaults() {
@@ -1551,6 +1633,11 @@
             scene.remove(chapelButtressMesh);
             if (chapelButtressMesh.geometry) chapelButtressMesh.geometry.dispose();
             chapelButtressMesh = null;
+          }
+          if (chapelButtressCapMesh) {
+            scene.remove(chapelButtressCapMesh);
+            if (chapelButtressCapMesh.geometry) chapelButtressCapMesh.geometry.dispose();
+            chapelButtressCapMesh = null;
           }
           houseTimberMeshes.forEach((m) => {
             scene.remove(m);
@@ -3649,15 +3736,24 @@
           const buttressCount = N + 1;
           const W = Math.max(0.2, Number(params.chapelButtressWidth) || 0.55);
           const D = Math.max(0.2, Number(params.chapelButtressDepth) || 0.55);
+          const stepCount = THREE.MathUtils.clamp(
+            Math.round(Number(params.chapelButtressStepCount) || 3),
+            1,
+            3,
+          );
+          const topScale = THREE.MathUtils.clamp(
+            Number(params.chapelButtressTopScale) || 0.7,
+            0.4,
+            1.0,
+          );
 
           const mortar = params.wallMortar;
           const rowH = params.brickH + mortar;
           const baseY = wallBase + mortar * 0.5 + params.brickH * 0.5;
-          const ny = Math.max(
-            2,
-            Math.floor((eaveY - baseY) / rowH),
-          );
-          const capacity = buttressCount * 2 * ny + 16;
+          const heightAvail = Math.max(1e-3, eaveY - baseY);
+          const ny = Math.max(2, Math.floor(heightAvail / rowH));
+          const gableCorners = params.chapelGableCornerButtressesEnabled ? 4 : 0;
+          const capacity = (buttressCount * 2 + gableCorners) * ny + 16;
           const buttressGeo = createInstancedBrickGeometry(brickGeo, capacity);
           const mesh = new THREE.InstancedMesh(buttressGeo, brickMat, capacity);
           mesh.castShadow = true;
@@ -3666,20 +3762,30 @@
 
           const rnd = mulberry32((params.colorSeed ^ 0xbada55ed) | 0);
           let k = 0;
+          let topCourseY = baseY;
 
           for (let side = 0; side < 2; side++) {
             const zSign = side === 0 ? 1 : -1;
-            /** Buttress *outer* face is at z = ±(halfTZ + D); its centre is offset by D/2 from the wall plane. */
-            const zPos = zSign * (halfTZ + D * 0.5);
             for (let j = 0; j < buttressCount; j++) {
               const xPos = -halfTX + ((2 * halfTX) / N) * j;
               for (let iy = 0; iy < ny; iy++) {
                 if (k >= capacity) break;
                 const yMid = baseY + iy * rowH;
                 if (yMid > eaveY - params.brickH * 0.3) break;
-                const sx = W / params.brickW;
+                /** Step scale shrinks W/D in 1-3 discrete steps from base to top. */
+                const yFrac = (yMid - baseY) / heightAvail;
+                const stepScale = getButtressStepScale(
+                  yFrac,
+                  stepCount,
+                  topScale,
+                );
+                const W_step = W * stepScale;
+                const D_step = D * stepScale;
+                /** Re-anchor the outer face per-step so the wall side stays flush; the buttress shrinks outward. */
+                const zPos = zSign * (halfTZ + D_step * 0.5);
+                const sx = W_step / params.brickW;
                 const sy = 0.94 + rnd() * 0.05;
-                const sz = D / params.brickD;
+                const sz = D_step / params.brickD;
                 const v = pickBrickVariation(rnd, sx, sy, sz, "wall");
                 tmpO.position.set(xPos, yMid, zPos);
                 tmpO.rotation.set(0, 0, 0);
@@ -3690,6 +3796,51 @@
                 mesh.setMatrixAt(k, tmpO.matrix);
                 setBrickVarAt(mesh, k, v.shapeMix, v.warp, v.grey, v.grain);
                 k++;
+                if (yMid > topCourseY) topCourseY = yMid;
+              }
+            }
+          }
+
+          /**
+           * Gable-end corner buttresses (4 total): stick out perpendicular to the gable wall.
+           * Width is along Z (so rotate the brick 90° around Y), depth sticks out in ±X.
+           * Z-center is inset by W/2 so the buttress's outer Z edge sits flush at ±halfTZ,
+           * meeting the long-side corner pilaster to form an L-shape.
+           */
+          if (params.chapelGableCornerButtressesEnabled) {
+            for (let xSide = 0; xSide < 2; xSide++) {
+              const xSign = xSide === 0 ? 1 : -1;
+              for (let zSide = 0; zSide < 2; zSide++) {
+                const zSign = zSide === 0 ? 1 : -1;
+                for (let iy = 0; iy < ny; iy++) {
+                  if (k >= capacity) break;
+                  const yMid = baseY + iy * rowH;
+                  if (yMid > eaveY - params.brickH * 0.3) break;
+                  const yFrac = (yMid - baseY) / heightAvail;
+                  const stepScale = getButtressStepScale(
+                    yFrac,
+                    stepCount,
+                    topScale,
+                  );
+                  const W_step = W * stepScale;
+                  const D_step = D * stepScale;
+                  const xPos = xSign * (halfTX + D_step * 0.5);
+                  const zPos = zSign * (halfTZ - W_step * 0.5);
+                  const sx = W_step / params.brickW;
+                  const sy = 0.94 + rnd() * 0.05;
+                  const sz = D_step / params.brickD;
+                  const v = pickBrickVariation(rnd, sx, sy, sz, "wall");
+                  tmpO.position.set(xPos, yMid, zPos);
+                  tmpO.rotation.set(0, (xSign * Math.PI) / 2, 0);
+                  tmpO.scale.set(v.sx, v.sy, v.sz);
+                  applyBrickAxisScaleNoise(tmpO, rnd, false);
+                  applyBrickPlacementNoise(tmpO, rnd, false);
+                  tmpO.updateMatrix();
+                  mesh.setMatrixAt(k, tmpO.matrix);
+                  setBrickVarAt(mesh, k, v.shapeMix, v.warp, v.grey, v.grain);
+                  k++;
+                  if (yMid > topCourseY) topCourseY = yMid;
+                }
               }
             }
           }
@@ -3700,6 +3851,82 @@
           if (bv) bv.needsUpdate = true;
           scene.add(mesh);
           chapelButtressMesh = mesh;
+
+          if (!params.chapelButtressCapEnabled) return;
+          /**
+           * Cap pyramid sits on top of each buttress at the *top step* width/depth.
+           * Top step scale is the same scalar used at yFrac=1, so caps match flat
+           * pilasters (no taper) AND tapered ones uniformly.
+           */
+          const topStepScale = getButtressStepScale(1.0, stepCount, topScale);
+          const capW = W * topStepScale;
+          const capD = D * topStepScale;
+          const capH = Math.max(
+            0.08,
+            Number(params.chapelButtressCapHeight) || 0.42,
+          );
+          const capBaseY = topCourseY + params.brickH * 0.5;
+          const capCapacity = buttressCount * 2 + gableCorners;
+          const capGeo = createInstancedBrickGeometry(
+            createButtressCapBaseGeometry(),
+            capCapacity,
+          );
+          const capMesh = new THREE.InstancedMesh(capGeo, brickMat, capCapacity);
+          capMesh.castShadow = true;
+          capMesh.receiveShadow = true;
+          const capRnd = mulberry32((params.colorSeed ^ 0xc0ffee15) | 0);
+          let kc = 0;
+          for (let side = 0; side < 2; side++) {
+            const zSign = side === 0 ? 1 : -1;
+            const zPos = zSign * (halfTZ + capD * 0.5);
+            for (let j = 0; j < buttressCount; j++) {
+              const xPos = -halfTX + ((2 * halfTX) / N) * j;
+              tmpO.position.set(xPos, capBaseY, zPos);
+              tmpO.rotation.set(0, 0, 0);
+              tmpO.scale.set(capW * 0.5, capH, capD * 0.5);
+              tmpO.updateMatrix();
+              capMesh.setMatrixAt(kc, tmpO.matrix);
+              setBrickVarAt(
+                capMesh,
+                kc,
+                0.05,
+                0.55,
+                0.45 + capRnd() * 0.35,
+                capRnd(),
+              );
+              kc++;
+            }
+          }
+          if (params.chapelGableCornerButtressesEnabled) {
+            for (let xSide = 0; xSide < 2; xSide++) {
+              const xSign = xSide === 0 ? 1 : -1;
+              for (let zSide = 0; zSide < 2; zSide++) {
+                const zSign = zSide === 0 ? 1 : -1;
+                const xPos = xSign * (halfTX + capD * 0.5);
+                const zPos = zSign * (halfTZ - capW * 0.5);
+                tmpO.position.set(xPos, capBaseY, zPos);
+                tmpO.rotation.set(0, (xSign * Math.PI) / 2, 0);
+                tmpO.scale.set(capW * 0.5, capH, capD * 0.5);
+                tmpO.updateMatrix();
+                capMesh.setMatrixAt(kc, tmpO.matrix);
+                setBrickVarAt(
+                  capMesh,
+                  kc,
+                  0.05,
+                  0.55,
+                  0.45 + capRnd() * 0.35,
+                  capRnd(),
+                );
+                kc++;
+              }
+            }
+          }
+          capMesh.count = kc;
+          capMesh.instanceMatrix.needsUpdate = true;
+          const capBv = capMesh.geometry.getAttribute("brickVar");
+          if (capBv) capBv.needsUpdate = true;
+          scene.add(capMesh);
+          chapelButtressCapMesh = capMesh;
         }
 
         /** Cylindrical tower shell: arc-length coordinate u = θ·R on [−πR, πR], one gate via `uArc`. */
@@ -5149,6 +5376,40 @@
             max: 1.5,
             step: 0.01,
             label: "Buttress depth (out)",
+          })
+          .on("change", rbChapel);
+        fChapel
+          .addBinding(params, "chapelButtressStepCount", {
+            min: 1,
+            max: 3,
+            step: 1,
+            label: "Buttress steps (1 = flat)",
+          })
+          .on("change", rbChapel);
+        fChapel
+          .addBinding(params, "chapelButtressTopScale", {
+            min: 0.4,
+            max: 1.0,
+            step: 0.01,
+            label: "Top-step scale",
+          })
+          .on("change", rbChapel);
+        fChapel
+          .addBinding(params, "chapelButtressCapEnabled", {
+            label: "Pyramid cap on top",
+          })
+          .on("change", rbChapel);
+        fChapel
+          .addBinding(params, "chapelButtressCapHeight", {
+            min: 0.1,
+            max: 1.2,
+            step: 0.01,
+            label: "Cap height",
+          })
+          .on("change", rbChapel);
+        fChapel
+          .addBinding(params, "chapelGableCornerButtressesEnabled", {
+            label: "Gable corner buttresses",
           })
           .on("change", rbChapel);
 
