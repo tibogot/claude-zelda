@@ -89,38 +89,9 @@
         attribute,
       } from "three/tsl";
 
-      /**
-       * Pointed-arch geometry from springline half-width R and pointedness k = c/R.
-       *   c = R * k          (each arc center offset from centerline, on the springline)
-       *   r = c + R          (each arc radius — passes through the opposite springer)
-       *   apexDy = sqrt(R*(R + 2*c))   (vertical distance from springline to keystone)
-       *   k = 0  → round (degenerate: c=0, r=R, arcs coincide as one circle).
-       *   k = 1  → equilateral (classic Gothic).
-       *   k > 1  → lancet (taller).
-       *   0<k<1  → drop (shallower than equilateral but still pointed).
-       */
-      function pointedArchGeom(R, k) {
-        const c = R * Math.max(0, k);
-        const r = c + R;
-        const apexDy = Math.sqrt(Math.max(0, R * (R + 2 * c)));
-        return { c, r, apexDy };
-      }
-
-      /** Half-arc-length of one pointed arc (left or right) from springer to keystone. */
-      function pointedArcHalfLen(R, k) {
-        const { c, r, apexDy } = pointedArchGeom(R, k);
-        if (apexDy <= 1e-6) return 0;
-        const thetaSpring = Math.atan2(0, c + R);
-        const thetaApex = Math.atan2(apexDy, c);
-        return r * Math.abs(thetaApex - thetaSpring);
-      }
-
-      /** Length of the ∩ outline: left jamb + arch (round or pointed) + right jamb (no sill). */
+      /** Length of the ∩ outline: left jamb + semicircle + right jamb (no sill). */
       function pathULength(p) {
         const Lj = Math.max(1e-6, p.springY - p.sillY);
-        if (p.archShape === "pointed") {
-          return 2 * Lj + 2 * pointedArcHalfLen(p.ringRadius, p.archPointedness);
-        }
         return 2 * Lj + Math.PI * p.ringRadius;
       }
 
@@ -131,17 +102,13 @@
         return { x, y: y0, tx: 1, ty: 0 };
       }
 
-      /**
-       * ∩ path: left jamb up → arch (round semicircle, OR two pointed arcs meeting at a
-       * keystone) → right jamb down. Pointed math collapses to round when archPointedness=0
-       * (c=0, r=R, α=π/2), so the round branch is purely an optimization.
-       */
+      /** ∩ path only: left jamb up → arch (left→right over crown) → right jamb down. */
       function sampleUPath(s, p) {
         const R = p.ringRadius;
         const y0 = p.sillY;
         const ys = p.springY;
         const Lj = Math.max(1e-6, ys - y0);
-        const isPointed = p.archShape === "pointed";
+        const La = Math.PI * R;
         let u = s;
 
         if (u <= Lj) {
@@ -150,52 +117,19 @@
           return { x: -R, y, tx: 0, ty: 1 };
         }
         u -= Lj;
-
-        if (isPointed) {
-          const pg = pointedArchGeom(R, p.archPointedness);
-          const alpha = Math.atan2(pg.apexDy, Math.max(1e-6, pg.c));
-          const oneArc = pg.r * alpha;
-          if (u <= oneArc) {
-            /** Left arc: center (+c, ys), sweep angle π → π − α (springer → keystone). */
-            const t = u / oneArc;
-            const ang = Math.PI - t * alpha;
-            const x = pg.c + pg.r * Math.cos(ang);
-            const y = ys + pg.r * Math.sin(ang);
-            const tx = Math.sin(ang);
-            const ty = -Math.cos(ang);
-            const inv = 1 / Math.hypot(tx, ty);
-            return { x, y, tx: tx * inv, ty: ty * inv };
-          }
-          u -= oneArc;
-          if (u <= oneArc) {
-            /** Right arc: center (−c, ys), sweep angle α → 0 (keystone → right springer). */
-            const t = u / oneArc;
-            const ang = alpha * (1 - t);
-            const x = -pg.c + pg.r * Math.cos(ang);
-            const y = ys + pg.r * Math.sin(ang);
-            const tx = Math.sin(ang);
-            const ty = -Math.cos(ang);
-            const inv = 1 / Math.hypot(tx, ty);
-            return { x, y, tx: tx * inv, ty: ty * inv };
-          }
-          u -= oneArc;
-        } else {
-          const La = Math.PI * R;
-          if (u <= La) {
-            const t = u / La;
-            const ang = Math.PI * (1 - t);
-            const ca = Math.cos(ang);
-            const sa = Math.sin(ang);
-            const x = R * ca;
-            const y = ys + R * sa;
-            const tx = sa;
-            const ty = -ca;
-            const inv = 1 / Math.hypot(tx, ty);
-            return { x, y, tx: tx * inv, ty: ty * inv };
-          }
-          u -= La;
+        if (u <= La) {
+          const t = u / La;
+          const ang = Math.PI * (1 - t);
+          const ca = Math.cos(ang);
+          const sa = Math.sin(ang);
+          const x = R * ca;
+          const y = ys + R * sa;
+          const tx = sa;
+          const ty = -ca;
+          const inv = 1 / Math.hypot(tx, ty);
+          return { x, y, tx: tx * inv, ty: ty * inv };
         }
-
+        u -= La;
         const t = THREE.MathUtils.clamp(u / Lj, 0, 1);
         const y = THREE.MathUtils.lerp(ys, y0, t);
         return { x: R, y, tx: 0, ty: -1 };
@@ -217,19 +151,10 @@
       }
 
       /** Horizontal extent (|x|) where wall field must stay outside so it does not clip the ring. */
-      function wallOpeningHalfX(y, R_out, y0, ys, seam, archShape, pointedness) {
+      function wallOpeningHalfX(y, R_out, y0, ys, seam) {
         if (y < y0 - 1e-6) return 0;
         if (y < ys - 1e-6) return R_out + seam;
         const dy = y - ys;
-        if (archShape === "pointed") {
-          const { c, r, apexDy } = pointedArchGeom(R_out, pointedness);
-          if (dy > apexDy + 1e-6) return 0;
-          const inner = r * r - dy * dy;
-          if (inner <= 0) return 0;
-          const halfW = -c + Math.sqrt(inner);
-          if (halfW <= 0) return 0;
-          return halfW + seam;
-        }
         if (dy > R_out + 1e-6) return 0;
         const inner = R_out * R_out - dy * dy;
         if (inner <= 0) return 0;
@@ -237,10 +162,10 @@
       }
 
       /** How fast the opening boundary moves in X with Y (large near springing and haunches). */
-      function wallOpeningCurvature(y, R_out, y0, ys, seam, archShape, pointedness) {
+      function wallOpeningCurvature(y, R_out, y0, ys, seam) {
         const e = 0.06;
-        const a = wallOpeningHalfX(y + e, R_out, y0, ys, seam, archShape, pointedness);
-        const b = wallOpeningHalfX(y - e, R_out, y0, ys, seam, archShape, pointedness);
+        const a = wallOpeningHalfX(y + e, R_out, y0, ys, seam);
+        const b = wallOpeningHalfX(y - e, R_out, y0, ys, seam);
         return Math.abs(a - b) / e;
       }
 
@@ -342,7 +267,6 @@
         g.setAttribute("brickVar", att);
         return g;
       }
-
 
       function mulberry32(a) {
         return function () {
@@ -455,19 +379,6 @@
            */
           archRingDepthScale: 1.09,
           showArchGizmo: true,
-
-          /**
-           * Arch profile shape — "round" (default, Romanesque semicircle) or "pointed" (Gothic).
-           * Round path is the original code; `archPointedness` is only consulted when "pointed".
-           */
-          archShape: "round",
-          /**
-           * Pointed-arch arc-center offset c relative to springline half-width R, so c = R * k.
-           *   0.4 → drop arch (shallower than equilateral)
-           *   1.0 → equilateral (classic Gothic)
-           *   1.6 → lancet (tall, narrow)
-           */
-          archPointedness: 1.0,
 
           /** Master: falling-brick sim + live erosion slider (no time-based erosion animation). */
           destructionEnabled: false,
@@ -844,15 +755,7 @@
             w1 = params.wallAnchorY + params.wallHeight;
           }
           const margin = 0.1;
-          /** Pointed arches rise higher than round (apex = √(R*(R+2c)) where c = R*k). */
-          let archHeight = R_out;
-          if (params.archShape === "pointed") {
-            const k = Number.isFinite(params.archPointedness)
-              ? params.archPointedness
-              : 1.0;
-            archHeight = pointedArchGeom(R_out, k).apexDy;
-          }
-          const maxSill = w1 - margin - leg - archHeight;
+          const maxSill = w1 - margin - leg - R_out;
           const minSill = w0 - 0.12;
           params.sillY = THREE.MathUtils.clamp(params.sillY, minSill, maxSill);
         }
@@ -865,10 +768,6 @@
             ringRadius: R_out,
             sillY: params.sillY,
             springY,
-            archShape: params.archShape || "round",
-            archPointedness: Number.isFinite(params.archPointedness)
-              ? params.archPointedness
-              : 1.0,
           };
         }
 
@@ -880,10 +779,6 @@
             ringRadius: R_out,
             sillY: o.sillY,
             springY,
-            archShape: o.archShape || "round",
-            archPointedness: Number.isFinite(o.archPointedness)
-              ? o.archPointedness
-              : 1.0,
           };
         }
 
@@ -993,10 +888,6 @@
             shell: params.masonryShell,
             closeBottom: params.closeBottom,
             archAlongZ: params.archAlongZ,
-            archShape: params.archShape || "round",
-            archPointedness: Number.isFinite(params.archPointedness)
-              ? params.archPointedness
-              : 1.0,
           };
           if (params.sceneMode === "towerRound") {
             const R = Math.max(0.2, params.towerHalfWidth);
@@ -1269,8 +1160,6 @@
               op.sillY,
               rp.springY,
               seam,
-              rp.archShape,
-              rp.archPointedness,
             );
             if (openH <= 1e-5) continue;
             const uHole =
@@ -2288,9 +2177,7 @@
           });
           timberMat.colorNode = Fn(() => {
             const pw = positionWorld;
-            const ring = sin(
-              pw.y.mul(36).add(pw.x.mul(5.5)).add(pw.z.mul(2.8)),
-            )
+            const ring = sin(pw.y.mul(36).add(pw.x.mul(5.5)).add(pw.z.mul(2.8)))
               .mul(0.5)
               .add(0.5);
             const grain = sin(dot(pw, vec3(11.3, 19.1, 7.6)))
@@ -2663,8 +2550,6 @@
                   op.sillY,
                   rp.springY,
                   seam,
-                  rp.archShape,
-                  rp.archPointedness,
                 );
                 if (ohC <= 1e-5) continue;
                 const c = wallOpeningCurvature(
@@ -2673,8 +2558,6 @@
                   op.sillY,
                   rp.springY,
                   seam,
-                  rp.archShape,
-                  rp.archPointedness,
                 );
                 maxCurveT = Math.max(
                   maxCurveT,
@@ -2735,8 +2618,6 @@
                       op0.sillY,
                       rpJ.springY,
                       seam,
-                      rpJ.archShape,
-                      rpJ.archPointedness,
                     );
                     gxJ =
                       typeof op0.uArc === "number" && !Number.isNaN(op0.uArc)
@@ -2787,8 +2668,6 @@
                       op.sillY,
                       rp.springY,
                       seam,
-                      rp.archShape,
-                      rp.archPointedness,
                     );
                     if (openH <= 1e-4) continue;
                     const curv = wallOpeningCurvature(
@@ -2797,8 +2676,6 @@
                       op.sillY,
                       rp.springY,
                       seam,
-                      rp.archShape,
-                      rp.archPointedness,
                     );
                     const curveT = THREE.MathUtils.smoothstep(0.06, 1.15, curv);
                     if (curveT <= 0.04) continue;
@@ -3091,8 +2968,6 @@
                   op.sillY,
                   rp.springY,
                   seam,
-                  rp.archShape,
-                  rp.archPointedness,
                 );
                 if (ohC <= 1e-5) continue;
                 const c = wallOpeningCurvature(
@@ -3101,8 +2976,6 @@
                   op.sillY,
                   rp.springY,
                   seam,
-                  rp.archShape,
-                  rp.archPointedness,
                 );
                 maxCurveT = Math.max(
                   maxCurveT,
@@ -3158,8 +3031,6 @@
                       op0.sillY,
                       rpJ.springY,
                       seam,
-                      rpJ.archShape,
-                      rpJ.archPointedness,
                     );
                     gxJ =
                       typeof op0.uArc === "number" && !Number.isNaN(op0.uArc)
@@ -3210,8 +3081,6 @@
                       op.sillY,
                       rp.springY,
                       seam,
-                      rp.archShape,
-                      rp.archPointedness,
                     );
                     if (openH <= 1e-4) continue;
                     const curv = wallOpeningCurvature(
@@ -3220,8 +3089,6 @@
                       op.sillY,
                       rp.springY,
                       seam,
-                      rp.archShape,
-                      rp.archPointedness,
                     );
                     const curveT = THREE.MathUtils.smoothstep(0.06, 1.15, curv);
                     if (curveT <= 0.04) continue;
@@ -3291,91 +3158,89 @@
             if (params.houseRoofKind === "timber") {
               buildHouseTimberFrame();
             } else {
-            roof: {
-              /**
-               * Roof ridge must match gable ends: ±X gables → ridge parallel to X (apex to apex);
-               * ±Z gables → ridge parallel to Z. (Earlier build used the swapped pairing.)
-               */
-              if (gableAxis === 0) {
-                const xMin = -halfT - zOv;
-                const xMax = halfT + zOv;
-                for (let side = -1; side <= 1; side += 2) {
-                  const z0 = side < 0 ? -run + nomW * 0.12 : nomW * 0.1;
-                  const z1 = side < 0 ? -nomW * 0.12 : run - nomW * 0.08;
-                  for (
-                    let rz = z0;
-                    side < 0 ? rz < z1 : rz < z1;
-                    rz += stepAlong
-                  ) {
-                    const t =
-                      side < 0 ? (-rz) / run : rz / run;
-                    const y = eaveY + (1 - t) * kRise;
-                    let row = 0;
-                    for (let qx = xMin; qx < xMax + 1e-6; qx += dxRidge) {
-                      const off =
-                        (row +
-                          (side < 0 ? 0 : 1) +
-                          Math.floor((rz + run * 3) / stepAlong)) %
-                        2;
-                      row++;
-                      const qx0 = qx + off * dxRidge * 0.5;
-                      if (qx0 > xMax - nomW * 0.18) continue;
-                      _doorBx.set(1, 0, 0);
-                      if (side < 0) {
-                        _doorBy.set(0, kRise, run).normalize();
-                      } else {
-                        _doorBy.set(0, kRise, -run).normalize();
-                      }
-                      _doorBz.crossVectors(_doorBx, _doorBy).normalize();
-                      if (
-                        !placeRoofBrick(qx0, y, rz, _doorBx, _doorBy, _doorBz)
-                      ) {
-                        break roof;
+              roof: {
+                /**
+                 * Roof ridge must match gable ends: ±X gables → ridge parallel to X (apex to apex);
+                 * ±Z gables → ridge parallel to Z. (Earlier build used the swapped pairing.)
+                 */
+                if (gableAxis === 0) {
+                  const xMin = -halfT - zOv;
+                  const xMax = halfT + zOv;
+                  for (let side = -1; side <= 1; side += 2) {
+                    const z0 = side < 0 ? -run + nomW * 0.12 : nomW * 0.1;
+                    const z1 = side < 0 ? -nomW * 0.12 : run - nomW * 0.08;
+                    for (
+                      let rz = z0;
+                      side < 0 ? rz < z1 : rz < z1;
+                      rz += stepAlong
+                    ) {
+                      const t = side < 0 ? -rz / run : rz / run;
+                      const y = eaveY + (1 - t) * kRise;
+                      let row = 0;
+                      for (let qx = xMin; qx < xMax + 1e-6; qx += dxRidge) {
+                        const off =
+                          (row +
+                            (side < 0 ? 0 : 1) +
+                            Math.floor((rz + run * 3) / stepAlong)) %
+                          2;
+                        row++;
+                        const qx0 = qx + off * dxRidge * 0.5;
+                        if (qx0 > xMax - nomW * 0.18) continue;
+                        _doorBx.set(1, 0, 0);
+                        if (side < 0) {
+                          _doorBy.set(0, kRise, run).normalize();
+                        } else {
+                          _doorBy.set(0, kRise, -run).normalize();
+                        }
+                        _doorBz.crossVectors(_doorBx, _doorBy).normalize();
+                        if (
+                          !placeRoofBrick(qx0, y, rz, _doorBx, _doorBy, _doorBz)
+                        ) {
+                          break roof;
+                        }
                       }
                     }
                   }
-                }
-              } else {
-                const zMin = -halfT - zOv;
-                const zMax = halfT + zOv;
-                for (let side = -1; side <= 1; side += 2) {
-                  const x0 = side < 0 ? -run + nomW * 0.12 : nomW * 0.1;
-                  const x1 = side < 0 ? -nomW * 0.12 : run - nomW * 0.08;
-                  for (
-                    let rx = x0;
-                    side < 0 ? rx < x1 : rx < x1;
-                    rx += stepAlong
-                  ) {
-                    const t =
-                      side < 0 ? (rx + run) / run : (run - rx) / run;
-                    const y = eaveY + t * kRise;
-                    let row = 0;
-                    for (let qz = zMin; qz < zMax + 1e-6; qz += dxRidge) {
-                      const off =
-                        (row +
-                          (side < 0 ? 0 : 1) +
-                          Math.floor((rx + run * 3) / stepAlong)) %
-                        2;
-                      row++;
-                      const qz0 = qz + off * dxRidge * 0.5;
-                      if (qz0 > zMax - nomW * 0.18) continue;
-                      _doorBx.set(0, 0, 1);
-                      if (side < 0) {
-                        _doorBy.set(run, kRise, 0).normalize();
-                      } else {
-                        _doorBy.set(-run, kRise, 0).normalize();
-                      }
-                      _doorBz.crossVectors(_doorBx, _doorBy).normalize();
-                      if (
-                        !placeRoofBrick(rx, y, qz0, _doorBx, _doorBy, _doorBz)
-                      ) {
-                        break roof;
+                } else {
+                  const zMin = -halfT - zOv;
+                  const zMax = halfT + zOv;
+                  for (let side = -1; side <= 1; side += 2) {
+                    const x0 = side < 0 ? -run + nomW * 0.12 : nomW * 0.1;
+                    const x1 = side < 0 ? -nomW * 0.12 : run - nomW * 0.08;
+                    for (
+                      let rx = x0;
+                      side < 0 ? rx < x1 : rx < x1;
+                      rx += stepAlong
+                    ) {
+                      const t = side < 0 ? (rx + run) / run : (run - rx) / run;
+                      const y = eaveY + t * kRise;
+                      let row = 0;
+                      for (let qz = zMin; qz < zMax + 1e-6; qz += dxRidge) {
+                        const off =
+                          (row +
+                            (side < 0 ? 0 : 1) +
+                            Math.floor((rx + run * 3) / stepAlong)) %
+                          2;
+                        row++;
+                        const qz0 = qz + off * dxRidge * 0.5;
+                        if (qz0 > zMax - nomW * 0.18) continue;
+                        _doorBx.set(0, 0, 1);
+                        if (side < 0) {
+                          _doorBy.set(run, kRise, 0).normalize();
+                        } else {
+                          _doorBy.set(-run, kRise, 0).normalize();
+                        }
+                        _doorBz.crossVectors(_doorBx, _doorBy).normalize();
+                        if (
+                          !placeRoofBrick(rx, y, qz0, _doorBx, _doorBy, _doorBz)
+                        ) {
+                          break roof;
+                        }
                       }
                     }
                   }
                 }
               }
-            }
             }
           }
 
@@ -3501,8 +3366,6 @@
                 op.sillY,
                 rp.springY,
                 seam,
-                rp.archShape,
-                rp.archPointedness,
               );
               if (ohC <= 1e-5) continue;
               const c = wallOpeningCurvature(
@@ -3511,8 +3374,6 @@
                 op.sillY,
                 rp.springY,
                 seam,
-                rp.archShape,
-                rp.archPointedness,
               );
               maxCurveT = Math.max(
                 maxCurveT,
@@ -3569,7 +3430,7 @@
               wEq = (innerLen - (nBricks - 1) * j) / nBricks;
               if (wEq < minW * 0.88) continue;
 
-              const staggerU = (iy % 2 === 1) ? (wEq + j) * 0.5 : 0;
+              const staggerU = iy % 2 === 1 ? (wEq + j) * 0.5 : 0;
 
               for (let bi = 0; bi < nBricks; bi++) {
                 if (k >= params.maxWallBricks) break outerRound;
@@ -3587,8 +3448,6 @@
                     op.sillY,
                     rp.springY,
                     seam,
-                    rp.archShape,
-                    rp.archPointedness,
                   );
                   if (openH <= 1e-4) continue;
                   const curv = wallOpeningCurvature(
@@ -3597,8 +3456,6 @@
                     op.sillY,
                     rp.springY,
                     seam,
-                    rp.archShape,
-                    rp.archPointedness,
                   );
                   const curveT = THREE.MathUtils.smoothstep(0.06, 1.15, curv);
                   if (curveT <= 0.04) continue;
@@ -3658,12 +3515,6 @@
                 THREE.MathUtils.clamp(params.spacingMul, 0.82, 1.08) +
               jRing;
             let nU = Math.max(5, Math.round(Lu / targetMod));
-            /**
-             * Pointed arches need an even voussoir count so symmetry puts a brick
-             * boundary exactly on the apex — the two final voussoirs then meet at
-             * a clean vertical mortar joint instead of overlapping or gapping.
-             */
-            if (rp.archShape === "pointed" && nU % 2 === 1) nU += 1;
             let nS = Ls > 0 ? Math.max(2, Math.round(Ls / targetMod)) : 0;
             if (nU + nS > params.maxBricks) {
               const room = params.maxBricks - nS;
@@ -3880,7 +3731,6 @@
               THREE.MathUtils.clamp(params.spacingMul, 0.82, 1.08) +
             jRing;
           let nU = Math.max(5, Math.round(Lu / targetMod));
-          if (rp.archShape === "pointed" && nU % 2 === 1) nU += 1;
           let nS = Ls > 0 ? Math.max(2, Math.round(Ls / targetMod)) : 0;
           if (nU + nS > params.maxBricks) {
             const room = params.maxBricks - nS;
@@ -4060,27 +3910,11 @@
             outer: for (let iy = 0; iy < ny; iy++) {
               const yMid = baseY + iy * rowH;
               if (yMid > topY - nomH * 0.2) break;
-              const oh0 = wallOpeningHalfX(
-                yMid,
-                R_out,
-                doorSill,
-                ys,
-                seam,
-                params.archShape,
-                params.archPointedness,
-              );
+              const oh0 = wallOpeningHalfX(yMid, R_out, doorSill, ys, seam);
               let intervals = [[wallLo, wallHi]];
               if (oh0 > 1e-5) {
                 for (const gxc of gxs) {
-                  const oh = wallOpeningHalfX(
-                    yMid,
-                    R_out,
-                    doorSill,
-                    ys,
-                    seam,
-                    params.archShape,
-                    params.archPointedness,
-                  );
+                  const oh = wallOpeningHalfX(yMid, R_out, doorSill, ys, seam);
                   if (oh > 1e-5) {
                     intervals = subtractIntervals(
                       intervals,
@@ -4096,8 +3930,6 @@
                 doorSill,
                 ys,
                 seam,
-                params.archShape,
-                params.archPointedness,
               );
               const curveT = THREE.MathUtils.smoothstep(0.06, 1.15, curv);
               const nomWCurve =
@@ -4152,8 +3984,6 @@
                     doorSill,
                     ys,
                     seam,
-                    params.archShape,
-                    params.archPointedness,
                   );
                   const rightOfOpening =
                     nearestOpenH > 1e-5 &&
@@ -4196,8 +4026,6 @@
                         doorSill,
                         ys,
                         seam,
-                        params.archShape,
-                        params.archPointedness,
                       );
                       if (openH <= 1e-4) continue;
                       const gap = Math.max(0, Math.abs(cx - gxc) - openH);
@@ -4330,7 +4158,6 @@
               THREE.MathUtils.clamp(params.spacingMul, 0.82, 1.08) +
             jRing;
           let nU = Math.max(5, Math.round(Lu / targetMod));
-          if (rp.archShape === "pointed" && nU % 2 === 1) nU += 1;
           let nS = Ls > 0 ? Math.max(2, Math.round(Ls / targetMod)) : 0;
           if (nU + nS > params.maxBricks) {
             const room = params.maxBricks - nS;
@@ -4484,29 +4311,13 @@
             const yMid = baseY + iy * rowH;
             if (yMid > topY - nomH * 0.2) break;
 
-            const openH = wallOpeningHalfX(
-              yMid,
-              R_out,
-              doorSill,
-              ys,
-              seam,
-              params.archShape,
-              params.archPointedness,
-            );
+            const openH = wallOpeningHalfX(yMid, R_out, doorSill, ys, seam);
             let intervals = [[wallLo, wallHi]];
             if (openH > 1e-5) {
               intervals = subtractIntervals(intervals, gx - openH, gx + openH);
             }
 
-            const curv = wallOpeningCurvature(
-              yMid,
-              R_out,
-              doorSill,
-              ys,
-              seam,
-              params.archShape,
-              params.archPointedness,
-            );
+            const curv = wallOpeningCurvature(yMid, R_out, doorSill, ys, seam);
             const curveT = THREE.MathUtils.smoothstep(0.06, 1.15, curv);
             const nomWCurve =
               nomW *
@@ -4917,20 +4728,6 @@
         fDoor
           .addBinding(params, "closeBottom", {
             label: "Close bottom (threshold)",
-          })
-          .on("change", rb);
-        fDoor
-          .addBinding(params, "archShape", {
-            label: "Arch shape",
-            options: { Round: "round", Pointed: "pointed" },
-          })
-          .on("change", rb);
-        fDoor
-          .addBinding(params, "archPointedness", {
-            min: 0.3,
-            max: 1.8,
-            step: 0.01,
-            label: "Pointedness (0.4 drop · 1 equilat · 1.6 lancet)",
           })
           .on("change", rb);
 

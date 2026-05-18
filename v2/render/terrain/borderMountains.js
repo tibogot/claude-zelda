@@ -141,6 +141,13 @@ function buildRingGeometry(half, terrainStore, params) {
   geo.setAttribute("position", new THREE.BufferAttribute(new Float32Array(allPos), 3));
   geo.setAttribute("normal", new THREE.BufferAttribute(new Float32Array(allNrm), 3));
   geo.setAttribute("uv", new THREE.BufferAttribute(new Float32Array(allUv), 2));
+  // The tile material's opacityNode reads `aSkirt` (shared with terrain chunks).
+  // Border mountains have no skirt, so fill zeros — keeps the WebGPU pipeline
+  // layout consistent with the terrain meshes that DO have a skirt.
+  geo.setAttribute(
+    "aSkirt",
+    new THREE.BufferAttribute(new Float32Array(allPos.length / 3), 1),
+  );
   geo.computeBoundingSphere();
 
   return geo;

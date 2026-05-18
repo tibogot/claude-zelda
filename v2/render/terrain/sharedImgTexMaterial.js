@@ -118,6 +118,7 @@ export function createV2ImageTexGroundMaterial(groundSlot, worldSize, cliffDeps 
     uSoloLayer: splatOverlay?.uSoloLayer ?? null,
     uHeightBlend: splatOverlay?.uHeightBlend ?? null,
     uHeightContrast: splatOverlay?.uHeightContrast ?? null,
+    uChunkHasHole: splatOverlay?.uChunkHasHole ?? null,
     syncMeadow: meadowBundle ? (p) => meadowBundle.syncFromParams(p) : () => {},
   };
 }

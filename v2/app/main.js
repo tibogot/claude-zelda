@@ -12,6 +12,7 @@ import {
   fog,
   exponentialHeightFogFactor,
   densityFogFactor,
+  attribute,
 } from "three/tsl";
 import { CSMShadowNode } from "three/addons/csm/CSMShadowNode.js";
 import { OrbitControls } from "three/addons/controls/OrbitControls.js";
@@ -474,6 +475,7 @@ export async function startV2App(opts = {}) {
     return t;
   })();
   let tileHoleTexNode = null;
+  let tileChunkHasHoleUniform = null;
 
   let _layerArrayAlbedo = null;
   let _layerArrayOrm = null;
@@ -506,6 +508,7 @@ export async function startV2App(opts = {}) {
       node0: bundle.splatTexNode,
       node1: bundle.splat1TexNode,
       holeNode: bundle.holeTexNode,
+      chunkHasHoleUniform: bundle.uChunkHasHole,
     };
   }
 
@@ -533,16 +536,20 @@ export async function startV2App(opts = {}) {
     mesh.onBeforeRender = (renderer, scene, camera, geometry, material, group) => {
       if (prev) prev(renderer, scene, camera, geometry, material, group);
       const nodes = getActiveSplatNodes();
-      if (!nodes) return;
       const key = mesh.userData.chunkKey;
       const entry = splatStore.getChunkSplatByKey(key);
       const tex = entry?.combinedTex ?? placeholderSplatTex;
       const holeEntry = holeStore.getChunkByKey(key);
       const holeTex = holeEntry?.tex ?? placeholderHoleTex;
-      if (nodes.node0) nodes.node0.value = tex;
-      if (nodes.node1) nodes.node1.value = tex;
-      if (nodes.holeNode) nodes.holeNode.value = holeTex;
+      const chunkHasHole = holeEntry?.hasAnyHole ? 1.0 : 0.0;
+      if (nodes) {
+        if (nodes.node0) nodes.node0.value = tex;
+        if (nodes.node1) nodes.node1.value = tex;
+        if (nodes.holeNode) nodes.holeNode.value = holeTex;
+        if (nodes.chunkHasHoleUniform) nodes.chunkHasHoleUniform.value = chunkHasHole;
+      }
       if (tileHoleTexNode) tileHoleTexNode.value = holeTex;
+      if (tileChunkHasHoleUniform) tileChunkHasHoleUniform.value = chunkHasHole;
     };
   }
 
@@ -667,8 +674,13 @@ export async function startV2App(opts = {}) {
       placeholderHoleTex,
       positionLocal.xz.div(cs).add(vec2(0.5, 0.5)),
     );
+    tileChunkHasHoleUniform = uniform(0.0);
     tileTerrainMaterial.opacityNode = Fn(() => {
-      return float(1.0).sub(step(float(0.25), tileHoleTexNode.r));
+      const surfaceMask = float(1.0).sub(step(float(0.25), tileHoleTexNode.r));
+      // Kill skirts inside hole-painted chunks (matches splatOverlay.holeMask).
+      const aSkirt = attribute("aSkirt", "float");
+      const skirtKill = float(1.0).sub(aSkirt.mul(tileChunkHasHoleUniform));
+      return surfaceMask.mul(skirtKill);
     })();
     tileTerrainMaterial.alphaTest = 0.5;
     tileTerrainMaterial.transparent = false;

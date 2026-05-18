@@ -31,6 +31,7 @@ import {
   sqrt,
   uniform,
   step,
+  attribute,
 } from "three/tsl";
 
 function makePlaceholderSplatArray() {
@@ -84,6 +85,9 @@ export function createSplatOverlay(layerSlots, chunkSize, worldSize, albedoArray
   const uSoloLayer = uniform(-1.0);
   const uHeightBlend = uniform(0.0);
   const uHeightContrast = uniform(0.5);
+  // 1.0 when the active chunk has any painted hole pixel — used to kill the
+  // skirt curtain so it doesn't show up as a wall inside the hole opening.
+  const uChunkHasHole = uniform(0.0);
 
   // ── layer texture samples (from DataArrayTexture) ──────────────────────
   const layerAlbedos = [];
@@ -208,7 +212,13 @@ export function createSplatOverlay(layerSlots, chunkSize, worldSize, albedoArray
   }
 
   function holeMask() {
-    return float(1.0).sub(step(float(0.25), holeTexNode.r));
+    const surfaceMask = float(1.0).sub(step(float(0.25), holeTexNode.r));
+    // Skirt verts get aSkirt=1 from the geometry pool; surface verts get 0.
+    // When the chunk has any hole AND this fragment came from a skirt vert,
+    // force opacity to 0 so the alphaTest discards the curtain.
+    const aSkirt = attribute("aSkirt", "float");
+    const skirtKill = float(1.0).sub(aSkirt.mul(uChunkHasHole));
+    return surfaceMask.mul(skirtKill);
   }
 
   return {
@@ -218,6 +228,7 @@ export function createSplatOverlay(layerSlots, chunkSize, worldSize, albedoArray
     uSoloLayer,
     uHeightBlend,
     uHeightContrast,
+    uChunkHasHole,
     splatWeights: null,
     blendColor,
     blendRoughness,

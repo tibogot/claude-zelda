@@ -119,7 +119,9 @@
       function pathULength(p) {
         const Lj = Math.max(1e-6, p.springY - p.sillY);
         if (p.archShape === "pointed") {
-          return 2 * Lj + 2 * pointedArcHalfLen(p.ringRadius, p.archPointedness);
+          return (
+            2 * Lj + 2 * pointedArcHalfLen(p.ringRadius, p.archPointedness)
+          );
         }
         return 2 * Lj + Math.PI * p.ringRadius;
       }
@@ -217,7 +219,15 @@
       }
 
       /** Horizontal extent (|x|) where wall field must stay outside so it does not clip the ring. */
-      function wallOpeningHalfX(y, R_out, y0, ys, seam, archShape, pointedness) {
+      function wallOpeningHalfX(
+        y,
+        R_out,
+        y0,
+        ys,
+        seam,
+        archShape,
+        pointedness,
+      ) {
         if (y < y0 - 1e-6) return 0;
         if (y < ys - 1e-6) return R_out + seam;
         const dy = y - ys;
@@ -237,10 +247,34 @@
       }
 
       /** How fast the opening boundary moves in X with Y (large near springing and haunches). */
-      function wallOpeningCurvature(y, R_out, y0, ys, seam, archShape, pointedness) {
+      function wallOpeningCurvature(
+        y,
+        R_out,
+        y0,
+        ys,
+        seam,
+        archShape,
+        pointedness,
+      ) {
         const e = 0.06;
-        const a = wallOpeningHalfX(y + e, R_out, y0, ys, seam, archShape, pointedness);
-        const b = wallOpeningHalfX(y - e, R_out, y0, ys, seam, archShape, pointedness);
+        const a = wallOpeningHalfX(
+          y + e,
+          R_out,
+          y0,
+          ys,
+          seam,
+          archShape,
+          pointedness,
+        );
+        const b = wallOpeningHalfX(
+          y - e,
+          R_out,
+          y0,
+          ys,
+          seam,
+          archShape,
+          pointedness,
+        );
         return Math.abs(a - b) / e;
       }
 
@@ -343,6 +377,120 @@
         return g;
       }
 
+      /**
+       * Path position and height of a pointed-arch apex (where left/right arcs meet).
+       * Returns null for round arches or degenerate pointedness.
+       */
+      function pointedApexPathInfo(rp) {
+        if (rp.archShape !== "pointed") return null;
+        const k = Number.isFinite(rp.archPointedness)
+          ? rp.archPointedness
+          : 1.0;
+        if (k <= 1e-4) return null;
+        const pg = pointedArchGeom(rp.ringRadius, k);
+        const Lj = Math.max(1e-6, rp.springY - rp.sillY);
+        const alpha = Math.atan2(pg.apexDy, Math.max(1e-6, pg.c));
+        const oneArc = pg.r * alpha;
+        return { apexX: 0, apexY: rp.springY + pg.apexDy, apexS: Lj + oneArc };
+      }
+
+      /** Last voussoir on the left arc and first on the right (meet at the cusp). */
+      function pointedApexBrickIndices(nU, alongU, jRing, apexS) {
+        let leftI = -1;
+        let rightI = -1;
+        let bestLeft = Infinity;
+        let bestRight = Infinity;
+        for (let i = 0; i < nU; i++) {
+          const s = jRing * i + alongU * (i + 0.5);
+          if (s < apexS - 1e-5) {
+            const d = apexS - s;
+            if (d < bestLeft) {
+              bestLeft = d;
+              leftI = i;
+            }
+          } else if (s > apexS + 1e-5) {
+            const d = s - apexS;
+            if (d < bestRight) {
+              bestRight = d;
+              rightI = i;
+            }
+          }
+        }
+        return { leftI, rightI };
+      }
+
+      function isPointedKeystoneIndex(i, apexIdx) {
+        if (!apexIdx) return false;
+        return i === apexIdx.leftI || i === apexIdx.rightI;
+      }
+
+      /** Extra tangent brick on the cusp (replaced by cusp wedge pair). */
+      function skipPointedCuspStraggler(s, apexS, alongU, i, apexIdx) {
+        if (!apexIdx || apexIdx.leftI < 0 || apexIdx.rightI < 0) return false;
+        if (isPointedKeystoneIndex(i, apexIdx)) return false;
+        return Math.abs(s - apexS) < alongU * 0.38;
+      }
+
+      /**
+       * Triangular cusp voussoir: outer edge follows the intrados up to the apex,
+       * inner face on x = 0 (vertical seam where left meets right).
+       */
+      function createPointedCuspHalfGeometry(
+        side,
+        xOuter,
+        yBottom,
+        yTop,
+        halfDepth,
+      ) {
+        const d = Math.max(1e-4, halfDepth);
+        const y0 = yBottom;
+        const y1 = yTop;
+        const xO = xOuter;
+        const positions = new Float32Array([
+          xO,
+          y0,
+          +d,
+          xO,
+          y0,
+          -d,
+          0,
+          y0,
+          +d,
+          0,
+          y0,
+          -d,
+          0,
+          y1,
+          +d,
+          0,
+          y1,
+          -d,
+        ]);
+        const indices =
+          side === "left"
+            ? new Uint16Array([
+                0, 2, 4, 0, 4, 1, 1, 4, 5, 1, 5, 3, 2, 4, 5, 2, 5, 3, 0, 1, 3,
+                0, 3, 2,
+              ])
+            : new Uint16Array([
+                0, 4, 2, 0, 1, 4, 1, 5, 4, 1, 3, 5, 2, 5, 4, 2, 3, 5, 0, 3, 1,
+                0, 2, 3,
+              ]);
+        const g = new THREE.BufferGeometry();
+        g.setAttribute("position", new THREE.BufferAttribute(positions, 3));
+        g.setIndex(new THREE.BufferAttribute(indices, 1));
+        g.computeVertexNormals();
+        const arr = new Float32Array(4);
+        const att = new THREE.InstancedBufferAttribute(arr, 4);
+        att.setUsage(THREE.DynamicDrawUsage);
+        g.setAttribute("brickVar", att);
+        return g;
+      }
+
+      function setCuspWedgeBrickVar(mesh, rnd) {
+        const grey = 0.45 + rnd() * 0.45;
+        setBrickVarAt(mesh, 0, 0.0, 0.7, grey, rnd());
+      }
 
       function mulberry32(a) {
         return function () {
@@ -691,6 +839,8 @@
         let brickMat = null;
         let timberMat = null;
         let doorMesh = null;
+        /** Pointed-arch cusp wedge pair (wall mode), disposed with door ring. */
+        let doorCuspMeshes = [];
         let wallMesh = null;
         /** Instanced arch ring in tower mode (single gate). */
         let towerDoorMeshes = [];
@@ -1322,6 +1472,11 @@
             if (doorMesh.geometry) doorMesh.geometry.dispose();
             doorMesh = null;
           }
+          doorCuspMeshes.forEach((m) => {
+            scene.remove(m);
+            if (m.geometry) m.geometry.dispose();
+          });
+          doorCuspMeshes = [];
           if (wallMesh) {
             scene.remove(wallMesh);
             if (wallMesh.geometry) wallMesh.geometry.dispose();
@@ -2288,9 +2443,7 @@
           });
           timberMat.colorNode = Fn(() => {
             const pw = positionWorld;
-            const ring = sin(
-              pw.y.mul(36).add(pw.x.mul(5.5)).add(pw.z.mul(2.8)),
-            )
+            const ring = sin(pw.y.mul(36).add(pw.x.mul(5.5)).add(pw.z.mul(2.8)))
               .mul(0.5)
               .add(0.5);
             const grain = sin(dot(pw, vec3(11.3, 19.1, 7.6)))
@@ -3291,91 +3444,89 @@
             if (params.houseRoofKind === "timber") {
               buildHouseTimberFrame();
             } else {
-            roof: {
-              /**
-               * Roof ridge must match gable ends: ±X gables → ridge parallel to X (apex to apex);
-               * ±Z gables → ridge parallel to Z. (Earlier build used the swapped pairing.)
-               */
-              if (gableAxis === 0) {
-                const xMin = -halfT - zOv;
-                const xMax = halfT + zOv;
-                for (let side = -1; side <= 1; side += 2) {
-                  const z0 = side < 0 ? -run + nomW * 0.12 : nomW * 0.1;
-                  const z1 = side < 0 ? -nomW * 0.12 : run - nomW * 0.08;
-                  for (
-                    let rz = z0;
-                    side < 0 ? rz < z1 : rz < z1;
-                    rz += stepAlong
-                  ) {
-                    const t =
-                      side < 0 ? (-rz) / run : rz / run;
-                    const y = eaveY + (1 - t) * kRise;
-                    let row = 0;
-                    for (let qx = xMin; qx < xMax + 1e-6; qx += dxRidge) {
-                      const off =
-                        (row +
-                          (side < 0 ? 0 : 1) +
-                          Math.floor((rz + run * 3) / stepAlong)) %
-                        2;
-                      row++;
-                      const qx0 = qx + off * dxRidge * 0.5;
-                      if (qx0 > xMax - nomW * 0.18) continue;
-                      _doorBx.set(1, 0, 0);
-                      if (side < 0) {
-                        _doorBy.set(0, kRise, run).normalize();
-                      } else {
-                        _doorBy.set(0, kRise, -run).normalize();
-                      }
-                      _doorBz.crossVectors(_doorBx, _doorBy).normalize();
-                      if (
-                        !placeRoofBrick(qx0, y, rz, _doorBx, _doorBy, _doorBz)
-                      ) {
-                        break roof;
+              roof: {
+                /**
+                 * Roof ridge must match gable ends: ±X gables → ridge parallel to X (apex to apex);
+                 * ±Z gables → ridge parallel to Z. (Earlier build used the swapped pairing.)
+                 */
+                if (gableAxis === 0) {
+                  const xMin = -halfT - zOv;
+                  const xMax = halfT + zOv;
+                  for (let side = -1; side <= 1; side += 2) {
+                    const z0 = side < 0 ? -run + nomW * 0.12 : nomW * 0.1;
+                    const z1 = side < 0 ? -nomW * 0.12 : run - nomW * 0.08;
+                    for (
+                      let rz = z0;
+                      side < 0 ? rz < z1 : rz < z1;
+                      rz += stepAlong
+                    ) {
+                      const t = side < 0 ? -rz / run : rz / run;
+                      const y = eaveY + (1 - t) * kRise;
+                      let row = 0;
+                      for (let qx = xMin; qx < xMax + 1e-6; qx += dxRidge) {
+                        const off =
+                          (row +
+                            (side < 0 ? 0 : 1) +
+                            Math.floor((rz + run * 3) / stepAlong)) %
+                          2;
+                        row++;
+                        const qx0 = qx + off * dxRidge * 0.5;
+                        if (qx0 > xMax - nomW * 0.18) continue;
+                        _doorBx.set(1, 0, 0);
+                        if (side < 0) {
+                          _doorBy.set(0, kRise, run).normalize();
+                        } else {
+                          _doorBy.set(0, kRise, -run).normalize();
+                        }
+                        _doorBz.crossVectors(_doorBx, _doorBy).normalize();
+                        if (
+                          !placeRoofBrick(qx0, y, rz, _doorBx, _doorBy, _doorBz)
+                        ) {
+                          break roof;
+                        }
                       }
                     }
                   }
-                }
-              } else {
-                const zMin = -halfT - zOv;
-                const zMax = halfT + zOv;
-                for (let side = -1; side <= 1; side += 2) {
-                  const x0 = side < 0 ? -run + nomW * 0.12 : nomW * 0.1;
-                  const x1 = side < 0 ? -nomW * 0.12 : run - nomW * 0.08;
-                  for (
-                    let rx = x0;
-                    side < 0 ? rx < x1 : rx < x1;
-                    rx += stepAlong
-                  ) {
-                    const t =
-                      side < 0 ? (rx + run) / run : (run - rx) / run;
-                    const y = eaveY + t * kRise;
-                    let row = 0;
-                    for (let qz = zMin; qz < zMax + 1e-6; qz += dxRidge) {
-                      const off =
-                        (row +
-                          (side < 0 ? 0 : 1) +
-                          Math.floor((rx + run * 3) / stepAlong)) %
-                        2;
-                      row++;
-                      const qz0 = qz + off * dxRidge * 0.5;
-                      if (qz0 > zMax - nomW * 0.18) continue;
-                      _doorBx.set(0, 0, 1);
-                      if (side < 0) {
-                        _doorBy.set(run, kRise, 0).normalize();
-                      } else {
-                        _doorBy.set(-run, kRise, 0).normalize();
-                      }
-                      _doorBz.crossVectors(_doorBx, _doorBy).normalize();
-                      if (
-                        !placeRoofBrick(rx, y, qz0, _doorBx, _doorBy, _doorBz)
-                      ) {
-                        break roof;
+                } else {
+                  const zMin = -halfT - zOv;
+                  const zMax = halfT + zOv;
+                  for (let side = -1; side <= 1; side += 2) {
+                    const x0 = side < 0 ? -run + nomW * 0.12 : nomW * 0.1;
+                    const x1 = side < 0 ? -nomW * 0.12 : run - nomW * 0.08;
+                    for (
+                      let rx = x0;
+                      side < 0 ? rx < x1 : rx < x1;
+                      rx += stepAlong
+                    ) {
+                      const t = side < 0 ? (rx + run) / run : (run - rx) / run;
+                      const y = eaveY + t * kRise;
+                      let row = 0;
+                      for (let qz = zMin; qz < zMax + 1e-6; qz += dxRidge) {
+                        const off =
+                          (row +
+                            (side < 0 ? 0 : 1) +
+                            Math.floor((rx + run * 3) / stepAlong)) %
+                          2;
+                        row++;
+                        const qz0 = qz + off * dxRidge * 0.5;
+                        if (qz0 > zMax - nomW * 0.18) continue;
+                        _doorBx.set(0, 0, 1);
+                        if (side < 0) {
+                          _doorBy.set(run, kRise, 0).normalize();
+                        } else {
+                          _doorBy.set(-run, kRise, 0).normalize();
+                        }
+                        _doorBz.crossVectors(_doorBx, _doorBy).normalize();
+                        if (
+                          !placeRoofBrick(rx, y, qz0, _doorBx, _doorBy, _doorBz)
+                        ) {
+                          break roof;
+                        }
                       }
                     }
                   }
                 }
               }
-            }
             }
           }
 
@@ -3569,7 +3720,7 @@
               wEq = (innerLen - (nBricks - 1) * j) / nBricks;
               if (wEq < minW * 0.88) continue;
 
-              const staggerU = (iy % 2 === 1) ? (wEq + j) * 0.5 : 0;
+              const staggerU = iy % 2 === 1 ? (wEq + j) * 0.5 : 0;
 
               for (let bi = 0; bi < nBricks; bi++) {
                 if (k >= params.maxWallBricks) break outerRound;
@@ -3638,6 +3789,61 @@
           scene.add(wallMesh);
         }
 
+        /**
+         * Two wedge voussoirs at the pointed cusp: curved outer edge, vertical seam at x = 0.
+         * @param {THREE.Matrix4 | null} ringWorld — flat tower face transform; null = identity (bridge local XY).
+         */
+        function placePointedCuspWedgePair(
+          apexInfo,
+          apexIdx,
+          rp,
+          alongU,
+          jRing,
+          rnd,
+          ringWorld,
+          meshList,
+          gx = 0,
+          zOff = 0,
+        ) {
+          if (!brickGeo || !apexIdx || apexIdx.leftI < 0 || apexIdx.rightI < 0)
+            return;
+          const halfD =
+            params.brickD * 0.5 * (params.archRingDepthScale || 1.0);
+          const sL = jRing * apexIdx.leftI + alongU * (apexIdx.leftI + 0.5);
+          const sR = jRing * apexIdx.rightI + alongU * (apexIdx.rightI + 0.5);
+          const tailPull = alongU * 0.48;
+          const sLo = Math.max(apexInfo.apexS - tailPull * 2, 0);
+          const sRo = Math.min(apexInfo.apexS + tailPull * 2, pathULength(rp));
+          const oL = sampleUPath(sLo, rp);
+          const oR = sampleUPath(sRo, rp);
+          const yTop = apexInfo.apexY;
+          const xOff = new THREE.Matrix4().makeTranslation(gx, 0, zOff);
+          const parent = new THREE.Matrix4();
+          if (ringWorld) parent.copy(ringWorld);
+          parent.multiply(xOff);
+
+          for (const [side, xOut, yBot] of [
+            ["left", oL.x, oL.y],
+            ["right", oR.x, oR.y],
+          ]) {
+            const geo = createPointedCuspHalfGeometry(
+              side,
+              xOut,
+              yBot,
+              yTop,
+              halfD,
+            );
+            const wedge = new THREE.InstancedMesh(geo, brickMat, 1);
+            wedge.castShadow = true;
+            wedge.receiveShadow = true;
+            wedge.setMatrixAt(0, parent);
+            setCuspWedgeBrickVar(wedge, rnd);
+            wedge.instanceMatrix.needsUpdate = true;
+            scene.add(wedge);
+            meshList.push(wedge);
+          }
+        }
+
         function buildTowerDoorRings() {
           if (!brickGeo) return;
           const openings = getTowerOpeningsList();
@@ -3658,12 +3864,6 @@
                 THREE.MathUtils.clamp(params.spacingMul, 0.82, 1.08) +
               jRing;
             let nU = Math.max(5, Math.round(Lu / targetMod));
-            /**
-             * Pointed arches need an even voussoir count so symmetry puts a brick
-             * boundary exactly on the apex — the two final voussoirs then meet at
-             * a clean vertical mortar joint instead of overlapping or gapping.
-             */
-            if (rp.archShape === "pointed" && nU % 2 === 1) nU += 1;
             let nS = Ls > 0 ? Math.max(2, Math.round(Ls / targetMod)) : 0;
             if (nU + nS > params.maxBricks) {
               const room = params.maxBricks - nS;
@@ -3829,8 +4029,20 @@
               k++;
             };
 
+            const apexInfo = pointedApexPathInfo(rp);
+            const apexIdx = apexInfo
+              ? pointedApexBrickIndices(nU, alongU, jRing, apexInfo.apexS)
+              : null;
+
             for (let i = 0; i < nU; i++) {
               const s = jRing * i + alongU * (i + 0.5);
+              if (
+                apexInfo &&
+                skipPointedCuspStraggler(s, apexInfo.apexS, alongU, i, apexIdx)
+              ) {
+                continue;
+              }
+              if (isPointedKeystoneIndex(i, apexIdx)) continue;
               const o = sampleUPath(s, rp);
               placeBrick(o.x, o.y, o.tx, o.ty, alongU);
             }
@@ -3846,6 +4058,52 @@
             if (bv) bv.needsUpdate = true;
             scene.add(mesh);
             towerDoorMeshes.push(mesh);
+
+            if (apexInfo && apexIdx && !isRoundTower()) {
+              const ringWorld = new THREE.Matrix4();
+              setRingParentForFace(
+                ringRoot,
+                op.face,
+                halfT,
+                op.uCenter,
+                params.brickD,
+              );
+              ringRoot.updateMatrixWorld(true);
+              ringWorld.copy(ringRoot.matrixWorld);
+              const ff = THREE.MathUtils.clamp(op.face | 0, 0, 3);
+              const rz =
+                typeof op.archAlongZ === "number" &&
+                !Number.isNaN(op.archAlongZ)
+                  ? op.archAlongZ
+                  : 0;
+              if (ff === 0) ringWorld.multiply(new THREE.Matrix4().makeTranslation(rz, 0, 0));
+              else if (ff === 1)
+                ringWorld.multiply(new THREE.Matrix4().makeTranslation(-rz, 0, 0));
+              else if (ff === 2)
+                ringWorld.multiply(new THREE.Matrix4().makeTranslation(0, 0, rz));
+              else ringWorld.multiply(new THREE.Matrix4().makeTranslation(0, 0, -rz));
+              placePointedCuspWedgePair(
+                apexInfo,
+                apexIdx,
+                rp,
+                alongU,
+                jRing,
+                rnd,
+                ringWorld,
+                towerDoorMeshes,
+              );
+            } else if (apexInfo && apexIdx && isRoundTower()) {
+              const oL = sampleUPath(
+                jRing * apexIdx.leftI + alongU * (apexIdx.leftI + 0.5),
+                rp,
+              );
+              const oR = sampleUPath(
+                jRing * apexIdx.rightI + alongU * (apexIdx.rightI + 0.5),
+                rp,
+              );
+              placeBrick(oL.x, oL.y, oL.tx, oL.ty, alongU);
+              placeBrick(oR.x, oR.y, oR.tx, oR.ty, alongU);
+            }
           });
         }
 
@@ -3880,7 +4138,6 @@
               THREE.MathUtils.clamp(params.spacingMul, 0.82, 1.08) +
             jRing;
           let nU = Math.max(5, Math.round(Lu / targetMod));
-          if (rp.archShape === "pointed" && nU % 2 === 1) nU += 1;
           let nS = Ls > 0 ? Math.max(2, Math.round(Ls / targetMod)) : 0;
           if (nU + nS > params.maxBricks) {
             const room = params.maxBricks - nS;
@@ -3946,8 +4203,20 @@
             setBrickVarAt(mesh, k, v.shapeMix, v.warp, v.grey, v.grain);
             k++;
           };
+          const apexInfo = pointedApexPathInfo(rp);
+          const apexIdx = apexInfo
+            ? pointedApexBrickIndices(nU, alongU, jRing, apexInfo.apexS)
+            : null;
+
           for (let i = 0; i < nU; i++) {
             const s = jRing * i + alongU * (i + 0.5);
+            if (
+              apexInfo &&
+              skipPointedCuspStraggler(s, apexInfo.apexS, alongU, i, apexIdx)
+            ) {
+              continue;
+            }
+            if (isPointedKeystoneIndex(i, apexIdx)) continue;
             const o = sampleUPath(s, rp);
             placeBrick(o.x, o.y, o.tx, o.ty, alongU);
           }
@@ -3964,6 +4233,27 @@
           mesh.rotation.set(0, 0, 0);
           scene.add(mesh);
           bridgeArchMeshes.push(mesh);
+
+          if (apexInfo && apexIdx) {
+            const ringWorld = new THREE.Matrix4().makeTranslation(
+              gxc,
+              0,
+              zWorld + params.archAlongZ,
+            );
+            if (flipX) {
+              ringWorld.multiply(new THREE.Matrix4().makeScale(-1, 1, 1));
+            }
+            placePointedCuspWedgePair(
+              apexInfo,
+              apexIdx,
+              rp,
+              alongU,
+              jRing,
+              rnd,
+              ringWorld,
+              bridgeArchMeshes,
+            );
+          }
         }
 
         function buildBridgeArchRings() {
@@ -4307,6 +4597,11 @@
         }
 
         function buildDoorInstances() {
+          doorCuspMeshes.forEach((m) => {
+            scene.remove(m);
+            if (m.geometry) m.geometry.dispose();
+          });
+          doorCuspMeshes = [];
           if (isBridge()) {
             buildBridgeArchRings();
             return;
@@ -4330,7 +4625,6 @@
               THREE.MathUtils.clamp(params.spacingMul, 0.82, 1.08) +
             jRing;
           let nU = Math.max(5, Math.round(Lu / targetMod));
-          if (rp.archShape === "pointed" && nU % 2 === 1) nU += 1;
           let nS = Ls > 0 ? Math.max(2, Math.round(Ls / targetMod)) : 0;
           if (nU + nS > params.maxBricks) {
             const room = params.maxBricks - nS;
@@ -4394,8 +4688,20 @@
             k++;
           };
 
+          const apexInfo = pointedApexPathInfo(rp);
+          const apexIdx = apexInfo
+            ? pointedApexBrickIndices(nU, alongU, jRing, apexInfo.apexS)
+            : null;
+
           for (let i = 0; i < nU; i++) {
             const s = jRing * i + alongU * (i + 0.5);
+            if (
+              apexInfo &&
+              skipPointedCuspStraggler(s, apexInfo.apexS, alongU, i, apexIdx)
+            ) {
+              continue;
+            }
+            if (isPointedKeystoneIndex(i, apexIdx)) continue;
             const o = sampleUPath(s, rp);
             placeBrick(o.x, o.y, o.tx, o.ty, alongU);
           }
@@ -4403,6 +4709,24 @@
             const s = jRing * i + alongS * (i + 0.5);
             const o = sampleSill(s, R, rp.sillY);
             placeBrick(o.x, o.y, o.tx, o.ty, alongS);
+          }
+
+          if (apexInfo && apexIdx) {
+            const ringWorld = new THREE.Matrix4().makeTranslation(
+              gx,
+              0,
+              params.archAlongZ,
+            );
+            placePointedCuspWedgePair(
+              apexInfo,
+              apexIdx,
+              rp,
+              alongU,
+              jRing,
+              rnd,
+              ringWorld,
+              doorCuspMeshes,
+            );
           }
 
           doorMesh.count = k;

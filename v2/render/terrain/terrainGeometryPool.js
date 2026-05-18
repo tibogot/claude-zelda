@@ -100,6 +100,10 @@ function appendChunkTerrainSkirt(geom, segments, skirtDepth) {
   newUv.set(uvArr);
   const newN = new Float32Array(newCount * 3);
   newN.set(nArr);
+  // 1 on skirt verts, 0 on the surface verts. Lets the fragment shader kill
+  // the skirt curtain inside chunks with painted holes (zero by default for
+  // surface verts since Float32Array initializes to 0).
+  const newSkirt = new Float32Array(newCount);
 
   for (let r = 0; r < botCount; r++) {
     const ti = ring[r];
@@ -112,6 +116,7 @@ function appendChunkTerrainSkirt(geom, segments, skirtDepth) {
     newN[bi * 3] = nArr[ti * 3];
     newN[bi * 3 + 1] = nArr[ti * 3 + 1];
     newN[bi * 3 + 2] = nArr[ti * 3 + 2];
+    newSkirt[bi] = 1;
   }
 
   const oldIdx = idx.array;
@@ -141,6 +146,7 @@ function appendChunkTerrainSkirt(geom, segments, skirtDepth) {
   geom.setAttribute("position", new THREE.BufferAttribute(newPos, 3));
   geom.setAttribute("normal", new THREE.BufferAttribute(newN, 3));
   geom.setAttribute("uv", new THREE.BufferAttribute(newUv, 2));
+  geom.setAttribute("aSkirt", new THREE.BufferAttribute(newSkirt, 1));
   // setIndex() only wraps plain Arrays; raw TypedArray ends up as index with no .array — WebGPU breaks.
   const indexBuf =
     maxVertIndex > 65535 ? new THREE.Uint32BufferAttribute(newIdx, 1) : new THREE.Uint16BufferAttribute(newIdx, 1);

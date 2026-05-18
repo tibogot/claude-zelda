@@ -33,9 +33,18 @@ export class HoleStore {
     tex.magFilter = THREE.LinearFilter;
     tex.needsUpdate = true;
 
-    const entry = { data, tex };
+    // hasAnyHole: true if any R-channel pixel exceeds the alpha-test threshold.
+    // Used to hide the chunk's terrain skirt (the LOD-seam curtain) when the
+    // player can see into the hole from above. Skirts at the chunk perimeter
+    // sample the edge texels of `data`, so a hole painted in the middle of a
+    // chunk never reaches them — this flag is the chunk-wide signal instead.
+    const entry = { data, tex, hasAnyHole: false };
     this.chunks.set(key, entry);
     return entry;
+  }
+
+  chunkHasAnyHole(key) {
+    return this.chunks.get(key)?.hasAnyHole === true;
   }
 
   getChunkIndicesInBounds(minX, minZ, maxX, maxZ) {
@@ -101,6 +110,7 @@ export class HoleStore {
 
       if (anyTouched) {
         entry.tex.needsUpdate = true;
+        entry.hasAnyHole = computeHasAnyHole(entry.data);
         touched.add(chunkKey(cx, cz));
       }
     }
@@ -116,6 +126,7 @@ export class HoleStore {
       }
       entry.data.set(data);
       entry.tex.needsUpdate = true;
+      entry.hasAnyHole = computeHasAnyHole(entry.data);
     }
   }
 
@@ -123,6 +134,7 @@ export class HoleStore {
     for (const entry of this.chunks.values()) {
       entry.data.fill(0);
       entry.tex.needsUpdate = true;
+      entry.hasAnyHole = false;
     }
   }
 
@@ -148,6 +160,7 @@ export class HoleStore {
       const entry = this.ensureChunk(cx, cz);
       entry.data.set(u8.subarray(0, entry.data.length));
       entry.tex.needsUpdate = true;
+      entry.hasAnyHole = computeHasAnyHole(entry.data);
     }
   }
 
@@ -155,4 +168,13 @@ export class HoleStore {
     for (const entry of this.chunks.values()) entry.tex.dispose();
     this.chunks.clear();
   }
+}
+
+// Matches the shader's alpha-test threshold (step(0.25, holeTex.r)).
+const HAS_ANY_HOLE_THRESHOLD = 64;
+function computeHasAnyHole(data) {
+  for (let i = 0; i < data.length; i += 4) {
+    if (data[i] >= HAS_ANY_HOLE_THRESHOLD) return true;
+  }
+  return false;
 }
