@@ -499,6 +499,13 @@
            */
           chapelGableCornerButtressesEnabled: true,
           /**
+           * Apse: half-cylinder sanctuary attached to the back wall (face 1, -X side).
+           * Centered on the back-wall plane at x = -halfTX, curves outward in -X.
+           * Default radius = halfTZ so it meets the wall corners flush.
+           */
+          chapelApseEnabled: true,
+          chapelApseRadius: 3.2,
+          /**
            * Half-length along the ridge (long axis, X) for chapel mode. `towerHalfWidth`
            * still represents the short axis (Z, nave width). Defaults to ~2.7× the width
            * so the chapel reads as a proper nave instead of a tower-with-a-gable.
@@ -781,6 +788,8 @@
         let chapelButtressMesh = null;
         /** Pyramid caps on top of chapel buttresses (one instance per buttress, shared unit pyramid). */
         let chapelButtressCapMesh = null;
+        /** Half-cylinder apse shell on the chapel's back wall. */
+        let chapelApseMesh = null;
         /** Instanced arch ring in tower mode (single gate). */
         let towerDoorMeshes = [];
         /** Three arch rings × two sides for `sceneMode === "bridge"`. */
@@ -1135,6 +1144,15 @@
             params.chapelGableCornerButtressesEnabled == null
               ? true
               : !!params.chapelGableCornerButtressesEnabled;
+          params.chapelApseEnabled =
+            params.chapelApseEnabled == null
+              ? true
+              : !!params.chapelApseEnabled;
+          /** Match the chapel half-width so the apse springs cleanly from the back wall corners. */
+          params.chapelApseRadius = Math.max(
+            0.6,
+            Number(params.chapelApseRadius) || params.towerHalfWidth || 3.2,
+          );
         }
 
         function applyBridgeDefaults() {
@@ -1638,6 +1656,11 @@
             scene.remove(chapelButtressCapMesh);
             if (chapelButtressCapMesh.geometry) chapelButtressCapMesh.geometry.dispose();
             chapelButtressCapMesh = null;
+          }
+          if (chapelApseMesh) {
+            scene.remove(chapelApseMesh);
+            if (chapelApseMesh.geometry) chapelApseMesh.geometry.dispose();
+            chapelApseMesh = null;
           }
           houseTimberMeshes.forEach((m) => {
             scene.remove(m);
@@ -3929,6 +3952,152 @@
           chapelButtressCapMesh = capMesh;
         }
 
+        /**
+         * Chapel apse: half-cylinder shell springing from the back wall (−X). Centered at
+         * (x = −halfTX, y, z = 0) with radius `chapelApseRadius`; curves outward in −X so
+         * the end-points sit at z = ±R (flush with the back-wall corners when R = halfTZ).
+         *
+         * Brick placement mirrors `buildTowerRoundShellInstances`:
+         *   - identical `placeRoundBrick`-style `lookAt(2x − cx, y, 2z) + rotateY(π/2)`
+         *     pattern so local +X is tangent and +Z points toward the apse axis (brick
+         *     depth into the shell — same convention as the round tower's comment);
+         *   - segment-and-stagger course loop with running-bond half-brick offset;
+         *   - identical jitter (radial, vertical, rotation) so the masonry reads
+         *     continuous with a round-tower shell.
+         */
+        function buildChapelApse() {
+          if (!isChapel()) return;
+          if (!params.chapelApseEnabled) return;
+          if (!brickGeo) return;
+
+          const { halfTX } = getShellHalves();
+          const apseCx = -halfTX;
+          const Rc = Math.max(
+            0.6,
+            Number(params.chapelApseRadius) || params.towerHalfWidth || 3.2,
+          );
+          const wallBase = params.towerAnchorY;
+          const eaveY =
+            wallBase +
+            Math.max(params.brickH * 2, params.towerHeight) -
+            Math.max(0, Number(params.houseEaveLowerY) || 0);
+
+          const mortar = params.wallMortar;
+          const nomH = params.brickH;
+          const nomW = params.brickW;
+          const rowH = nomH + mortar;
+          const baseY = wallBase + mortar * 0.5 + nomH * 0.5;
+          const ny = Math.max(2, Math.floor((eaveY - baseY) / rowH));
+
+          const inset = towerFaceInsetD();
+          /** Arc length of the half-cylinder; u-coordinate runs [0, devLen] from +Z corner to −Z corner. */
+          const devLen = Math.PI * Rc;
+
+          /** Worst-case bricks per course × courses, plus headroom. */
+          const capacity =
+            Math.ceil(devLen / Math.max(0.12, nomW * 0.45)) * ny + 32;
+          const apseGeo = createInstancedBrickGeometry(brickGeo, capacity);
+          const mesh = new THREE.InstancedMesh(apseGeo, brickMat, capacity);
+          mesh.castShadow = true;
+          mesh.receiveShadow = true;
+          mesh.position.set(0, 0, 0);
+
+          const rnd = mulberry32((params.colorSeed ^ 0xa9573e10) | 0);
+          let k = 0;
+
+          /** Place one shell brick; phi maps to a world point relative to the apse axis at `apseCx`. */
+          const placeApseBrick = (phi, y, sx, sy, sz, iyRow) => {
+            if (k >= capacity) return false;
+            const v = pickBrickVariation(rnd, sx, sy, sz, "wall");
+            const rJ = (params.brickRadiusVariation || 0) * (rnd() - 0.5);
+            const rUse = Math.max(0.06, Rc - inset + rJ);
+            const px = apseCx + Math.cos(phi) * rUse;
+            const pz = Math.sin(phi) * rUse;
+            const yExtra =
+              (params.brickVerticalVariation || 0) * (rnd() - 0.5) * 0.75;
+            const yJ =
+              (iyRow > 0 ? y + (rnd() - 0.5) * rowH * 0.045 : y) + yExtra;
+            tmpO.position.set(px, yJ, pz);
+            tmpO.quaternion.identity();
+            /** lookAt target must be the OUTWARD-radial point from the *apse* centre (not the world origin). */
+            tmpO.lookAt(2 * px - apseCx, yJ, 2 * pz);
+            tmpO.rotateY(Math.PI * 0.5);
+            tmpO.rotateX((rnd() - 0.5) * 0.028);
+            tmpO.rotateY((rnd() - 0.5) * 0.038);
+            tmpO.rotateZ((rnd() - 0.5) * 0.028);
+            const rvExtra = params.brickRotationVariation || 0;
+            if (rvExtra > 0) {
+              tmpO.rotateX((rnd() - 0.5) * rvExtra);
+              tmpO.rotateY((rnd() - 0.5) * rvExtra);
+              tmpO.rotateZ((rnd() - 0.5) * rvExtra);
+            }
+            tmpO.scale.set(v.sx, v.sy, v.sz);
+            applyBrickAxisScaleNoise(tmpO, rnd, false);
+            tmpO.updateMatrix();
+            mesh.setMatrixAt(k, tmpO.matrix);
+            setBrickVarAt(mesh, k, v.shapeMix, v.warp, v.grey, v.grain);
+            k++;
+            return true;
+          };
+
+          outerApse: for (let iy = 0; iy < ny; iy++) {
+            const yMid = baseY + iy * rowH;
+            if (yMid > eaveY - nomH * 0.2) break;
+
+            const segLo = 0;
+            const segHi = devLen;
+            const span = segHi - segLo;
+            const minW = nomW * params.wallMinBrickScale;
+            const jMin = 0.0035;
+            const jMax = Math.min(
+              mortar,
+              Math.max(jMin, span * 0.014 + jMin * 0.6),
+            );
+            const j = THREE.MathUtils.clamp(mortar, jMin, jMax);
+            const hj = j * 0.5;
+            const innerLo = segLo + hj;
+            const innerHi = segHi - hj;
+            const innerLen = innerHi - innerLo;
+            if (innerLen < minW * 0.72) continue;
+
+            let nBricks = Math.max(1, Math.round(innerLen / (nomW + j)));
+            let wEq = (innerLen - (nBricks - 1) * j) / nBricks;
+            for (let it = 0; it < 96; it++) {
+              wEq = (innerLen - (nBricks - 1) * j) / nBricks;
+              if (wEq < minW * 0.998) {
+                if (nBricks <= 1) break;
+                nBricks--;
+              } else if (wEq > nomW * 1.075 && nBricks < 1600) {
+                nBricks++;
+              } else break;
+            }
+            wEq = (innerLen - (nBricks - 1) * j) / nBricks;
+            if (wEq < minW * 0.88) continue;
+
+            const staggerU = iy % 2 === 1 ? (wEq + j) * 0.5 : 0;
+
+            for (let bi = 0; bi < nBricks; bi++) {
+              const u = innerLo + wEq * 0.5 + bi * (wEq + j) + staggerU;
+              if (u > innerHi - wEq * 0.25) break;
+              /** φ runs π/2 → 3π/2 across u ∈ [0, devLen]; +Z corner at φ=π/2, −Z corner at φ=3π/2. */
+              const phi = Math.PI * 0.5 + u / Rc;
+              const sx = wEq / nomW;
+              const sy = (0.91 + rnd() * 0.06);
+              const sz = 0.92 + rnd() * 0.06;
+              if (!placeApseBrick(phi, yMid, sx, sy, sz, iy)) {
+                break outerApse;
+              }
+            }
+          }
+
+          mesh.count = k;
+          mesh.instanceMatrix.needsUpdate = true;
+          const bv = mesh.geometry.getAttribute("brickVar");
+          if (bv) bv.needsUpdate = true;
+          scene.add(mesh);
+          chapelApseMesh = mesh;
+        }
+
         /** Cylindrical tower shell: arc-length coordinate u = θ·R on [−πR, πR], one gate via `uArc`. */
         function buildTowerRoundShellInstances() {
           if (!brickGeo) return;
@@ -4963,7 +5132,10 @@
           }
           if (params.sceneMode === "house" || params.sceneMode === "chapel") {
             buildHouseShellInstances();
-            if (isChapel()) buildChapelButtresses();
+            if (isChapel()) {
+              buildChapelButtresses();
+              buildChapelApse();
+            }
             return;
           }
           if (params.sceneMode === "towerRound") {
@@ -5410,6 +5582,19 @@
         fChapel
           .addBinding(params, "chapelGableCornerButtressesEnabled", {
             label: "Gable corner buttresses",
+          })
+          .on("change", rbChapel);
+        fChapel
+          .addBinding(params, "chapelApseEnabled", {
+            label: "Apse (curved back end)",
+          })
+          .on("change", rbChapel);
+        fChapel
+          .addBinding(params, "chapelApseRadius", {
+            min: 1.2,
+            max: 6.0,
+            step: 0.05,
+            label: "Apse radius",
           })
           .on("change", rbChapel);
 
