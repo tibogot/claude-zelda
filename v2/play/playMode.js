@@ -780,6 +780,15 @@ function clearBullets(pool) {
   }
 }
 
+const MODE_ORDER = ["capsule", "char", "fly", "car", "lotus"];
+const MODE_META = {
+  capsule: { label: "Capsule", icon: "◉", digit: "1" },
+  char:    { label: "Character", icon: "🧝", digit: "2" },
+  fly:     { label: "Flight", icon: "✈", digit: "3" },
+  car:     { label: "Bruno", icon: "🚙", digit: "4" },
+  lotus:   { label: "Lotus", icon: "🏎", digit: "5" },
+};
+
 export class PlayMode {
   constructor({
     scene,
@@ -1041,6 +1050,366 @@ export class PlayMode {
     this._loadLotus();
     this._initLotusCamGui();
     this._initJeepTuningGui();
+
+    this._modePill = null;
+    this._modePillIcon = null;
+    this._modePillLabel = null;
+    this._modePillKey = null;
+    this._createModePill();
+
+    // Radial mode wheel state
+    this._wheelEl = null;
+    this._wheelCursorEl = null;
+    this._wheelHubLabelEl = null;
+    this._wheelSlotEls = {};
+    this._wheelOpen = false;
+    this._wheelArmed = false;
+    this._wheelHoldTimer = null;
+    this._wheelCursor = { x: 0, y: 0 };
+    this._wheelHover = null;
+    this._createModeWheel();
+
+    // Free-orbit detach camera state (Unreal "Eject" pattern)
+    this.detached = false;
+    this._detachWasPointerLocked = false;
+    this._detachBadge = null;
+    this._createDetachBadge();
+  }
+
+  _createModePill() {
+    const el = document.createElement("div");
+    el.id = "play-mode-pill";
+    el.style.cssText = [
+      "position:fixed",
+      "bottom:20px",
+      "left:20px",
+      "z-index:7",
+      "display:none",
+      "pointer-events:none",
+      "font-family:system-ui,-apple-system,Segoe UI,Roboto,Ubuntu,sans-serif",
+      "font-variant-numeric:tabular-nums",
+      "-webkit-font-smoothing:antialiased",
+      "filter:drop-shadow(0 12px 32px rgba(0,0,0,0.55))",
+    ].join(";");
+    el.innerHTML = `
+      <div style="display:flex;align-items:center;gap:10px;padding:8px 14px 8px 10px;border-radius:999px;background:rgba(6,10,14,0.72);backdrop-filter:blur(14px) saturate(1.2);-webkit-backdrop-filter:blur(14px) saturate(1.2);border:1px solid rgba(120,175,200,0.22);box-shadow:inset 0 1px 0 rgba(255,255,255,0.06),0 0 0 1px rgba(0,0,0,0.35),0 8px 22px rgba(0,0,0,0.4);">
+        <div id="play-mode-pill-icon" style="display:flex;align-items:center;justify-content:center;width:28px;height:28px;border-radius:50%;background:linear-gradient(145deg,rgba(120,170,220,0.35),rgba(40,60,90,0.6));color:#f2f8fc;font-size:16px;line-height:1;">◉</div>
+        <div style="display:flex;flex-direction:column;gap:1px;">
+          <div style="font-size:8px;font-weight:600;letter-spacing:0.2em;color:rgba(140,175,195,0.7);text-transform:uppercase;">Play mode</div>
+          <div style="display:flex;align-items:baseline;gap:8px;">
+            <span id="play-mode-pill-label" style="font-size:14px;font-weight:700;color:#f2f8fc;letter-spacing:-0.01em;">Capsule</span>
+            <span id="play-mode-pill-key" style="font-size:9px;font-weight:600;letter-spacing:0.16em;color:rgba(140,175,195,0.7);text-transform:uppercase;">1 · hold G</span>
+          </div>
+        </div>
+      </div>`;
+    document.body.appendChild(el);
+    this._modePill = el;
+    this._modePillIcon = el.querySelector("#play-mode-pill-icon");
+    this._modePillLabel = el.querySelector("#play-mode-pill-label");
+    this._modePillKey = el.querySelector("#play-mode-pill-key");
+  }
+
+  _updateModePill() {
+    if (!this._modePill) return;
+    const meta = MODE_META[this.moveMode];
+    if (!meta) return;
+    if (this._modePillIcon) this._modePillIcon.textContent = meta.icon;
+    if (this._modePillLabel) this._modePillLabel.textContent = meta.label;
+    if (this._modePillKey) this._modePillKey.textContent = `${meta.digit} · G wheel · F free cam`;
+  }
+
+  _createModeWheel() {
+    const RING_R = 130; // slot ring radius (px)
+    const overlay = document.createElement("div");
+    overlay.id = "mode-wheel-overlay";
+    overlay.style.cssText = [
+      "position:fixed",
+      "inset:0",
+      "z-index:8",
+      "display:none",
+      "pointer-events:none",
+      "background:radial-gradient(circle at center,rgba(4,8,12,0.55),rgba(4,8,12,0.25) 60%,transparent 80%)",
+      "backdrop-filter:blur(6px) saturate(1.05)",
+      "-webkit-backdrop-filter:blur(6px) saturate(1.05)",
+      "font-family:system-ui,-apple-system,Segoe UI,Roboto,Ubuntu,sans-serif",
+      "-webkit-font-smoothing:antialiased",
+    ].join(";");
+
+    const wheel = document.createElement("div");
+    wheel.style.cssText = [
+      "position:absolute",
+      "left:50%",
+      "top:50%",
+      "width:360px",
+      "height:360px",
+      "transform:translate(-50%,-50%)",
+    ].join(";");
+
+    const ring = document.createElement("div");
+    ring.style.cssText = [
+      "position:absolute",
+      "left:50%",
+      "top:50%",
+      `width:${RING_R * 2}px`,
+      `height:${RING_R * 2}px`,
+      "margin-left:" + -RING_R + "px",
+      "margin-top:" + -RING_R + "px",
+      "border-radius:50%",
+      "border:1px dashed rgba(160,200,225,0.18)",
+      "box-shadow:inset 0 0 60px rgba(0,0,0,0.4)",
+    ].join(";");
+    wheel.appendChild(ring);
+
+    const n = MODE_ORDER.length;
+    for (let i = 0; i < n; i++) {
+      const name = MODE_ORDER[i];
+      const meta = MODE_META[name];
+      const ang = -Math.PI / 2 + (i * Math.PI * 2) / n;
+      const cx = Math.cos(ang) * RING_R;
+      const cy = Math.sin(ang) * RING_R;
+      const slot = document.createElement("div");
+      slot.dataset.mode = name;
+      slot.style.cssText = [
+        "position:absolute",
+        "left:50%",
+        "top:50%",
+        "width:84px",
+        "height:84px",
+        `transform:translate(calc(-50% + ${cx}px),calc(-50% + ${cy}px))`,
+        "border-radius:50%",
+        "background:rgba(6,10,14,0.78)",
+        "backdrop-filter:blur(14px) saturate(1.2)",
+        "-webkit-backdrop-filter:blur(14px) saturate(1.2)",
+        "border:1px solid rgba(120,175,200,0.25)",
+        "box-shadow:inset 0 1px 0 rgba(255,255,255,0.06),0 8px 22px rgba(0,0,0,0.45)",
+        "display:flex",
+        "flex-direction:column",
+        "align-items:center",
+        "justify-content:center",
+        "gap:2px",
+        "color:#f2f8fc",
+        "transition:transform 120ms ease,background 120ms ease,border-color 120ms ease,box-shadow 120ms ease",
+      ].join(";");
+      slot.innerHTML = `
+        <div style="font-size:22px;line-height:1;">${meta.icon}</div>
+        <div style="font-size:10px;font-weight:700;letter-spacing:0.02em;">${meta.label}</div>
+        <div style="font-size:8px;font-weight:600;letter-spacing:0.16em;color:rgba(140,175,195,0.7);text-transform:uppercase;">Key ${meta.digit}</div>
+      `;
+      wheel.appendChild(slot);
+      this._wheelSlotEls[name] = slot;
+    }
+
+    const hub = document.createElement("div");
+    hub.style.cssText = [
+      "position:absolute",
+      "left:50%",
+      "top:50%",
+      "width:120px",
+      "height:120px",
+      "margin-left:-60px",
+      "margin-top:-60px",
+      "border-radius:50%",
+      "background:rgba(4,8,12,0.82)",
+      "border:1px solid rgba(120,175,200,0.22)",
+      "box-shadow:inset 0 1px 0 rgba(255,255,255,0.05),0 0 24px rgba(0,0,0,0.5)",
+      "display:flex",
+      "flex-direction:column",
+      "align-items:center",
+      "justify-content:center",
+      "text-align:center",
+      "padding:0 10px",
+    ].join(";");
+    hub.innerHTML = `
+      <div style="font-size:8px;font-weight:600;letter-spacing:0.22em;color:rgba(140,175,195,0.7);text-transform:uppercase;">Play mode</div>
+      <div id="mode-wheel-hub-label" style="font-size:14px;font-weight:700;color:#f2f8fc;margin-top:4px;">—</div>
+      <div style="font-size:8px;font-weight:500;letter-spacing:0.1em;color:rgba(140,175,195,0.55);margin-top:6px;text-transform:uppercase;">Release to pick</div>
+    `;
+    wheel.appendChild(hub);
+
+    const cursor = document.createElement("div");
+    cursor.style.cssText = [
+      "position:absolute",
+      "left:50%",
+      "top:50%",
+      "width:10px",
+      "height:10px",
+      "margin-left:-5px",
+      "margin-top:-5px",
+      "border-radius:50%",
+      "background:#f2f8fc",
+      "box-shadow:0 0 12px rgba(255,255,255,0.6),0 0 4px rgba(140,200,255,0.8)",
+      "pointer-events:none",
+      "transform:translate(0,0)",
+    ].join(";");
+    wheel.appendChild(cursor);
+
+    overlay.appendChild(wheel);
+    document.body.appendChild(overlay);
+
+    this._wheelEl = overlay;
+    this._wheelCursorEl = cursor;
+    this._wheelHubLabelEl = hub.querySelector("#mode-wheel-hub-label");
+  }
+
+  _armWheelHold() {
+    if (this._wheelHoldTimer || this._wheelOpen) return;
+    this._wheelArmed = true;
+    this._wheelHoldTimer = setTimeout(() => {
+      this._wheelHoldTimer = null;
+      if (this._wheelArmed && this.active) this._openModeWheel();
+    }, 180);
+  }
+
+  _openModeWheel() {
+    if (!this._wheelEl || this._wheelOpen) return;
+    this._wheelOpen = true;
+    this._wheelCursor.x = 0;
+    this._wheelCursor.y = 0;
+    this._wheelHover = null;
+    this._refreshWheelVisual();
+    this._wheelEl.style.display = "block";
+  }
+
+  _closeModeWheel(commit) {
+    if (this._wheelHoldTimer) {
+      clearTimeout(this._wheelHoldTimer);
+      this._wheelHoldTimer = null;
+    }
+    this._wheelArmed = false;
+    if (!this._wheelOpen) return;
+    this._wheelOpen = false;
+    if (this._wheelEl) this._wheelEl.style.display = "none";
+    if (commit && this._wheelHover && this._wheelHover !== this.moveMode) {
+      this._setMoveMode(this._wheelHover);
+    }
+    this._wheelHover = null;
+  }
+
+  _feedWheelMouse(dx, dy) {
+    if (!this._wheelOpen) return;
+    const RING_R = 130;
+    this._wheelCursor.x += dx;
+    this._wheelCursor.y += dy;
+    const mag = Math.hypot(this._wheelCursor.x, this._wheelCursor.y);
+    const maxR = RING_R + 30;
+    if (mag > maxR) {
+      const s = maxR / mag;
+      this._wheelCursor.x *= s;
+      this._wheelCursor.y *= s;
+    }
+    this._refreshWheelVisual();
+  }
+
+  _refreshWheelVisual() {
+    const { x, y } = this._wheelCursor;
+    if (this._wheelCursorEl) {
+      this._wheelCursorEl.style.transform = `translate(${x}px,${y}px)`;
+    }
+    const mag = Math.hypot(x, y);
+    const DEAD_R = 40;
+    let hover = null;
+    if (mag > DEAD_R) {
+      const ang = Math.atan2(y, x);
+      const n = MODE_ORDER.length;
+      let best = -1;
+      let bestDiff = Infinity;
+      for (let i = 0; i < n; i++) {
+        const slotAng = -Math.PI / 2 + (i * Math.PI * 2) / n;
+        let d = Math.abs(((ang - slotAng + Math.PI * 3) % (Math.PI * 2)) - Math.PI);
+        if (d < bestDiff) { bestDiff = d; best = i; }
+      }
+      if (best >= 0) hover = MODE_ORDER[best];
+    }
+    if (hover !== this._wheelHover) {
+      this._wheelHover = hover;
+      for (const name of MODE_ORDER) {
+        const el = this._wheelSlotEls[name];
+        if (!el) continue;
+        if (name === hover) {
+          el.style.background = "rgba(60,120,170,0.55)";
+          el.style.borderColor = "rgba(180,220,250,0.7)";
+          el.style.boxShadow =
+            "inset 0 1px 0 rgba(255,255,255,0.1),0 10px 28px rgba(60,140,200,0.45),0 0 22px rgba(120,200,255,0.35)";
+          el.style.transform = el.style.transform.replace(/scale\([^)]*\)/, "") + " scale(1.12)";
+        } else {
+          el.style.background = "rgba(6,10,14,0.78)";
+          el.style.borderColor = "rgba(120,175,200,0.25)";
+          el.style.boxShadow =
+            "inset 0 1px 0 rgba(255,255,255,0.06),0 8px 22px rgba(0,0,0,0.45)";
+          el.style.transform = el.style.transform.replace(/\s*scale\([^)]*\)/, "");
+        }
+      }
+      if (this._wheelHubLabelEl) {
+        this._wheelHubLabelEl.textContent = hover
+          ? MODE_META[hover].label
+          : MODE_META[this.moveMode].label;
+      }
+    }
+  }
+
+  _createDetachBadge() {
+    const el = document.createElement("div");
+    el.id = "play-detach-badge";
+    el.style.cssText = [
+      "position:fixed",
+      "top:20px",
+      "left:50%",
+      "transform:translateX(-50%)",
+      "z-index:7",
+      "display:none",
+      "pointer-events:none",
+      "font-family:system-ui,-apple-system,Segoe UI,Roboto,Ubuntu,sans-serif",
+      "-webkit-font-smoothing:antialiased",
+      "filter:drop-shadow(0 12px 32px rgba(0,0,0,0.55))",
+    ].join(";");
+    el.innerHTML = `
+      <div style="display:flex;align-items:center;gap:10px;padding:8px 16px;border-radius:999px;background:rgba(14,8,4,0.78);backdrop-filter:blur(14px) saturate(1.2);-webkit-backdrop-filter:blur(14px) saturate(1.2);border:1px solid rgba(225,170,90,0.45);box-shadow:inset 0 1px 0 rgba(255,255,255,0.06),0 0 0 1px rgba(0,0,0,0.35),0 8px 22px rgba(0,0,0,0.4),0 0 24px rgba(225,170,90,0.18);">
+        <div style="display:flex;align-items:center;justify-content:center;width:22px;height:22px;border-radius:50%;background:linear-gradient(145deg,rgba(255,200,120,0.5),rgba(180,110,40,0.6));color:#fff5e0;font-size:13px;line-height:1;">📷</div>
+        <div style="display:flex;align-items:baseline;gap:10px;">
+          <span style="font-size:11px;font-weight:700;letter-spacing:0.22em;color:#ffd9a0;text-transform:uppercase;">Free camera</span>
+          <span style="font-size:9px;font-weight:600;letter-spacing:0.16em;color:rgba(225,190,150,0.7);text-transform:uppercase;">F · re-attach</span>
+        </div>
+      </div>`;
+    document.body.appendChild(el);
+    this._detachBadge = el;
+  }
+
+  _enterDetached() {
+    if (this.detached || !this.active) return;
+    this.detached = true;
+    this._detachWasPointerLocked = !!document.pointerLockElement;
+    if (document.pointerLockElement) document.exitPointerLock();
+    this.renderer.domElement.style.cursor = "";
+    this._rmbLookActive = false;
+    // Seed orbit target on current pawn so the initial orbit feels natural.
+    const ty = this.playerPos.y + 1.0;
+    this.controls.target.set(this.playerPos.x, ty, this.playerPos.z);
+    this.controls.enabled = true;
+    if (this._detachBadge) this._detachBadge.style.display = "block";
+  }
+
+  _exitDetached() {
+    if (!this.detached) return;
+    this.detached = false;
+    this.controls.enabled = false;
+    if (this._detachBadge) this._detachBadge.style.display = "none";
+    if (!this.active) return;
+    if (this._editorRelaxedPointer) {
+      this.renderer.domElement.style.cursor = "";
+    } else if (this._detachWasPointerLocked) {
+      this.renderer.domElement.style.cursor = "none";
+      try {
+        this.renderer.domElement.requestPointerLock();
+      } catch (_) {
+        /* browser will block if not in a user gesture; that's ok, next click re-locks */
+      }
+    }
+    this._detachWasPointerLocked = false;
+  }
+
+  _toggleDetached() {
+    if (this.detached) this._exitDetached();
+    else this._enterDetached();
   }
 
   _createFlyHud() {
@@ -2559,6 +2928,9 @@ export class PlayMode {
       this.renderer.domElement.style.cursor = "none";
       this.renderer.domElement.requestPointerLock();
     }
+
+    if (this._modePill) this._modePill.style.display = "block";
+    this._updateModePill();
   }
 
   _attachRelaxedPointerListeners() {
@@ -2626,6 +2998,7 @@ export class PlayMode {
 
   exit() {
     if (!this.active) return;
+    if (this.detached) this._exitDetached();
     this.active = false;
     this._moveTarget = null;
     this.isoHoverRing.visible = false;
@@ -2640,6 +3013,8 @@ export class PlayMode {
     if (this._flyHud) this._flyHud.style.display = "none";
     if (this._carHud) this._carHud.style.display = "none";
     if (this._carSpeedometer) this._carSpeedometer.style.display = "none";
+    if (this._modePill) this._modePill.style.display = "none";
+    this._closeModeWheel(false);
     if (this._lotusCamGui) this._lotusCamGui.domElement.style.display = "none";
     if (this._jeepTuningGui) this._jeepTuningGui.domElement.style.display = "none";
     this.planeSpeed = 0;
@@ -4330,6 +4705,17 @@ export class PlayMode {
     }
     this._updateJeepGuiTelemetry();
 
+    if (this.detached) {
+      // Smoothly track the pawn so orbit stays useful while sim continues.
+      const tgt = this.controls.target;
+      const lerp = 1 - Math.exp(-6 * dtSec);
+      tgt.x += (this.playerPos.x - tgt.x) * lerp;
+      tgt.y += ((this.playerPos.y + 1.0) - tgt.y) * lerp;
+      tgt.z += (this.playerPos.z - tgt.z) * lerp;
+      this.controls.update();
+      return;
+    }
+
     if (carDriving && !iso) {
       let chaseTarget = this.carHeading;
       if (this.carDrifting) {
@@ -4497,14 +4883,32 @@ export class PlayMode {
     }
   }
 
+  _currentYaw() {
+    switch (this.moveMode) {
+      case "char": return this.charYaw;
+      case "fly": return this.flyHeading;
+      case "car":
+      case "lotus": return this.carHeading;
+      case "capsule":
+      default: return this.capsule ? this.capsule.rotation.y : 0;
+    }
+  }
+
   _toggleMoveMode() {
-    const prev = this.moveMode;
+    const i = MODE_ORDER.indexOf(this.moveMode);
+    const next = MODE_ORDER[(i + 1) % MODE_ORDER.length] || MODE_ORDER[0];
+    this._setMoveMode(next);
+  }
+
+  _setMoveMode(target) {
+    if (!MODE_META[target] || target === this.moveMode) return;
+    const yaw = this._currentYaw();
     this._moveTarget = null;
     this.isoHoverRing.visible = false;
     this.isoTargetRing.visible = false;
-    if (prev === "capsule") {
+    if (target === "char") {
       this.moveMode = "char";
-      this.charYaw = this.capsule.rotation.y;
+      this.charYaw = yaw;
       this.charVelY = 0;
       this.charInAir = false;
       this.charGliding = false;
@@ -4518,9 +4922,9 @@ export class PlayMode {
       this.charSpellPhase = "none";
       this.charSpellExitRequested = false;
       if (this.charKite) this.charKite.visible = false;
-    } else if (prev === "char") {
+    } else if (target === "fly") {
       this.moveMode = "fly";
-      this.flyHeading = this.charYaw;
+      this.flyHeading = yaw;
       this.flyHeight = this.playerPos.y;
       this.flyPitch = 0;
       this.flyRoll = 0;
@@ -4530,14 +4934,14 @@ export class PlayMode {
       this.flyGroundCamYawOff = 0;
       this.flyAileronAngle = 0;
       this.planeSpeed = 0;
-    } else if (prev === "fly") {
+    } else if (target === "car") {
       this.moveMode = "car";
-      this.carHeading = this.flyHeading;
+      this.carHeading = yaw;
+      this.carCamYaw = yaw;
       this.carVx = 0;
       this.carVz = 0;
       this.carDrifting = false;
       this.carDriftAngle = 0;
-      this.carCamYaw = this.flyHeading;
       this.playerPos.y = this.getWorldHeight(
         this.playerPos.x,
         this.playerPos.z,
@@ -4552,8 +4956,10 @@ export class PlayMode {
       this.driftSmoke.reset();
       this._clearTrails();
       clearBullets(this._bullets.pool);
-    } else if (prev === "car") {
+    } else if (target === "lotus") {
       this.moveMode = "lotus";
+      this.carHeading = yaw;
+      this.carCamYaw = yaw;
       this.carVx = 0;
       this.carVz = 0;
       this.carDrifting = false;
@@ -4576,6 +4982,7 @@ export class PlayMode {
       this.driftSmoke.reset();
     } else {
       this.moveMode = "capsule";
+      if (this.capsule) this.capsule.rotation.y = yaw;
       this.carVx = 0;
       this.carVz = 0;
       this.playerPos.y = this.getWorldHeight(
@@ -4593,6 +5000,7 @@ export class PlayMode {
       this.driftMarks.reset();
       this.driftSmoke.reset();
     }
+    this._updateModePill();
   }
 
   _onKeyDown(event) {
@@ -4601,8 +5009,45 @@ export class PlayMode {
 
     if (!event.repeat && event.code === "KeyG") {
       event.preventDefault();
-      this._toggleMoveMode();
+      if (this.detached) return; // ignore mode-switch while detached
+      this._armWheelHold();
       return;
+    }
+
+    if (!event.repeat && event.code === "KeyF") {
+      event.preventDefault();
+      this._toggleDetached();
+      return;
+    }
+
+    if (!event.repeat && event.code === "Escape") {
+      if (this._wheelOpen) {
+        event.preventDefault();
+        this._closeModeWheel(false);
+        return;
+      }
+      if (this.detached) {
+        event.preventDefault();
+        this._exitDetached();
+        return;
+      }
+    }
+
+    if (!event.repeat && event.code && !this.detached) {
+      let digit = null;
+      if (event.code.startsWith("Digit")) digit = event.code.slice(5);
+      else if (event.code.startsWith("Numpad") && /^Numpad[0-9]$/.test(event.code))
+        digit = event.code.slice(6);
+      if (digit) {
+        const target = MODE_ORDER.find(
+          (name) => MODE_META[name].digit === digit,
+        );
+        if (target) {
+          event.preventDefault();
+          this._setMoveMode(target);
+          return;
+        }
+      }
     }
 
     if (
@@ -4765,10 +5210,27 @@ export class PlayMode {
   _onKeyUp(event) {
     if (!this.active) return;
     delete this.keysHeld[event.code];
+    if (event.code === "KeyG") {
+      if (this._wheelOpen) {
+        this._closeModeWheel(true);
+      } else if (this._wheelArmed) {
+        if (this._wheelHoldTimer) {
+          clearTimeout(this._wheelHoldTimer);
+          this._wheelHoldTimer = null;
+        }
+        this._wheelArmed = false;
+        this._toggleMoveMode();
+      }
+    }
   }
 
   _onMouseMove(event) {
     if (!this.active) return;
+    if (this._wheelOpen) {
+      this._feedWheelMouse(event.movementX || 0, event.movementY || 0);
+      return;
+    }
+    if (this.detached) return; // OrbitControls handles mouse during detach
     const locked = !!document.pointerLockElement;
     const relaxedLook =
       this._editorRelaxedPointer && this._rmbLookActive && !locked;
@@ -4810,6 +5272,7 @@ export class PlayMode {
 
   _onPointerLockChange() {
     if (this._editorRelaxedPointer) return;
+    if (this.detached) return;
     if (!document.pointerLockElement && this.active && this.camView !== "iso") {
       this._exitCallback?.();
     }
@@ -4817,7 +5280,7 @@ export class PlayMode {
 
   _onIsoClick(event) {
     if (!this.active || this.camView !== "iso" || event.button !== 0) return;
-    if (this.flying || this.carMode) return;
+    if (this.flying || this.carMode || this.detached) return;
     event.preventDefault();
     const hit = this._pickIsoTerrain(event);
     if (!hit) return;
@@ -4832,7 +5295,7 @@ export class PlayMode {
   }
 
   _onIsoPointerMove(event) {
-    if (!this.active || this.camView !== "iso" || this.flying || this.carMode) {
+    if (!this.active || this.camView !== "iso" || this.flying || this.carMode || this.detached) {
       this.isoHoverRing.visible = false;
       return;
     }
@@ -4915,7 +5378,7 @@ export class PlayMode {
   }
 
   _onIsoWheel(event) {
-    if (!this.active || this.camView !== "iso") return;
+    if (!this.active || this.camView !== "iso" || this.detached) return;
     event.preventDefault();
     const dir = event.deltaY < 0 ? -1 : 1;
     this.isoDist = THREE.MathUtils.clamp(
@@ -5005,6 +5468,25 @@ export class PlayMode {
     if (this._flyHud) {
       this._flyHud.remove();
       this._flyHud = null;
+    }
+    if (this._modePill) {
+      this._modePill.remove();
+      this._modePill = null;
+    }
+    if (this._wheelHoldTimer) {
+      clearTimeout(this._wheelHoldTimer);
+      this._wheelHoldTimer = null;
+    }
+    if (this._wheelEl) {
+      this._wheelEl.remove();
+      this._wheelEl = null;
+      this._wheelCursorEl = null;
+      this._wheelHubLabelEl = null;
+      this._wheelSlotEls = {};
+    }
+    if (this._detachBadge) {
+      this._detachBadge.remove();
+      this._detachBadge = null;
     }
     if (this._lotusCamGui) {
       this._lotusCamGui.destroy();
