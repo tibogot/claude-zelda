@@ -1167,6 +1167,10 @@ export async function createVolumetricCloudSystemOptimized({
     renderer.clear();
     renderer.render(postScene, postCam);
 
+    // Restore camera layers — otherwise disabling the cloud leaves the camera
+    // restricted to CLOUD_OPT_LAYER and the next direct scene render is black.
+    camera.layers.enableAll();
+
     return true;
   }
 
