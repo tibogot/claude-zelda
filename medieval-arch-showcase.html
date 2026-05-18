@@ -426,12 +426,26 @@
            * side. Front-door geometry comes from the standard `door*` params (so the
            * existing Door folder controls work). Window-only proportions live here.
            */
-          chapelWindowCountSide: 2,
+          chapelWindowCountSide: 4,
           chapelWindowInnerHalfW: 0.42,
           chapelWindowLegH: 2.2,
           chapelWindowSillY: 3.4,
           chapelWindowArchPointedness: 1.25,
           chapelBackWindow: true,
+          /**
+           * Buttresses on the long sides (faces 2/3): one between each pair of windows
+           * + one at each corner = `chapelWindowCountSide + 1` per side. Simple rectangular
+           * pilasters in v1 (no stepped tapering). Sit flush against the wall outer face.
+           */
+          chapelButtressesEnabled: true,
+          chapelButtressWidth: 0.55,
+          chapelButtressDepth: 0.55,
+          /**
+           * Half-length along the ridge (long axis, X) for chapel mode. `towerHalfWidth`
+           * still represents the short axis (Z, nave width). Defaults to ~2.7× the width
+           * so the chapel reads as a proper nave instead of a tower-with-a-gable.
+           */
+          chapelNaveHalfLength: 8.5,
 
           wallEnabled: true,
           wallWidth: 15,
@@ -705,6 +719,8 @@
         let timberMat = null;
         let doorMesh = null;
         let wallMesh = null;
+        /** Single InstancedMesh holding every chapel buttress brick (one column per buttress). */
+        let chapelButtressMesh = null;
         /** Instanced arch ring in tower mode (single gate). */
         let towerDoorMeshes = [];
         /** Three arch rings × two sides for `sceneMode === "bridge"`. */
@@ -771,7 +787,17 @@
             const R_in = Math.max(0.08, params.doorInnerHalfW);
             const R_out = R_in + Math.max(0.05, params.masonryShell);
             const margin = 0.28;
-            const lim = Math.max(0.12, params.towerHalfWidth - R_out - margin);
+            /** Chapel: gate sits on one specific face; archAlong slides along that face's span. */
+            const halfSpan = isChapel()
+              ? spanHalfForFace(
+                  THREE.MathUtils.clamp(
+                    Math.floor(params.towerGateFace) || 0,
+                    0,
+                    3,
+                  ),
+                )
+              : params.towerHalfWidth;
+            const lim = Math.max(0.12, halfSpan - R_out - margin);
             params.archAlong = THREE.MathUtils.clamp(
               params.archAlong,
               -lim,
@@ -1011,6 +1037,22 @@
           );
           params.chapelBackWindow =
             params.chapelBackWindow == null ? true : !!params.chapelBackWindow;
+          params.chapelButtressesEnabled =
+            params.chapelButtressesEnabled == null
+              ? true
+              : !!params.chapelButtressesEnabled;
+          params.chapelButtressWidth = Math.max(
+            0.2,
+            Number(params.chapelButtressWidth) || 0.55,
+          );
+          params.chapelButtressDepth = Math.max(
+            0.2,
+            Number(params.chapelButtressDepth) || 0.55,
+          );
+          params.chapelNaveHalfLength = Math.max(
+            params.towerHalfWidth + 0.5,
+            Number(params.chapelNaveHalfLength) || 8.5,
+          );
         }
 
         function applyBridgeDefaults() {
@@ -1098,7 +1140,7 @@
          */
         function getChapelOpeningsList() {
           const ops = [];
-          const halfT = params.towerHalfWidth;
+          const { halfTX } = getShellHalves();
           const pointedness = Number.isFinite(params.archPointedness)
             ? params.archPointedness
             : 1.0;
@@ -1143,7 +1185,7 @@
           );
           for (let face = 2; face <= 3; face++) {
             for (let i = 0; i < N; i++) {
-              const u = -halfT + (2 * halfT * (i + 0.5)) / N;
+              const u = -halfTX + (2 * halfTX * (i + 0.5)) / N;
               ops.push({
                 face,
                 uCenter: u,
@@ -1159,6 +1201,36 @@
             }
           }
           return ops;
+        }
+
+        /**
+         * Half-extents of the house/chapel footprint. Square modes return the same value
+         * on both axes (`towerHalfWidth`); chapel mode uses `chapelNaveHalfLength` for X
+         * (the long ridge axis) and `towerHalfWidth` for Z (the short nave-width axis).
+         */
+        function getShellHalves() {
+          if (isChapel()) {
+            return {
+              halfTX: Math.max(
+                0.6,
+                Number(params.chapelNaveHalfLength) || params.towerHalfWidth,
+              ),
+              halfTZ: Math.max(0.6, params.towerHalfWidth),
+            };
+          }
+          return { halfTX: params.towerHalfWidth, halfTZ: params.towerHalfWidth };
+        }
+
+        /** Per-face plane half-extent: faces 0/1 sit on ±X (return halfTX); 2/3 sit on ±Z (return halfTZ). */
+        function halfTForFace(face) {
+          const h = getShellHalves();
+          return face === 0 || face === 1 ? h.halfTX : h.halfTZ;
+        }
+
+        /** Per-face wall-span half (orthogonal to plane): faces 0/1 span in Z; 2/3 span in X. */
+        function spanHalfForFace(face) {
+          const h = getShellHalves();
+          return face === 0 || face === 1 ? h.halfTZ : h.halfTX;
         }
 
         function setRingParentForFace(obj, face, halfT, uCenter, depth) {
@@ -1293,7 +1365,6 @@
         }
 
         function towerPivotWorld() {
-          const halfT = params.towerHalfWidth;
           const inset = towerFaceInsetD();
           const gf = THREE.MathUtils.clamp(
             Math.floor(params.towerGateFace) || 0,
@@ -1302,7 +1373,7 @@
           );
           return towerPivotVecForFace(
             gf,
-            halfT,
+            halfTForFace(gf),
             inset,
             params.archAlongZ,
             params.sillY + params.legHeight * 0.35,
@@ -1312,13 +1383,13 @@
 
         function syncTowerGizmoFromPivot() {
           const p = archGizmoWorldPosition(_archGizmoWP);
-          const halfT = params.towerHalfWidth;
           const inset = towerFaceInsetD();
           const gf = THREE.MathUtils.clamp(
             Math.floor(params.towerGateFace) || 0,
             0,
             3,
           );
+          const halfT = halfTForFace(gf);
           params.sillY = THREE.MathUtils.clamp(
             p.y - params.legHeight * 0.35,
             -2,
@@ -1475,6 +1546,11 @@
             scene.remove(wallMesh);
             if (wallMesh.geometry) wallMesh.geometry.dispose();
             wallMesh = null;
+          }
+          if (chapelButtressMesh) {
+            scene.remove(chapelButtressMesh);
+            if (chapelButtressMesh.geometry) chapelButtressMesh.geometry.dispose();
+            chapelButtressMesh = null;
           }
           houseTimberMeshes.forEach((m) => {
             scene.remove(m);
@@ -2999,7 +3075,13 @@
         function buildHouseShellInstances() {
           if (!brickGeo) return;
 
-          const halfT = params.towerHalfWidth;
+          const { halfTX, halfTZ } = getShellHalves();
+          /** Per-face plane distance (X faces use halfTX; Z faces use halfTZ). */
+          const planeHalf = (face) =>
+            face === 0 || face === 1 ? halfTX : halfTZ;
+          /** Per-face wall-span half (orthogonal to the plane direction). */
+          const spanHalf = (face) =>
+            face === 0 || face === 1 ? halfTZ : halfTX;
           const wallBase = params.towerAnchorY;
           const eaveY =
             wallBase +
@@ -3015,8 +3097,10 @@
               ? face === 0 || face === 1
               : face === 2 || face === 3;
 
+          /** Roof slope `run` is perpendicular to the ridge — depends on gable axis. */
+          const slopeHalf = gableAxis === 0 ? halfTZ : halfTX;
           const run =
-            halfT + Math.max(0, Number(params.houseRoofOverhang) || 0);
+            slopeHalf + Math.max(0, Number(params.houseRoofOverhang) || 0);
           const zOv = Math.max(0, Number(params.houseRoofZOverhang) || 0);
           const riseSpan = Math.max(1e-3, ridgeY - eaveY);
 
@@ -3056,8 +3140,8 @@
               Number(params.houseTimberRafterSpacing) || 0.52,
             );
             const yPlate = eaveY + nomH * 0.16;
-            const xExt = halfT + zOv;
-            const zExt = halfT + zOv;
+            const xExt = halfTX + zOv;
+            const zExt = halfTZ + zOv;
             const plateRad = 1.1;
 
             const place = (mesh, ki, ax, ay, az, bx, by, bz, radMul) => {
@@ -3087,16 +3171,17 @@
             mesh.receiveShadow = true;
             let tk = 0;
             if (gableAxis === 0) {
+              /** Ridge ∥ X: ridge ends at ±xExt; plates run X at z=±halfTZ. */
               tk = place(mesh, tk, -xExt, ridgeY, 0, xExt, ridgeY, 0, 1);
               tk = place(
                 mesh,
                 tk,
                 -xExt,
                 yPlate,
-                halfT,
+                halfTZ,
                 xExt,
                 yPlate,
-                halfT,
+                halfTZ,
                 plateRad,
               );
               tk = place(
@@ -3104,28 +3189,29 @@
                 tk,
                 -xExt,
                 yPlate,
-                -halfT,
+                -halfTZ,
                 xExt,
                 yPlate,
-                -halfT,
+                -halfTZ,
                 plateRad,
               );
               const nR = Math.max(3, Math.ceil((2 * xExt) / spacing) + 1);
               for (let i = 0; i < nR; i++) {
                 const u = nR <= 1 ? 0.5 : i / (nR - 1);
                 const xi = -xExt + u * (2 * xExt);
-                tk = place(mesh, tk, xi, yPlate, halfT, xi, ridgeY, 0, 1);
-                tk = place(mesh, tk, xi, yPlate, -halfT, xi, ridgeY, 0, 1);
+                tk = place(mesh, tk, xi, yPlate, halfTZ, xi, ridgeY, 0, 1);
+                tk = place(mesh, tk, xi, yPlate, -halfTZ, xi, ridgeY, 0, 1);
               }
             } else {
+              /** Ridge ∥ Z: ridge ends at ±zExt; plates run Z at x=±halfTX. */
               tk = place(mesh, tk, 0, ridgeY, -zExt, 0, ridgeY, zExt, 1);
               tk = place(
                 mesh,
                 tk,
-                halfT,
+                halfTX,
                 yPlate,
                 -zExt,
-                halfT,
+                halfTX,
                 yPlate,
                 zExt,
                 plateRad,
@@ -3133,10 +3219,10 @@
               tk = place(
                 mesh,
                 tk,
-                -halfT,
+                -halfTX,
                 yPlate,
                 -zExt,
-                -halfT,
+                -halfTX,
                 yPlate,
                 zExt,
                 plateRad,
@@ -3145,8 +3231,8 @@
               for (let j = 0; j < nR; j++) {
                 const u = nR <= 1 ? 0.5 : j / (nR - 1);
                 const zi = -zExt + u * (2 * zExt);
-                tk = place(mesh, tk, halfT, yPlate, zi, 0, ridgeY, zi, 1);
-                tk = place(mesh, tk, -halfT, yPlate, zi, 0, ridgeY, zi, 1);
+                tk = place(mesh, tk, halfTX, yPlate, zi, 0, ridgeY, zi, 1);
+                tk = place(mesh, tk, -halfTX, yPlate, zi, 0, ridgeY, zi, 1);
               }
             }
             mesh.count = tk;
@@ -3162,24 +3248,24 @@
             let by;
             let bz;
             if (face === 0) {
-              bx = halfT - inset;
+              bx = halfTX - inset;
               by = y;
               bz = u;
               tmpO.rotation.set(0, -Math.PI / 2, 0);
             } else if (face === 1) {
-              bx = -halfT + inset;
+              bx = -halfTX + inset;
               by = y;
               bz = u;
               tmpO.rotation.set(0, Math.PI / 2, 0);
             } else if (face === 2) {
               bx = u;
               by = y;
-              bz = halfT - inset;
+              bz = halfTZ - inset;
               tmpO.rotation.set(0, 0, 0);
             } else {
               bx = u;
               by = y;
-              bz = -halfT + inset;
+              bz = -halfTZ + inset;
               tmpO.rotation.set(0, Math.PI, 0);
             }
             tmpO.position.set(bx, by, bz);
@@ -3203,7 +3289,8 @@
 
               if (!isGableFace(face) && yMid > eaveY - nomH * 0.2) break;
 
-              const rawIntervals = [[-halfT, halfT]];
+              const faceHalf = spanHalf(face);
+              const rawIntervals = [[-faceHalf, faceHalf]];
               let intervals = subtractHolesFromIntervals(
                 rawIntervals,
                 opsFace,
@@ -3213,9 +3300,9 @@
 
               if (isGableFace(face) && yMid > eaveY - rowH * 0.02) {
                 const uCap = THREE.MathUtils.clamp(
-                  (halfT * (ridgeY - yMid)) / riseSpan,
+                  (faceHalf * (ridgeY - yMid)) / riseSpan,
                   0,
-                  halfT,
+                  faceHalf,
                 );
                 if (uCap < nomW * params.wallMinBrickScale * 0.35) continue;
                 const clipped = [];
@@ -3446,8 +3533,8 @@
                * ±Z gables → ridge parallel to Z. (Earlier build used the swapped pairing.)
                */
               if (gableAxis === 0) {
-                const xMin = -halfT - zOv;
-                const xMax = halfT + zOv;
+                const xMin = -halfTX - zOv;
+                const xMax = halfTX + zOv;
                 for (let side = -1; side <= 1; side += 2) {
                   const z0 = side < 0 ? -run + nomW * 0.12 : nomW * 0.1;
                   const z1 = side < 0 ? -nomW * 0.12 : run - nomW * 0.08;
@@ -3485,8 +3572,8 @@
                   }
                 }
               } else {
-                const zMin = -halfT - zOv;
-                const zMax = halfT + zOv;
+                const zMin = -halfTZ - zOv;
+                const zMax = halfTZ + zOv;
                 for (let side = -1; side <= 1; side += 2) {
                   const x0 = side < 0 ? -run + nomW * 0.12 : nomW * 0.1;
                   const x1 = side < 0 ? -nomW * 0.12 : run - nomW * 0.08;
@@ -3533,6 +3620,86 @@
           const wbv = wallMesh.geometry.getAttribute("brickVar");
           if (wbv) wbv.needsUpdate = true;
           scene.add(wallMesh);
+        }
+
+        /**
+         * Chapel buttresses: vertical brick pilasters on the long sides (faces 2/3),
+         * placed between each pair of windows and at each end corner. Each buttress is
+         * a single stack of full-width bricks (one brick per course). Sits flush with the
+         * outer wall face, sticks outward by `chapelButtressDepth`. Mesh lifecycle is
+         * managed via the global `chapelButtressMesh` (disposed on rebuild).
+         */
+        function buildChapelButtresses() {
+          if (!isChapel()) return;
+          if (!params.chapelButtressesEnabled) return;
+          if (!brickGeo) return;
+
+          const { halfTX, halfTZ } = getShellHalves();
+          const wallBase = params.towerAnchorY;
+          const eaveY =
+            wallBase +
+            Math.max(params.brickH * 2, params.towerHeight) -
+            Math.max(0, Number(params.houseEaveLowerY) || 0);
+
+          const N = THREE.MathUtils.clamp(
+            Math.round(Number(params.chapelWindowCountSide) || 2),
+            1,
+            6,
+          );
+          const buttressCount = N + 1;
+          const W = Math.max(0.2, Number(params.chapelButtressWidth) || 0.55);
+          const D = Math.max(0.2, Number(params.chapelButtressDepth) || 0.55);
+
+          const mortar = params.wallMortar;
+          const rowH = params.brickH + mortar;
+          const baseY = wallBase + mortar * 0.5 + params.brickH * 0.5;
+          const ny = Math.max(
+            2,
+            Math.floor((eaveY - baseY) / rowH),
+          );
+          const capacity = buttressCount * 2 * ny + 16;
+          const buttressGeo = createInstancedBrickGeometry(brickGeo, capacity);
+          const mesh = new THREE.InstancedMesh(buttressGeo, brickMat, capacity);
+          mesh.castShadow = true;
+          mesh.receiveShadow = true;
+          mesh.position.set(0, 0, 0);
+
+          const rnd = mulberry32((params.colorSeed ^ 0xbada55ed) | 0);
+          let k = 0;
+
+          for (let side = 0; side < 2; side++) {
+            const zSign = side === 0 ? 1 : -1;
+            /** Buttress *outer* face is at z = ±(halfTZ + D); its centre is offset by D/2 from the wall plane. */
+            const zPos = zSign * (halfTZ + D * 0.5);
+            for (let j = 0; j < buttressCount; j++) {
+              const xPos = -halfTX + ((2 * halfTX) / N) * j;
+              for (let iy = 0; iy < ny; iy++) {
+                if (k >= capacity) break;
+                const yMid = baseY + iy * rowH;
+                if (yMid > eaveY - params.brickH * 0.3) break;
+                const sx = W / params.brickW;
+                const sy = 0.94 + rnd() * 0.05;
+                const sz = D / params.brickD;
+                const v = pickBrickVariation(rnd, sx, sy, sz, "wall");
+                tmpO.position.set(xPos, yMid, zPos);
+                tmpO.rotation.set(0, 0, 0);
+                tmpO.scale.set(v.sx, v.sy, v.sz);
+                applyBrickAxisScaleNoise(tmpO, rnd, false);
+                applyBrickPlacementNoise(tmpO, rnd, false);
+                tmpO.updateMatrix();
+                mesh.setMatrixAt(k, tmpO.matrix);
+                setBrickVarAt(mesh, k, v.shapeMix, v.warp, v.grey, v.grain);
+                k++;
+              }
+            }
+          }
+
+          mesh.count = k;
+          mesh.instanceMatrix.needsUpdate = true;
+          const bv = mesh.geometry.getAttribute("brickVar");
+          if (bv) bv.needsUpdate = true;
+          scene.add(mesh);
+          chapelButtressMesh = mesh;
         }
 
         /** Cylindrical tower shell: arc-length coordinate u = θ·R on [−πR, πR], one gate via `uArc`. */
@@ -3874,7 +4041,7 @@
               setRingParentForFace(
                 ringRoot,
                 op.face,
-                halfT,
+                halfTForFace(op.face),
                 op.uCenter,
                 params.brickD,
               );
@@ -4569,6 +4736,7 @@
           }
           if (params.sceneMode === "house" || params.sceneMode === "chapel") {
             buildHouseShellInstances();
+            if (isChapel()) buildChapelButtresses();
             return;
           }
           if (params.sceneMode === "towerRound") {
@@ -4910,6 +5078,14 @@
         });
         const rbChapel = () => rebuildInstances(false);
         fChapel
+          .addBinding(params, "chapelNaveHalfLength", {
+            min: 3.5,
+            max: 22,
+            step: 0.1,
+            label: "Nave half-length (long axis)",
+          })
+          .on("change", rbChapel);
+        fChapel
           .addBinding(params, "chapelWindowCountSide", {
             min: 1,
             max: 6,
@@ -4952,6 +5128,27 @@
         fChapel
           .addBinding(params, "chapelBackWindow", {
             label: "Window on back wall",
+          })
+          .on("change", rbChapel);
+        fChapel
+          .addBinding(params, "chapelButtressesEnabled", {
+            label: "Side buttresses",
+          })
+          .on("change", rbChapel);
+        fChapel
+          .addBinding(params, "chapelButtressWidth", {
+            min: 0.25,
+            max: 1.4,
+            step: 0.01,
+            label: "Buttress width",
+          })
+          .on("change", rbChapel);
+        fChapel
+          .addBinding(params, "chapelButtressDepth", {
+            min: 0.2,
+            max: 1.5,
+            step: 0.01,
+            label: "Buttress depth (out)",
           })
           .on("change", rbChapel);
 
