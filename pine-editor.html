@@ -65,7 +65,7 @@
   <body>
     <div id="title">Pine — 5 cards / ring · 7 levels (default) · pivot on trunk</div>
     <div id="hint">
-      Pine: pivot default = trunk centerline (XZ); use “pivot → surface” to slide onto the hull. Single card: use position + rotation.
+      Pine: foliage + optional instanced branches (trunk-axis pivot). Toggle “Branches → enable”. Single card: use position + rotation.
     </div>
     <script type="module">
       import * as THREE from "three";
@@ -154,6 +154,34 @@
         pos.needsUpdate = true;
         geo.computeVertexNormals();
         return geo;
+      }
+
+      /** Stylized branch: tapered cylinder along +Y, base at origin, quadratic bend in +Z (droops after card-style tilt). */
+      function createBranchGeometry(length, radiusBottom, radiusTop, radialSegs, heightSegs, bend) {
+        const L = Math.max(0.08, length);
+        const r0 = Math.max(0.004, radiusBottom);
+        const r1 = Math.max(0.004, radiusTop);
+        const rs = Math.max(3, Math.round(radialSegs));
+        const hs = Math.max(1, Math.round(heightSegs));
+        const geo = new THREE.CylinderGeometry(r1, r0, L, rs, hs);
+        geo.translate(0, L * 0.5, 0);
+        const pos = geo.attributes.position;
+        for (let i = 0; i < pos.count; i++) {
+          const x = pos.getX(i);
+          const y = pos.getY(i);
+          let z = pos.getZ(i);
+          const t = L > 1e-6 ? THREE.MathUtils.clamp(y / L, 0, 1) : 0;
+          z += bend * t * t;
+          pos.setXYZ(i, x, y, z);
+        }
+        pos.needsUpdate = true;
+        geo.computeVertexNormals();
+        return geo;
+      }
+
+      function instanceScaleJitter(idx, amount) {
+        const s = Math.sin(idx * 12.9898) * 43758.5453;
+        return (s - Math.floor(s) - 0.5) * 2 * amount;
       }
 
       function makeCheckerTexture() {
@@ -263,6 +291,36 @@
             amb: 0.55,
             key: 1.1,
           },
+          branches: {
+            enabled: false,
+            levels: 5,
+            perRing: 5,
+            baseY: 1.45,
+            stepY: 0.55,
+            scaleBottom: 1,
+            scaleTop: 0.72,
+            scalePower: 1.1,
+            scaleVariation: 0.14,
+            globalScale: 1,
+            radialInset: 0,
+            pivotAlongRadius: 0,
+            azimuthOffsetDeg: 18,
+            staggerDeg: 4,
+            offsetX: 0,
+            offsetY: 0,
+            offsetZ: 0,
+            length: 1.05,
+            radiusBottom: 0.038,
+            radiusTop: 0.02,
+            radialSegs: 6,
+            heightSegs: 5,
+            bend: 0.32,
+            rotXDeg: -28,
+            rotYDeg: 0,
+            rotZDeg: 90,
+            color: "#4a3528",
+            roughness: 0.88,
+          },
           debug: {
             wireframe: false,
             showPivot: false,
@@ -308,14 +366,22 @@
         });
 
         let geo = null;
+        let branchGeo = null;
         /** @type {THREE.Mesh | THREE.InstancedMesh | null} */
         let foliageObject = null;
+        /** @type {THREE.InstancedMesh | null} */
+        let branchesObject = null;
         /** @type {THREE.Object3D | null} */
         let pivotHelperRoot = null;
 
         const trunkMat = new THREE.MeshStandardMaterial({
           color: params.trunk.color,
           roughness: 0.92,
+          metalness: 0,
+        });
+        const branchMat = new THREE.MeshStandardMaterial({
+          color: params.branches.color,
+          roughness: params.branches.roughness,
           metalness: 0,
         });
         let trunkGeo = null;
@@ -378,6 +444,119 @@
           _qCard.setFromEuler(_euler);
           _qAz.setFromAxisAngle(_yAxis, thetaRad);
           return _qOut.copy(_qAz).multiply(_qCard);
+        }
+
+        function quaternionForBranchAzimuth(thetaRad) {
+          const b = params.branches;
+          _euler.set(b.rotXDeg * DEG, b.rotYDeg * DEG, b.rotZDeg * DEG, "XYZ");
+          _qCard.setFromEuler(_euler);
+          _qAz.setFromAxisAngle(_yAxis, thetaRad);
+          return _qOut.copy(_qAz).multiply(_qCard);
+        }
+
+        function syncBranchMaterial() {
+          branchMat.color.set(params.branches.color);
+          branchMat.roughness = params.branches.roughness;
+          branchMat.wireframe = params.debug.wireframe;
+          branchMat.needsUpdate = true;
+        }
+
+        function updateBranchMatrices() {
+          if (!branchesObject) return;
+          const b = params.branches;
+          const tr = params.trunk;
+          const levels = Math.max(1, Math.round(b.levels));
+          const perRing = Math.max(1, Math.round(b.perRing));
+          const count = levels * perRing;
+          if (branchesObject.count !== count) return;
+
+          const pow = Math.max(0.05, b.scalePower);
+          const gScale = Number.isFinite(b.globalScale) && b.globalScale > 0 ? b.globalScale : 1;
+          const varAmt = Math.max(0, b.scaleVariation);
+
+          let idx = 0;
+          for (let level = 0; level < levels; level++) {
+            const tLin = levels <= 1 ? 0 : level / (levels - 1);
+            const u = Math.pow(tLin, pow);
+            const sRing = (b.scaleBottom * (1 - u) + b.scaleTop * u) * gScale;
+            const y = b.baseY + level * b.stepY + b.offsetY;
+            const R = Math.max(0.001, trunkRadiusAtWorldY(y, tr) - b.radialInset);
+            const along = THREE.MathUtils.clamp(
+              Number.isFinite(b.pivotAlongRadius) ? b.pivotAlongRadius : 0,
+              0,
+              1
+            );
+
+            for (let k = 0; k < perRing; k++) {
+              const thetaDeg =
+                b.azimuthOffsetDeg + (k * 360) / perRing + b.staggerDeg * level;
+              const theta = thetaDeg * DEG;
+              const cx = Math.cos(theta);
+              const sz = Math.sin(theta);
+
+              const px = along * R * cx + b.offsetX;
+              const pz = along * R * sz + b.offsetZ;
+              const jitter = 1 + instanceScaleJitter(idx, varAmt);
+              _dummy.position.set(px, y, pz);
+              _dummy.quaternion.copy(quaternionForBranchAzimuth(theta));
+              _dummy.scale.setScalar(sRing * jitter);
+              _dummy.updateMatrix();
+              branchesObject.setMatrixAt(idx++, _dummy.matrix);
+            }
+          }
+          branchesObject.instanceMatrix.needsUpdate = true;
+        }
+
+        function disposeBranchesObject() {
+          if (!branchesObject) return;
+          scene.remove(branchesObject);
+          branchesObject.dispose();
+          branchesObject = null;
+        }
+
+        function ensureBranchesObject() {
+          const pine = params.foliage.layout === "pine";
+          const b = params.branches;
+          if (!b.enabled || !pine || !branchGeo) {
+            disposeBranchesObject();
+            return;
+          }
+
+          const levels = Math.max(1, Math.round(b.levels));
+          const perRing = Math.max(1, Math.round(b.perRing));
+          const needCount = levels * perRing;
+
+          const needNew =
+            !branchesObject || branchesObject.count !== needCount;
+
+          if (needNew) {
+            disposeBranchesObject();
+            branchesObject = new THREE.InstancedMesh(branchGeo, branchMat, needCount);
+            branchesObject.frustumCulled = false;
+            branchesObject.renderOrder = 0;
+            scene.add(branchesObject);
+          } else {
+            branchesObject.geometry = branchGeo;
+            branchesObject.material = branchMat;
+          }
+          syncBranchMaterial();
+          updateBranchMatrices();
+        }
+
+        function rebuildBranchGeometry() {
+          const b = params.branches;
+          const newGeo = createBranchGeometry(
+            b.length,
+            b.radiusBottom,
+            b.radiusTop,
+            b.radialSegs,
+            b.heightSegs,
+            b.bend
+          );
+          if (branchGeo) branchGeo.dispose();
+          branchGeo = newGeo;
+          if (branchesObject) branchesObject.geometry = branchGeo;
+          ensureBranchesObject();
         }
 
         function updateInstanceMatrices() {
@@ -450,6 +629,7 @@
             if (pine) {
               foliageObject = new THREE.InstancedMesh(geo, mat, needCount);
               foliageObject.frustumCulled = false;
+              foliageObject.renderOrder = 1;
               scene.add(foliageObject);
               updateInstanceMatrices();
             } else {
@@ -531,7 +711,9 @@
 
         rebuildTrunk();
         rebuildGeometry();
+        rebuildBranchGeometry();
         syncMaterial();
+        syncBranchMaterial();
         syncScene();
 
         const pane = new Pane({ title: "Pine card + trunk" });
@@ -582,6 +764,7 @@
         fTrunk.on("change", () => {
           rebuildTrunk();
           updateInstanceMatrices();
+          updateBranchMatrices();
           updatePivotHelper();
         });
 
@@ -620,7 +803,60 @@
         fFoliage.addBinding(params.foliage, "offsetX", { min: -2, max: 2, step: 0.02, label: "offset X" });
         fFoliage.addBinding(params.foliage, "offsetY", { min: -2, max: 2, step: 0.02, label: "offset Y" });
         fFoliage.addBinding(params.foliage, "offsetZ", { min: -2, max: 2, step: 0.02, label: "offset Z" });
-        fFoliage.on("change", () => ensureFoliageObject());
+        fFoliage.on("change", () => {
+          ensureFoliageObject();
+          ensureBranchesObject();
+        });
+
+        const fBranches = pane.addFolder({ title: "Branches (curved cylinders)", expanded: true });
+        fBranches.addBinding(params.branches, "enabled", { label: "enable" });
+        fBranches.addBinding(params.branches, "levels", { min: 1, max: 24, step: 1 });
+        fBranches.addBinding(params.branches, "perRing", { min: 1, max: 24, step: 1, label: "per ring" });
+        fBranches.addBinding(params.branches, "baseY", { min: -2, max: 24, step: 0.02, label: "base Y" });
+        fBranches.addBinding(params.branches, "stepY", { min: 0.05, max: 4, step: 0.02, label: "ΔY / level" });
+        fBranches.addBinding(params.branches, "scaleBottom", { min: 0.05, max: 3, step: 0.02, label: "scale bottom" });
+        fBranches.addBinding(params.branches, "scaleTop", { min: 0.05, max: 3, step: 0.02, label: "scale top" });
+        fBranches.addBinding(params.branches, "scalePower", { min: 0.2, max: 4, step: 0.02, label: "scale curve" });
+        fBranches.addBinding(params.branches, "scaleVariation", {
+          min: 0,
+          max: 0.5,
+          step: 0.01,
+          label: "scale jitter",
+        });
+        fBranches.addBinding(params.branches, "globalScale", { min: 0.1, max: 3, step: 0.02, label: "global ×" });
+        fBranches.addBinding(params.branches, "radialInset", { min: -0.2, max: 0.5, step: 0.005, label: "trunk inset" });
+        fBranches.addBinding(params.branches, "pivotAlongRadius", {
+          min: 0,
+          max: 1,
+          step: 0.02,
+          label: "pivot → surface",
+        });
+        fBranches.addBinding(params.branches, "azimuthOffsetDeg", {
+          min: -180,
+          max: 180,
+          step: 0.5,
+          label: "ring rotate °",
+        });
+        fBranches.addBinding(params.branches, "staggerDeg", {
+          min: -45,
+          max: 45,
+          step: 0.5,
+          label: "stagger / level °",
+        });
+        fBranches.addBinding(params.branches, "offsetX", { min: -2, max: 2, step: 0.02, label: "offset X" });
+        fBranches.addBinding(params.branches, "offsetY", { min: -2, max: 2, step: 0.02, label: "offset Y" });
+        fBranches.addBinding(params.branches, "offsetZ", { min: -2, max: 2, step: 0.02, label: "offset Z" });
+        fBranches.addBinding(params.branches, "length", { min: 0.1, max: 6, step: 0.02 });
+        fBranches.addBinding(params.branches, "radiusBottom", { min: 0.005, max: 0.25, step: 0.002, label: "radius base" });
+        fBranches.addBinding(params.branches, "radiusTop", { min: 0.003, max: 0.2, step: 0.002, label: "radius tip" });
+        fBranches.addBinding(params.branches, "radialSegs", { min: 3, max: 16, step: 1, label: "radial segs" });
+        fBranches.addBinding(params.branches, "heightSegs", { min: 1, max: 16, step: 1, label: "length segs" });
+        fBranches.addBinding(params.branches, "bend", { min: -1.5, max: 1.5, step: 0.02, label: "bend (+ droop)" });
+        fBranches.addBinding(params.branches, "rotXDeg", { min: -180, max: 180, step: 0.5, label: "tilt X °" });
+        fBranches.addBinding(params.branches, "rotYDeg", { min: -180, max: 180, step: 0.5, label: "tilt Y °" });
+        fBranches.addBinding(params.branches, "rotZDeg", { min: -180, max: 180, step: 0.5, label: "tilt Z °" });
+        fBranches.addBinding(params.branches, "color");
+        fBranches.addBinding(params.branches, "roughness", { min: 0, max: 1, step: 0.02 });
 
         const fRect = pane.addFolder({ title: "Rectangle (pivot = short edge)", expanded: true });
         fRect.addBinding(params.rect, "width", { min: 0.1, max: 8, step: 0.05 });
@@ -753,11 +989,50 @@
         const TEX_KEYS = new Set(["alphaTest", "depthWrite", "maskMode"]);
         const SCENE_KEYS = new Set(["bg", "amb", "key"]);
         const DBG_KEYS = new Set(["wireframe", "showPivot"]);
+        const BRANCH_LAYOUT_KEYS = new Set([
+          "enabled",
+          "levels",
+          "perRing",
+          "baseY",
+          "stepY",
+          "scaleBottom",
+          "scaleTop",
+          "scalePower",
+          "scaleVariation",
+          "globalScale",
+          "radialInset",
+          "pivotAlongRadius",
+          "azimuthOffsetDeg",
+          "staggerDeg",
+          "offsetX",
+          "offsetY",
+          "offsetZ",
+          "rotXDeg",
+          "rotYDeg",
+          "rotZDeg",
+          "color",
+          "roughness",
+        ]);
+        const BRANCH_GEOM_KEYS = new Set([
+          "length",
+          "radiusBottom",
+          "radiusTop",
+          "radialSegs",
+          "heightSegs",
+          "bend",
+        ]);
 
         pane.on("change", (ev) => {
           const k = ev.target.key;
           if (GEOM_KEYS.has(k)) rebuildGeometry();
-          else if (FOLIAGE_KEYS.has(k)) ensureFoliageObject();
+          else if (FOLIAGE_KEYS.has(k)) {
+            ensureFoliageObject();
+            ensureBranchesObject();
+          } else if (BRANCH_LAYOUT_KEYS.has(k)) {
+            if (k === "enabled" || k === "levels" || k === "perRing") ensureBranchesObject();
+            else if (k === "color" || k === "roughness") syncBranchMaterial();
+            else updateBranchMatrices();
+          } else if (BRANCH_GEOM_KEYS.has(k)) rebuildBranchGeometry();
           else if (XF_KEYS.has(k)) {
             if (params.foliage.layout === "pine") updateInstanceMatrices();
             else applySingleTransform();
@@ -767,6 +1042,7 @@
           else if (SCENE_KEYS.has(k)) syncScene();
           else if (DBG_KEYS.has(k)) {
             syncMaterial();
+            syncBranchMaterial();
             if (k === "showPivot") updatePivotHelper();
           }
         });
