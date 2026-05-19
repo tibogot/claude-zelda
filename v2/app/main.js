@@ -656,10 +656,12 @@ export async function startV2App(opts = {}) {
   function markHeightTexDirty() {
     heightTexDirty = true;
   }
+  const sculptBrushMask = new BrushMask();
   const sculptSystem = new SculptSystem({
     toolState,
     terrainStore,
     chunkStream,
+    brushMask: sculptBrushMask,
     onHeightsChanged: () => {
       markHeightTexDirty();
       treeStore.syncAllHeights(terrainStore);
@@ -3573,6 +3575,7 @@ export async function startV2App(opts = {}) {
     rebuildBorderMountains,
     textureLibrary,
     brushMask,
+    sculptBrushMask,
     paintFill() { paintSystem.fillWithActiveLayer(); },
     paintClear() { paintSystem.clearAll(); },
     syncSoloLayer,

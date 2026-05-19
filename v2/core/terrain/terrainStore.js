@@ -145,6 +145,21 @@ export class TerrainStore {
     const bcx = stroke.cx;
     const bcz = stroke.cz;
 
+    // PNG stamp mask — modulates only "stamp" deltas (raise/lower, noise, fbmPeak,
+    // terrace). Smooth/flatten ignore it because masking those produces splotchy,
+    // half-applied averaging that is rarely what users want.
+    const maskAllowedMode =
+      stroke.mode === "raiseLower" ||
+      stroke.mode === "noise" ||
+      stroke.mode === "fbmPeak" ||
+      stroke.mode === "terrace";
+    const maskData = maskAllowedMode ? stroke.maskData ?? null : null;
+    const maskSize = maskData ? stroke.maskSize ?? 0 : 0;
+    const maskRot = stroke.maskRotation ?? 0;
+    const maskCos = maskData ? Math.cos(maskRot) : 1;
+    const maskSin = maskData ? Math.sin(maskRot) : 0;
+    const invDiameter = 1 / (2 * r);
+
     for (let cz = minCZ; cz <= maxCZ; cz++) {
       for (let cx = minCX; cx <= maxCX; cx++) {
         const heights = this.ensureChunkData(cx, cz);
@@ -174,6 +189,19 @@ export class TerrainStore {
             const dist = Math.sqrt(d2);
             const t = 1 - dist * invR;
             if (t <= 0) continue;
+
+            // Sample PNG mask in brush-local space (rotated). Zero-mask cells are
+            // skipped entirely — matches the paint-side cull in splatStore.
+            let maskMul = 1;
+            if (maskData) {
+              const rx = dx * maskCos - dz * maskSin;
+              const rz = dx * maskSin + dz * maskCos;
+              const mu = rx * invDiameter + 0.5;
+              const mv = rz * invDiameter + 0.5;
+              if (mu < 0 || mu > 1 || mv < 0 || mv > 1) continue;
+              maskMul = _sampleSculptMask(maskData, maskSize, mu, mv);
+              if (maskMul <= 0.001) continue;
+            }
             let falloff = 1;
             if (stroke.mode === "noise") {
               // v1 `applyNoiseAt`: (1 - dist/r)^2, independent of brush falloff slider.
@@ -284,6 +312,9 @@ export class TerrainStore {
             } else if (stroke.mode === "smooth") {
               const avg = this.sampleNeighborhood(wx, wz, step * 1.4);
               next = current + (avg - current) * (falloff * stroke.strength);
+            }
+            if (maskData) {
+              next = current + (next - current) * maskMul;
             }
             if (next < cmin) next = cmin;
             else if (next > cmax) next = cmax;
@@ -764,6 +795,24 @@ function markRect(dirtyChunks, cx, cz, ix, iz) {
  * for sculpting, and the canonical chunk is part of the current stroke — so
  * this cell should not apply the brush (the owner will propagate here).
  */
+/** Bilinear sample of a Float32 grayscale brush mask — mirrors splatStore._sampleMask. */
+function _sampleSculptMask(data, size, u, v) {
+  const fx = u * (size - 1);
+  const fy = v * (size - 1);
+  const x0 = Math.floor(fx);
+  const y0 = Math.floor(fy);
+  const x1 = Math.min(x0 + 1, size - 1);
+  const y1 = Math.min(y0 + 1, size - 1);
+  const tx = fx - x0;
+  const ty = fy - y0;
+  return (
+    data[y0 * size + x0] * (1 - tx) * (1 - ty) +
+    data[y0 * size + x1] * tx * (1 - ty) +
+    data[y1 * size + x0] * (1 - tx) * ty +
+    data[y1 * size + x1] * tx * ty
+  );
+}
+
 function shouldSkipSculptBecauseOwnerInStroke(
   cx,
   cz,

@@ -40,6 +40,9 @@ export function createBrushStrokeFromHit({
   flattenTargetY,
   sessionBrushSeed,
   pointerEvent,
+  maskData = null,
+  maskSize = 0,
+  maskRotation = 0,
 }) {
   const radius = toolState.brush.radius;
   const strength = toolState.brush.strength;
@@ -71,6 +74,9 @@ export function createBrushStrokeFromHit({
     maxX: hitPoint.x + radius,
     minZ: hitPoint.z - radius,
     maxZ: hitPoint.z + radius,
+    maskData,
+    maskSize,
+    maskRotation,
     ...(toolState.sculptMode === "fbmPeak"
       ? { fbmPeak: { ...toolState.fbmPeak } }
       : {}),

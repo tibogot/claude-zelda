@@ -64,6 +64,17 @@ export function createToolState() {
       noiseScale: V2_CONFIG.sculpt.noiseScale,
       noiseOctaves: V2_CONFIG.sculpt.noiseOctaves,
     },
+    /**
+     * Sculpt brush mask — PNG stamp that modulates stamp-mode deltas
+     * (raiseLower, noise, fbmPeak, terrace). Mirror of `paint.mask*` fields but
+     * independent so paint and sculpt can run different stamps simultaneously.
+     */
+    sculptMask: {
+      preset: "none",
+      rotation: 0,
+      randomRotation: false,
+      followStroke: false,
+    },
     terrace: { ...V2_CONFIG.sculpt.terrace },
     ramp: { ...V2_CONFIG.sculpt.ramp },
     erosion: { ...V2_CONFIG.sculpt.erosion },

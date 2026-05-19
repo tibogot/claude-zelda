@@ -1305,6 +1305,39 @@ function buildSculptPanel(app) {
   _slider(sculptBody, cfg.sculpt, 'sculptClampMin', { label: 'Min height', min: -800, max: 3990, step: 5, onChange: () => { enforceSculptClampGap(); app.onConfigChanged(); } });
   _slider(sculptBody, ts.brush, 'spacingFactor', { label: 'Stroke spacing', min: 0.05, max: 1.0, step: 0.01 });
 
+  // --- Brush Mask (PNG stamp) — modulates raise/lower, noise, fbmPeak, terrace ---
+  const sculptMaskBody = _section(panel, 'Brush Mask', false);
+  const sculptMaskPreview = document.createElement('canvas');
+  sculptMaskPreview.width = 64;
+  sculptMaskPreview.height = 64;
+  sculptMaskPreview.style.cssText = 'display:block;width:48px;height:48px;margin:6px auto 8px;border:1px solid rgba(255,255,255,0.2);border-radius:4px;image-rendering:pixelated;background:var(--bg-input);';
+  const sbm = app.sculptBrushMask;
+  sbm.renderPreview(sculptMaskPreview);
+
+  _dropdown(sculptMaskBody, ts.sculptMask, 'preset', { label: 'Preset', options: {
+    None: 'none', Soft: 'soft', Hard: 'hard', Splatter: 'splatter', Grunge: 'grunge',
+  }, onChange: () => {
+    sbm.generateBuiltin(ts.sculptMask.preset);
+    sbm.renderPreview(sculptMaskPreview);
+  } });
+  _button(sculptMaskBody, { title: 'Load PNG mask', onClick: () => {
+    const input = document.createElement('input');
+    input.type = 'file';
+    input.accept = 'image/png,image/jpeg,image/webp';
+    input.onchange = async () => {
+      const file = input.files?.[0];
+      if (!file) return;
+      await sbm.loadFromFile(file);
+      ts.sculptMask.preset = 'custom:' + sbm.name;
+      sbm.renderPreview(sculptMaskPreview);
+    };
+    input.click();
+  } });
+  sculptMaskBody.appendChild(sculptMaskPreview);
+  _slider(sculptMaskBody, ts.sculptMask, 'rotation', { label: 'Rotation', min: 0, max: 360, step: 1 });
+  _toggle(sculptMaskBody, ts.sculptMask, 'randomRotation', { label: 'Random rot.' });
+  _toggle(sculptMaskBody, ts.sculptMask, 'followStroke', { label: 'Follow stroke' });
+
   // --- Ramp shape ---
   const rampBody = _section(panel, 'Ramp Shape', false);
   _slider(rampBody, ts.ramp, 'crossExponent', { label: 'Corridor edge', min: 0.5, max: 10, step: 0.05 });

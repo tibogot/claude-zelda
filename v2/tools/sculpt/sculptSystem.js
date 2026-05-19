@@ -8,15 +8,18 @@ import {
 } from "../../core/terrain/erosionBrush.js";
 
 export class SculptSystem {
-  constructor({ toolState, terrainStore, chunkStream, onHeightsChanged }) {
+  constructor({ toolState, terrainStore, chunkStream, onHeightsChanged, brushMask = null }) {
     this.toolState = toolState;
     this.terrainStore = terrainStore;
     this.chunkStream = chunkStream;
     this.onHeightsChanged = onHeightsChanged || (() => {});
+    this.brushMask = brushMask;
     this.isSculpting = false;
     this.sign = 1;
     this.flattenTargetY = 0;
     this.lastStrokePoint = null;
+    /** Radians, updated between samples in a stroke — drives `followStroke` mask rotation. */
+    this._strokeDirection = 0;
     this.beforeMap = new Map();
     this.afterMap = new Map();
     this.undoStack = [];
@@ -89,6 +92,7 @@ export class SculptSystem {
     this.isSculpting = true;
     this.sign = event.shiftKey ? -1 : 1;
     this.lastStrokePoint = null;
+    this._strokeDirection = 0;
     this.beforeMap.clear();
     this.afterMap.clear();
     this.sessionBrushSeed = Math.random() * 1000;
@@ -111,8 +115,33 @@ export class SculptSystem {
     ) {
       return;
     }
+    if (this.lastStrokePoint) {
+      const sdx = hitPoint.x - this.lastStrokePoint.x;
+      const sdz = hitPoint.z - this.lastStrokePoint.z;
+      if (sdx * sdx + sdz * sdz > 0.01) {
+        this._strokeDirection = Math.atan2(sdz, sdx);
+      }
+    }
     this.lastStrokePoint = this.lastStrokePoint ?? new THREE.Vector3();
     this.lastStrokePoint.copy(hitPoint);
+
+    let maskData = null;
+    let maskSize = 0;
+    let maskRotation = 0;
+    const bm = this.brushMask;
+    if (bm && bm.active && bm.data) {
+      maskData = bm.data;
+      maskSize = bm.size;
+      const sm = this.toolState.sculptMask ?? {};
+      const baseRad = ((sm.rotation ?? 0) * Math.PI) / 180;
+      if (sm.randomRotation) {
+        maskRotation = Math.random() * Math.PI * 2;
+      } else if (sm.followStroke) {
+        maskRotation = this._strokeDirection + baseRad;
+      } else {
+        maskRotation = baseRad;
+      }
+    }
 
     const stroke = createBrushStrokeFromHit({
       hitPoint,
@@ -121,6 +150,9 @@ export class SculptSystem {
       flattenTargetY: this.flattenTargetY,
       sessionBrushSeed: this.sessionBrushSeed,
       pointerEvent: event,
+      maskData,
+      maskSize,
+      maskRotation,
     });
 
     if (stroke.mode === "erosion") {
