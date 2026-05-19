@@ -335,6 +335,15 @@ export function createToolState() {
       showOverlay: true,
       overlayOpacity: 0.35,
     },
+    cave: {
+      // Box-room placeholder sizes. Tuned so a default cave fits comfortably
+      // under a brush radius ~8 hole and gives the player room to land + walk.
+      width: 12,
+      depth: 12,
+      height: 6,
+      opening: 4,
+      ceilingOffset: 0.5,
+    },
     ambientFx: {
       erase: false,
       effectType: "butterflies",

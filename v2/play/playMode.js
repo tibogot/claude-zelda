@@ -30,6 +30,11 @@ const CAP_H = 1.2;
 const GRAVITY = 20.0;
 const JUMP_VEL = 11.0;
 const MOVE_SPEED = 12;
+// Safety net for the new hole feature: if the player drops below this Y
+// (e.g. fell into a terrain hole with no cave to catch them), the next update
+// tick snaps them back to spawn. Lower than any plausible sculpted terrain
+// (sculptClampMin defaults to ~-200) but higher than the hole sentinel (-1e7).
+const KILLPLANE_Y = -500;
 
 const CHAR_MODEL = "../models/UA1+UA2_compressed.glb";
 const CHAR_KATANA = "../models/katana.glb";
@@ -3067,9 +3072,64 @@ export class PlayMode {
     this.renderer.domElement.style.cursor = "";
   }
 
+  /**
+   * Snap the player back to the configured spawn point and clear all per-mode
+   * velocity / airborne state. Called by the killplane safety net when the
+   * player has fallen below `KILLPLANE_Y` (typically because they walked into
+   * a terrain hole with no cave to catch them). Uses `getWorldHeight` rather
+   * than `getTerrainHeight` for the Y snap so a spawn point that happens to
+   * sit over a hole still lands on the heightfield's underlying surface —
+   * they'll drop in again next frame, but at least they won't loop while
+   * already below the world.
+   */
+  _respawnToSpawn() {
+    const spawn = this.spawnSettings;
+    const half = this.worldHalf || Infinity;
+    let sx, sz, syaw;
+    if (spawn?.enabled) {
+      sx = THREE.MathUtils.clamp(spawn.x || 0, -half, half);
+      sz = THREE.MathUtils.clamp(spawn.z || 0, -half, half);
+      syaw = THREE.MathUtils.degToRad(spawn.yawDeg || 0);
+    } else {
+      sx = this.controls.target.x;
+      sz = this.controls.target.z;
+      syaw = 0;
+    }
+    this.playerPos.x = sx;
+    this.playerPos.z = sz;
+    this.playerPos.y = this.getWorldHeight(sx, sz);
+
+    this.velY = 0;
+    this.inAir = false;
+    this.charVelY = 0;
+    this.charInAir = false;
+    this.charJumpPhase = "none";
+    this.charGliding = false;
+    this.carVelY = 0;
+    this.carInAir = false;
+    this.carOnSteepSlope = false;
+    this.carVx = 0;
+    this.carVz = 0;
+    this.planeSpeed = 0;
+    this.flyHeight = this.playerPos.y + 2;
+
+    this.camYaw = syaw;
+    this.charYaw = syaw;
+    this.carHeading = syaw;
+    this.carCamYaw = syaw;
+    this.flyHeading = syaw;
+  }
+
   update(dtSec) {
     if (!this.active) return;
     dtSec = Math.min(dtSec, 0.05);
+
+    // Killplane: if the player has dropped well below the world (e.g. fell
+    // into a terrain hole with no cave under it), teleport them back to
+    // spawn. Flying players are exempt — pilots may legitimately fly low.
+    if (!this.flying && this.playerPos.y < KILLPLANE_Y) {
+      this._respawnToSpawn();
+    }
 
     const iso = this.camView === "iso";
     const keys = this.keysHeld;
@@ -3620,7 +3680,13 @@ export class PlayMode {
         fromY,
         this.playerPos.z,
       );
-      if (bvhY != null && bvhY > terrainY) groundY = bvhY;
+      // When the player is *underneath* the terrain (e.g. inside a cave they
+      // fell into through a hole), the terrain surface is above their head
+      // and must not be treated as ground — otherwise they'd snap back up.
+      // In that case the BVH (cave floor) is the only valid ground; if the
+      // BVH didn't catch them either, fall back to the hole sentinel.
+      if (terrainY > fromY) groundY = bvhY ?? terrainY;
+      else if (bvhY != null && bvhY > terrainY) groundY = bvhY;
     }
     const prevY = this.playerPos.y;
     const capsuleBase = CAP_R + CAP_H * 0.5;

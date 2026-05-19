@@ -410,6 +410,8 @@ function extractSerializableSettings(toolState) {
     barrierChunks: toolState._barrierExportData?.() ?? null,
     hole: { ...toolState.hole },
     holeChunks: toolState._holeExportData?.() ?? null,
+    cave: { ...toolState.cave },
+    caves: toolState._caveExportData?.() ?? null,
     ambientFx: { ...toolState.ambientFx },
     ambientFxEmitters: toolState._ambientFxExportData?.() ?? null,
     leafFxEmitters: toolState._leafFxExportData?.() ?? null,

@@ -47,6 +47,31 @@ export class HoleStore {
     return this.chunks.get(key)?.hasAnyHole === true;
   }
 
+  /**
+   * Point-sample the hole mask at a world XZ. Returns true if that spot has
+   * been painted out — same threshold the shader uses, so visual + collision
+   * stay in lockstep. Cheap: bails on `hasAnyHole` for untouched chunks.
+   */
+  isHoleAt(wx, wz) {
+    const cfg = this.config;
+    const cs = cfg.world.chunkSize;
+    const half = cfg.world.size * 0.5;
+    const maxC = getChunkCountPerAxis(cfg) - 1;
+    const cx = Math.floor((wx + half) / cs);
+    const cz = Math.floor((wz + half) / cs);
+    if (cx < 0 || cz < 0 || cx > maxC || cz > maxC) return false;
+    const entry = this.chunks.get(chunkKey(cx, cz));
+    if (!entry || !entry.hasAnyHole) return false;
+    const res = this.resolution;
+    const minWX = chunkMinWorldX(cx, cfg);
+    const minWZ = chunkMinWorldZ(cz, cfg);
+    let px = Math.floor(((wx - minWX) / cs) * res);
+    let pz = Math.floor(((wz - minWZ) / cs) * res);
+    if (px < 0) px = 0; else if (px >= res) px = res - 1;
+    if (pz < 0) pz = 0; else if (pz >= res) pz = res - 1;
+    return entry.data[(pz * res + px) * 4] >= HAS_ANY_HOLE_THRESHOLD;
+  }
+
   getChunkIndicesInBounds(minX, minZ, maxX, maxZ) {
     const { cx: cx0, cz: cz0 } = worldToChunkIndex(minX, minZ, this.config);
     const { cx: cx1, cz: cz1 } = worldToChunkIndex(maxX, maxZ, this.config);

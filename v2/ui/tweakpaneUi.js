@@ -17,6 +17,7 @@ import { addWaterfallFolder } from "./waterfallTweakpane.js";
 import { addDecalFolder } from "./decalTweakpane.js";
 import { addBarrierFolder } from "./barrierTweakpane.js";
 import { addHoleFolder } from "./holeTweakpane.js";
+import { addCaveFolder } from "./caveTweakpane.js";
 import { addFleurFolder } from "./fleurTweakpane.js";
 import { addAmbientFxFolder } from "./ambientFxTweakpane.js";
 import { addAudioMixerFolder } from "./audioTweakpane.js";
@@ -158,6 +159,9 @@ export function createTweakpaneUi({
   onBarrierFill,
   onHoleOverlayChanged,
   onHoleClear,
+  onCaveUndo,
+  onCaveRedo,
+  onCaveClear,
   onFleurChanged,
   onFleurColorChanged,
   onFleurStemChanged,
@@ -198,6 +202,7 @@ export function createTweakpaneUi({
         "Ambient FX (X)": "ambientfx",
         "Barrier (B)": "barrier",
         Hole: "hole",
+        Cave: "cave",
         "Play Spawn (Z)": "playSpawn",
         "Play (F)": "play",
       },
@@ -531,6 +536,13 @@ export function createTweakpaneUi({
     onHoleOverlayChanged,
     onHoleClear,
   });
+
+  const caveFolderPack = addCaveFolder(pane, toolState, {
+    onCaveUndo,
+    onCaveRedo,
+    onCaveClear,
+  });
+  const caveFolder = caveFolderPack.folder;
 
   const fleurFolder = addFleurFolder(pane, toolState, {
     onFleurChanged,
@@ -1275,6 +1287,8 @@ export function createTweakpaneUi({
     decalFolder,
     barrierFolder,
     holeFolder,
+    caveFolder,
+    refreshCaveCount: caveFolderPack.refreshCount,
     fleurFolder,
     ambientFxFolder,
     /** Call after hotkey / wheel edits to `toolState.brush` so bindings stay in sync. */

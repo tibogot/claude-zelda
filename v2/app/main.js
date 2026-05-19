@@ -95,12 +95,20 @@ import { BarrierOverlay } from "../render/barrier/barrierOverlay.js";
 import { HoleStore } from "../core/hole/holeStore.js";
 import { HoleSystem } from "../tools/hole/holeSystem.js";
 import { HoleOverlay } from "../render/hole/holeOverlay.js";
+import { CaveStore } from "../core/cave/caveStore.js";
+import { CaveSystem } from "../tools/cave/caveSystem.js";
 import { createFleurSystem, FLEUR_PRESETS, FLEUR_ALPHA_URLS } from "../../fleur-painter.js";
 import { createAmbientFxStore } from "../core/ambientfx/ambientFxStore.js";
 import { createLeafFxStore } from "../core/ambientfx/leafFxStore.js";
 import { BorderMountains } from "../render/terrain/borderMountains.js";
 import { createVolumetricCloudSystem } from "../render/clouds/volumetricCloudSystem.js";
 import { createVolumetricCloudSystemOptimized } from "../render/clouds/volumetricCloudSystemv2.js";
+
+// Returned by `getTerrainHeight` whenever the sampled XZ is over a painted
+// hole pixel. Finite (no NaN/Infinity edge cases) but far enough below any
+// real terrain that the playMode "drop > 0.4" / "y <= groundY" tests always
+// classify the player as airborne when standing on a hole.
+const HOLE_GROUND_SENTINEL = -1e7;
 
 // GLBs imported via file picker are auto-linked to /models/<file.name> when present,
 // so a project save records only the filename and the load round-trip can re-fetch it.
@@ -668,6 +676,17 @@ export async function startV2App(opts = {}) {
   const holeStore = new HoleStore(config);
   const holeSystem = new HoleSystem({ toolState, holeStore, chunkStream });
   const holeOverlay = new HoleOverlay(scene, config);
+  const caveStore = new CaveStore(scene);
+  // Assigned once cliffBvh + grassManager + every store that contributes
+  // triangles to the player BVH have been created (further down). The cave
+  // system only ever invokes this in response to a user action (place /
+  // remove / clear), so the reference is always populated by then.
+  let rebakePlayerBvh = () => {};
+  const caveSystem = new CaveSystem({
+    toolState,
+    caveStore,
+    onRebakeBvh: () => rebakePlayerBvh(),
+  });
   {
     const cs = float(config.world.chunkSize);
     tileHoleTexNode = texture(
@@ -870,6 +889,19 @@ export async function startV2App(opts = {}) {
     toolState,
     transformControls,
   });
+
+  // Single source of truth for the player BVH bake. Used by both the manual
+  // rebake button (cliffs/props panel) and the cave system (auto-rebake on
+  // every place/remove/clear/load). Adding a new store that contributes
+  // collidable geometry? Append it to the array.
+  rebakePlayerBvh = () => {
+    cliffBvh.bake(terrainStore, config, [
+      propStore, splineSystem, fullRoadSystem, smartRoadSystem, waterfallSystem,
+      caveStore,
+    ]);
+    grassManager.rebuildCliffHeightTex(cliffBvh, terrainStore, config.world.size);
+    ui?.refreshCaveCount?.(caveStore.count());
+  };
   const decalSystem = new DecalSystem({
     scene,
     toolState,
@@ -993,7 +1025,16 @@ export async function startV2App(opts = {}) {
   const playMode = new PlayMode({
     scene, camera, renderer, controls,
     getWorldHeight,
-    getTerrainHeight: (x, z) => terrainStore.getWorldHeight(x, z),
+    // `getTerrainHeight` drives the play-mode ground-collision test each frame
+    // (player + car). Returning a sentinel far below the world when the (x,z)
+    // is over a painted hole pixel makes the existing "is the player below
+    // ground?" / "did they drop more than 0.4?" checks naturally fire, so the
+    // character falls through holes without touching the playMode movement
+    // code. `getWorldHeight` (used for spawn snaps, camera floor, plane AGL)
+    // is left alone so we don't dump the player into the void on respawn /
+    // mode switch / fly-over.
+    getTerrainHeight: (x, z) =>
+      holeStore.isHoleAt(x, z) ? HOLE_GROUND_SENTINEL : terrainStore.getWorldHeight(x, z),
     worldHalf: config.world.size * 0.5,
     cliffBvh,
     isBarrierBlocked: (wx, wz) => barrierStore.isBlocked(wx, wz),
@@ -1087,6 +1128,7 @@ export async function startV2App(opts = {}) {
     if (ui?.decalFolder) ui.decalFolder.hidden = toolState.mode !== "decals";
     if (ui?.barrierFolder) ui.barrierFolder.expanded = toolState.mode === "barrier";
     if (ui?.holeFolder) ui.holeFolder.expanded = toolState.mode === "hole";
+    if (ui?.caveFolder) ui.caveFolder.expanded = toolState.mode === "cave";
     if (ui?.fleurFolder) ui.fleurFolder.hidden = toolState.mode !== "fleurs";
     if (ui?.ambientFxFolder) ui.ambientFxFolder.hidden = toolState.mode !== "ambientfx";
     if (toolState.mode === "ambientfx") {
@@ -1120,7 +1162,7 @@ export async function startV2App(opts = {}) {
   let _importTreeGlb, _loadTreePreset, _removeTreeSlot, _clearAllTrees, _treeCastShadowChanged, _foliageParamChanged;
   let _importPropGlb, _addPrimitive, _addLiveProp, _removePropSlot, _importPropLod, _propCastShadowChanged, _deleteSelectedProp, _duplicateSelectedProp, _clearAllProps, _propTransformModeChanged, _rebakeBvh;
   let _loadFoliageTexture, _foliageSlotStructureChanged, _foliageSlotMaterialChanged, _clearAllFoliage, _foliageLodChanged;
-  let _playSpawnChanged, _barrierOverlayChanged, _barrierClear, _barrierFill, _holeOverlayChanged, _holeClear;
+  let _playSpawnChanged, _barrierOverlayChanged, _barrierClear, _barrierFill, _holeOverlayChanged, _holeClear, _caveUndo, _caveRedo, _caveClear;
   let _ambientFxFlapChanged, _ambientFxRingsChanged, _ambientFxClear, _ambientFxLeafChanged, _ambientFxClearLeaves, _ambientFxLeafRespawn;
   let _fleurChanged, _fleurColorChanged, _fleurStemChanged, _fleurStemCurveChanged, _fleurInteractionChanged, _fleurClear;
   let _cliffGrassFill, _cliffGrassClear, _importCliffGlb, _removeCliffSlot, _deleteSelectedCliff, _clearAllCliffs, _cliffTransformModeChanged, _cliffBlendChanged;
@@ -1427,11 +1469,7 @@ export async function startV2App(opts = {}) {
     }),
     onDeleteSelectedCliff: (_deleteSelectedCliff = () => cliffSystem.handleDelete()),
     onClearAllCliffs: (_clearAllCliffs = () => cliffSystem.clearAll()),
-    onRebakeBvh: (_rebakeBvh = () => {
-      cliffBvh.bake(terrainStore, config, [propStore, splineSystem, fullRoadSystem, smartRoadSystem, waterfallSystem]);
-      grassManager.rebuildCliffHeightTex(cliffBvh, terrainStore, config.world.size);
-      console.log("[V2] BVH rebaked (cliffs + props + spline/full-road/smart-road accessories + waterfalls) + cliff height tex updated");
-    }),
+    onRebakeBvh: (_rebakeBvh = () => rebakePlayerBvh()),
     onCliffTransformModeChanged: (_cliffTransformModeChanged = () => {
       transformControls.setMode(toolState.cliffs.transformMode);
     }),
@@ -1933,6 +1971,18 @@ export async function startV2App(opts = {}) {
       holeSystem.clearAll();
       syncHoleOverlay();
     }),
+    onCaveUndo: (_caveUndo = () => {
+      caveSystem.undo();
+      ui?.refreshCaveCount?.(caveStore.count());
+    }),
+    onCaveRedo: (_caveRedo = () => {
+      caveSystem.redo();
+      ui?.refreshCaveCount?.(caveStore.count());
+    }),
+    onCaveClear: (_caveClear = () => {
+      caveSystem.clearAll();
+      ui?.refreshCaveCount?.(caveStore.count());
+    }),
     onFleurChanged: (_fleurChanged = () => {}),
     onFleurColorChanged: (_fleurColorChanged = (slot) => {
       const fp = toolState.fleur;
@@ -1982,6 +2032,7 @@ export async function startV2App(opts = {}) {
       toolState._waterfallExportData = () => waterfallSystem.exportData();
       toolState._barrierExportData = () => barrierStore.exportData();
       toolState._holeExportData = () => holeStore.exportData();
+      toolState._caveExportData = () => caveStore.serialize();
       toolState._fleurExportData = () => fleurSystem.getPositions();
       toolState._ambientFxExportData = () => ambientFxStore.getEmitters();
       toolState._leafFxExportData = () => leafFxStore.getEmitters();
@@ -1998,6 +2049,7 @@ export async function startV2App(opts = {}) {
       delete toolState._waterfallExportData;
       delete toolState._barrierExportData;
       delete toolState._holeExportData;
+      delete toolState._caveExportData;
       delete toolState._fleurExportData;
       delete toolState._ambientFxExportData;
       delete toolState._leafFxExportData;
@@ -2130,6 +2182,14 @@ export async function startV2App(opts = {}) {
         holeStore.dispose();
         if (project.settings?.holeChunks) {
           holeStore.importData(project.settings.holeChunks);
+        }
+        // Restore caves — `deserialize` clears existing anchors first, then
+        // adds the saved ones. `caveStore.onChange` fires inside both, so the
+        // BVH rebake is automatic.
+        if (project.settings?.caves) {
+          caveStore.deserialize(project.settings.caves);
+        } else {
+          caveStore.clearAll();
         }
         // Restore flowers
         if (project.settings?.fleurPositions && Array.isArray(project.settings.fleurPositions)) {
@@ -2526,7 +2586,7 @@ export async function startV2App(opts = {}) {
   }
 
   function isBrushMode() {
-    return toolState.mode === "sculpt" || toolState.mode === "paint" || toolState.mode === "treePaint" || toolState.mode === "foliagePaint" || toolState.mode === "grass" || toolState.mode === "cliffGrass" || toolState.mode === "barrier" || toolState.mode === "hole" || toolState.mode === "fleurs" || toolState.mode === "ambientfx" || (toolState.mode === "props" && toolState.props.placementMode === "paint");
+    return toolState.mode === "sculpt" || toolState.mode === "paint" || toolState.mode === "treePaint" || toolState.mode === "foliagePaint" || toolState.mode === "grass" || toolState.mode === "cliffGrass" || toolState.mode === "barrier" || toolState.mode === "hole" || toolState.mode === "cave" || toolState.mode === "fleurs" || toolState.mode === "ambientfx" || (toolState.mode === "props" && toolState.props.placementMode === "paint");
   }
 
   function updateBrushPreviewFromPick(hit) {
@@ -2849,6 +2909,9 @@ export async function startV2App(opts = {}) {
       barrierSystem.beginStroke(hit.point, event);
     } else if (toolState.mode === "hole") {
       holeSystem.beginStroke(hit.point, event);
+    } else if (toolState.mode === "cave") {
+      // One-shot placement — no brush stroke; one click = one cave.
+      caveSystem.placeAt(hit.point);
     } else if (toolState.mode === "fleurs") {
       paintFleurAt(hit.point.x, hit.point.z, toolState.fleur.erase || event.shiftKey);
     } else if (toolState.mode === "ambientfx") {
@@ -3048,6 +3111,7 @@ export async function startV2App(opts = {}) {
     if (toolState.mode === "decals") return decalSystem;
     if (toolState.mode === "barrier") return barrierSystem;
     if (toolState.mode === "hole") return holeSystem;
+    if (toolState.mode === "cave") return caveSystem;
     return sculptSystem;
   }
 
@@ -3553,6 +3617,9 @@ export async function startV2App(opts = {}) {
     barrierFill() { _barrierFill(); },
     holeOverlayChanged() { _holeOverlayChanged(); },
     holeClear() { _holeClear(); },
+    caveUndo() { _caveUndo(); },
+    caveRedo() { _caveRedo(); },
+    caveClear() { _caveClear(); },
     ambientFxFlapChanged() { _ambientFxFlapChanged(); },
     ambientFxLeafChanged() { _ambientFxLeafChanged(); },
     ambientFxRingsChanged() { _ambientFxRingsChanged(); },
@@ -3781,6 +3848,8 @@ export async function startV2App(opts = {}) {
       barrierOverlay.dispose();
       holeStore.dispose();
       holeOverlay.dispose();
+      caveSystem.dispose();
+      caveStore.dispose();
       brushDomeGeom.dispose();
       brushDomeFillMat.dispose();
       brushDomeEdgesGeom.dispose();
