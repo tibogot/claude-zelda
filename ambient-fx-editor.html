@@ -68,7 +68,8 @@
       import {
         color, cos, float, mix, normalWorld, sin, smoothstep, step,
         texture, time, uniform, uv, vec2, vec3, vec4,
-        positionLocal, instanceIndex, hash, attribute,
+        positionLocal, positionWorld, instanceIndex, hash, attribute,
+        mx_noise_float,
       } from "three/tsl";
       import { OrbitControls } from "three/addons/controls/OrbitControls.js";
       import { Pane } from "tweakpane";
@@ -84,6 +85,7 @@
 
       // ─── Globals ──────────────────────────────────────────────────────
       let camera, scene, renderer, controls, timer;
+      let cloudShadowUniforms = null;
       const infoEl = document.getElementById("info");
       const labelEl = document.getElementById("fx-label");
 
@@ -99,6 +101,19 @@
         volume:    30,         // spawn volume radius
         showGround: true,
         bgColor:   "#87CEEB",
+      };
+
+      // ─── Cloud shadow params (terrain-side, procedural) ───────────────
+      const cloudShadow = {
+        enabled:       true,
+        intensity:     0.55,   // 0 = no darkening, 1 = full darken
+        coverage:      0.5,    // noise threshold center
+        softness:      0.18,   // smoothstep half-width around threshold
+        scale:         0.04,   // spatial frequency (1/world-units)
+        speed:         2.5,    // world-units of drift per second
+        useSharedWind: true,
+        windX:         1.0,
+        windZ:         0.3,
       };
 
       // ─── Effect registry ──────────────────────────────────────────────
@@ -174,11 +189,44 @@
         const groundSize = 80;
         const groundRes  = 64;
         const groundGeo = new THREE.PlaneGeometry(groundSize, groundSize, groundRes, groundRes);
-        const groundMat = new THREE.MeshStandardMaterial({
-          color: 0x3b6a3b,
+
+        // Cloud-shadow uniforms (synced each frame in animate()).
+        const uCsEnabled   = uniform(cloudShadow.enabled ? 1.0 : 0.0);
+        const uCsIntensity = uniform(cloudShadow.intensity);
+        const uCsCoverage  = uniform(cloudShadow.coverage);
+        const uCsSoftness  = uniform(cloudShadow.softness);
+        const uCsScale     = uniform(cloudShadow.scale);
+        const uCsSpeed     = uniform(cloudShadow.speed);
+        const uCsWind      = uniform(new THREE.Vector2(cloudShadow.windX, cloudShadow.windZ));
+        const uCsBaseColor = uniform(new THREE.Color(0x3b6a3b));
+        cloudShadowUniforms = {
+          enabled: uCsEnabled,
+          intensity: uCsIntensity,
+          coverage: uCsCoverage,
+          softness: uCsSoftness,
+          scale: uCsScale,
+          speed: uCsSpeed,
+          wind: uCsWind,
+        };
+
+        const groundMat = new THREE.MeshStandardNodeMaterial({
           roughness: 0.9,
           metalness: 0.0,
         });
+        // Terrain-side cloud shadows: 2-octave FBM at world XZ, drifting with wind.
+        // The cloud-shadow term multiplies into albedo BEFORE lighting, so shadowed
+        // patches read as cooler/darker even under direct sun. Pure procedural — no
+        // 1:1 match with billboard cards above, just visually coherent drift.
+        const csDrift = uCsWind.mul(time).mul(uCsSpeed);
+        const csWXZ = positionWorld.xz.add(csDrift).mul(uCsScale);
+        const csN1 = mx_noise_float(vec3(csWXZ.x, 0.0, csWXZ.y));
+        const csN2 = mx_noise_float(vec3(csWXZ.x.mul(2.13), 1.0, csWXZ.y.mul(2.07)));
+        const csNoise01 = csN1.mul(0.65).add(csN2.mul(0.35)).mul(0.5).add(0.5);
+        const csLo = uCsCoverage.sub(uCsSoftness);
+        const csHi = uCsCoverage.add(uCsSoftness);
+        const csCover = smoothstep(csLo, csHi, csNoise01);
+        const csShadowAmount = csCover.mul(uCsIntensity).mul(uCsEnabled);
+        groundMat.colorNode = uCsBaseColor.mul(float(1.0).sub(csShadowAmount));
         const ground = new THREE.Mesh(groundGeo, groundMat);
         // Displace vertices along local Z, then rotate the plane so this becomes world Y.
         const pos = groundGeo.attributes.position;
@@ -228,6 +276,21 @@
 
         // Update time-of-day lighting
         updateLighting();
+
+        // Sync cloud-shadow uniforms (terrain side).
+        if (cloudShadowUniforms) {
+          cloudShadowUniforms.enabled.value   = cloudShadow.enabled ? 1.0 : 0.0;
+          cloudShadowUniforms.intensity.value = cloudShadow.intensity;
+          cloudShadowUniforms.coverage.value  = cloudShadow.coverage;
+          cloudShadowUniforms.softness.value  = cloudShadow.softness;
+          cloudShadowUniforms.scale.value     = cloudShadow.scale;
+          cloudShadowUniforms.speed.value     = cloudShadow.speed;
+          if (cloudShadow.useSharedWind) {
+            cloudShadowUniforms.wind.value.set(shared.windX, shared.windZ);
+          } else {
+            cloudShadowUniforms.wind.value.set(cloudShadow.windX, cloudShadow.windZ);
+          }
+        }
 
         // Update active effect
         if (activeEffect && activeEffect.update) {
@@ -388,6 +451,26 @@
             scene.userData.ground.visible = ev.value;
             scene.userData.grid.visible = ev.value;
           });
+
+        // Cloud shadows (terrain side).
+        const csFolder = envFolder.addFolder({ title: "Cloud shadows", expanded: false });
+        csFolder.addBinding(cloudShadow, "enabled", { label: "Enabled" });
+        csFolder.addBinding(cloudShadow, "intensity", {
+          label: "Intensity", min: 0, max: 1, step: 0.01,
+        });
+        csFolder.addBinding(cloudShadow, "coverage", {
+          label: "Coverage", min: 0, max: 1, step: 0.01,
+        });
+        csFolder.addBinding(cloudShadow, "softness", {
+          label: "Softness", min: 0.005, max: 0.5, step: 0.005,
+        });
+        csFolder.addBinding(cloudShadow, "scale", {
+          label: "Scale (freq)", min: 0.005, max: 0.2, step: 0.005,
+        });
+        csFolder.addBinding(cloudShadow, "speed", {
+          label: "Drift speed", min: 0, max: 10, step: 0.1,
+        });
+        csFolder.addBinding(cloudShadow, "useSharedWind", { label: "Use env wind dir" });
 
         // Placeholder for effect-specific folder (created dynamically)
         fxFolder = null;
