@@ -1,53 +1,76 @@
 /**
- * Procedural collectibles (coin / heart / key) as live props.
- * Each returns the same shape as flagFactory: { group, update, dispose, setParam, getParams }
- * plus `kind` and `pickupRadius` read by collectibleRuntime.
+ * Procedural collectibles (coin / heart / key) — shared geometry + material per kind.
  *
- * Visuals use TSL (MeshStandardNodeMaterial) so emissive pulse + rim glow run on GPU.
+ * Design goals
+ *   - Zero per-instance shader compile: one MeshBasicNodeMaterial per kind, shared across all instances.
+ *   - Zero per-instance geometry alloc: one buffer geometry per kind, built lazily on first use.
+ *   - Per-instance state limited to transform + spin/bob phase.
+ *   - Shadows preserved (cylinders/hearts/keys cast normal shadows via depth pass).
+ *   - GLB extensibility: `registerGlbCollectibleKind()` hangs a custom kind off the same registry,
+ *     so a future Treasure/Weapon GLB plugs in without touching the runtime or the props pipeline.
+ *
+ * Returns the same shape as flagFactory: { group, update, dispose, setParam, getParams, kind, pickupRadius, burstColor }.
+ * Color / emissive / intensity are kind-level (shared), so per-instance setParam for those is a no-op;
+ * spin/bob params remain per-instance because they're tied to mesh.userData state.
  */
 import * as THREE from "three";
-import { MeshStandardNodeMaterial } from "three";
+import { MeshBasicNodeMaterial } from "three";
 import {
-  uniform, float, mix, abs, sin, time, normalView, oneMinus,
+  uniform, float, mix, abs, sin, time, normalView, oneMinus, vec3,
 } from "three/tsl";
 
-const TAU = Math.PI * 2;
+/* ─────────── module-level kind registry ─────────── */
 
-/* ─────────── shared TSL emissive material ─────────── */
+/** Map<kindName, KindAssets> */
+const _kinds = new Map();
 
 /**
- * Standard PBR + animated emissive pulse + Fresnel rim.
- * Returns { material, uniforms } so the factory can tweak color/intensity at runtime.
+ * KindAssets shape:
+ *   buildGroup(params) → THREE.Group   // creates a new group of shared-geo meshes for one instance
+ *   defaults: object                   // default params (only animation params consulted at runtime)
+ *   pickupRadius: number               // default pickup radius
+ *   burstColor: THREE.Color            // shared burst tint
+ *   baseY: number                      // float offset above ground
+ *   sharedAssets: () => void           // ensures geo+mat are built (idempotent)
+ *   dispose: () => void                // disposes shared geo+mat (called at app shutdown)
  */
-function buildGlowMaterial({ color, emissive, intensity = 1.0, metalness = 0.85, roughness = 0.25 }) {
-  const mat = new MeshStandardNodeMaterial({
-    color: new THREE.Color(color),
-    metalness,
-    roughness,
-  });
-  const uEmissive = uniform(new THREE.Color(emissive));
-  const uIntensity = uniform(intensity);
-
-  const pulse = mix(float(0.7), float(1.3), sin(time.mul(3.0)).mul(0.5).add(0.5));
-
-  // View-space Fresnel: normalView.z is cos(angle to camera); rim is bright at grazing angles.
-  const rim = oneMinus(abs(normalView.z)).pow(2.0);
-
-  mat.emissiveNode = uEmissive.mul(uIntensity).mul(pulse).add(uEmissive.mul(rim).mul(0.6));
-  return { material: mat, uEmissive, uIntensity };
+function _registerKind(name, kindAssets) {
+  _kinds.set(name, kindAssets);
 }
 
-/* ─────────── shared animation: spin + bob ─────────── */
+/** Internal helper — build a kind-shared "glow basic" material once per kind. */
+function _buildSharedMaterial({ baseColor, emissive, intensity, rimStrength }) {
+  const mat = new MeshBasicNodeMaterial({
+    toneMapped: true,
+  });
+  const uBase = uniform(new THREE.Color(baseColor));
+  const uEmissive = uniform(new THREE.Color(emissive));
+  const uIntensity = uniform(intensity);
+  const uRim = uniform(rimStrength);
 
-function applySpinBob(mesh, opts) {
-  const { spinSpeed = 2.0, bobAmp = 0.15, bobSpeed = 1.6, baseY = 0 } = opts;
+  // Pulse uses the global TSL time — all instances of this kind pulse in sync.
+  const pulse = mix(float(0.7), float(1.3), sin(time.mul(3.0)).mul(0.5).add(0.5));
+  const rim = oneMinus(abs(normalView.z)).pow(2.0);
+
+  mat.colorNode = uBase
+    .add(uEmissive.mul(uIntensity).mul(pulse))
+    .add(uEmissive.mul(rim).mul(uRim));
+
+  // Material is shared, but we expose its uniforms for kind-level adjustment.
+  mat.userData = { uBase, uEmissive, uIntensity, uRim };
+  return mat;
+}
+
+/* ─────────── shared animation: spin + bob (per-instance state) ─────────── */
+
+function _applySpinBob(obj, opts) {
+  const { spinSpeed, bobAmp, bobSpeed, baseY } = opts;
   let t = Math.random() * 100;
-  mesh.userData._anim = (dt) => {
+  obj.userData._anim = (dt) => {
     t += dt;
-    mesh.rotation.y += spinSpeed * dt;
-    mesh.position.y = baseY + Math.sin(t * bobSpeed) * bobAmp;
+    obj.rotation.y += spinSpeed * dt;
+    obj.position.y = baseY + Math.sin(t * bobSpeed) * bobAmp;
   };
-  return mesh;
 }
 
 /* ─────────── COIN ─────────── */
@@ -73,37 +96,45 @@ export function coinBoundingBox(params) {
   );
 }
 
+let _coinShared = null;
+function _coinAssets() {
+  if (_coinShared) return _coinShared;
+  const r = COIN_DEFAULTS.radius;
+  const geo = new THREE.CylinderGeometry(r, r, COIN_DEFAULTS.thickness, 32, 1);
+  geo.rotateX(Math.PI / 2);
+  const mat = _buildSharedMaterial({
+    baseColor: COIN_DEFAULTS.color,
+    emissive: COIN_DEFAULTS.emissive,
+    intensity: COIN_DEFAULTS.intensity,
+    rimStrength: 0.8,
+  });
+  _coinShared = { geo, mat };
+  return _coinShared;
+}
+
 export function createCoinProp(params = {}) {
   const p = { ...COIN_DEFAULTS, ...params };
+  const { geo, mat } = _coinAssets();
 
+  const baseY = p.radius + 0.2;
   const group = new THREE.Group();
-
-  const geo = new THREE.CylinderGeometry(p.radius, p.radius, p.thickness, 32, 1);
-  geo.rotateX(Math.PI / 2); // face camera (axis along Z), spin around Y
-  const glow = buildGlowMaterial({
-    color: p.color,
-    emissive: p.emissive,
-    intensity: p.intensity,
-    metalness: 0.9,
-    roughness: 0.2,
-  });
-  const mesh = new THREE.Mesh(geo, glow.material);
+  const mesh = new THREE.Mesh(geo, mat);
   mesh.castShadow = true;
-  applySpinBob(mesh, { spinSpeed: p.spinSpeed, bobAmp: p.bobAmp, bobSpeed: p.bobSpeed, baseY: p.radius + 0.2 });
-  mesh.position.y = p.radius + 0.2;
+  mesh.receiveShadow = false;
+  mesh.position.y = baseY;
+  _applySpinBob(mesh, { spinSpeed: p.spinSpeed, bobAmp: p.bobAmp, bobSpeed: p.bobSpeed, baseY });
   group.add(mesh);
 
   function update(dt) { mesh.userData._anim?.(dt); }
-  function dispose() { geo.dispose(); glow.material.dispose(); }
+  function dispose() { /* shared assets, do not dispose */ }
   function setParam(key, value) {
-    if (key === "color") glow.material.color.set(value);
-    else if (key === "emissive") glow.uEmissive.value.set(value);
-    else if (key === "intensity") glow.uIntensity.value = value;
-    else if (key === "pickupRadius") api.pickupRadius = value;
+    if (key === "pickupRadius") api.pickupRadius = value;
+    // spin/bob params can be live-tuned via re-applying anim
     else if (key === "spinSpeed" || key === "bobAmp" || key === "bobSpeed") {
-      applySpinBob(mesh, { spinSpeed: p.spinSpeed, bobAmp: p.bobAmp, bobSpeed: p.bobSpeed, baseY: p.radius + 0.2, [key]: value });
       p[key] = value;
+      _applySpinBob(mesh, { spinSpeed: p.spinSpeed, bobAmp: p.bobAmp, bobSpeed: p.bobSpeed, baseY });
     }
+    // color/emissive/intensity are kind-level; ignored per-instance to preserve material sharing.
   }
   function getParams() { return { ...p }; }
 
@@ -111,7 +142,7 @@ export function createCoinProp(params = {}) {
     group, update, dispose, setParam, getParams,
     kind: "coin",
     pickupRadius: p.pickupRadius,
-    burstColor: new THREE.Color(p.emissive),
+    burstColor: new THREE.Color(COIN_DEFAULTS.emissive),
   };
   return api;
 }
@@ -138,8 +169,7 @@ export function heartBoundingBox(params) {
   );
 }
 
-function buildHeartGeometry(size) {
-  // 2D heart extruded along Z (thin slab) — classic Shape + ExtrudeGeometry.
+function _buildHeartGeometry(size) {
   const shape = new THREE.Shape();
   const s = size;
   shape.moveTo(0, -s * 0.6);
@@ -158,31 +188,40 @@ function buildHeartGeometry(size) {
   return geo;
 }
 
+let _heartShared = null;
+function _heartAssets() {
+  if (_heartShared) return _heartShared;
+  const geo = _buildHeartGeometry(HEART_DEFAULTS.size);
+  const mat = _buildSharedMaterial({
+    baseColor: HEART_DEFAULTS.color,
+    emissive: HEART_DEFAULTS.emissive,
+    intensity: HEART_DEFAULTS.intensity,
+    rimStrength: 1.0,
+  });
+  _heartShared = { geo, mat };
+  return _heartShared;
+}
+
 export function createHeartProp(params = {}) {
   const p = { ...HEART_DEFAULTS, ...params };
-  const group = new THREE.Group();
+  const { geo, mat } = _heartAssets();
 
-  const geo = buildHeartGeometry(p.size);
-  const glow = buildGlowMaterial({
-    color: p.color,
-    emissive: p.emissive,
-    intensity: p.intensity,
-    metalness: 0.1,
-    roughness: 0.35,
-  });
-  const mesh = new THREE.Mesh(geo, glow.material);
+  const baseY = p.size + 0.2;
+  const group = new THREE.Group();
+  const mesh = new THREE.Mesh(geo, mat);
   mesh.castShadow = true;
-  applySpinBob(mesh, { spinSpeed: p.spinSpeed, bobAmp: p.bobAmp, bobSpeed: p.bobSpeed, baseY: p.size + 0.2 });
-  mesh.position.y = p.size + 0.2;
+  mesh.position.y = baseY;
+  _applySpinBob(mesh, { spinSpeed: p.spinSpeed, bobAmp: p.bobAmp, bobSpeed: p.bobSpeed, baseY });
   group.add(mesh);
 
   function update(dt) { mesh.userData._anim?.(dt); }
-  function dispose() { geo.dispose(); glow.material.dispose(); }
+  function dispose() { /* shared assets, do not dispose */ }
   function setParam(key, value) {
-    if (key === "color") glow.material.color.set(value);
-    else if (key === "emissive") glow.uEmissive.value.set(value);
-    else if (key === "intensity") glow.uIntensity.value = value;
-    else if (key === "pickupRadius") api.pickupRadius = value;
+    if (key === "pickupRadius") api.pickupRadius = value;
+    else if (key === "spinSpeed" || key === "bobAmp" || key === "bobSpeed") {
+      p[key] = value;
+      _applySpinBob(mesh, { spinSpeed: p.spinSpeed, bobAmp: p.bobAmp, bobSpeed: p.bobSpeed, baseY });
+    }
   }
   function getParams() { return { ...p }; }
 
@@ -190,7 +229,7 @@ export function createHeartProp(params = {}) {
     group, update, dispose, setParam, getParams,
     kind: "heart",
     pickupRadius: p.pickupRadius,
-    burstColor: new THREE.Color(p.emissive),
+    burstColor: new THREE.Color(HEART_DEFAULTS.emissive),
   };
   return api;
 }
@@ -217,61 +256,104 @@ export function keyBoundingBox(params) {
   );
 }
 
+/** Build the key as ONE merged BufferGeometry (4 parts → single draw per instance). */
+function _buildKeyGeometry(size) {
+  const s = size;
+  const parts = [];
+
+  const ring = new THREE.TorusGeometry(s * 0.28, s * 0.07, 12, 24);
+  ring.translate(0, s * 0.3, 0);
+  parts.push(ring);
+
+  const shaft = new THREE.CylinderGeometry(s * 0.05, s * 0.05, s * 0.7, 10);
+  shaft.translate(0, s * 0.3 - s * 0.45, 0);
+  parts.push(shaft);
+
+  const tooth1 = new THREE.BoxGeometry(s * 0.18, s * 0.06, s * 0.08);
+  tooth1.translate(s * 0.09, s * 0.3 - s * 0.62, 0);
+  parts.push(tooth1);
+
+  const tooth2 = new THREE.BoxGeometry(s * 0.13, s * 0.06, s * 0.08);
+  tooth2.translate(s * 0.07, s * 0.3 - s * 0.78, 0);
+  parts.push(tooth2);
+
+  // Merge — manually concat positions/normals/indices to avoid needing BufferGeometryUtils import.
+  const merged = _mergeBufferGeometries(parts);
+  for (const g of parts) g.dispose();
+  return merged;
+}
+
+function _mergeBufferGeometries(geos) {
+  let totalVerts = 0;
+  let totalIndices = 0;
+  for (const g of geos) {
+    totalVerts += g.attributes.position.count;
+    totalIndices += g.index ? g.index.count : g.attributes.position.count;
+  }
+  const positions = new Float32Array(totalVerts * 3);
+  const normals = new Float32Array(totalVerts * 3);
+  const indices = new Uint32Array(totalIndices);
+
+  let vOff = 0, iOff = 0;
+  for (const g of geos) {
+    const p = g.attributes.position.array;
+    const n = g.attributes.normal.array;
+    positions.set(p, vOff * 3);
+    normals.set(n, vOff * 3);
+    if (g.index) {
+      const src = g.index.array;
+      for (let i = 0; i < src.length; i++) indices[iOff + i] = src[i] + vOff;
+      iOff += src.length;
+    } else {
+      for (let i = 0; i < g.attributes.position.count; i++) indices[iOff + i] = vOff + i;
+      iOff += g.attributes.position.count;
+    }
+    vOff += g.attributes.position.count;
+  }
+
+  const out = new THREE.BufferGeometry();
+  out.setAttribute("position", new THREE.BufferAttribute(positions, 3));
+  out.setAttribute("normal", new THREE.BufferAttribute(normals, 3));
+  out.setIndex(new THREE.BufferAttribute(indices, 1));
+  out.computeBoundingBox();
+  out.computeBoundingSphere();
+  return out;
+}
+
+let _keyShared = null;
+function _keyAssets() {
+  if (_keyShared) return _keyShared;
+  const geo = _buildKeyGeometry(KEY_DEFAULTS.size);
+  const mat = _buildSharedMaterial({
+    baseColor: KEY_DEFAULTS.color,
+    emissive: KEY_DEFAULTS.emissive,
+    intensity: KEY_DEFAULTS.intensity,
+    rimStrength: 0.7,
+  });
+  _keyShared = { geo, mat };
+  return _keyShared;
+}
+
 export function createKeyProp(params = {}) {
   const p = { ...KEY_DEFAULTS, ...params };
+  const { geo, mat } = _keyAssets();
+
+  const baseY = p.size + 0.3;
   const group = new THREE.Group();
+  const mesh = new THREE.Mesh(geo, mat);
+  mesh.castShadow = true;
+  mesh.position.y = baseY;
+  _applySpinBob(mesh, { spinSpeed: p.spinSpeed, bobAmp: p.bobAmp, bobSpeed: p.bobSpeed, baseY });
+  group.add(mesh);
 
-  const s = p.size;
-  const glow = buildGlowMaterial({
-    color: p.color,
-    emissive: p.emissive,
-    intensity: p.intensity,
-    metalness: 0.95,
-    roughness: 0.18,
-  });
-
-  // Ring (bow)
-  const ringGeo = new THREE.TorusGeometry(s * 0.28, s * 0.07, 12, 24);
-  const ring = new THREE.Mesh(ringGeo, glow.material);
-  ring.castShadow = true;
-  ring.position.set(0, s * 0.3, 0);
-
-  // Shaft
-  const shaftGeo = new THREE.CylinderGeometry(s * 0.05, s * 0.05, s * 0.7, 10);
-  shaftGeo.translate(0, -s * 0.45, 0);
-  const shaft = new THREE.Mesh(shaftGeo, glow.material);
-  shaft.castShadow = true;
-  shaft.position.set(0, s * 0.3, 0);
-
-  // Teeth
-  const tooth1Geo = new THREE.BoxGeometry(s * 0.18, s * 0.06, s * 0.08);
-  tooth1Geo.translate(s * 0.09, -s * 0.62, 0);
-  const tooth1 = new THREE.Mesh(tooth1Geo, glow.material);
-  tooth1.castShadow = true;
-  tooth1.position.set(0, s * 0.3, 0);
-
-  const tooth2Geo = new THREE.BoxGeometry(s * 0.13, s * 0.06, s * 0.08);
-  tooth2Geo.translate(s * 0.07, -s * 0.78, 0);
-  const tooth2 = new THREE.Mesh(tooth2Geo, glow.material);
-  tooth2.castShadow = true;
-  tooth2.position.set(0, s * 0.3, 0);
-
-  const keyRoot = new THREE.Group();
-  keyRoot.add(ring, shaft, tooth1, tooth2);
-  applySpinBob(keyRoot, { spinSpeed: p.spinSpeed, bobAmp: p.bobAmp, bobSpeed: p.bobSpeed, baseY: p.size + 0.3 });
-  keyRoot.position.y = p.size + 0.3;
-  group.add(keyRoot);
-
-  function update(dt) { keyRoot.userData._anim?.(dt); }
-  function dispose() {
-    ringGeo.dispose(); shaftGeo.dispose(); tooth1Geo.dispose(); tooth2Geo.dispose();
-    glow.material.dispose();
-  }
+  function update(dt) { mesh.userData._anim?.(dt); }
+  function dispose() { /* shared assets, do not dispose */ }
   function setParam(key, value) {
-    if (key === "color") glow.material.color.set(value);
-    else if (key === "emissive") glow.uEmissive.value.set(value);
-    else if (key === "intensity") glow.uIntensity.value = value;
-    else if (key === "pickupRadius") api.pickupRadius = value;
+    if (key === "pickupRadius") api.pickupRadius = value;
+    else if (key === "spinSpeed" || key === "bobAmp" || key === "bobSpeed") {
+      p[key] = value;
+      _applySpinBob(mesh, { spinSpeed: p.spinSpeed, bobAmp: p.bobAmp, bobSpeed: p.bobSpeed, baseY });
+    }
   }
   function getParams() { return { ...p }; }
 
@@ -279,11 +361,116 @@ export function createKeyProp(params = {}) {
     group, update, dispose, setParam, getParams,
     kind: "key",
     pickupRadius: p.pickupRadius,
-    burstColor: new THREE.Color(p.emissive),
+    burstColor: new THREE.Color(KEY_DEFAULTS.emissive),
   };
   return api;
+}
+
+/* ─────────── GLB-collectible extension hook (future) ───────────
+ *
+ * To add a GLB-based collectible (chest, sword, etc.):
+ *
+ *   import { registerGlbCollectibleKind } from "./collectibleFactory.js";
+ *   const treasure = registerGlbCollectibleKind("Treasure", gltfScene, {
+ *     pickupRadius: 1.5,
+ *     burstColor: "#ffd56a",
+ *     spinSpeed: 1.0,
+ *     bobAmp: 0.1,
+ *     bobSpeed: 1.0,
+ *   });
+ *   // Then in main.js: livePropManager.registerFactory(treasure.factoryId, treasure.create);
+ *   //                  defs[name] = { factoryId, defaults, bbox }
+ *   // and add a button to the Add Live Prop section.
+ *
+ * The runtime (collectibleRuntime.js) only checks for `kind` membership in COLLECTIBLE_KINDS,
+ * so we register the new kind name there too.
+ */
+export function registerGlbCollectibleKind(name, gltfScene, opts = {}) {
+  const {
+    pickupRadius = 1.3,
+    burstColor = "#ffffff",
+    spinSpeed = 1.5,
+    bobAmp = 0.15,
+    bobSpeed = 1.4,
+    baseYOffset = 0.3,
+  } = opts;
+
+  const kindKey = name.toLowerCase();
+  COLLECTIBLE_KINDS.add(kindKey);
+
+  // Pre-extract shared meshes from the GLB scene; we'll clone references at instance time.
+  // Each unique material+geometry pair already lives in the GLB — we don't duplicate them.
+  const submeshes = [];
+  gltfScene.updateMatrixWorld(true);
+  const rootInv = new THREE.Matrix4().copy(gltfScene.matrixWorld).invert();
+  gltfScene.traverse((child) => {
+    if (!child.isMesh) return;
+    const localMatrix = new THREE.Matrix4().multiplyMatrices(rootInv, child.matrixWorld);
+    submeshes.push({ geometry: child.geometry, material: child.material, localMatrix });
+  });
+
+  const mergedBox = new THREE.Box3();
+  for (const sm of submeshes) {
+    if (!sm.geometry.boundingBox) sm.geometry.computeBoundingBox();
+    const localBox = sm.geometry.boundingBox.clone().applyMatrix4(sm.localMatrix);
+    mergedBox.union(localBox);
+  }
+  const baseY = -mergedBox.min.y + baseYOffset;
+
+  const defaults = { pickupRadius, spinSpeed, bobAmp, bobSpeed };
+  const burstColorObj = new THREE.Color(burstColor);
+
+  function create(params = {}) {
+    const p = { ...defaults, ...params };
+    const group = new THREE.Group();
+    const inner = new THREE.Group();
+    for (const sm of submeshes) {
+      const m = new THREE.Mesh(sm.geometry, sm.material);
+      m.applyMatrix4(sm.localMatrix);
+      m.castShadow = true;
+      m.receiveShadow = false;
+      inner.add(m);
+    }
+    inner.position.y = baseY;
+    _applySpinBob(inner, { spinSpeed: p.spinSpeed, bobAmp: p.bobAmp, bobSpeed: p.bobSpeed, baseY });
+    group.add(inner);
+
+    function update(dt) { inner.userData._anim?.(dt); }
+    function dispose() { /* GLB assets are shared and owned externally */ }
+    function setParam(key, value) {
+      if (key === "pickupRadius") api.pickupRadius = value;
+      else if (key === "spinSpeed" || key === "bobAmp" || key === "bobSpeed") {
+        p[key] = value;
+        _applySpinBob(inner, { spinSpeed: p.spinSpeed, bobAmp: p.bobAmp, bobSpeed: p.bobSpeed, baseY });
+      }
+    }
+    function getParams() { return { ...p }; }
+    const api = {
+      group, update, dispose, setParam, getParams,
+      kind: kindKey,
+      pickupRadius: p.pickupRadius,
+      burstColor: burstColorObj.clone(),
+    };
+    return api;
+  }
+
+  return {
+    name,
+    kind: kindKey,
+    factoryId: kindKey,
+    defaults,
+    boundingBox: () => mergedBox.clone(),
+    create,
+  };
 }
 
 /* ─────────── meta ─────────── */
 
 export const COLLECTIBLE_KINDS = new Set(["coin", "heart", "key"]);
+
+/** Optional: dispose shared assets at app shutdown. Not strictly needed (browser cleans up). */
+export function disposeAllCollectibleAssets() {
+  if (_coinShared)  { _coinShared.geo.dispose();  _coinShared.mat.dispose();  _coinShared = null; }
+  if (_heartShared) { _heartShared.geo.dispose(); _heartShared.mat.dispose(); _heartShared = null; }
+  if (_keyShared)   { _keyShared.geo.dispose();   _keyShared.mat.dispose();   _keyShared = null; }
+}

@@ -10,7 +10,7 @@ import * as THREE from "three";
 import { MeshBasicNodeMaterial } from "three";
 import {
   vec3, float, uniform, attribute, positionLocal,
-  sub, smoothstep, max,
+  sub, smoothstep, max, greaterThanEqual,
 } from "three/tsl";
 
 const MAX_PARTICLES   = 256;
@@ -94,6 +94,10 @@ export function createCollectibleBurst(scene) {
   const aliveMask = smoothstep(float(0.0), float(0.001), ageRaw); // kill before birth
   mat.colorNode   = aColorNode.mul(alive.add(0.4));
   mat.opacityNode = alive.mul(aliveMask);
+
+  // Skip fragment shader entirely for dead particles — major perf win when many bursts have decayed
+  // (no overdraw, no blending of zero-alpha fragments).
+  mat.discardNode = greaterThanEqual(tNorm, float(1.0));
 
   const mesh = new THREE.Mesh(instGeo, mat);
   mesh.frustumCulled = false;
