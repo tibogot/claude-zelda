@@ -1,0 +1,3367 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <title>Tree Editor — Stylized Tree Builder for V2 Engine</title>
+    <style>
+      * {
+        margin: 0;
+        padding: 0;
+        box-sizing: border-box;
+      }
+      html,
+      body {
+        width: 100%;
+        height: 100%;
+        overflow: hidden;
+        background: #1a3020;
+      }
+      canvas {
+        display: block;
+      }
+      :root {
+        --bg-darkest: #1a1a1a;
+        --bg-dark: #222222;
+        --bg-panel: #2a2a2a;
+        --bg-item: #333333;
+        --bg-hover: #3a3a3a;
+        --bg-input: #1e1e1e;
+        --border: #3c3c3c;
+        --border-light: #4a4a4a;
+        --text: #cccccc;
+        --text-dim: #888888;
+        --text-bright: #e0e0e0;
+        --accent: #4a9eff;
+        --font: "Segoe UI", system-ui, -apple-system, sans-serif;
+        --font-mono: "Cascadia Code", "Fira Code", Consolas, monospace;
+        --radius: 4px;
+      }
+      #ui {
+        position: fixed;
+        top: 8px;
+        right: 8px;
+        z-index: 10;
+        width: 320px;
+        max-height: calc(100vh - 16px);
+        display: flex;
+        flex-direction: column;
+        overflow: hidden;
+        background: var(--bg-panel);
+        border: 1px solid var(--border);
+        border-radius: 6px;
+        font-family: var(--font);
+        font-size: 13px;
+        color: var(--text);
+        user-select: none;
+        box-shadow: 0 8px 24px rgba(0, 0, 0, 0.45);
+      }
+      #ui .panel-header {
+        display: flex;
+        align-items: center;
+        padding: 8px 12px;
+        min-height: 36px;
+        background: var(--bg-dark);
+        border-bottom: 1px solid var(--border);
+        font-size: 12px;
+        font-weight: 600;
+        letter-spacing: 0.4px;
+        color: var(--text-bright);
+        flex-shrink: 0;
+      }
+      #ui-scroll {
+        flex: 1;
+        overflow-y: auto;
+        scrollbar-width: thin;
+      }
+      #ui-scroll::-webkit-scrollbar {
+        width: 8px;
+      }
+      #ui-scroll::-webkit-scrollbar-thumb {
+        background: var(--border);
+        border-radius: 4px;
+      }
+      .inspector-section {
+        border-bottom: 1px solid var(--border);
+      }
+      .section-header {
+        display: flex;
+        align-items: center;
+        gap: 6px;
+        padding: 6px 12px;
+        cursor: pointer;
+        font-size: 11px;
+        font-weight: 600;
+        text-transform: uppercase;
+        letter-spacing: 0.4px;
+        color: var(--text-dim);
+      }
+      .section-header:hover {
+        background: var(--bg-hover);
+      }
+      .section-header .section-arrow {
+        width: 14px;
+        height: 14px;
+        transition: transform 0.15s;
+        flex-shrink: 0;
+      }
+      .section-header.collapsed .section-arrow {
+        transform: rotate(-90deg);
+      }
+      .section-body {
+        padding: 6px 12px 10px;
+      }
+      .section-body.hidden {
+        display: none;
+      }
+      .prop-row {
+        display: flex;
+        align-items: center;
+        gap: 8px;
+        padding: 3px 0;
+        min-height: 26px;
+      }
+      .prop-label {
+        width: 108px;
+        min-width: 108px;
+        font-size: 11px;
+        color: var(--text-dim);
+        text-align: right;
+        padding-right: 4px;
+        line-height: 1.2;
+      }
+      .prop-value {
+        flex: 1;
+        display: flex;
+        gap: 4px;
+        align-items: center;
+        min-width: 0;
+      }
+      .prop-input {
+        flex: 1;
+        height: 22px;
+        background: var(--bg-input);
+        border: 1px solid var(--border);
+        border-radius: var(--radius);
+        padding: 0 6px;
+        color: var(--text);
+        font-size: 12px;
+        font-family: var(--font-mono);
+        outline: none;
+        min-width: 0;
+      }
+      .prop-input:focus {
+        border-color: var(--accent);
+      }
+      .prop-color-wrap {
+        display: flex;
+        align-items: center;
+        gap: 6px;
+        flex: 1;
+      }
+      .prop-color {
+        width: 22px;
+        height: 22px;
+        border-radius: var(--radius);
+        border: 1px solid var(--border);
+        cursor: pointer;
+        flex-shrink: 0;
+        padding: 0;
+        -webkit-appearance: none;
+        appearance: none;
+      }
+      .prop-color::-webkit-color-swatch-wrapper {
+        padding: 0;
+      }
+      .prop-color::-webkit-color-swatch {
+        border: none;
+        border-radius: 2px;
+      }
+      .prop-slider-wrap {
+        flex: 1;
+        display: flex;
+        align-items: center;
+        gap: 6px;
+        min-width: 0;
+      }
+      .prop-num-input {
+        width: 72px;
+        height: 22px;
+        flex-shrink: 0;
+        box-sizing: border-box;
+        background: var(--bg-input);
+        border: 1px solid var(--border);
+        border-radius: var(--radius);
+        padding: 0 5px;
+        color: var(--text);
+        font-size: 11px;
+        font-family: var(--font-mono);
+        text-align: right;
+        outline: none;
+      }
+      .prop-num-input:focus {
+        border-color: var(--accent);
+      }
+      .prop-num-input::-webkit-outer-spin-button,
+      .prop-num-input::-webkit-inner-spin-button {
+        -webkit-appearance: none;
+        margin: 0;
+      }
+      .prop-num-input[type="number"] {
+        appearance: textfield;
+        -moz-appearance: textfield;
+      }
+      .prop-slider {
+        flex: 1;
+        height: 4px;
+        -webkit-appearance: none;
+        appearance: none;
+        background: var(--bg-input);
+        border-radius: 2px;
+        outline: none;
+        min-width: 0;
+      }
+      .prop-slider::-webkit-slider-thumb {
+        -webkit-appearance: none;
+        width: 12px;
+        height: 12px;
+        border-radius: 50%;
+        background: var(--accent);
+        cursor: pointer;
+      }
+      .prop-toggle {
+        width: 14px;
+        height: 14px;
+        border: 1px solid var(--border-light);
+        border-radius: 3px;
+        background: var(--bg-input);
+        cursor: pointer;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        flex-shrink: 0;
+        padding: 0;
+        color: transparent;
+      }
+      .prop-toggle.checked {
+        background: var(--accent);
+        border-color: var(--accent);
+        color: white;
+      }
+      .prop-toggle svg {
+        width: 10px;
+        height: 10px;
+      }
+      .section-btn {
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        width: 100%;
+        height: 26px;
+        margin-top: 4px;
+        background: var(--bg-item);
+        border: 1px solid var(--border);
+        border-radius: var(--radius);
+        color: var(--text-dim);
+        cursor: pointer;
+        font-size: 11px;
+        font-family: var(--font);
+      }
+      .section-btn:hover {
+        background: var(--bg-hover);
+        color: var(--text);
+        border-color: var(--border-light);
+      }
+      .section-separator {
+        height: 1px;
+        background: var(--border);
+        margin: 6px 0;
+      }
+      .info-row {
+        display: flex;
+        align-items: center;
+        gap: 8px;
+        padding: 3px 0;
+        min-height: 26px;
+      }
+      .info-label {
+        width: 108px;
+        min-width: 108px;
+        font-size: 11px;
+        color: var(--text-dim);
+        text-align: right;
+        padding-right: 4px;
+      }
+      .info-value {
+        flex: 1;
+        font-size: 12px;
+        color: var(--text);
+        font-family: var(--font-mono);
+      }
+      #info {
+        position: fixed;
+        bottom: 8px;
+        left: 8px;
+        color: #ddd;
+        font: 11px/1.8 monospace;
+        background: rgba(0, 0, 0, 0.55);
+        padding: 5px 10px;
+        border-radius: 4px;
+        pointer-events: none;
+      }
+      .tex-gallery-label {
+        font-size: 10px;
+        font-weight: 600;
+        text-transform: uppercase;
+        letter-spacing: 0.35px;
+        color: var(--text-dim);
+        padding: 2px 0 6px;
+      }
+      .tex-gallery {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 8px;
+        padding: 0 0 10px;
+      }
+      .tex-gallery .tex-item {
+        display: flex;
+        flex-direction: column;
+        align-items: center;
+        gap: 3px;
+        width: 56px;
+      }
+      .tex-gallery img {
+        width: 52px;
+        height: 52px;
+        object-fit: cover;
+        border-radius: var(--radius);
+        border: 2px solid var(--border);
+        cursor: pointer;
+        opacity: 0.75;
+        background: var(--bg-input);
+        transition:
+          opacity 0.15s,
+          border-color 0.15s;
+      }
+      .tex-gallery img:hover {
+        opacity: 1;
+        border-color: var(--border-light);
+      }
+      .tex-gallery img.active {
+        border-color: var(--accent);
+        opacity: 1;
+        box-shadow: 0 0 0 1px var(--accent);
+      }
+      .tex-gallery .tex-label {
+        font-size: 9px;
+        line-height: 1.2;
+        font-family: var(--font-mono);
+        color: var(--text-dim);
+        text-align: center;
+        max-width: 56px;
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+        pointer-events: none;
+      }
+    </style>
+  </head>
+  <body>
+    <div id="ui">
+      <div class="panel-header">Tree Editor</div>
+      <div id="ui-scroll"></div>
+    </div>
+    <div id="info">
+      Drag to orbit · Scroll to zoom · Middle-drag to pan · Ctrl+Z undo · Ctrl+Y
+      redo
+    </div>
+    <script type="importmap">
+      {
+        "imports": {
+          "three": "https://cdn.jsdelivr.net/npm/three@0.183.1/build/three.webgpu.js",
+          "three/webgpu": "https://cdn.jsdelivr.net/npm/three@0.183.1/build/three.webgpu.js",
+          "three/tsl": "https://cdn.jsdelivr.net/npm/three@0.183.1/build/three.tsl.js",
+          "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.183.1/examples/jsm/"
+        }
+      }
+    </script>
+
+    <script type="module">
+      import * as THREE from "three";
+      import {
+        Fn,
+        float,
+        vec2,
+        vec3,
+        vec4,
+        uniform,
+        attribute,
+        varying,
+        texture,
+        uv,
+        mix,
+        step,
+        smoothstep,
+        clamp,
+        sin,
+        cos,
+        abs,
+        fract,
+        floor,
+        dot,
+        normalize,
+        length,
+        add,
+        sub,
+        mul,
+        div,
+        max,
+        min,
+        pow,
+        positionLocal,
+        positionWorld,
+        normalLocal,
+        normalWorld,
+        cameraPosition,
+        modelWorldMatrix,
+        negate,
+        cross,
+      } from "three/tsl";
+      import { MeshStandardNodeMaterial } from "three";
+      import { GLTFLoader } from "three/addons/loaders/GLTFLoader.js";
+      import { DRACOLoader } from "three/addons/loaders/DRACOLoader.js";
+      import { OrbitControls } from "three/addons/controls/OrbitControls.js";
+
+      // ─── CUSTOM INSPECTOR (v2/editor-style) ─────────────────────────────────────
+      const _checkSvg =
+        '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12"></polyline></svg>';
+      const _arrowSvg =
+        '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="section-arrow"><polyline points="6 9 12 15 18 9"></polyline></svg>';
+      const _uiRefreshers = [];
+
+      function _fmt(v, step) {
+        if (step >= 1) return String(Math.round(v));
+        const d = Math.max(0, -Math.floor(Math.log10(step)));
+        return v.toFixed(d);
+      }
+
+      function _clampSnap(v, min, max, step) {
+        if (!Number.isFinite(v)) return min;
+        const n = Math.round((v - min) / step);
+        let out = min + n * step;
+        const stepStr = String(step);
+        let decimals = 0;
+        if (stepStr.includes(".")) {
+          decimals = stepStr.split(".")[1].length;
+        } else if (stepStr.includes("e-")) {
+          decimals = 8;
+        }
+        if (decimals > 0) out = Number(out.toFixed(decimals));
+        return Math.min(max, Math.max(min, out));
+      }
+
+      function _section(parent, title, expanded = true) {
+        const sec = document.createElement("div");
+        sec.className = "inspector-section";
+        const hdr = document.createElement("div");
+        hdr.className = "section-header" + (expanded ? "" : " collapsed");
+        hdr.innerHTML = _arrowSvg + " " + title;
+        const body = document.createElement("div");
+        body.className = "section-body" + (expanded ? "" : " hidden");
+        hdr.addEventListener("click", () => {
+          hdr.classList.toggle("collapsed");
+          body.classList.toggle("hidden");
+        });
+        sec.appendChild(hdr);
+        sec.appendChild(body);
+        parent.appendChild(sec);
+        return body;
+      }
+
+      function _slider(parent, obj, key, opts) {
+        const { label, min, max, step = 0.01, onChange } = opts;
+        const row = document.createElement("div");
+        row.className = "prop-row";
+        const cur = obj[key];
+        row.innerHTML = `<span class="prop-label">${label}</span><div class="prop-value"><div class="prop-slider-wrap"><input type="range" class="prop-slider" min="${min}" max="${max}" step="${step}" value="${cur}"><input type="number" class="prop-num-input" title="Type an exact value" min="${min}" max="${max}" step="${step}" value="${_fmt(cur, step)}"></div></div>`;
+        const sl = row.querySelector(".prop-slider");
+        const num = row.querySelector(".prop-num-input");
+        const syncNumDisplay = () => {
+          num.value = _fmt(obj[key], step);
+        };
+        const applyFromSlider = () => {
+          obj[key] = parseFloat(sl.value);
+          syncNumDisplay();
+          onChange?.({ value: obj[key] });
+        };
+        const commitFromNum = () => {
+          const raw = String(num.value).trim();
+          if (raw === "" || raw === "-" || raw === "." || raw === "-.") {
+            syncNumDisplay();
+            return;
+          }
+          let v = parseFloat(raw);
+          if (!Number.isFinite(v)) {
+            syncNumDisplay();
+            return;
+          }
+          v = _clampSnap(v, min, max, step);
+          obj[key] = v;
+          sl.value = String(v);
+          syncNumDisplay();
+          onChange?.({ value: obj[key] });
+        };
+        sl.addEventListener("input", applyFromSlider);
+        num.addEventListener("change", commitFromNum);
+        num.addEventListener("keydown", (e) => {
+          if (e.key === "Enter") num.blur();
+        });
+        num.addEventListener(
+          "wheel",
+          (e) => {
+            if (document.activeElement === num) e.preventDefault();
+          },
+          { passive: false },
+        );
+        parent.appendChild(row);
+        const handle = {
+          refresh() {
+            sl.value = obj[key];
+            syncNumDisplay();
+          },
+        };
+        _uiRefreshers.push(handle);
+        return handle;
+      }
+
+      function _color(parent, obj, key, opts) {
+        const { label, onChange } = opts;
+        const row = document.createElement("div");
+        row.className = "prop-row";
+        row.innerHTML = `<span class="prop-label">${label}</span><div class="prop-value"><div class="prop-color-wrap"><input type="color" class="prop-color" value="${obj[key]}"><span class="prop-slider-val" style="width:auto;font-size:11px;color:var(--text-dim);font-family:var(--font-mono)">${obj[key]}</span></div></div>`;
+        const inp = row.querySelector(".prop-color");
+        const hex = row.querySelector(".prop-slider-val");
+        inp.addEventListener("input", () => {
+          obj[key] = inp.value;
+          hex.textContent = inp.value;
+          onChange?.({ value: obj[key] });
+        });
+        parent.appendChild(row);
+        const handle = {
+          refresh() {
+            inp.value = obj[key];
+            hex.textContent = obj[key];
+          },
+        };
+        _uiRefreshers.push(handle);
+        return handle;
+      }
+
+      function _toggle(parent, obj, key, opts) {
+        const { label, onChange } = opts;
+        const row = document.createElement("div");
+        row.className = "prop-row";
+        row.innerHTML = `<span class="prop-label">${label}</span><div class="prop-value"><button type="button" class="prop-toggle ${obj[key] ? "checked" : ""}">${_checkSvg}</button></div>`;
+        const btn = row.querySelector(".prop-toggle");
+        btn.addEventListener("click", () => {
+          obj[key] = !obj[key];
+          btn.classList.toggle("checked", obj[key]);
+          onChange?.({ value: obj[key] });
+        });
+        parent.appendChild(row);
+        const handle = {
+          refresh() {
+            btn.classList.toggle("checked", !!obj[key]);
+          },
+        };
+        _uiRefreshers.push(handle);
+        return handle;
+      }
+
+      function _text(parent, obj, key, opts) {
+        const { label, onChange } = opts;
+        const row = document.createElement("div");
+        row.className = "prop-row";
+        row.innerHTML = `<span class="prop-label">${label}</span><div class="prop-value"><input type="text" class="prop-input" value="${obj[key] ?? ""}"></div>`;
+        const inp = row.querySelector(".prop-input");
+        inp.addEventListener("change", () => {
+          obj[key] = inp.value;
+          onChange?.({ value: obj[key] });
+        });
+        parent.appendChild(row);
+        const handle = {
+          refresh() {
+            inp.value = obj[key] ?? "";
+          },
+        };
+        _uiRefreshers.push(handle);
+        return handle;
+      }
+
+      function _button(parent, opts) {
+        const { title, onClick } = opts;
+        const btn = document.createElement("button");
+        btn.type = "button";
+        btn.className = "section-btn";
+        btn.textContent = title;
+        btn.addEventListener("click", onClick);
+        parent.appendChild(btn);
+      }
+
+      function _info(parent, label, getValue) {
+        const row = document.createElement("div");
+        row.className = "info-row";
+        const valSpan = document.createElement("span");
+        valSpan.className = "info-value";
+        valSpan.textContent = getValue();
+        row.innerHTML = `<span class="info-label">${label}</span>`;
+        row.appendChild(valSpan);
+        parent.appendChild(row);
+        const handle = {
+          refresh() {
+            valSpan.textContent = getValue();
+          },
+        };
+        _uiRefreshers.push(handle);
+        return handle;
+      }
+
+      function _separator(parent) {
+        const div = document.createElement("div");
+        div.className = "section-separator";
+        parent.appendChild(div);
+      }
+
+      function uiRefresh() {
+        _uiRefreshers.forEach((h) => h.refresh());
+      }
+
+      // ─── BUILT-IN LEAF TEXTURES ─────────────────────────────────────────────────
+      const LEAF_TEXTURES = [
+        { name: "Alpha 3", path: "textures/leaves/foliage_alpha3.png" },
+        { name: "SDF", path: "textures/leaves/foliageSDF.png" },
+        { name: "Frame 7", path: "textures/leaves/Frame 7.png" },
+        { name: "Leaf 128", path: "textures/leaves/image 128.png" },
+        { name: "Leaf 127", path: "textures/leaves/image 127.png" },
+        { name: "Leafcard", path: "textures/leaves/leafcard.jpg" },
+      ];
+
+      // ─── BUILT-IN TREE PRESETS ──────────────────────────────────────────────────
+      const TREE_PRESETS = {
+        Oak: {
+          clusters: [
+            {
+              enabled: true,
+              x: 0,
+              y: 4.5,
+              z: 0,
+              rx: 3.2,
+              ry: 2.2,
+              count: 600,
+              leafSize: 1.1,
+              scaleVar: 0.35,
+              shell: 0.5,
+              shellThick: 0.45,
+              tiltMax: 35,
+            },
+            {
+              enabled: true,
+              x: 1.8,
+              y: 3.2,
+              z: 0.5,
+              rx: 2.0,
+              ry: 1.4,
+              count: 300,
+              leafSize: 1.0,
+              scaleVar: 0.3,
+              shell: 0.45,
+              shellThick: 0.4,
+              tiltMax: 40,
+            },
+            {
+              enabled: true,
+              x: -1.4,
+              y: 3.8,
+              z: -0.8,
+              rx: 1.8,
+              ry: 1.2,
+              count: 250,
+              leafSize: 0.95,
+              scaleVar: 0.3,
+              shell: 0.48,
+              shellThick: 0.42,
+              tiltMax: 38,
+            },
+            {
+              enabled: false,
+              x: 0,
+              y: 6.0,
+              z: 0,
+              rx: 1.5,
+              ry: 0.8,
+              count: 180,
+              leafSize: 0.8,
+              scaleVar: 0.25,
+              shell: 0.55,
+              shellThick: 0.35,
+              tiltMax: 28,
+            },
+            {
+              enabled: false,
+              x: 0,
+              y: 3,
+              z: 0,
+              rx: 2,
+              ry: 1.5,
+              count: 300,
+              leafSize: 1.0,
+              scaleVar: 0.3,
+              shell: 0.5,
+              shellThick: 0.4,
+              tiltMax: 35,
+            },
+            {
+              enabled: false,
+              x: 0,
+              y: 3,
+              z: 0,
+              rx: 2,
+              ry: 1.5,
+              count: 300,
+              leafSize: 1.0,
+              scaleVar: 0.3,
+              shell: 0.5,
+              shellThick: 0.4,
+              tiltMax: 35,
+            },
+          ],
+          material: {
+            bottomColor: "#1d4d22",
+            topColor: "#5aaa2a",
+            colorVar: 0.15,
+            roughness: 1.0,
+            alphaCutoff: 0.45,
+            sssColor: "#ffee55",
+            sssStr: 0.6,
+            sssPow: 2.0,
+            rimColor: "#c8ffaa",
+            rimStr: 0.4,
+            rimPow: 2.5,
+            aoStr: 0.5,
+            normalBias: 0.75,
+            leafWarp: 0.28,
+          },
+          wind: { windSpeed: 0.9, windStr: 0.13, windMicro: 0.04 },
+          leafTexture: "textures/leaves/foliage_alpha3.png",
+          bushMode: false,
+        },
+        Pine: {
+          clusters: [
+            {
+              enabled: true,
+              x: 0,
+              y: 6.5,
+              z: 0,
+              rx: 1.2,
+              ry: 0.6,
+              count: 250,
+              leafSize: 0.9,
+              scaleVar: 0.25,
+              shell: 0.6,
+              shellThick: 0.5,
+              tiltMax: 25,
+            },
+            {
+              enabled: true,
+              x: 0,
+              y: 5.0,
+              z: 0,
+              rx: 1.8,
+              ry: 0.7,
+              count: 300,
+              leafSize: 0.95,
+              scaleVar: 0.28,
+              shell: 0.55,
+              shellThick: 0.45,
+              tiltMax: 30,
+            },
+            {
+              enabled: true,
+              x: 0,
+              y: 3.5,
+              z: 0,
+              rx: 2.4,
+              ry: 0.7,
+              count: 350,
+              leafSize: 1.0,
+              scaleVar: 0.3,
+              shell: 0.5,
+              shellThick: 0.4,
+              tiltMax: 32,
+            },
+            {
+              enabled: true,
+              x: 0,
+              y: 2.2,
+              z: 0,
+              rx: 2.8,
+              ry: 0.6,
+              count: 300,
+              leafSize: 1.0,
+              scaleVar: 0.3,
+              shell: 0.5,
+              shellThick: 0.4,
+              tiltMax: 35,
+            },
+            {
+              enabled: false,
+              x: 0,
+              y: 1.0,
+              z: 0,
+              rx: 2.2,
+              ry: 0.5,
+              count: 200,
+              leafSize: 0.9,
+              scaleVar: 0.3,
+              shell: 0.5,
+              shellThick: 0.4,
+              tiltMax: 35,
+            },
+            {
+              enabled: false,
+              x: 0,
+              y: 3,
+              z: 0,
+              rx: 2,
+              ry: 1.5,
+              count: 300,
+              leafSize: 1.0,
+              scaleVar: 0.3,
+              shell: 0.5,
+              shellThick: 0.4,
+              tiltMax: 35,
+            },
+          ],
+          material: {
+            bottomColor: "#1a3a15",
+            topColor: "#3d7a28",
+            colorVar: 0.08,
+            roughness: 1.0,
+            alphaCutoff: 0.45,
+            sssColor: "#aadd44",
+            sssStr: 0.4,
+            sssPow: 2.5,
+            rimColor: "#88cc66",
+            rimStr: 0.3,
+            rimPow: 3.0,
+            aoStr: 0.55,
+            normalBias: 0.75,
+            leafWarp: 0.28,
+          },
+          wind: { windSpeed: 0.7, windStr: 0.08, windMicro: 0.03 },
+          leafTexture: "textures/leaves/Frame 7.png",
+          bushMode: false,
+        },
+        Bush: {
+          clusters: [
+            {
+              enabled: true,
+              x: 0,
+              y: 1.2,
+              z: 0,
+              rx: 2.5,
+              ry: 1.4,
+              count: 500,
+              leafSize: 0.85,
+              scaleVar: 0.35,
+              shell: 0.5,
+              shellThick: 0.45,
+              tiltMax: 40,
+            },
+            {
+              enabled: true,
+              x: 0.8,
+              y: 0.8,
+              z: 0.6,
+              rx: 1.5,
+              ry: 1.0,
+              count: 250,
+              leafSize: 0.8,
+              scaleVar: 0.3,
+              shell: 0.45,
+              shellThick: 0.4,
+              tiltMax: 42,
+            },
+            {
+              enabled: false,
+              x: -0.6,
+              y: 0.9,
+              z: -0.5,
+              rx: 1.3,
+              ry: 0.9,
+              count: 200,
+              leafSize: 0.75,
+              scaleVar: 0.3,
+              shell: 0.48,
+              shellThick: 0.42,
+              tiltMax: 38,
+            },
+            {
+              enabled: false,
+              x: 0,
+              y: 1,
+              z: 0,
+              rx: 2,
+              ry: 1,
+              count: 300,
+              leafSize: 0.8,
+              scaleVar: 0.3,
+              shell: 0.5,
+              shellThick: 0.4,
+              tiltMax: 35,
+            },
+            {
+              enabled: false,
+              x: 0,
+              y: 1,
+              z: 0,
+              rx: 2,
+              ry: 1,
+              count: 300,
+              leafSize: 0.8,
+              scaleVar: 0.3,
+              shell: 0.5,
+              shellThick: 0.4,
+              tiltMax: 35,
+            },
+            {
+              enabled: false,
+              x: 0,
+              y: 1,
+              z: 0,
+              rx: 2,
+              ry: 1,
+              count: 300,
+              leafSize: 0.8,
+              scaleVar: 0.3,
+              shell: 0.5,
+              shellThick: 0.4,
+              tiltMax: 35,
+            },
+          ],
+          material: {
+            bottomColor: "#2a5518",
+            topColor: "#68b830",
+            colorVar: 0.14,
+            roughness: 1.0,
+            alphaCutoff: 0.45,
+            sssColor: "#ddee44",
+            sssStr: 0.5,
+            sssPow: 2.0,
+            rimColor: "#aaffaa",
+            rimStr: 0.35,
+            rimPow: 2.8,
+            aoStr: 0.4,
+            normalBias: 0.75,
+            leafWarp: 0.28,
+          },
+          wind: { windSpeed: 1.0, windStr: 0.15, windMicro: 0.05 },
+          leafTexture: "textures/leaves/foliageSDF.png",
+          bushMode: true,
+        },
+        Palm: {
+          clusters: [
+            {
+              enabled: true,
+              x: 0,
+              y: 7.0,
+              z: 0,
+              rx: 3.5,
+              ry: 1.0,
+              count: 200,
+              leafSize: 2.0,
+              scaleVar: 0.3,
+              shell: 0.7,
+              shellThick: 0.6,
+              tiltMax: 55,
+            },
+            {
+              enabled: true,
+              x: 0,
+              y: 6.5,
+              z: 0,
+              rx: 2.5,
+              ry: 0.8,
+              count: 120,
+              leafSize: 1.8,
+              scaleVar: 0.25,
+              shell: 0.65,
+              shellThick: 0.5,
+              tiltMax: 50,
+            },
+            {
+              enabled: false,
+              x: 0,
+              y: 5,
+              z: 0,
+              rx: 2,
+              ry: 1.5,
+              count: 300,
+              leafSize: 1.0,
+              scaleVar: 0.3,
+              shell: 0.5,
+              shellThick: 0.4,
+              tiltMax: 35,
+            },
+            {
+              enabled: false,
+              x: 0,
+              y: 5,
+              z: 0,
+              rx: 2,
+              ry: 1.5,
+              count: 300,
+              leafSize: 1.0,
+              scaleVar: 0.3,
+              shell: 0.5,
+              shellThick: 0.4,
+              tiltMax: 35,
+            },
+            {
+              enabled: false,
+              x: 0,
+              y: 5,
+              z: 0,
+              rx: 2,
+              ry: 1.5,
+              count: 300,
+              leafSize: 1.0,
+              scaleVar: 0.3,
+              shell: 0.5,
+              shellThick: 0.4,
+              tiltMax: 35,
+            },
+            {
+              enabled: false,
+              x: 0,
+              y: 5,
+              z: 0,
+              rx: 2,
+              ry: 1.5,
+              count: 300,
+              leafSize: 1.0,
+              scaleVar: 0.3,
+              shell: 0.5,
+              shellThick: 0.4,
+              tiltMax: 35,
+            },
+          ],
+          material: {
+            bottomColor: "#2a5a1a",
+            topColor: "#4a9922",
+            colorVar: 0.1,
+            roughness: 1.0,
+            alphaCutoff: 0.45,
+            sssColor: "#ccee33",
+            sssStr: 0.7,
+            sssPow: 1.8,
+            rimColor: "#bbff88",
+            rimStr: 0.45,
+            rimPow: 2.2,
+            aoStr: 0.35,
+            normalBias: 0.75,
+            leafWarp: 0.28,
+          },
+          wind: { windSpeed: 0.6, windStr: 0.2, windMicro: 0.06 },
+          leafTexture: "textures/leaves/image 128.png",
+          bushMode: false,
+        },
+        Autumn: {
+          clusters: [
+            {
+              enabled: true,
+              x: 0,
+              y: 5.2,
+              z: 0,
+              rx: 2.8,
+              ry: 2.0,
+              count: 450,
+              leafSize: 1.05,
+              scaleVar: 0.32,
+              shell: 0.5,
+              shellThick: 0.42,
+              tiltMax: 32,
+            },
+            {
+              enabled: true,
+              x: 1.2,
+              y: 4.0,
+              z: 0.4,
+              rx: 2.0,
+              ry: 1.3,
+              count: 280,
+              leafSize: 1.0,
+              scaleVar: 0.28,
+              shell: 0.45,
+              shellThick: 0.38,
+              tiltMax: 38,
+            },
+            {
+              enabled: true,
+              x: -1.0,
+              y: 4.5,
+              z: -0.5,
+              rx: 1.9,
+              ry: 1.2,
+              count: 220,
+              leafSize: 0.95,
+              scaleVar: 0.3,
+              shell: 0.48,
+              shellThick: 0.4,
+              tiltMax: 36,
+            },
+            {
+              enabled: false,
+              x: 0,
+              y: 3,
+              z: 0,
+              rx: 2,
+              ry: 1.5,
+              count: 300,
+              leafSize: 1.0,
+              scaleVar: 0.3,
+              shell: 0.5,
+              shellThick: 0.4,
+              tiltMax: 35,
+            },
+            {
+              enabled: false,
+              x: 0,
+              y: 3,
+              z: 0,
+              rx: 2,
+              ry: 1.5,
+              count: 300,
+              leafSize: 1.0,
+              scaleVar: 0.3,
+              shell: 0.5,
+              shellThick: 0.4,
+              tiltMax: 35,
+            },
+            {
+              enabled: false,
+              x: 0,
+              y: 3,
+              z: 0,
+              rx: 2,
+              ry: 1.5,
+              count: 300,
+              leafSize: 1.0,
+              scaleVar: 0.3,
+              shell: 0.5,
+              shellThick: 0.4,
+              tiltMax: 35,
+            },
+          ],
+          material: {
+            bottomColor: "#7a3010",
+            topColor: "#e87820",
+            colorVar: 0.16,
+            roughness: 1.0,
+            alphaCutoff: 0.45,
+            sssColor: "#ffaa44",
+            sssStr: 0.55,
+            sssPow: 2.0,
+            rimColor: "#ffcc88",
+            rimStr: 0.38,
+            rimPow: 2.5,
+            aoStr: 0.45,
+            normalBias: 0.75,
+            leafWarp: 0.28,
+          },
+          wind: { windSpeed: 0.85, windStr: 0.12, windMicro: 0.04 },
+          leafTexture: "textures/leaves/leafcard.jpg",
+          bushMode: false,
+        },
+      };
+
+      const MAX_CLUSTERS = 6;
+      const LOD_SPACING = 12;
+      const LOD_LABEL_Z = 5.2;
+
+      // ─── RENDERER ────────────────────────────────────────────────────────────────
+      const renderer = new THREE.WebGPURenderer({ antialias: true });
+      renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
+      renderer.setSize(innerWidth, innerHeight);
+      renderer.shadowMap.enabled = true;
+      renderer.shadowMap.type = THREE.PCFSoftShadowMap;
+      renderer.shadowMap.transmitted = true;
+      document.body.appendChild(renderer.domElement);
+      await renderer.init();
+
+      // ─── SCENE / CAMERA ──────────────────────────────────────────────────────────
+      const scene = new THREE.Scene();
+      scene.background = new THREE.Color("#87ceeb");
+      scene.fog = null;
+
+      const camera = new THREE.PerspectiveCamera(
+        55,
+        innerWidth / innerHeight,
+        0.1,
+        500,
+      );
+      camera.position.set(7, 5, 10);
+
+      const controls = new OrbitControls(camera, renderer.domElement);
+      controls.target.set(0, 3, 0);
+      controls.enableDamping = true;
+      controls.dampingFactor = 0.08;
+      controls.update();
+
+      // ─── LIGHTING ────────────────────────────────────────────────────────────────
+      const hemi = new THREE.HemisphereLight("#b8dfff", "#3d6b20", 0.8);
+      scene.add(hemi);
+
+      const sun = new THREE.DirectionalLight("#fff8e8", 2.2);
+      sun.position.set(5, 12, 4);
+      sun.castShadow = true;
+      sun.shadow.mapSize.set(2048, 2048);
+      sun.shadow.camera.near = 0.5;
+      sun.shadow.camera.far = 60;
+      sun.shadow.camera.left = -20;
+      sun.shadow.camera.right = 20;
+      sun.shadow.camera.top = 12;
+      sun.shadow.camera.bottom = -12;
+      sun.shadow.bias = -0.001;
+      scene.add(sun);
+
+      // ─── GROUND ──────────────────────────────────────────────────────────────────
+      const groundGeo = new THREE.CircleGeometry(40, 72);
+      const groundMat = new THREE.MeshStandardMaterial({
+        color: "#4a7c2a",
+        roughness: 0.92,
+        metalness: 0,
+      });
+      const ground = new THREE.Mesh(groundGeo, groundMat);
+      ground.rotation.x = -Math.PI / 2;
+      ground.receiveShadow = true;
+      scene.add(ground);
+
+      const pebbleGeo = new THREE.SphereGeometry(0.12, 5, 3);
+      const pebbleMat = new THREE.MeshStandardMaterial({
+        color: "#888",
+        roughness: 0.95,
+      });
+      [
+        [-1.8, 0, 1.4],
+        [2.2, 0, 0.9],
+        [-0.5, 0, 2.3],
+        [1.5, 0, -1.7],
+      ].forEach(([x, y, z]) => {
+        const p = new THREE.Mesh(pebbleGeo, pebbleMat);
+        p.position.set(x, 0.07, z);
+        p.scale.y = 0.5 + Math.random() * 0.5;
+        scene.add(p);
+      });
+
+      // ─── DEFAULT TRUNK PLACEHOLDER ───────────────────────────────────────────────
+      const defTrunkGeo = new THREE.CylinderGeometry(0.1, 0.3, 5.0, 10, 3);
+      const defTrunkMat = new THREE.MeshStandardMaterial({
+        color: 0x5c3a1e,
+        roughness: 0.95,
+      });
+      const defaultTrunk = new THREE.Mesh(defTrunkGeo, defTrunkMat);
+      defaultTrunk.position.y = 2.5;
+      defaultTrunk.castShadow = true;
+      defaultTrunk.receiveShadow = true;
+      scene.add(defaultTrunk);
+
+      let trunkRoot = null;
+      let trunkLod1Root = null;
+
+      // ─── LEAF TEXTURE ────────────────────────────────────────────────────────────
+      const leafMapNode = texture(new THREE.Texture());
+      // 0 = sample mask from .r (grayscale/RGB-only PNGs), 1 = sample from .a (RGBA PNGs).
+      // Set per-texture by detectAlphaChannel() after load.
+      const uMaskInAlpha = uniform(0.0);
+      // Built-in texture: activeLeafTexPath = "textures/leaves/...".
+      // User-loaded texture: activeLeafTexDataUrl = "data:image/...;base64,...".
+      // At most one is non-empty; both are serialized as `leafTexture` in the preset.
+      let activeLeafTexPath = "";
+      let activeLeafTexDataUrl = "";
+
+      // Detects whether an image's alpha channel carries meaningful (<255) data.
+      // Used to decide which channel holds the leaf mask.
+      function detectAlphaChannel(image) {
+        try {
+          const w = image.width || image.naturalWidth;
+          const h = image.height || image.naturalHeight;
+          if (!w || !h) return false;
+          const c = document.createElement("canvas");
+          c.width = w;
+          c.height = h;
+          const ctx = c.getContext("2d", { willReadFrequently: true });
+          ctx.drawImage(image, 0, 0);
+          const data = ctx.getImageData(0, 0, w, h).data;
+          // Sample every 4th pixel for speed; bail on first sub-opaque alpha.
+          for (let i = 3; i < data.length; i += 16) {
+            if (data[i] < 255) return true;
+          }
+          return false;
+        } catch (e) {
+          // Cross-origin tainted canvas etc. — fall back to red-channel.
+          return false;
+        }
+      }
+
+      function applyMaskChannelFor(tex) {
+        const img = tex.image;
+        uMaskInAlpha.value = detectAlphaChannel(img) ? 1.0 : 0.0;
+      }
+
+      function loadLeafTexFromPath(path) {
+        const loader = new THREE.TextureLoader();
+        loader.load(path, (tex) => {
+          tex.colorSpace = THREE.SRGBColorSpace;
+          tex.needsUpdate = true;
+          leafMapNode.value = tex;
+          applyMaskChannelFor(tex);
+          activeLeafTexPath = path;
+          activeLeafTexDataUrl = "";
+          params.leafTexFile = path;
+          updateGallerySelection();
+        });
+      }
+
+      function loadLeafTexFromFile(file) {
+        const reader = new FileReader();
+        reader.onload = (ev) => {
+          const dataUrl = ev.target.result;
+          loadLeafTexFromDataUrl(dataUrl, file.name);
+        };
+        reader.readAsDataURL(file);
+      }
+
+      // Used both by file uploads and by preset loads that embedded the texture.
+      function loadLeafTexFromDataUrl(dataUrl, displayName) {
+        const img = new Image();
+        img.onload = () => {
+          const tex = new THREE.Texture(img);
+          tex.colorSpace = THREE.SRGBColorSpace;
+          tex.needsUpdate = true;
+          leafMapNode.value = tex;
+          applyMaskChannelFor(tex);
+          activeLeafTexPath = "";
+          activeLeafTexDataUrl = dataUrl;
+          params.leafTexFile = displayName || "(embedded)";
+          updateGallerySelection();
+        };
+        img.src = dataUrl;
+      }
+
+      // ─── TEXTURE GALLERY (mounted in Leaf Texture panel) ─────────────────────────
+      let galleryImgs = [];
+
+      function updateGallerySelection() {
+        galleryImgs.forEach((img, i) => {
+          img.classList.toggle(
+            "active",
+            LEAF_TEXTURES[i].path === activeLeafTexPath,
+          );
+        });
+      }
+
+      function buildTexGallery(parent) {
+        const label = document.createElement("div");
+        label.className = "tex-gallery-label";
+        label.textContent = "Built-in textures";
+        parent.appendChild(label);
+
+        const galleryEl = document.createElement("div");
+        galleryEl.className = "tex-gallery";
+        parent.appendChild(galleryEl);
+
+        galleryImgs = [];
+        LEAF_TEXTURES.forEach((t) => {
+          const wrap = document.createElement("div");
+          wrap.className = "tex-item";
+          const img = document.createElement("img");
+          img.src = t.path;
+          img.title = t.name;
+          img.alt = t.name;
+          img.addEventListener("click", () => loadLeafTexFromPath(t.path));
+          wrap.appendChild(img);
+          const cap = document.createElement("div");
+          cap.className = "tex-label";
+          cap.textContent = t.name;
+          wrap.appendChild(cap);
+          galleryEl.appendChild(wrap);
+          galleryImgs.push(img);
+        });
+        updateGallerySelection();
+      }
+
+      // ─── MATERIAL UNIFORMS ───────────────────────────────────────────────────────
+      const uTime = uniform(0.0);
+      const uYMin = uniform(0.0);
+      const uYMax = uniform(8.0);
+      const uBottomColor = uniform(new THREE.Color("#2d5a1b"));
+      const uTopColor = uniform(new THREE.Color("#5aaa2a"));
+      const uColorVar = uniform(0.12);
+      const uAlphaCutoff = uniform(0.45);
+      const uSssColor = uniform(new THREE.Color("#c8e070"));
+      const uSssStr = uniform(0.0);
+      const uSssPow = uniform(2.0);
+      const uRimColor = uniform(new THREE.Color("#c8ffaa"));
+      const uRimStr = uniform(0.07);
+      const uRimPow = uniform(2.5);
+      const uAoStr = uniform(0.7);
+      const uSunDir = uniform(new THREE.Vector3(5, 12, 4).normalize());
+      const uWindSpeed = uniform(0.9);
+      const uWindStr = uniform(0.0);
+      const uWindMicro = uniform(0.0);
+      const uCanopyCenter = uniform(new THREE.Vector3(0, 4, 0));
+      const uAoRadius = uniform(6.0);
+      const uNormalBias = uniform(1.0);
+      const uLeafWarp = uniform(0.28);
+      const uBillboard = uniform(1.0);
+      const uBillboardYaw = uniform(0.0);
+
+      // ─── LEAF MATERIAL (TSL) ─────────────────────────────────────────────────────
+      const aRand = attribute("aRand", "vec2");
+      const aLeafScale = attribute("aLeafScale", "float");
+      const aLeafCenter = attribute("aLeafCenter", "vec3");
+      // Per-instance world-space center — instance-aware (modelWorldMatrix * leaf center)
+      const instanceCenterW = modelWorldMatrix.mul(vec4(aLeafCenter, 1)).xyz;
+
+      const leafWindOffset = Fn(() => {
+        const phase = aRand.x.mul(6.2832);
+        const tipFactor = positionLocal.y.add(0.5);
+        const sway = sin(uTime.mul(uWindSpeed).add(phase))
+          .mul(uWindStr)
+          .mul(tipFactor);
+        const micro = sin(uTime.mul(3.1).add(phase.mul(2.6)))
+          .mul(uWindMicro)
+          .mul(tipFactor);
+        const swayZ = cos(uTime.mul(uWindSpeed.mul(0.8)).add(phase.mul(1.3)))
+          .mul(uWindStr.mul(0.5))
+          .mul(tipFactor);
+        return vec3(sway.add(micro), float(0), swayZ);
+      });
+
+      const positionNode = Fn(() => {
+        // Wind is a world-space delta (sway along world X, swayZ along world Z).
+        // Must NOT be projected into the camera basis or it appears to rotate with the camera.
+        const wo = leafWindOffset();
+        const pivotW = instanceCenterW;
+        const toCam = normalize(sub(cameraPosition, pivotW));
+        const horiz = vec3(toCam.x, float(0), toCam.z);
+        const hLen = length(horiz);
+        const useH = step(float(0.0001), hLen);
+        const yawDir = normalize(
+          add(
+            mul(normalize(horiz), useH),
+            mul(vec3(0, 0, float(1)), sub(float(1), useH)),
+          ),
+        );
+        const face = normalize(mix(toCam, yawDir, uBillboardYaw));
+        const worldUp = vec3(0, 1, 0);
+        // NaN-safe basis: pick the non-degenerate cross BEFORE normalizing.
+        const cA = cross(worldUp, face);
+        const cB = cross(vec3(-1, 0, 0), face);
+        const right = normalize(mix(cA, cB, step(float(0.99), abs(face.y))));
+        const upv = normalize(cross(face, right));
+        // Per-leaf 2D rotation of the camera-aligned quad around the face axis.
+        // Breaks up the "all billboards point the same way" tell. Uses aRand.x
+        // (already deterministic per leaf and shared with v2).
+        const ang = aRand.x.mul(6.2831853);
+        const cosA = cos(ang);
+        const sinA = sin(ang);
+        const rRight = right.mul(cosA).add(upv.mul(sinA));
+        const rUp = upv.mul(cosA).sub(right.mul(sinA));
+        // Camera-aligned quad from positionLocal only (no wind in the basis).
+        const bbQuad = add(
+          mul(rRight, mul(positionLocal.x, aLeafScale)),
+          mul(rUp, mul(positionLocal.y, aLeafScale)),
+        );
+        // World-space wind, scaled with leaf size.
+        const windWorld = mul(wo, aLeafScale);
+        const bb3 = bbQuad.add(windWorld);
+        // Non-billboard branch: wind added in local space (rotates with the leaf — acceptable).
+        return mix(positionLocal.add(wo), bb3, uBillboard);
+      })();
+
+      // Stylized foliage lighting: every leaf uses world-up as its normal so the
+      // entire canopy lights as one uniform "puff." Per-leaf sphereDir variation
+      // produces visible per-leaf shading noise that swings as the camera orbits
+      // (different leaves come to the front). Uniform world-up gives a stable,
+      // angle-independent appearance; shape comes from AO and the height gradient,
+      // not from per-leaf normal variation. Matches the BotW/Genshin stylized look.
+      const sphereDir = vec3(0, 1, 0);
+      // SSS uses the per-leaf outward direction (not the uniform sphereDir) so
+      // backlit leaves on the anti-sun hemisphere still glow with the SSS color.
+      // Kept separate so Lambert stays uniform but SSS gives the stylized highlight.
+      const sphereDirForSSS = normalize(instanceCenterW.sub(uCanopyCenter));
+      const leafBillboardFace = Fn(() => {
+        const pivotW = instanceCenterW;
+        const toCam = normalize(sub(cameraPosition, pivotW));
+        const horiz = vec3(toCam.x, float(0), toCam.z);
+        const hLen = length(horiz);
+        const useH = step(float(0.0001), hLen);
+        const yawDir = normalize(
+          add(
+            mul(normalize(horiz), useH),
+            mul(vec3(0, 0, float(1)), sub(float(1), useH)),
+          ),
+        );
+        return normalize(mix(toCam, yawDir, uBillboardYaw));
+      })();
+      const warpedNormal = normalize(
+        normalLocal.add(sin(uv().x.mul(10)).mul(uLeafWarp)),
+      );
+      const geomForMix = normalize(
+        mix(warpedNormal, leafBillboardFace, uBillboard),
+      );
+      const finalNormal = normalize(mix(geomForMix, sphereDir, uNormalBias));
+
+      const colorNode = Fn(() => {
+        const h1 = aRand.x;
+        const h2 = aRand.y;
+        const heightFactor = clamp(
+          positionWorld.y.sub(uYMin).div(max(uYMax.sub(uYMin), float(0.001))),
+          float(0),
+          float(1),
+        );
+        let col = mix(uBottomColor, uTopColor, heightFactor);
+        const varMul = h1
+          .mul(uColorVar.mul(2.0))
+          .add(float(1.0).sub(uColorVar));
+        col = col.mul(varMul);
+        const hueShift = h2.sub(0.5).mul(uColorVar.mul(0.4));
+        col = vec3(
+          col.x.add(hueShift.mul(0.3)),
+          col.y,
+          col.z.sub(hueShift.mul(0.2)),
+        );
+        // Height-based AO
+        const aoHeight = mix(
+          float(1.0).sub(uAoStr),
+          float(1.0),
+          heightFactor.mul(0.8).add(0.2),
+        );
+        col = col.mul(aoHeight);
+        // Sphere-distance AO: inner leaves darker
+        const distC = clamp(
+          length(sub(positionWorld, uCanopyCenter)).div(
+            max(uAoRadius, float(0.001)),
+          ),
+          float(0),
+          float(1),
+        );
+        const aoSphere = mix(float(1.0).sub(uAoStr), float(1.0), distC);
+        col = col.mul(aoSphere);
+        const viewDir = normalize(cameraPosition.sub(positionWorld));
+        const n = normalWorld;
+        // SSS uses per-leaf sphere direction so backlit anti-sun leaves glow,
+        // while Lambert (via normalWorld = uniform world-up) stays stable.
+        const backDot = max(dot(negate(uSunDir), sphereDirForSSS), float(0));
+        const sss = pow(backDot, uSssPow).mul(uSssStr);
+        col = col.add(uSssColor.mul(sss));
+        // Rim uses per-leaf sphere direction (not the uniform up normal) so it
+        // activates on leaves whose outward direction is perpendicular to view —
+        // i.e. the canopy silhouette from any camera angle. Without this, rim
+        // would be a "horizon glow" tied to camera height and would only show
+        // up on the AO-darkened bottom, looking like SSS instead of edge rim.
+        const rimDot = float(1.0).sub(
+          max(dot(sphereDirForSSS, viewDir), float(0)),
+        );
+        const rim = pow(rimDot, uRimPow).mul(uRimStr);
+        col = col.add(uRimColor.mul(rim));
+        return clamp(col, float(0), float(2));
+      })();
+
+      // Selects the leaf mask channel based on the loaded texture format.
+      // uMaskInAlpha = 0 -> .r (grayscale / RGB-only PNGs), = 1 -> .a (RGBA PNGs).
+      const leafMaskCh = mix(leafMapNode.r, leafMapNode.a, uMaskInAlpha);
+
+      const opacityNode = Fn(() => {
+        const camDist = length(cameraPosition.sub(positionWorld));
+        const distFade = clamp(camDist.div(float(150.0)), float(0), float(1));
+        const adaptiveCutoff = mix(uAlphaCutoff, float(0.15), distFade);
+        return smoothstep(
+          adaptiveCutoff.sub(0.05),
+          adaptiveCutoff.add(0.05),
+          leafMaskCh,
+        );
+      })();
+
+      const leafMat = new MeshStandardNodeMaterial({
+        side: THREE.DoubleSide,
+        transparent: false,
+        alphaTest: 0.3,
+        roughness: 1.0,
+        metalness: 0.0,
+        depthWrite: true,
+      });
+      leafMat.positionNode = positionNode;
+      leafMat.normalNode = finalNormal;
+      leafMat.colorNode = colorNode;
+      leafMat.opacityNode = opacityNode;
+      leafMat.envMapIntensity = 0;
+      leafMat.castShadowNode = Fn(() => {
+        // Match the visible pass: same channel select and same alphaTest threshold (0.3),
+        // so the shadow silhouette aligns with the leaf silhouette.
+        const a = smoothstep(
+          uAlphaCutoff.sub(0.05),
+          uAlphaCutoff.add(0.05),
+          leafMaskCh,
+        );
+        a.lessThan(float(0.3)).discard();
+        return vec4(0, 0, 0, 1);
+      })();
+
+      // ─── CLUSTER DEFINITIONS (6 slots) ──────────────────────────────────────────
+      function makeDefaultCluster(enabled, x, y, z) {
+        return {
+          enabled,
+          x,
+          y,
+          z,
+          rx: 2.0,
+          ry: 1.5,
+          count: 300,
+          leafSize: 1.0,
+          scaleVar: 0.3,
+          shell: 0.5,
+          shellThick: 0.4,
+          tiltMax: 35,
+        };
+      }
+
+      const clusterDefs = [
+        {
+          enabled: true,
+          x: 0,
+          y: 4.2,
+          z: 0,
+          rx: 2.4,
+          ry: 1.6,
+          count: 500,
+          leafSize: 1.0,
+          scaleVar: 0.35,
+          shell: 0.5,
+          shellThick: 0.45,
+          tiltMax: 35,
+        },
+        {
+          enabled: false,
+          x: 1.1,
+          y: 2.8,
+          z: 0.4,
+          rx: 1.3,
+          ry: 0.9,
+          count: 200,
+          leafSize: 0.85,
+          scaleVar: 0.3,
+          shell: 0.45,
+          shellThick: 0.4,
+          tiltMax: 40,
+        },
+        {
+          enabled: false,
+          x: 0,
+          y: 5.6,
+          z: 0,
+          rx: 1.0,
+          ry: 0.7,
+          count: 140,
+          leafSize: 0.75,
+          scaleVar: 0.25,
+          shell: 0.55,
+          shellThick: 0.35,
+          tiltMax: 28,
+        },
+        makeDefaultCluster(false, -1.0, 3.0, -0.5),
+        makeDefaultCluster(false, 0.5, 2.0, 0.8),
+        makeDefaultCluster(false, 0, 1.5, 0),
+      ];
+
+      // ─── UNDO / REDO ─────────────────────────────────────────────────────────────
+      const undoStack = [];
+      const redoStack = [];
+      const MAX_UNDO = 40;
+
+      function captureState() {
+        return {
+          clusters: clusterDefs.map((c) => ({ ...c })),
+          material: {
+            bottomColor: params.bottomColor,
+            topColor: params.topColor,
+            colorVar: params.colorVar,
+            roughness: params.roughness,
+            alphaCutoff: params.alphaCutoff,
+            sssColor: params.sssColor,
+            sssStr: params.sssStr,
+            sssPow: params.sssPow,
+            rimColor: params.rimColor,
+            rimStr: params.rimStr,
+            rimPow: params.rimPow,
+            aoStr: params.aoStr,
+            normalBias: params.normalBias,
+            leafWarp: params.leafWarp,
+            billboardLeaves: params.billboardLeaves,
+            billboardYawOnly: params.billboardYawOnly,
+          },
+          wind: {
+            windSpeed: params.windSpeed,
+            windStr: params.windStr,
+            windMicro: params.windMicro,
+          },
+          trunkScale: params.trunkScale,
+          bushMode: params.bushMode,
+        };
+      }
+
+      function restoreState(state) {
+        state.clusters.forEach((c, i) => {
+          if (i < clusterDefs.length) Object.assign(clusterDefs[i], c);
+        });
+        if (state.material) {
+          const m = state.material;
+          params.bottomColor = m.bottomColor;
+          uBottomColor.value.set(m.bottomColor);
+          params.topColor = m.topColor;
+          uTopColor.value.set(m.topColor);
+          params.colorVar = m.colorVar;
+          uColorVar.value = m.colorVar;
+          params.roughness = m.roughness;
+          leafMat.roughness = m.roughness;
+          params.alphaCutoff = m.alphaCutoff;
+          uAlphaCutoff.value = m.alphaCutoff;
+          params.sssColor = m.sssColor;
+          uSssColor.value.set(m.sssColor);
+          params.sssStr = m.sssStr;
+          uSssStr.value = m.sssStr;
+          params.sssPow = m.sssPow;
+          uSssPow.value = m.sssPow;
+          params.rimColor = m.rimColor;
+          uRimColor.value.set(m.rimColor);
+          params.rimStr = m.rimStr;
+          uRimStr.value = m.rimStr;
+          params.rimPow = m.rimPow;
+          uRimPow.value = m.rimPow;
+          params.aoStr = m.aoStr;
+          uAoStr.value = m.aoStr;
+          if (m.normalBias != null) {
+            params.normalBias = m.normalBias;
+            uNormalBias.value = m.normalBias;
+          }
+          if (m.leafWarp != null) {
+            params.leafWarp = m.leafWarp;
+            uLeafWarp.value = m.leafWarp;
+          }
+          if (m.billboardLeaves != null) {
+            params.billboardLeaves = m.billboardLeaves;
+            uBillboard.value = m.billboardLeaves ? 1.0 : 0.0;
+          }
+          if (m.billboardYawOnly != null) {
+            params.billboardYawOnly = m.billboardYawOnly;
+            uBillboardYaw.value = m.billboardYawOnly ? 1.0 : 0.0;
+          }
+        }
+        if (state.wind) {
+          params.windSpeed = state.wind.windSpeed;
+          uWindSpeed.value = state.wind.windSpeed;
+          params.windStr = state.wind.windStr;
+          uWindStr.value = state.wind.windStr;
+          params.windMicro = state.wind.windMicro;
+          uWindMicro.value = state.wind.windMicro;
+        }
+        if (state.trunkScale != null) {
+          params.trunkScale = state.trunkScale;
+          trunkScale = state.trunkScale;
+          (trunkRoot || defaultTrunk).scale.setScalar(state.trunkScale);
+        }
+        if (state.bushMode != null) {
+          params.bushMode = state.bushMode;
+          defaultTrunk.visible = !state.bushMode && !trunkRoot;
+          if (trunkRoot) trunkRoot.visible = !state.bushMode;
+        }
+        uiRefresh();
+        buildFoliage(true);
+      }
+
+      function pushUndo() {
+        undoStack.push(captureState());
+        if (undoStack.length > MAX_UNDO) undoStack.shift();
+        redoStack.length = 0;
+      }
+
+      function undo() {
+        if (undoStack.length === 0) return;
+        redoStack.push(captureState());
+        restoreState(undoStack.pop());
+        infoEl.textContent = `Undo (${undoStack.length} left)`;
+      }
+
+      function redo() {
+        if (redoStack.length === 0) return;
+        undoStack.push(captureState());
+        restoreState(redoStack.pop());
+        infoEl.textContent = `Redo (${redoStack.length} left)`;
+      }
+
+      window.addEventListener("keydown", (e) => {
+        if (e.ctrlKey && e.key === "z") {
+          e.preventDefault();
+          undo();
+        }
+        if (e.ctrlKey && e.key === "y") {
+          e.preventDefault();
+          redo();
+        }
+      });
+
+      let _undoTimer = null;
+      function scheduleUndo() {
+        if (_undoTimer) clearTimeout(_undoTimer);
+        _undoTimer = setTimeout(() => {
+          pushUndo();
+          _undoTimer = null;
+        }, 400);
+      }
+
+      // ─── DETERMINISTIC RNG ──────────────────────────────────────────────────────
+      // LCG matching v2/core/foliage/foliageSampler.js exactly. The aRand and
+      // per-leaf jitter use the SAME fixed seeds as v2 (77777 and 42) so that
+      // the JSON preset reproduces the same tree in arborist and v2.
+      function createLcg(seed) {
+        let s = (seed * 1664525 + 1013904223) >>> 0;
+        return () => {
+          s = (s * 1664525 + 1013904223) >>> 0;
+          return s / 0xffffffff;
+        };
+      }
+
+      // ─── ELLIPSOID SAMPLER ───────────────────────────────────────────────────────
+      function sampleCluster(c, seedOffset) {
+        let lcg = (seedOffset * 1664525 + 1013904223) >>> 0;
+        const rng = () => {
+          lcg = (lcg * 1664525 + 1013904223) >>> 0;
+          return lcg / 0xffffffff;
+        };
+
+        const positions = [];
+        const maxTry = c.count * 12;
+        let tries = 0;
+
+        while (positions.length < c.count && tries++ < maxTry) {
+          const rx = rng() * 2 - 1;
+          const ry = rng() * 2 - 1;
+          const rz = rng() * 2 - 1;
+          const d = Math.sqrt(rx * rx + ry * ry + rz * rz);
+          if (d > 1.0) continue;
+          const innerR = 1.0 - c.shellThick;
+          if (d < innerR && rng() < c.shell) continue;
+
+          positions.push({
+            x: c.x + rx * c.rx,
+            y: c.y + ry * c.ry,
+            z: c.z + rz * c.rx,
+            leafSize: c.leafSize,
+            scaleVar: c.scaleVar,
+            tiltMax: c.tiltMax,
+          });
+        }
+        return positions;
+      }
+
+      // ─── FOLIAGE MESH BUILDER ────────────────────────────────────────────────────
+      let leavesMesh = null;
+
+      function sampleAllPositions() {
+        const allPos = [];
+        const allRands = [];
+        // 4 jitter values per leaf, in v2's consumption order: [rotY01, tiltX01, tiltZ01, scale01].
+        // Pre-computed so LOD0/LOD1/LOD2 share identical per-leaf jitter for the same leaf index.
+        const allJitter = [];
+        // First pass: positions + aRand. Mirrors v2/foliageSampler.sampleAllClusters().
+        const randRng = createLcg(77777);
+        clusterDefs.forEach((c, ci) => {
+          if (!c.enabled) return;
+          sampleCluster(c, ci * 999983 + 12345).forEach((p) => {
+            allPos.push(p);
+            allRands.push(randRng(), randRng());
+          });
+        });
+        // Second pass: per-leaf jitter. Mirrors v2/foliageSampler.buildAllFoliageLods().
+        const jitterRng = createLcg(42);
+        for (let i = 0; i < allPos.length; i++) {
+          allJitter.push(jitterRng(), jitterRng(), jitterRng(), jitterRng());
+        }
+        return { allPos, allRands, allJitter };
+      }
+
+      function buildLeafMesh(positions, rands, jitter, scaleMul, xOffset) {
+        const n = positions.length;
+        if (n === 0) return null;
+
+        const useBillboard = params.billboardLeaves;
+
+        const geo = new THREE.PlaneGeometry(1, 1);
+        const randData = new Float32Array(rands);
+        geo.setAttribute(
+          "aRand",
+          new THREE.InstancedBufferAttribute(randData, 2),
+        );
+        const scaleData = new Float32Array(n);
+        for (let i = 0; i < n; i++) scaleData[i] = 1;
+        geo.setAttribute(
+          "aLeafScale",
+          new THREE.InstancedBufferAttribute(scaleData, 1),
+        );
+
+        const centerData = new Float32Array(n * 3);
+        for (let i = 0; i < n; i++) {
+          const p = positions[i];
+          centerData[i * 3] = p.x + xOffset;
+          centerData[i * 3 + 1] = p.y;
+          centerData[i * 3 + 2] = p.z;
+        }
+        geo.setAttribute(
+          "aLeafCenter",
+          new THREE.InstancedBufferAttribute(centerData, 3),
+        );
+
+        const mesh = new THREE.InstancedMesh(geo, leafMat, n);
+        mesh.frustumCulled = false;
+        mesh.castShadow = true;
+        mesh.receiveShadow = false;
+
+        const dummy = new THREE.Object3D();
+        const DEG2RAD = Math.PI / 180;
+
+        positions.forEach((p, i) => {
+          // Jitter consumption order matches v2/foliageSampler.buildAllFoliageLods:
+          // j0 = rotY, j1 = tiltX, j2 = tiltZ, j3 = scale.
+          const j0 = jitter[i * 4];
+          const j1 = jitter[i * 4 + 1];
+          const j2 = jitter[i * 4 + 2];
+          const j3 = jitter[i * 4 + 3];
+          dummy.position.set(p.x + xOffset, p.y, p.z);
+          const s = Math.max(
+            0.05,
+            p.leafSize * scaleMul * (1 + (j3 - 0.5) * 2 * p.scaleVar),
+          );
+          if (useBillboard) {
+            dummy.rotation.set(0, 0, 0);
+            dummy.scale.set(1, 1, 1);
+            scaleData[i] = s;
+          } else {
+            dummy.rotation.order = "YXZ";
+            dummy.rotation.y = j0 * Math.PI * 2;
+            dummy.rotation.x = (j1 - 0.5) * p.tiltMax * DEG2RAD * 2;
+            dummy.rotation.z = (j2 - 0.5) * p.tiltMax * DEG2RAD * 2;
+            dummy.scale.setScalar(s);
+            scaleData[i] = 1;
+          }
+          dummy.updateMatrix();
+          mesh.setMatrixAt(i, dummy.matrix);
+        });
+
+        geo.attributes.aLeafScale.needsUpdate = true;
+        mesh.instanceMatrix.needsUpdate = true;
+        return mesh;
+      }
+
+      function buildFoliage(skipUndo) {
+        uBillboard.value = params.billboardLeaves ? 1.0 : 0.0;
+        uBillboardYaw.value = params.billboardYawOnly ? 1.0 : 0.0;
+
+        // Clean up main foliage
+        if (leavesMesh) {
+          scene.remove(leavesMesh);
+          leavesMesh.geometry.dispose();
+          leavesMesh = null;
+        }
+        // Clean up LOD previews
+        clearLodPreviews();
+
+        const { allPos, allRands, allJitter } = sampleAllPositions();
+        const n = allPos.length;
+
+        if (n > 0) {
+          // Compute bounds for shaders
+          let yMin = Infinity,
+            yMax = -Infinity;
+          let xMin = Infinity,
+            xMax = -Infinity,
+            zMin = Infinity,
+            zMax = -Infinity;
+          allPos.forEach((p) => {
+            if (p.y < yMin) yMin = p.y;
+            if (p.y > yMax) yMax = p.y;
+            if (p.x < xMin) xMin = p.x;
+            if (p.x > xMax) xMax = p.x;
+            if (p.z < zMin) zMin = p.z;
+            if (p.z > zMax) zMax = p.z;
+          });
+          uYMin.value = yMin - 0.3;
+          uYMax.value = yMax + 0.5;
+          // Canopy center + radius for sphere normals and sphere AO
+          const cx = (xMin + xMax) * 0.5;
+          const cy = (yMin + yMax) * 0.5;
+          const cz = (zMin + zMax) * 0.5;
+          uCanopyCenter.value.set(cx, cy, cz);
+          const ext = Math.max(xMax - xMin, yMax - yMin, zMax - zMin);
+          uAoRadius.value = ext * 0.62;
+
+          // Build main tree (LOD0) — at origin or offset if LOD preview
+          const xOff = lodPreview ? -LOD_SPACING : 0;
+          leavesMesh = buildLeafMesh(allPos, allRands, allJitter, 1.0, xOff);
+          if (leavesMesh) scene.add(leavesMesh);
+
+          // Build LOD previews if active
+          if (lodPreview) {
+            buildLodPreviews(allPos, allRands, allJitter);
+          }
+        }
+
+        updateStats();
+        updateClusterHelpers();
+        updateLodTrunkVisibility();
+      }
+
+      // ─── LOD PREVIEW SYSTEM ─────────────────────────────────────────────────────
+      let lodPreview = false;
+      let lodMesh1 = null;
+      let lodMesh2 = null;
+      let lodTrunk0Clone = null;
+      let lodTrunk1Clone = null;
+      let lodTrunk2Clone = null;
+
+      const lodGroundLabels = [];
+
+      function lodLabelRoundRect(ctx, x, y, w, h, r) {
+        const rr = Math.min(r, w / 2, h / 2);
+        ctx.beginPath();
+        ctx.moveTo(x + rr, y);
+        ctx.arcTo(x + w, y, x + w, y + h, rr);
+        ctx.arcTo(x + w, y + h, x, y + h, rr);
+        ctx.arcTo(x, y + h, x, y, rr);
+        ctx.arcTo(x, y, x + w, y, rr);
+        ctx.closePath();
+      }
+
+      function createLodGroundLabel() {
+        const canvas = document.createElement("canvas");
+        const W = 640;
+        const H = 176;
+        canvas.width = W;
+        canvas.height = H;
+        const ctx = canvas.getContext("2d");
+        const tex = new THREE.CanvasTexture(canvas);
+        tex.colorSpace = THREE.SRGBColorSpace;
+        const mat = new THREE.MeshBasicMaterial({
+          map: tex,
+          transparent: true,
+          depthWrite: false,
+          toneMapped: false,
+        });
+        const geo = new THREE.PlaneGeometry(5.8, 1.6);
+        geo.rotateX(-Math.PI / 2);
+        const mesh = new THREE.Mesh(geo, mat);
+        mesh.renderOrder = 25;
+        const label = { mesh, canvas, ctx, tex, W, H };
+        label.redraw = (title, sub) => {
+          const { ctx, tex, W, H } = label;
+          ctx.clearRect(0, 0, W, H);
+          lodLabelRoundRect(ctx, 8, 8, W - 16, H - 16, 14);
+          ctx.fillStyle = "rgba(12, 18, 12, 0.9)";
+          ctx.fill();
+          ctx.strokeStyle = "rgba(100, 160, 95, 0.5)";
+          ctx.lineWidth = 2;
+          ctx.stroke();
+          ctx.fillStyle = "#e8f0e4";
+          ctx.font = "bold 26px Segoe UI, system-ui, sans-serif";
+          ctx.textAlign = "center";
+          ctx.textBaseline = "middle";
+          ctx.fillText(title, W / 2, 56);
+          ctx.fillStyle = "#9cb090";
+          ctx.font = "17px Consolas, monospace";
+          ctx.fillText(sub, W / 2, 112);
+          tex.needsUpdate = true;
+        };
+        return label;
+      }
+
+      function ensureLodGroundLabels() {
+        if (lodGroundLabels.length) return;
+        for (let i = 0; i < 3; i++) {
+          const lb = createLodGroundLabel();
+          lodGroundLabels.push(lb);
+          scene.add(lb.mesh);
+          lb.mesh.visible = false;
+        }
+      }
+
+      function setLodGroundLabelsVisible(visible) {
+        ensureLodGroundLabels();
+        lodGroundLabels.forEach((lb) => {
+          lb.mesh.visible = visible;
+        });
+      }
+
+      function decimatePositions(allPos, allRands, allJitter, keep) {
+        const subPos = [];
+        const subRands = [];
+        const subJitter = [];
+        const step = Math.max(1, Math.round(1 / keep));
+        for (let i = 0; i < allPos.length; i += step) {
+          subPos.push(allPos[i]);
+          subRands.push(allRands[i * 2], allRands[i * 2 + 1]);
+          subJitter.push(
+            allJitter[i * 4],
+            allJitter[i * 4 + 1],
+            allJitter[i * 4 + 2],
+            allJitter[i * 4 + 3],
+          );
+        }
+        return { subPos, subRands, subJitter };
+      }
+
+      function buildLodPreviews(allPos, allRands, allJitter) {
+        // LOD1: 50% leaves, 1.414× bigger
+        const lod1 = decimatePositions(allPos, allRands, allJitter, 0.5);
+        lodMesh1 = buildLeafMesh(
+          lod1.subPos,
+          lod1.subRands,
+          lod1.subJitter,
+          1.414,
+          0,
+        );
+        if (lodMesh1) scene.add(lodMesh1);
+
+        // LOD2: 25% leaves, 2× bigger
+        const lod2 = decimatePositions(allPos, allRands, allJitter, 0.25);
+        lodMesh2 = buildLeafMesh(
+          lod2.subPos,
+          lod2.subRands,
+          lod2.subJitter,
+          2.0,
+          LOD_SPACING,
+        );
+        if (lodMesh2) scene.add(lodMesh2);
+
+        // Update stats
+        params.lod1Leaves = lod1.subPos.length;
+        params.lod2Leaves = lod2.subPos.length;
+
+        // Clone trunks for LOD preview columns
+        cloneTrunksForLod();
+
+        updateLodLabels();
+      }
+
+      function cloneTrunksForLod() {
+        clearLodTrunkClones();
+
+        const srcTrunk = trunkRoot || defaultTrunk;
+        const showTrunk = !params.bushMode;
+
+        // LOD0 trunk (left)
+        if (showTrunk) {
+          lodTrunk0Clone = srcTrunk.clone();
+          lodTrunk0Clone.visible = true;
+          lodTrunk0Clone.position.x = -LOD_SPACING;
+          if (srcTrunk === defaultTrunk) lodTrunk0Clone.position.y = 2.5;
+          lodTrunk0Clone.scale.setScalar(trunkScale);
+          scene.add(lodTrunk0Clone);
+        }
+
+        // LOD1 trunk (center) — use LOD1 trunk if loaded, else same as LOD0
+        if (showTrunk) {
+          const src1 = trunkLod1Root || srcTrunk;
+          lodTrunk1Clone = src1.clone();
+          lodTrunk1Clone.visible = true;
+          lodTrunk1Clone.position.x = 0;
+          if (src1 === defaultTrunk) lodTrunk1Clone.position.y = 2.5;
+          lodTrunk1Clone.scale.setScalar(trunkScale);
+          scene.add(lodTrunk1Clone);
+        }
+
+        // LOD2 trunk (right) — always use LOD1 trunk (lowest detail)
+        if (showTrunk) {
+          const src2 = trunkLod1Root || srcTrunk;
+          lodTrunk2Clone = src2.clone();
+          lodTrunk2Clone.visible = true;
+          lodTrunk2Clone.position.x = LOD_SPACING;
+          if (src2 === defaultTrunk) lodTrunk2Clone.position.y = 2.5;
+          lodTrunk2Clone.scale.setScalar(trunkScale);
+          scene.add(lodTrunk2Clone);
+        }
+      }
+
+      function clearLodTrunkClones() {
+        if (lodTrunk0Clone) {
+          scene.remove(lodTrunk0Clone);
+          lodTrunk0Clone = null;
+        }
+        if (lodTrunk1Clone) {
+          scene.remove(lodTrunk1Clone);
+          lodTrunk1Clone = null;
+        }
+        if (lodTrunk2Clone) {
+          scene.remove(lodTrunk2Clone);
+          lodTrunk2Clone = null;
+        }
+      }
+
+      function clearLodPreviews() {
+        if (lodMesh1) {
+          scene.remove(lodMesh1);
+          lodMesh1.geometry.dispose();
+          lodMesh1 = null;
+        }
+        if (lodMesh2) {
+          scene.remove(lodMesh2);
+          lodMesh2.geometry.dispose();
+          lodMesh2 = null;
+        }
+        clearLodTrunkClones();
+      }
+
+      function updateLodTrunkVisibility() {
+        if (lodPreview) {
+          // Hide main trunk in LOD preview (clones handle it)
+          defaultTrunk.visible = false;
+          if (trunkRoot) trunkRoot.visible = false;
+        } else {
+          defaultTrunk.visible = !params.bushMode && !trunkRoot;
+          if (trunkRoot) trunkRoot.visible = !params.bushMode;
+        }
+      }
+
+      function updateLodLabels() {
+        ensureLodGroundLabels();
+        if (!lodPreview) {
+          setLodGroundLabelsVisible(false);
+          return;
+        }
+
+        const offsets = [-LOD_SPACING, 0, LOD_SPACING];
+        const n0 = leavesMesh ? leavesMesh.count : 0;
+        const n1 = params.lod1Leaves || 0;
+        const n2 = params.lod2Leaves || 0;
+        const trunkLod1Str = trunkLod1Root ? "LOD1 trunk" : "same trunk";
+        const titles = [
+          "LOD 0 — Full Detail",
+          "LOD 1 — Half Density",
+          "LOD 2 — Quarter Density",
+        ];
+        const subs = [
+          `${n0} leaves · < ${params.lodDist1}m · full trunk`,
+          `${n1} leaves · 1.4× size · ${params.lodDist1}-${params.lodDist2}m · ${trunkLod1Str}`,
+          `${n2} leaves · 2× size · ${params.lodDist2}m+ · ${trunkLod1Str}`,
+        ];
+
+        offsets.forEach((xOff, i) => {
+          lodGroundLabels[i].mesh.position.set(xOff, 0.02, LOD_LABEL_Z);
+          lodGroundLabels[i].redraw(titles[i], subs[i]);
+        });
+        setLodGroundLabelsVisible(true);
+      }
+
+      function toggleLodPreview(on) {
+        lodPreview = on;
+        if (on) {
+          controls.target.set(0, 3, 0);
+          camera.position.set(0, 6, 22);
+          controls.update();
+        } else {
+          controls.target.set(0, 3, 0);
+          camera.position.set(7, 5, 10);
+          controls.update();
+        }
+        buildFoliage(true);
+        updateLodLabels();
+      }
+
+      // ─── CLUSTER WIREFRAME HELPERS ───────────────────────────────────────────────
+      const HELPER_COLORS = [
+        0xffff00, 0x00ffff, 0xff8800, 0xff44ff, 0x44ff44, 0x4488ff,
+      ];
+      let showHelpers = true;
+
+      const clusterHelpers = clusterDefs.map((c, i) => {
+        const sGeo = new THREE.SphereGeometry(1, 14, 7);
+        const wfGeo = new THREE.WireframeGeometry(sGeo);
+        const line = new THREE.LineSegments(
+          wfGeo,
+          new THREE.LineBasicMaterial({
+            color: HELPER_COLORS[i % HELPER_COLORS.length],
+            transparent: true,
+            opacity: 0.22,
+          }),
+        );
+        scene.add(line);
+        return line;
+      });
+
+      const markerGeo = new THREE.SphereGeometry(0.18, 8, 6);
+      const clusterMarkers = clusterDefs.map((c, i) => {
+        const mat = new THREE.MeshBasicMaterial({
+          color: HELPER_COLORS[i % HELPER_COLORS.length],
+          transparent: true,
+          opacity: 0.6,
+        });
+        const mesh = new THREE.Mesh(markerGeo, mat);
+        mesh.userData.clusterIdx = i;
+        scene.add(mesh);
+        return mesh;
+      });
+
+      function updateClusterHelpers() {
+        const xOff = lodPreview ? -LOD_SPACING : 0;
+        clusterDefs.forEach((c, i) => {
+          clusterHelpers[i].position.set(c.x + xOff, c.y, c.z);
+          clusterHelpers[i].scale.set(c.rx, c.ry, c.rx);
+          clusterHelpers[i].visible = showHelpers && c.enabled;
+          clusterMarkers[i].position.set(c.x + xOff, c.y, c.z);
+          clusterMarkers[i].visible = showHelpers && c.enabled;
+        });
+      }
+      updateClusterHelpers();
+
+      // ─── DRAG CLUSTER MARKERS ────────────────────────────────────────────────────
+      const raycaster = new THREE.Raycaster();
+      const mouse = new THREE.Vector2();
+      let dragCluster = -1;
+      let dragPlane = new THREE.Plane();
+      let dragOffset = new THREE.Vector3();
+      const _intersect = new THREE.Vector3();
+
+      renderer.domElement.addEventListener("pointerdown", (e) => {
+        if (e.button !== 0 || !showHelpers) return;
+        mouse.x = (e.clientX / innerWidth) * 2 - 1;
+        mouse.y = -(e.clientY / innerHeight) * 2 + 1;
+        raycaster.setFromCamera(mouse, camera);
+
+        const hits = raycaster.intersectObjects(
+          clusterMarkers.filter((m, i) => clusterDefs[i].enabled),
+        );
+        if (hits.length > 0) {
+          const idx = hits[0].object.userData.clusterIdx;
+          dragCluster = idx;
+          pushUndo();
+          controls.enabled = false;
+          dragPlane.setFromNormalAndCoplanarPoint(
+            camera.getWorldDirection(new THREE.Vector3()).negate(),
+            hits[0].object.position,
+          );
+          raycaster.ray.intersectPlane(dragPlane, _intersect);
+          dragOffset.copy(hits[0].object.position).sub(_intersect);
+          e.stopPropagation();
+        }
+      });
+
+      renderer.domElement.addEventListener("pointermove", (e) => {
+        if (dragCluster < 0) return;
+        mouse.x = (e.clientX / innerWidth) * 2 - 1;
+        mouse.y = -(e.clientY / innerHeight) * 2 + 1;
+        raycaster.setFromCamera(mouse, camera);
+
+        if (raycaster.ray.intersectPlane(dragPlane, _intersect)) {
+          _intersect.add(dragOffset);
+          const xOff = lodPreview ? -LOD_SPACING : 0;
+          const c = clusterDefs[dragCluster];
+          c.x = Math.round((_intersect.x - xOff) * 20) / 20;
+          c.y = Math.max(0, Math.round(_intersect.y * 20) / 20);
+          c.z = Math.round(_intersect.z * 20) / 20;
+          buildFoliage(true);
+          uiRefresh();
+        }
+      });
+
+      renderer.domElement.addEventListener("pointerup", () => {
+        if (dragCluster >= 0) {
+          dragCluster = -1;
+          controls.enabled = true;
+        }
+      });
+
+      // ─── TRUNK GLB LOADER ────────────────────────────────────────────────────────
+      const dracoLoader = new DRACOLoader();
+      dracoLoader.setDecoderPath(
+        "https://cdn.jsdelivr.net/npm/three@0.183.1/examples/jsm/libs/draco/",
+      );
+      const gltfLoader = new GLTFLoader();
+      gltfLoader.setDRACOLoader(dracoLoader);
+      let trunkScale = 1.0;
+      let trunkFileName = "";
+      let trunkLod1FileName = "";
+      let _bushYShift = 0;
+
+      function loadTrunk(file) {
+        const url = URL.createObjectURL(file);
+        gltfLoader.load(
+          url,
+          (gltf) => {
+            if (trunkRoot) scene.remove(trunkRoot);
+            defaultTrunk.visible = false;
+            trunkRoot = gltf.scene;
+            trunkRoot.scale.setScalar(trunkScale);
+            trunkRoot.visible = !params.bushMode && !lodPreview;
+            trunkRoot.traverse((o) => {
+              if (o.isMesh) {
+                o.castShadow = true;
+                o.receiveShadow = true;
+              }
+            });
+            scene.add(trunkRoot);
+            URL.revokeObjectURL(url);
+
+            trunkFileName = file.name;
+
+            const box = new THREE.Box3().setFromObject(trunkRoot);
+            const h = box.max.y - box.min.y;
+            let tris = 0;
+            trunkRoot.traverse((o) => {
+              if (o.isMesh && o.geometry.index)
+                tris += o.geometry.index.count / 3;
+            });
+            params.trunkTris = Math.round(tris);
+
+            infoEl.textContent =
+              `Trunk LOD0: ${file.name} — ${tris} tris, height: ${h.toFixed(2)}  |  ` +
+              `Tip Y ≈ ${box.max.y.toFixed(2)}  |  ` +
+              `Suggested Cluster 1 Y: ${(box.max.y * 0.85).toFixed(2)}`;
+
+            if (lodPreview) buildFoliage(true);
+            uiRefresh();
+          },
+          undefined,
+          (err) => {
+            console.error("Trunk load error:", err);
+          },
+        );
+      }
+
+      function loadTrunkLod1(file) {
+        const url = URL.createObjectURL(file);
+        gltfLoader.load(
+          url,
+          (gltf) => {
+            if (trunkLod1Root) scene.remove(trunkLod1Root);
+            trunkLod1Root = gltf.scene;
+            trunkLod1Root.scale.setScalar(trunkScale);
+            trunkLod1Root.visible = false; // never shown directly, only cloned in LOD preview
+            trunkLod1Root.traverse((o) => {
+              if (o.isMesh) {
+                o.castShadow = true;
+                o.receiveShadow = true;
+              }
+            });
+
+            trunkLod1FileName = file.name;
+
+            let tris = 0;
+            trunkLod1Root.traverse((o) => {
+              if (o.isMesh && o.geometry.index)
+                tris += o.geometry.index.count / 3;
+            });
+            params.trunkLod1Tris = Math.round(tris);
+
+            infoEl.textContent = `Trunk LOD1: ${file.name} — ${tris} tris (${((tris / Math.max(1, params.trunkTris)) * 100).toFixed(0)}% of LOD0)`;
+
+            if (lodPreview) buildFoliage(true);
+            URL.revokeObjectURL(url);
+            uiRefresh();
+          },
+          undefined,
+          (err) => {
+            console.error("Trunk LOD1 load error:", err);
+          },
+        );
+      }
+
+      // ─── PARAMS ──────────────────────────────────────────────────────────────────
+      const params = {
+        bgColor: "#87ceeb",
+        sunIntensity: 2.2,
+        ambientInt: 0.8,
+        sunX: 5,
+        sunY: 12,
+        sunZ: 4,
+        showGround: true,
+        showHelpers: true,
+        showFog: false,
+        bushMode: false,
+        trunkScale: 1.0,
+        bottomColor: "#2d5a1b",
+        topColor: "#5aaa2a",
+        colorVar: 0.12,
+        roughness: 1.0,
+        alphaCutoff: 0.45,
+        sssColor: "#c8e070",
+        sssStr: 0.0,
+        sssPow: 2.0,
+        rimColor: "#c8ffaa",
+        rimStr: 0.07,
+        rimPow: 2.5,
+        aoStr: 0.7,
+        normalBias: 1.0,
+        leafWarp: 0.28,
+        windSpeed: 0.9,
+        windStr: 0.0,
+        windMicro: 0.0,
+        presetName: "my_tree",
+        leafTexFile: "",
+        trunkTris: 0,
+        trunkLod1Tris: 0,
+        totalLeaves: 0,
+        totalLeafTris: 0,
+        lod1Leaves: 0,
+        lod2Leaves: 0,
+        activePreset: "",
+        lodPreview: false,
+        lodDist1: 80,
+        lodDist2: 200,
+        billboardLeaves: true,
+        billboardYawOnly: false,
+      };
+
+      function updateStats() {
+        const n = leavesMesh ? leavesMesh.count : 0;
+        params.totalLeaves = n;
+        params.totalLeafTris = n * 2;
+        params.lod1Leaves = lodMesh1 ? lodMesh1.count : 0;
+        params.lod2Leaves = lodMesh2 ? lodMesh2.count : 0;
+        uiRefresh();
+      }
+
+      function applyBushMode(enabled) {
+        defaultTrunk.visible = !enabled && !trunkRoot && !lodPreview;
+        if (trunkRoot) trunkRoot.visible = !enabled && !lodPreview;
+
+        if (enabled) {
+          const enabledClusters = clusterDefs.filter((c) => c.enabled);
+          const minBottom = enabledClusters.length
+            ? Math.min(...enabledClusters.map((c) => c.y - c.ry))
+            : 0;
+          _bushYShift = Math.max(0, minBottom);
+          if (_bushYShift > 0) {
+            clusterDefs.forEach((c) => {
+              c.y -= _bushYShift;
+            });
+            buildFoliage(true);
+            uiRefresh();
+          }
+        } else {
+          if (_bushYShift > 0) {
+            clusterDefs.forEach((c) => {
+              c.y += _bushYShift;
+            });
+            _bushYShift = 0;
+            buildFoliage(true);
+            uiRefresh();
+          }
+        }
+      }
+
+      // ─── PRESET SAVE / LOAD ──────────────────────────────────────────────────────
+      function buildPresetData() {
+        return {
+          presetName: params.presetName,
+          trunkFile: trunkFileName,
+          trunkLod1File: trunkLod1FileName,
+          // Either "textures/leaves/..." (built-in, light) or "data:image/...;base64,..." (embedded, self-contained).
+          leafTexture: activeLeafTexPath || activeLeafTexDataUrl || "",
+          leafTextureName: params.leafTexFile || "",
+          clusters: clusterDefs.map((c) => ({ ...c })),
+          material: {
+            bottomColor: params.bottomColor,
+            topColor: params.topColor,
+            colorVar: params.colorVar,
+            roughness: params.roughness,
+            alphaCutoff: params.alphaCutoff,
+            sssColor: params.sssColor,
+            sssStr: params.sssStr,
+            sssPow: params.sssPow,
+            rimColor: params.rimColor,
+            rimStr: params.rimStr,
+            rimPow: params.rimPow,
+            aoStr: params.aoStr,
+            normalBias: params.normalBias,
+            leafWarp: params.leafWarp,
+            billboardLeaves: params.billboardLeaves,
+            billboardYawOnly: params.billboardYawOnly,
+          },
+          wind: {
+            windSpeed: params.windSpeed,
+            windStr: params.windStr,
+            windMicro: params.windMicro,
+          },
+          trunkScale: params.trunkScale,
+          bushMode: params.bushMode,
+          lodDistances: { lod1: params.lodDist1, lod2: params.lodDist2 },
+        };
+      }
+
+      async function savePreset() {
+        const json = JSON.stringify(buildPresetData(), null, 2);
+        const name = (params.presetName || "preset").replace(
+          /[^a-z0-9_\-]/gi,
+          "_",
+        );
+        if (window.showSaveFilePicker) {
+          try {
+            const handle = await showSaveFilePicker({
+              suggestedName: name + ".json",
+              types: [
+                {
+                  description: "Tree preset",
+                  accept: { "application/json": [".json"] },
+                },
+              ],
+            });
+            const writable = await handle.createWritable();
+            await writable.write(json);
+            await writable.close();
+            infoEl.textContent = `Preset saved: ${name}.json — trunk: ${trunkFileName || "(default)"}, texture: ${activeLeafTexPath || "(custom)"}`;
+          } catch (e) {
+            if (e.name !== "AbortError") console.error(e);
+          }
+        } else {
+          const a = document.createElement("a");
+          a.href = URL.createObjectURL(
+            new Blob([json], { type: "application/json" }),
+          );
+          a.download = name + ".json";
+          a.click();
+        }
+      }
+
+      function applyPresetData(data) {
+        if (data.clusters) {
+          data.clusters.forEach((c, i) => {
+            if (i < clusterDefs.length) Object.assign(clusterDefs[i], c);
+          });
+          for (let i = data.clusters.length; i < clusterDefs.length; i++) {
+            clusterDefs[i].enabled = false;
+          }
+        }
+        if (data.material) {
+          const m = data.material;
+          if (m.bottomColor) {
+            params.bottomColor = m.bottomColor;
+            uBottomColor.value.set(m.bottomColor);
+          }
+          if (m.topColor) {
+            params.topColor = m.topColor;
+            uTopColor.value.set(m.topColor);
+          }
+          if (m.colorVar != null) {
+            params.colorVar = m.colorVar;
+            uColorVar.value = m.colorVar;
+          }
+          if (m.roughness != null) {
+            params.roughness = m.roughness;
+            leafMat.roughness = m.roughness;
+          }
+          if (m.alphaCutoff != null) {
+            params.alphaCutoff = m.alphaCutoff;
+            uAlphaCutoff.value = m.alphaCutoff;
+          }
+          if (m.sssColor) {
+            params.sssColor = m.sssColor;
+            uSssColor.value.set(m.sssColor);
+          }
+          if (m.sssStr != null) {
+            params.sssStr = m.sssStr;
+            uSssStr.value = m.sssStr;
+          }
+          if (m.sssPow != null) {
+            params.sssPow = m.sssPow;
+            uSssPow.value = m.sssPow;
+          }
+          if (m.rimColor) {
+            params.rimColor = m.rimColor;
+            uRimColor.value.set(m.rimColor);
+          }
+          if (m.rimStr != null) {
+            params.rimStr = m.rimStr;
+            uRimStr.value = m.rimStr;
+          }
+          if (m.rimPow != null) {
+            params.rimPow = m.rimPow;
+            uRimPow.value = m.rimPow;
+          }
+          if (m.aoStr != null) {
+            params.aoStr = m.aoStr;
+            uAoStr.value = m.aoStr;
+          }
+          if (m.normalBias != null) {
+            params.normalBias = m.normalBias;
+            uNormalBias.value = m.normalBias;
+          }
+          if (m.leafWarp != null) {
+            params.leafWarp = m.leafWarp;
+            uLeafWarp.value = m.leafWarp;
+          }
+          if (m.billboardLeaves != null) {
+            params.billboardLeaves = !!m.billboardLeaves;
+            uBillboard.value = params.billboardLeaves ? 1.0 : 0.0;
+          }
+          if (m.billboardYawOnly != null) {
+            params.billboardYawOnly = !!m.billboardYawOnly;
+            uBillboardYaw.value = params.billboardYawOnly ? 1.0 : 0.0;
+          }
+        }
+        if (data.wind) {
+          const w = data.wind;
+          if (w.windSpeed != null) {
+            params.windSpeed = w.windSpeed;
+            uWindSpeed.value = w.windSpeed;
+          }
+          if (w.windStr != null) {
+            params.windStr = w.windStr;
+            uWindStr.value = w.windStr;
+          }
+          if (w.windMicro != null) {
+            params.windMicro = w.windMicro;
+            uWindMicro.value = w.windMicro;
+          }
+        }
+        if (data.trunkScale != null) {
+          params.trunkScale = data.trunkScale;
+          trunkScale = data.trunkScale;
+          (trunkRoot || defaultTrunk).scale.setScalar(data.trunkScale);
+        }
+        if (data.lodDistances) {
+          if (data.lodDistances.lod1 != null)
+            params.lodDist1 = data.lodDistances.lod1;
+          if (data.lodDistances.lod2 != null)
+            params.lodDist2 = data.lodDistances.lod2;
+        }
+        if (data.presetName) params.presetName = data.presetName;
+        if (data.leafTexture) {
+          if (data.leafTexture.startsWith("data:")) {
+            loadLeafTexFromDataUrl(
+              data.leafTexture,
+              data.leafTextureName || "(embedded)",
+            );
+          } else if (data.leafTexture.startsWith("textures/")) {
+            loadLeafTexFromPath(data.leafTexture);
+          }
+        }
+        if (data.bushMode != null) {
+          params.bushMode = data.bushMode;
+          applyBushMode(data.bushMode);
+        }
+        uiRefresh();
+        buildFoliage(true);
+      }
+
+      function loadPresetFromFile(file) {
+        const reader = new FileReader();
+        reader.onload = (ev) => {
+          try {
+            pushUndo();
+            applyPresetData(JSON.parse(ev.target.result));
+            infoEl.textContent = `Preset loaded from ${file.name}`;
+          } catch (e) {
+            infoEl.textContent = "Invalid preset file: " + e.message;
+          }
+        };
+        reader.readAsText(file);
+      }
+
+      const infoEl = document.getElementById("info");
+
+      // ─── UI ──────────────────────────────────────────────────────────────────────
+      const uiRoot = document.getElementById("ui-scroll");
+      const CLUSTER_COLORS = [
+        "yellow",
+        "cyan",
+        "orange",
+        "magenta",
+        "green",
+        "blue",
+      ];
+      const rebuildCluster = () => {
+        scheduleUndo();
+        buildFoliage(true);
+      };
+
+      const quickBody = _section(uiRoot, "Quick Presets", true);
+      Object.keys(TREE_PRESETS).forEach((name) => {
+        _button(quickBody, {
+          title: name,
+          onClick: () => {
+            pushUndo();
+            params.activePreset = name;
+            params.presetName = name.toLowerCase().replace(/\s+/g, "_");
+            applyPresetData(TREE_PRESETS[name]);
+            infoEl.textContent = `Loaded preset: ${name}`;
+          },
+        });
+      });
+
+      _separator(uiRoot);
+      const lodBody = _section(uiRoot, "LOD Preview", true);
+      _toggle(lodBody, params, "lodPreview", {
+        label: "Show LOD side-by-side",
+        onChange: (ev) => toggleLodPreview(ev.value),
+      });
+      _separator(lodBody);
+      _slider(lodBody, params, "lodDist1", {
+        label: "LOD0 → LOD1 dist",
+        min: 20,
+        max: 300,
+        step: 5,
+        onChange: () => updateLodLabels(),
+      });
+      _slider(lodBody, params, "lodDist2", {
+        label: "LOD1 → LOD2 dist",
+        min: 50,
+        max: 600,
+        step: 10,
+        onChange: () => updateLodLabels(),
+      });
+      _separator(lodBody);
+      _info(lodBody, "LOD1 leaves", () => String(params.lod1Leaves));
+      _info(lodBody, "LOD2 leaves", () => String(params.lod2Leaves));
+
+      const trunkBody = _section(uiRoot, "Trunk", true);
+      _toggle(trunkBody, params, "bushMode", {
+        label: "Bush mode (no trunk)",
+        onChange: (ev) => {
+          pushUndo();
+          applyBushMode(ev.value);
+        },
+      });
+      _separator(trunkBody);
+      _button(trunkBody, {
+        title: "Load Trunk GLB (LOD0)",
+        onClick: () => {
+          const i = document.createElement("input");
+          i.type = "file";
+          i.accept = ".glb,.gltf";
+          i.onchange = () => i.files[0] && loadTrunk(i.files[0]);
+          i.click();
+        },
+      });
+      _button(trunkBody, {
+        title: "Load Trunk GLB (LOD1 — decimated)",
+        onClick: () => {
+          const i = document.createElement("input");
+          i.type = "file";
+          i.accept = ".glb,.gltf";
+          i.onchange = () => i.files[0] && loadTrunkLod1(i.files[0]);
+          i.click();
+        },
+      });
+      _button(trunkBody, {
+        title: "Reset to default cylinder",
+        onClick: () => {
+          if (trunkRoot) {
+            scene.remove(trunkRoot);
+            trunkRoot = null;
+          }
+          if (trunkLod1Root) {
+            trunkLod1Root = null;
+          }
+          defaultTrunk.visible = !lodPreview;
+          trunkFileName = "";
+          trunkLod1FileName = "";
+          params.trunkTris = 0;
+          params.trunkLod1Tris = 0;
+          if (lodPreview) buildFoliage(true);
+          uiRefresh();
+          infoEl.textContent = "Trunk reset to default cylinder";
+        },
+      });
+      _slider(trunkBody, params, "trunkScale", {
+        label: "Trunk scale",
+        min: 0.01,
+        max: 8,
+        step: 0.01,
+        onChange: (ev) => {
+          trunkScale = ev.value;
+          (trunkRoot || defaultTrunk).scale.setScalar(ev.value);
+          if (trunkLod1Root) trunkLod1Root.scale.setScalar(ev.value);
+          if (lodPreview) buildFoliage(true);
+          scheduleUndo();
+        },
+      });
+      _info(trunkBody, "LOD0 triangles", () => String(params.trunkTris));
+      _info(trunkBody, "LOD1 triangles", () => String(params.trunkLod1Tris));
+
+      const leafTexBody = _section(uiRoot, "Leaf Texture", true);
+      buildTexGallery(leafTexBody);
+      _button(leafTexBody, {
+        title: "Load Custom PNG / JPG",
+        onClick: () => {
+          const i = document.createElement("input");
+          i.type = "file";
+          i.accept = "image/*";
+          i.onchange = () => {
+            if (i.files[0]) loadLeafTexFromFile(i.files[0]);
+          };
+          i.click();
+        },
+      });
+      _button(leafTexBody, {
+        title: "Reset to solid (no texture)",
+        onClick: () => {
+          leafMapNode.value = new THREE.Texture();
+          activeLeafTexPath = "";
+          params.leafTexFile = "";
+          updateGallerySelection();
+        },
+      });
+      _slider(leafTexBody, params, "alphaCutoff", {
+        label: "Alpha cutoff",
+        min: 0,
+        max: 1,
+        step: 0.01,
+        onChange: (ev) => {
+          uAlphaCutoff.value = ev.value;
+          scheduleUndo();
+        },
+      });
+
+      clusterDefs.forEach((c, ci) => {
+        const cBody = _section(
+          uiRoot,
+          `Cluster ${ci + 1} (${CLUSTER_COLORS[ci]})`,
+          ci === 0,
+        );
+        _toggle(cBody, c, "enabled", {
+          label: "Enabled",
+          onChange: () => {
+            scheduleUndo();
+            buildFoliage(true);
+          },
+        });
+        _button(cBody, {
+          title: "Duplicate to next empty slot",
+          onClick: () => {
+            const target = clusterDefs.findIndex(
+              (cc, ii) => ii > ci && !cc.enabled,
+            );
+            if (target < 0) {
+              infoEl.textContent = "No empty slot available";
+              return;
+            }
+            pushUndo();
+            Object.assign(clusterDefs[target], { ...c });
+            clusterDefs[target].x += 0.5;
+            clusterDefs[target].enabled = true;
+            buildFoliage(true);
+            uiRefresh();
+            infoEl.textContent = `Duplicated cluster ${ci + 1} → ${target + 1}`;
+          },
+        });
+        _separator(cBody);
+        _slider(cBody, c, "x", {
+          label: "X",
+          min: -10,
+          max: 10,
+          step: 0.05,
+          onChange: rebuildCluster,
+        });
+        _slider(cBody, c, "y", {
+          label: "Y",
+          min: 0,
+          max: 20,
+          step: 0.05,
+          onChange: rebuildCluster,
+        });
+        _slider(cBody, c, "z", {
+          label: "Z",
+          min: -10,
+          max: 10,
+          step: 0.05,
+          onChange: rebuildCluster,
+        });
+        _separator(cBody);
+        _slider(cBody, c, "rx", {
+          label: "Radius XZ",
+          min: 0.2,
+          max: 10,
+          step: 0.05,
+          onChange: rebuildCluster,
+        });
+        _slider(cBody, c, "ry", {
+          label: "Radius Y",
+          min: 0.2,
+          max: 8,
+          step: 0.05,
+          onChange: rebuildCluster,
+        });
+        _separator(cBody);
+        _slider(cBody, c, "count", {
+          label: "Leaf count",
+          min: 10,
+          max: 2000,
+          step: 10,
+          onChange: rebuildCluster,
+        });
+        _slider(cBody, c, "leafSize", {
+          label: "Leaf size",
+          min: 0.05,
+          max: 4,
+          step: 0.05,
+          onChange: rebuildCluster,
+        });
+        _slider(cBody, c, "scaleVar", {
+          label: "Scale variation",
+          min: 0,
+          max: 0.9,
+          step: 0.01,
+          onChange: rebuildCluster,
+        });
+        _separator(cBody);
+        _slider(cBody, c, "shell", {
+          label: "Shell bias",
+          min: 0,
+          max: 1,
+          step: 0.01,
+          onChange: rebuildCluster,
+        });
+        _slider(cBody, c, "shellThick", {
+          label: "Shell thickness",
+          min: 0.05,
+          max: 0.98,
+          step: 0.01,
+          onChange: rebuildCluster,
+        });
+        _slider(cBody, c, "tiltMax", {
+          label: "Max tilt",
+          min: 0,
+          max: 90,
+          step: 1,
+          onChange: rebuildCluster,
+        });
+      });
+
+      const matBody = _section(uiRoot, "Leaf Colors", false);
+      _color(matBody, params, "bottomColor", {
+        label: "Base color",
+        onChange: (ev) => {
+          uBottomColor.value.set(ev.value);
+          scheduleUndo();
+        },
+      });
+      _color(matBody, params, "topColor", {
+        label: "Top color",
+        onChange: (ev) => {
+          uTopColor.value.set(ev.value);
+          scheduleUndo();
+        },
+      });
+      _slider(matBody, params, "colorVar", {
+        label: "Tint variation",
+        min: 0,
+        max: 0.6,
+        step: 0.01,
+        onChange: (ev) => {
+          uColorVar.value = ev.value;
+          scheduleUndo();
+        },
+      });
+      _slider(matBody, params, "roughness", {
+        label: "Roughness",
+        min: 0,
+        max: 1,
+        step: 0.01,
+        onChange: (ev) => {
+          if (leavesMesh) leavesMesh.material.roughness = ev.value;
+          scheduleUndo();
+        },
+      });
+
+      const lightBody = _section(uiRoot, "SSS & Rim Light", false);
+      _color(lightBody, params, "sssColor", {
+        label: "SSS color",
+        onChange: (ev) => {
+          uSssColor.value.set(ev.value);
+          scheduleUndo();
+        },
+      });
+      _slider(lightBody, params, "sssStr", {
+        label: "SSS strength",
+        min: 0,
+        max: 2,
+        step: 0.01,
+        onChange: (ev) => {
+          uSssStr.value = ev.value;
+          scheduleUndo();
+        },
+      });
+      _slider(lightBody, params, "sssPow", {
+        label: "SSS falloff",
+        min: 0.5,
+        max: 10,
+        step: 0.1,
+        onChange: (ev) => {
+          uSssPow.value = ev.value;
+          scheduleUndo();
+        },
+      });
+      _separator(lightBody);
+      _color(lightBody, params, "rimColor", {
+        label: "Rim color",
+        onChange: (ev) => {
+          uRimColor.value.set(ev.value);
+          scheduleUndo();
+        },
+      });
+      _slider(lightBody, params, "rimStr", {
+        label: "Rim strength",
+        min: 0,
+        max: 2,
+        step: 0.01,
+        onChange: (ev) => {
+          uRimStr.value = ev.value;
+          scheduleUndo();
+        },
+      });
+      _slider(lightBody, params, "rimPow", {
+        label: "Rim sharpness",
+        min: 0.5,
+        max: 10,
+        step: 0.1,
+        onChange: (ev) => {
+          uRimPow.value = ev.value;
+          scheduleUndo();
+        },
+      });
+      _separator(lightBody);
+      _slider(lightBody, params, "aoStr", {
+        label: "AO strength",
+        min: 0,
+        max: 1,
+        step: 0.01,
+        onChange: (ev) => {
+          uAoStr.value = ev.value;
+          scheduleUndo();
+        },
+      });
+      _separator(lightBody);
+      _slider(lightBody, params, "normalBias", {
+        label: "Normal bias (sphere)",
+        min: 0,
+        max: 1,
+        step: 0.01,
+        onChange: (ev) => {
+          uNormalBias.value = ev.value;
+          scheduleUndo();
+        },
+      });
+      _slider(lightBody, params, "leafWarp", {
+        label: "Leaf warp",
+        min: 0,
+        max: 1,
+        step: 0.01,
+        onChange: (ev) => {
+          uLeafWarp.value = ev.value;
+          scheduleUndo();
+        },
+      });
+
+      const windBody = _section(uiRoot, "Wind", false);
+      _slider(windBody, params, "windSpeed", {
+        label: "Speed",
+        min: 0,
+        max: 5,
+        step: 0.05,
+        onChange: (ev) => {
+          uWindSpeed.value = ev.value;
+          scheduleUndo();
+        },
+      });
+      _slider(windBody, params, "windStr", {
+        label: "Strength",
+        min: 0,
+        max: 0.8,
+        step: 0.005,
+        onChange: (ev) => {
+          uWindStr.value = ev.value;
+          scheduleUndo();
+        },
+      });
+      _slider(windBody, params, "windMicro", {
+        label: "Micro sway",
+        min: 0,
+        max: 0.3,
+        step: 0.005,
+        onChange: (ev) => {
+          uWindMicro.value = ev.value;
+          scheduleUndo();
+        },
+      });
+
+      const bbBody = _section(uiRoot, "Billboard foliage", false);
+      _toggle(bbBody, params, "billboardLeaves", {
+        label: "Face camera",
+        onChange: () => {
+          scheduleUndo();
+          buildFoliage(true);
+        },
+      });
+      _toggle(bbBody, params, "billboardYawOnly", {
+        label: "Yaw only (stable)",
+        onChange: () => {
+          uBillboardYaw.value = params.billboardYawOnly ? 1.0 : 0.0;
+          scheduleUndo();
+        },
+      });
+
+      const sceneBody = _section(uiRoot, "Scene", false);
+      _color(sceneBody, params, "bgColor", {
+        label: "Sky color",
+        onChange: (ev) => {
+          scene.background.set(ev.value);
+          if (scene.fog) scene.fog.color.set(ev.value);
+        },
+      });
+      _slider(sceneBody, params, "sunIntensity", {
+        label: "Sun intensity",
+        min: 0,
+        max: 6,
+        step: 0.05,
+        onChange: (ev) => {
+          sun.intensity = ev.value;
+        },
+      });
+      _slider(sceneBody, params, "ambientInt", {
+        label: "Ambient light",
+        min: 0,
+        max: 3,
+        step: 0.05,
+        onChange: (ev) => {
+          hemi.intensity = ev.value;
+        },
+      });
+      _separator(sceneBody);
+      const syncSun = () => {
+        sun.position.set(params.sunX, params.sunY, params.sunZ);
+        uSunDir.value.set(params.sunX, params.sunY, params.sunZ);
+        uSunDir.value.normalize();
+      };
+      _slider(sceneBody, params, "sunX", {
+        label: "Sun X",
+        min: -20,
+        max: 20,
+        step: 0.5,
+        onChange: syncSun,
+      });
+      _slider(sceneBody, params, "sunY", {
+        label: "Sun Y",
+        min: 0.5,
+        max: 20,
+        step: 0.5,
+        onChange: syncSun,
+      });
+      _slider(sceneBody, params, "sunZ", {
+        label: "Sun Z",
+        min: -20,
+        max: 20,
+        step: 0.5,
+        onChange: syncSun,
+      });
+      _separator(sceneBody);
+      _toggle(sceneBody, params, "showFog", {
+        label: "Show fog",
+        onChange: (ev) => {
+          scene.fog = ev.value
+            ? new THREE.FogExp2(params.bgColor, 0.018)
+            : null;
+        },
+      });
+      _toggle(sceneBody, params, "showGround", {
+        label: "Show ground",
+        onChange: (ev) => {
+          ground.visible = ev.value;
+        },
+      });
+      _toggle(sceneBody, params, "showHelpers", {
+        label: "Show helpers (draggable)",
+        onChange: (ev) => {
+          showHelpers = ev.value;
+          updateClusterHelpers();
+        },
+      });
+
+      const statsBody = _section(uiRoot, "Stats", true);
+      _info(statsBody, "Trunk LOD0 tris", () => String(params.trunkTris));
+      _info(statsBody, "Trunk LOD1 tris", () => String(params.trunkLod1Tris));
+      _info(statsBody, "LOD0 leaves", () => String(params.totalLeaves));
+      _info(statsBody, "LOD0 leaf tris", () => String(params.totalLeafTris));
+
+      _separator(uiRoot);
+      _button(uiRoot, {
+        title: "Rebuild Foliage",
+        onClick: () => buildFoliage(true),
+      });
+
+      _separator(uiRoot);
+      const presetBody = _section(uiRoot, "Save / Load", true);
+      _text(presetBody, params, "presetName", { label: "Preset name" });
+      _button(presetBody, {
+        title: "Save Preset to File",
+        onClick: savePreset,
+      });
+      _button(presetBody, {
+        title: "Load Preset from File",
+        onClick: () => {
+          const i = document.createElement("input");
+          i.type = "file";
+          i.accept = ".json";
+          i.onchange = () => i.files[0] && loadPresetFromFile(i.files[0]);
+          i.click();
+        },
+      });
+      _separator(presetBody);
+      _button(presetBody, {
+        title: "Copy to Clipboard",
+        onClick: () => {
+          const json = JSON.stringify(buildPresetData(), null, 2);
+          navigator.clipboard
+            .writeText(json)
+            .then(() => (infoEl.textContent = "Settings copied to clipboard!"))
+            .catch(() => {
+              const ta = document.createElement("textarea");
+              ta.value = json;
+              document.body.appendChild(ta);
+              ta.select();
+              document.execCommand("copy");
+              document.body.removeChild(ta);
+              infoEl.textContent = "Settings copied!";
+            });
+        },
+      });
+
+      // ─── INITIAL BUILD ───────────────────────────────────────────────────────────
+      buildFoliage(true);
+
+      // ─── RENDER LOOP ─────────────────────────────────────────────────────────────
+      const timer = new THREE.Timer();
+      renderer.setAnimationLoop(() => {
+        timer.update();
+        uTime.value = timer.getElapsed();
+        controls.update();
+        renderer.render(scene, camera);
+      });
+
+      // ─── RESIZE ──────────────────────────────────────────────────────────────────
+      window.addEventListener("resize", () => {
+        camera.aspect = innerWidth / innerHeight;
+        camera.updateProjectionMatrix();
+        renderer.setSize(innerWidth, innerHeight);
+      });
+    </script>
+  </body>
+</html>
