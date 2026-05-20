@@ -245,12 +245,7 @@ export function createManciniLensFlare({
       checkTransparency(hits);
     }
 
-    // Exponential damp. Upstream uses maath's critically-damped spring at smoothTime=0.007;
-    // a plain 1st-order filter at that time constant reads as a hard cut, so we use a
-    // slightly slower time constant to recover the perceived softness of the spring.
-    const SMOOTH_TIME = 0.05;
-    const k = 1 - Math.exp(-dt / SMOOTH_TIME);
-    internalOpacity += (targetOpacity - internalOpacity) * k;
+    internalOpacity += (targetOpacity - internalOpacity) * Math.min(1, dt * 60 * 0.007);
     uOpacity.value = internalOpacity;
   }
 
