@@ -651,6 +651,17 @@
         return (s - Math.floor(s) - 0.5) * 2 * amount;
       }
 
+      /** Stable 0…1 hash for ring / card randomization (seed changes → reshuffle). */
+      function foliageHash01(a, b, seed) {
+        const s = Math.sin(a * 12.9898 + b * 78.233 + seed * 43.758) * 43758.5453;
+        return s - Math.floor(s);
+      }
+
+      function foliageRandomSignedDeg(a, b, seed, amount) {
+        if (!amount) return 0;
+        return (foliageHash01(a, b, seed) * 2 - 1) * amount;
+      }
+
       function makeCheckerTexture() {
         const t = new THREE.CanvasTexture(
           (() => {
@@ -730,6 +741,15 @@
             pivotAlongRadius: 0,
             azimuthOffsetDeg: 0,
             staggerDeg: 0,
+            /** ±° random spin of whole ring per level (Y axis); use seed / reshuffle to reroll */
+            ringRandomDeg: 0,
+            ringRandomSeed: 0,
+            /** ±° extra azimuth per card on the ring (Y axis) */
+            cardRandomDeg: 0,
+            /** Per-leaf variation (same seed as ring/card random; reshuffle rerolls all) */
+            leafPitchRandomDeg: 6,
+            leafYRandom: 0.05,
+            leafScaleRandom: 0.1,
             offsetX: 0,
             offsetY: 0,
             offsetZ: 0,
@@ -915,9 +935,14 @@
           foliageObject.scale.setScalar(Number.isFinite(g) && g > 0 ? g : 1);
         }
 
-        function quaternionForAzimuth(thetaRad) {
+        function quaternionForAzimuth(thetaRad, pitchExtraDeg = 0) {
           const t = params.transform;
-          _euler.set(t.rotXDeg * DEG, t.rotYDeg * DEG, t.rotZDeg * DEG, "XYZ");
+          _euler.set(
+            (t.rotXDeg + pitchExtraDeg) * DEG,
+            t.rotYDeg * DEG,
+            t.rotZDeg * DEG,
+            "XYZ"
+          );
           _qCard.setFromEuler(_euler);
           _qAz.setFromAxisAngle(_yAxis, thetaRad);
           return _qOut.copy(_qAz).multiply(_qCard);
@@ -1052,27 +1077,65 @@
           for (let level = 0; level < levels; level++) {
             const tLin = levels <= 1 ? 0 : level / (levels - 1);
             const u = Math.pow(tLin, pow);
-            const s =
+            const sRing =
               (f.scaleBottom * (1 - u) + f.scaleTop * u) * gScale;
-            const y = f.baseY + level * f.stepY + f.offsetY;
-            const R = Math.max(0.001, trunkRadiusAtWorldY(y, tr) - f.radialInset);
+            const yRing = f.baseY + level * f.stepY + f.offsetY;
+            const R = Math.max(0.001, trunkRadiusAtWorldY(yRing, tr) - f.radialInset);
             const along = THREE.MathUtils.clamp(
               Number.isFinite(f.pivotAlongRadius) ? f.pivotAlongRadius : 0,
               0,
               1
             );
 
+            const ringRand = foliageRandomSignedDeg(
+              level,
+              0,
+              f.ringRandomSeed,
+              f.ringRandomDeg
+            );
             for (let k = 0; k < perRing; k++) {
+              const cardRand = foliageRandomSignedDeg(
+                level,
+                k + 1,
+                f.ringRandomSeed,
+                f.cardRandomDeg
+              );
               const thetaDeg =
-                f.azimuthOffsetDeg + (k * 360) / perRing + f.staggerDeg * level;
+                f.azimuthOffsetDeg +
+                (k * 360) / perRing +
+                f.staggerDeg * level +
+                ringRand +
+                cardRand;
               const theta = thetaDeg * DEG;
               const cx = Math.cos(theta);
               const sz = Math.sin(theta);
 
+              const seed = f.ringRandomSeed;
+              const pitchJit = foliageRandomSignedDeg(
+                level,
+                k + 40,
+                seed,
+                f.leafPitchRandomDeg
+              );
+              const yJit = foliageRandomSignedDeg(
+                level,
+                k + 50,
+                seed,
+                f.leafYRandom
+              );
+              const scaleJit = foliageRandomSignedDeg(
+                level,
+                k + 60,
+                seed,
+                f.leafScaleRandom
+              );
+
               const px = along * R * cx + f.offsetX;
               const pz = along * R * sz + f.offsetZ;
+              const y = yRing + yJit;
+              const s = Math.max(0.02, sRing * (1 + scaleJit));
               _dummy.position.set(px, y, pz);
-              _dummy.quaternion.copy(quaternionForAzimuth(theta));
+              _dummy.quaternion.copy(quaternionForAzimuth(theta, pitchJit));
               _dummy.scale.setScalar(s);
               _dummy.updateMatrix();
               foliageObject.setMatrixAt(idx++, _dummy.matrix);
@@ -1207,6 +1270,10 @@
           ensureFoliageObject();
           ensureBranchesObject();
         };
+        const onFoliageMatrices = () => {
+          if (params.foliage.layout === "pine") updateInstanceMatrices();
+          else applySingleTransform();
+        };
         const onGeom = () => rebuildGeometry();
         const onCardTilt = () => {
           if (params.foliage.layout === "pine") updateInstanceMatrices();
@@ -1292,8 +1359,38 @@
         _slider(sFol, f, "globalScale", { label: "global ×", min: 0.1, max: 3, step: 0.02, onChange: onFoliage });
         _slider(sFol, f, "radialInset", { label: "trunk inset", min: -0.2, max: 0.5, step: 0.005, onChange: onFoliage });
         _slider(sFol, f, "pivotAlongRadius", { label: "pivot → surface", min: 0, max: 1, step: 0.02, onChange: onFoliage });
-        _slider(sFol, f, "azimuthOffsetDeg", { label: "ring rotate °", min: -180, max: 180, step: 0.5, onChange: onFoliage });
-        _slider(sFol, f, "staggerDeg", { label: "stagger / level °", min: -45, max: 45, step: 0.5, onChange: onFoliage });
+        _slider(sFol, f, "azimuthOffsetDeg", { label: "ring rotate °", min: -180, max: 180, step: 0.5, onChange: onFoliageMatrices });
+        _slider(sFol, f, "staggerDeg", { label: "stagger / level °", min: -45, max: 45, step: 0.5, onChange: onFoliageMatrices });
+        _slider(sFol, f, "ringRandomDeg", { label: "ring random ° (±)", min: 0, max: 180, step: 1, onChange: onFoliageMatrices });
+        _slider(sFol, f, "cardRandomDeg", { label: "card random ° (±)", min: 0, max: 90, step: 1, onChange: onFoliageMatrices });
+        _slider(sFol, f, "leafPitchRandomDeg", {
+          label: "leaf pitch ± °",
+          min: 0,
+          max: 25,
+          step: 0.5,
+          onChange: onFoliageMatrices,
+        });
+        _slider(sFol, f, "leafYRandom", {
+          label: "leaf height ±",
+          min: 0,
+          max: 0.35,
+          step: 0.005,
+          onChange: onFoliageMatrices,
+        });
+        _slider(sFol, f, "leafScaleRandom", {
+          label: "leaf scale ±",
+          min: 0,
+          max: 0.35,
+          step: 0.01,
+          onChange: onFoliageMatrices,
+        });
+        _button(sFol, {
+          title: "Reshuffle all random",
+          onClick: () => {
+            f.ringRandomSeed = (f.ringRandomSeed | 0) + 1;
+            onFoliageMatrices();
+          },
+        });
         _slider(sFol, f, "offsetX", { label: "offset X", min: -2, max: 2, step: 0.02, onChange: onFoliage });
         _slider(sFol, f, "offsetY", { label: "offset Y", min: -2, max: 2, step: 0.02, onChange: onFoliage });
         _slider(sFol, f, "offsetZ", { label: "offset Z", min: -2, max: 2, step: 0.02, onChange: onFoliage });
