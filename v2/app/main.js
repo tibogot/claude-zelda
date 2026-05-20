@@ -31,6 +31,8 @@ import { createHud } from "../ui/hud.js";
 import { createLensFlareSystem } from "../effects/lensFlare.js";
 import { createAutoCliffUniforms } from "../../chunkTerrainAutoCliff.js";
 import { createTextureLibrary } from "../core/textures/textureLibrary.js";
+import { createPropTextureLibrary } from "../core/textures/propTextureLibrary.js";
+import { createPropPbrNodeMaterial } from "../render/props/propPbrNodeMaterial.js";
 import { createV2ImageTexGroundMaterial } from "../render/terrain/sharedImgTexMaterial.js";
 import { createSplatOverlay } from "../render/terrain/splatOverlayTsl.js";
 import { SplatStore } from "../core/paint/splatStore.js";
@@ -413,6 +415,7 @@ export async function startV2App(opts = {}) {
   const cliffU = createAutoCliffUniforms();
 
   const textureLibrary = createTextureLibrary();
+  const propTextureLibrary = createPropTextureLibrary();
   let textureLibraryReady = false;
   textureLibrary
     .loadDefaultsAsync()
@@ -1797,12 +1800,22 @@ export async function startV2App(opts = {}) {
       const factory = defs[primitiveName];
       if (!factory) return;
       const geometry = factory();
-      const material = new THREE.MeshStandardMaterial({ color: 0xcccccc, roughness: 0.6, metalness: 0.1 });
+      const defaultPropMat = propTextureLibrary.getByIndex(0);
+      const material = defaultPropMat
+        ? createPropPbrNodeMaterial(defaultPropMat, { triplanar: false })
+        : new THREE.MeshStandardMaterial({ color: 0xcccccc, roughness: 0.6, metalness: 0.1 });
       const typeIdx = propStore.registerPrimitive(primitiveName, geometry, material);
       if (typeIdx >= 0) {
         propInstancer.onTypeRegistered(typeIdx);
         const slotIdx = toolState.propSlots.length;
-        toolState.propSlots.push({ name: primitiveName, loaded: true, typeIdx, builtin: true });
+        toolState.propSlots.push({
+          name: primitiveName,
+          loaded: true,
+          typeIdx,
+          builtin: true,
+          materialId: defaultPropMat?.id ?? null,
+          triplanar: false,
+        });
         toolState.props.activeSlot = slotIdx;
         propUiCallbacks._rebuildPropUi?.();
         console.log(`[V2] Primitive "${primitiveName}" added (type ${typeIdx})`);
@@ -3591,6 +3604,33 @@ export async function startV2App(opts = {}) {
     importPropGlb() { _importPropGlb(); },
     addPrimitive(name) { _addPrimitive(name); },
     addLiveProp(name) { _addLiveProp(name); },
+    propTextureLibrary,
+    /** Swap the PBR material on a primitive slot. All instances of that slot use the new material. */
+    setPrimitiveMaterial(slotIdx, materialId) {
+      const slot = toolState.propSlots[slotIdx];
+      if (!slot || !slot.builtin) return;
+      const propMat = propTextureLibrary.getById(materialId);
+      if (!propMat) return;
+      const newMat = createPropPbrNodeMaterial(propMat, { triplanar: !!slot.triplanar });
+      propInstancer.setTypeMaterial(slot.typeIdx, newMat);
+      const type = propStore.types[slot.typeIdx];
+      if (type) for (const e of type.entries) e.material = newMat;
+      slot.materialId = materialId;
+      console.log(`[V2] Slot "${slot.name}" material → "${propMat.name}"`);
+    },
+    /** Toggle triplanar (world-axis) projection on a primitive slot. Rebuilds its material. */
+    setPrimitiveTriplanar(slotIdx, enabled) {
+      const slot = toolState.propSlots[slotIdx];
+      if (!slot || !slot.builtin || !slot.materialId) return;
+      slot.triplanar = !!enabled;
+      const propMat = propTextureLibrary.getById(slot.materialId);
+      if (!propMat) return;
+      const newMat = createPropPbrNodeMaterial(propMat, { triplanar: slot.triplanar });
+      propInstancer.setTypeMaterial(slot.typeIdx, newMat);
+      const type = propStore.types[slot.typeIdx];
+      if (type) for (const e of type.entries) e.material = newMat;
+      console.log(`[V2] Slot "${slot.name}" triplanar → ${slot.triplanar}`);
+    },
     livePropManager,
     set onPropSelectionChanged(fn) { _onPropSelectionChanged = fn; },
     removePropSlot(idx) { _removePropSlot(idx); },

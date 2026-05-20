@@ -2096,6 +2096,24 @@ function buildPropsPanel(app) {
   // --- Import / Primitives ---
   const importBody = _section(panel, 'Import');
   _button(importBody, { title: 'Import GLB...', onClick: async () => { await app.importPropGlb(); rebuildAll(); } });
+  _button(importBody, { title: '+ Import material (folder)...', onClick: () => {
+    if (!app.propTextureLibrary) return;
+    const inp = document.createElement('input');
+    inp.type = 'file';
+    inp.webkitdirectory = true;
+    inp.multiple = true;
+    inp.addEventListener('change', () => {
+      if (!inp.files || inp.files.length === 0) return;
+      const newMat = app.propTextureLibrary.addMaterialFromFiles(Array.from(inp.files));
+      if (!newMat) {
+        console.warn('[V2] Material import: no albedo/diff map detected in folder. Check filenames for _diff/_color/_basecolor suffix.');
+        return;
+      }
+      console.log(`[V2] Imported material "${newMat.name}" (id ${newMat.id})`);
+      rebuildAll();
+    });
+    inp.click();
+  }});
 
   const primBody = _section(panel, 'Add Primitive', false);
   for (const shape of ['Cube', 'Sphere', 'Cylinder', 'Plane', 'Cone', 'Torus']) {
@@ -2128,6 +2146,30 @@ function buildPropsPanel(app) {
       rmBtn.addEventListener('click', () => { app.removePropSlot(i); rebuildAll(); });
       headerRow.appendChild(rmBtn);
       row.appendChild(headerRow);
+      if (slot.builtin && app.propTextureLibrary) {
+        const matOpts = app.propTextureLibrary.getMaterialOptionsForUi();
+        if (Object.keys(matOpts).length > 0) {
+          const proxy = { materialId: slot.materialId ?? Object.values(matOpts)[0] };
+          _dropdown(row, proxy, 'materialId', {
+            label: 'Material',
+            options: matOpts,
+            onChange: () => { app.setPrimitiveMaterial(i, proxy.materialId); rebuildAll(); },
+          });
+          const propMat = app.propTextureLibrary.getById(proxy.materialId);
+          if (propMat) {
+            _slider(row, propMat, 'uvScale', { label: 'UV tile', min: 0.01, max: 20, step: 0.01,
+              onChange: () => { propMat.uUVScale.value = propMat.uvScale; } });
+            _slider(row, propMat, 'normalStrength', { label: 'Normal', min: 0, max: 3, step: 0.05,
+              onChange: () => { propMat.uNormalStr.value = propMat.normalStrength; } });
+            _slider(row, propMat, 'aoStrength', { label: 'AO', min: 0, max: 2, step: 0.05,
+              onChange: () => { propMat.uAOStr.value = propMat.aoStrength; } });
+            _slider(row, propMat, 'roughStrength', { label: 'Rough', min: 0, max: 2, step: 0.05,
+              onChange: () => { propMat.uRoughStr.value = propMat.roughStrength; } });
+            const triProxy = { triplanar: !!slot.triplanar };
+            _toggle(row, triProxy, 'triplanar', { label: 'Triplanar', onChange: () => app.setPrimitiveTriplanar(i, triProxy.triplanar) });
+          }
+        }
+      }
       if (!slot.builtin && !slot.live) {
         const lodRow = document.createElement('div');
         lodRow.style.cssText = 'display:flex; gap:4px;';

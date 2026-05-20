@@ -104,6 +104,23 @@ export class PropInstancer {
     };
   }
 
+  /** Swap the material on every LOD InstancedMesh for this type. Disposes the prior material. */
+  setTypeMaterial(typeIdx, newMaterial) {
+    const tr = this._typeRender[typeIdx];
+    if (!tr) return;
+    const seen = new Set();
+    const lods = [tr.lod0, tr.lod1, tr.lod2];
+    for (const lod of lods) {
+      if (!lod) continue;
+      for (const { im } of lod) {
+        const prev = im.material;
+        im.material = newMaterial;
+        if (prev && prev !== newMaterial) seen.add(prev);
+      }
+    }
+    for (const m of seen) m.dispose?.();
+  }
+
   onTypeLodRegistered(typeIdx, lod) {
     const type = this.store.types[typeIdx];
     if (!type) return;
