@@ -1,0 +1,3252 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Pine editor — instanced rings + card shaping</title>
+    <style>
+      * {
+        margin: 0;
+        padding: 0;
+        box-sizing: border-box;
+      }
+      html,
+      body {
+        width: 100%;
+        height: 100%;
+        overflow: hidden;
+        background: #87ceeb;
+      }
+      canvas {
+        display: block;
+        width: 100vw;
+        height: 100vh;
+      }
+      #hint {
+        position: fixed;
+        bottom: 14px;
+        left: 50%;
+        transform: translateX(-50%);
+        z-index: 5;
+        font-size: 12px;
+        color: rgba(30, 50, 80, 0.75);
+        pointer-events: none;
+        text-align: center;
+        max-width: 92vw;
+      }
+      #title {
+        position: fixed;
+        top: 12px;
+        left: 12px;
+        z-index: 5;
+        font-size: 14px;
+        font-weight: 600;
+        color: rgba(40, 60, 100, 0.85);
+        pointer-events: none;
+      }
+      :root {
+        --bg-dark: #222222;
+        --bg-panel: #2a2a2a;
+        --bg-item: #333333;
+        --bg-hover: #3a3a3a;
+        --bg-input: #1e1e1e;
+        --border: #3c3c3c;
+        --border-light: #4a4a4a;
+        --text: #cccccc;
+        --text-dim: #888888;
+        --text-bright: #e0e0e0;
+        --accent: #4a9eff;
+        --font: "Segoe UI", system-ui, -apple-system, sans-serif;
+        --font-mono: "Cascadia Code", "Fira Code", Consolas, monospace;
+        --radius: 4px;
+      }
+      #ui {
+        position: fixed;
+        top: 8px;
+        right: 8px;
+        z-index: 20;
+        width: 320px;
+        max-height: calc(100vh - 16px);
+        display: flex;
+        flex-direction: column;
+        overflow: hidden;
+        background: var(--bg-panel);
+        border: 1px solid var(--border);
+        border-radius: 6px;
+        font-family: var(--font);
+        font-size: 13px;
+        color: var(--text);
+        user-select: none;
+        box-shadow: 0 8px 24px rgba(0, 0, 0, 0.45);
+      }
+      #ui .panel-header {
+        display: flex;
+        align-items: center;
+        padding: 8px 12px;
+        min-height: 36px;
+        background: var(--bg-dark);
+        border-bottom: 1px solid var(--border);
+        font-size: 12px;
+        font-weight: 600;
+        letter-spacing: 0.4px;
+        color: var(--text-bright);
+        flex-shrink: 0;
+      }
+      #ui-scroll {
+        flex: 1;
+        overflow-y: auto;
+        scrollbar-width: thin;
+      }
+      #ui-scroll::-webkit-scrollbar {
+        width: 8px;
+      }
+      #ui-scroll::-webkit-scrollbar-thumb {
+        background: var(--border);
+        border-radius: 4px;
+      }
+      .inspector-section {
+        border-bottom: 1px solid var(--border);
+      }
+      .section-header {
+        display: flex;
+        align-items: center;
+        gap: 6px;
+        padding: 6px 12px;
+        cursor: pointer;
+        font-size: 11px;
+        font-weight: 600;
+        text-transform: uppercase;
+        letter-spacing: 0.4px;
+        color: var(--text-dim);
+      }
+      .section-header:hover {
+        background: var(--bg-hover);
+      }
+      .section-header .section-arrow {
+        width: 14px;
+        height: 14px;
+        transition: transform 0.15s;
+        flex-shrink: 0;
+      }
+      .section-header.collapsed .section-arrow {
+        transform: rotate(-90deg);
+      }
+      .section-body {
+        padding: 6px 12px 10px;
+      }
+      .section-body.hidden {
+        display: none;
+      }
+      .prop-row {
+        display: flex;
+        align-items: center;
+        gap: 8px;
+        padding: 3px 0;
+        min-height: 26px;
+      }
+      .prop-label {
+        width: 108px;
+        min-width: 108px;
+        font-size: 11px;
+        color: var(--text-dim);
+        text-align: right;
+        padding-right: 4px;
+        line-height: 1.2;
+      }
+      .prop-value {
+        flex: 1;
+        display: flex;
+        gap: 4px;
+        align-items: center;
+        min-width: 0;
+      }
+      .prop-color-wrap {
+        display: flex;
+        align-items: center;
+        gap: 6px;
+        flex: 1;
+      }
+      .prop-color {
+        width: 22px;
+        height: 22px;
+        border-radius: var(--radius);
+        border: 1px solid var(--border);
+        cursor: pointer;
+        padding: 0;
+        -webkit-appearance: none;
+        appearance: none;
+      }
+      .prop-color::-webkit-color-swatch-wrapper {
+        padding: 0;
+      }
+      .prop-color::-webkit-color-swatch {
+        border: none;
+        border-radius: 2px;
+      }
+      .prop-slider-wrap {
+        flex: 1;
+        display: flex;
+        align-items: center;
+        gap: 6px;
+        min-width: 0;
+      }
+      .prop-num-input {
+        width: 72px;
+        height: 22px;
+        flex-shrink: 0;
+        background: var(--bg-input);
+        border: 1px solid var(--border);
+        border-radius: var(--radius);
+        padding: 0 5px;
+        color: var(--text);
+        font-size: 11px;
+        font-family: var(--font-mono);
+        text-align: right;
+        outline: none;
+      }
+      .prop-num-input:focus {
+        border-color: var(--accent);
+      }
+      .prop-num-input::-webkit-outer-spin-button,
+      .prop-num-input::-webkit-inner-spin-button {
+        -webkit-appearance: none;
+        margin: 0;
+      }
+      .prop-num-input[type="number"] {
+        appearance: textfield;
+        -moz-appearance: textfield;
+      }
+      .prop-slider {
+        flex: 1;
+        height: 4px;
+        -webkit-appearance: none;
+        appearance: none;
+        background: var(--bg-input);
+        border-radius: 2px;
+        outline: none;
+        min-width: 0;
+      }
+      .prop-slider::-webkit-slider-thumb {
+        -webkit-appearance: none;
+        width: 12px;
+        height: 12px;
+        border-radius: 50%;
+        background: var(--accent);
+        cursor: pointer;
+      }
+      .prop-dropdown {
+        flex: 1;
+        height: 22px;
+        background: var(--bg-input);
+        border: 1px solid var(--border);
+        border-radius: var(--radius);
+        padding: 0 6px;
+        color: var(--text);
+        font-size: 12px;
+        font-family: var(--font);
+        outline: none;
+        cursor: pointer;
+        min-width: 0;
+      }
+      .prop-dropdown:focus {
+        border-color: var(--accent);
+      }
+      .prop-input {
+        flex: 1;
+        height: 22px;
+        background: var(--bg-input);
+        border: 1px solid var(--border);
+        border-radius: var(--radius);
+        padding: 0 6px;
+        color: var(--text);
+        font-size: 12px;
+        font-family: var(--font-mono);
+        outline: none;
+        min-width: 0;
+      }
+      .prop-input:focus {
+        border-color: var(--accent);
+      }
+      .ui-separator {
+        height: 1px;
+        background: var(--border);
+        margin: 8px 0;
+      }
+      .tex-gallery-label {
+        font-size: 10px;
+        font-weight: 600;
+        text-transform: uppercase;
+        letter-spacing: 0.35px;
+        color: var(--text-dim);
+        padding: 2px 0 6px;
+      }
+      .tex-gallery {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 8px;
+        padding: 0 0 10px;
+      }
+      .tex-gallery .tex-item {
+        display: flex;
+        flex-direction: column;
+        align-items: center;
+        gap: 3px;
+        width: 56px;
+      }
+      .tex-gallery img {
+        width: 52px;
+        height: 52px;
+        object-fit: cover;
+        border-radius: var(--radius);
+        border: 2px solid var(--border);
+        cursor: pointer;
+        opacity: 0.75;
+        background: var(--bg-input);
+        transition:
+          opacity 0.15s,
+          border-color 0.15s;
+      }
+      .tex-gallery img:hover {
+        opacity: 1;
+        border-color: var(--border-light);
+      }
+      .tex-gallery img.active {
+        border-color: var(--accent);
+        opacity: 1;
+        box-shadow: 0 0 0 1px var(--accent);
+      }
+      .tex-gallery .tex-label {
+        font-size: 9px;
+        line-height: 1.2;
+        font-family: var(--font-mono);
+        color: var(--text-dim);
+        text-align: center;
+        max-width: 56px;
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+        pointer-events: none;
+      }
+      .prop-toggle {
+        width: 14px;
+        height: 14px;
+        border: 1px solid var(--border-light);
+        border-radius: 3px;
+        background: var(--bg-input);
+        cursor: pointer;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        flex-shrink: 0;
+        padding: 0;
+        color: transparent;
+      }
+      .prop-toggle.checked {
+        background: var(--accent);
+        border-color: var(--accent);
+        color: white;
+      }
+      .prop-toggle svg {
+        width: 10px;
+        height: 10px;
+      }
+      .section-btn {
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        width: 100%;
+        height: 26px;
+        margin-top: 4px;
+        background: var(--bg-item);
+        border: 1px solid var(--border);
+        border-radius: var(--radius);
+        color: var(--text-dim);
+        cursor: pointer;
+        font-size: 11px;
+        font-family: var(--font);
+      }
+      .section-btn:hover {
+        background: var(--bg-hover);
+        color: var(--text);
+        border-color: var(--border-light);
+      }
+      .info-row {
+        display: flex;
+        align-items: center;
+        gap: 8px;
+        padding: 3px 0;
+        min-height: 26px;
+      }
+      .info-label {
+        width: 108px;
+        min-width: 108px;
+        font-size: 11px;
+        color: var(--text-dim);
+        text-align: right;
+        padding-right: 4px;
+      }
+      .info-value {
+        flex: 1;
+        font-size: 11px;
+        color: var(--text);
+        font-family: var(--font-mono);
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+      }
+    </style>
+    <script type="importmap">
+      {
+        "imports": {
+          "three": "https://cdn.jsdelivr.net/npm/three@0.183.1/build/three.webgpu.js",
+          "three/webgpu": "https://cdn.jsdelivr.net/npm/three@0.183.1/build/three.webgpu.js",
+          "three/tsl": "https://cdn.jsdelivr.net/npm/three@0.183.1/build/three.tsl.js",
+          "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.183.1/examples/jsm/"
+        }
+      }
+    </script>
+  </head>
+  <body>
+    <div id="ui">
+      <div class="panel-header">Pine card + trunk</div>
+      <div id="ui-scroll"></div>
+    </div>
+    <div id="title">
+      Pine — 9 cards / ring · 8 levels (default) · pivot on trunk
+    </div>
+    <div id="hint">
+      Pine: foliage + optional instanced branches (trunk-axis pivot). Toggle
+      “Branches → enable”. Single card: use position + rotation.
+    </div>
+    <script type="module">
+      import * as THREE from "three";
+      import {
+        Fn,
+        float,
+        vec2,
+        vec3,
+        vec4,
+        uniform,
+        modelWorldMatrix,
+        texture,
+        uv,
+        mix,
+        smoothstep,
+        clamp,
+        sin,
+        cos,
+        positionLocal,
+        positionWorld,
+        normalLocal,
+        cameraPosition,
+        normalize,
+        length,
+        dot,
+        max,
+        pow,
+        negate,
+        mul,
+        add,
+        sub,
+        div,
+        instanceIndex,
+        hash,
+        rotateUV,
+        step,
+        abs,
+      } from "three/tsl";
+      import { OrbitControls } from "three/addons/controls/OrbitControls.js";
+      const DEG = Math.PI / 180;
+
+      const _checkSvg =
+        '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12"></polyline></svg>';
+      const _arrowSvg =
+        '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="section-arrow"><polyline points="6 9 12 15 18 9"></polyline></svg>';
+
+      function _fmt(v, step) {
+        if (step >= 1) return String(Math.round(v));
+        const d = Math.max(0, -Math.floor(Math.log10(step)));
+        return v.toFixed(d);
+      }
+
+      function _clampSnap(v, min, max, step) {
+        if (!Number.isFinite(v)) return min;
+        const n = Math.round((v - min) / step);
+        let out = min + n * step;
+        const stepStr = String(step);
+        let decimals = 0;
+        if (stepStr.includes(".")) {
+          decimals = stepStr.split(".")[1].length;
+        } else if (stepStr.includes("e-")) {
+          decimals = 8;
+        }
+        if (decimals > 0) out = Number(out.toFixed(decimals));
+        return Math.min(max, Math.max(min, out));
+      }
+
+      function _section(parent, title, expanded = true) {
+        const sec = document.createElement("div");
+        sec.className = "inspector-section";
+        const hdr = document.createElement("div");
+        hdr.className = "section-header" + (expanded ? "" : " collapsed");
+        hdr.innerHTML = _arrowSvg + " " + title;
+        const body = document.createElement("div");
+        body.className = "section-body" + (expanded ? "" : " hidden");
+        hdr.addEventListener("click", () => {
+          hdr.classList.toggle("collapsed");
+          body.classList.toggle("hidden");
+        });
+        sec.appendChild(hdr);
+        sec.appendChild(body);
+        parent.appendChild(sec);
+        return body;
+      }
+
+      function _slider(parent, obj, key, opts) {
+        const { label, min, max, step = 0.01, onChange } = opts;
+        const row = document.createElement("div");
+        row.className = "prop-row";
+        const cur = obj[key];
+        row.innerHTML = `<span class="prop-label">${label}</span><div class="prop-value"><div class="prop-slider-wrap"><input type="range" class="prop-slider" min="${min}" max="${max}" step="${step}" value="${cur}"><input type="number" class="prop-num-input" title="Type an exact value" min="${min}" max="${max}" step="${step}" value="${_fmt(cur, step)}"></div></div>`;
+        const sl = row.querySelector(".prop-slider");
+        const num = row.querySelector(".prop-num-input");
+        const syncNumDisplay = () => {
+          num.value = _fmt(obj[key], step);
+        };
+        const applyFromSlider = () => {
+          obj[key] = parseFloat(sl.value);
+          syncNumDisplay();
+          onChange?.();
+        };
+        const commitFromNum = () => {
+          const raw = String(num.value).trim();
+          if (raw === "" || raw === "-" || raw === "." || raw === "-.") {
+            syncNumDisplay();
+            return;
+          }
+          let v = parseFloat(raw);
+          if (!Number.isFinite(v)) {
+            syncNumDisplay();
+            return;
+          }
+          v = _clampSnap(v, min, max, step);
+          obj[key] = v;
+          sl.value = String(v);
+          syncNumDisplay();
+          onChange?.();
+        };
+        sl.addEventListener("input", applyFromSlider);
+        num.addEventListener("change", commitFromNum);
+        num.addEventListener("keydown", (e) => {
+          if (e.key === "Enter") num.blur();
+        });
+        parent.appendChild(row);
+      }
+
+      function _color(parent, obj, key, opts) {
+        const { label, onChange } = opts;
+        const row = document.createElement("div");
+        row.className = "prop-row";
+        row.innerHTML = `<span class="prop-label">${label}</span><div class="prop-value"><div class="prop-color-wrap"><input type="color" class="prop-color" value="${obj[key]}"><span style="font-size:11px;color:var(--text-dim);font-family:var(--font-mono)">${obj[key]}</span></div></div>`;
+        const inp = row.querySelector(".prop-color");
+        const hex = row.querySelector("span");
+        inp.addEventListener("input", () => {
+          obj[key] = inp.value;
+          hex.textContent = inp.value;
+          onChange?.();
+        });
+        parent.appendChild(row);
+      }
+
+      function _toggle(parent, obj, key, opts) {
+        const { label, onChange } = opts;
+        const row = document.createElement("div");
+        row.className = "prop-row";
+        row.innerHTML = `<span class="prop-label">${label}</span><div class="prop-value"><button type="button" class="prop-toggle ${obj[key] ? "checked" : ""}">${_checkSvg}</button></div>`;
+        const btn = row.querySelector(".prop-toggle");
+        btn.addEventListener("click", () => {
+          obj[key] = !obj[key];
+          btn.classList.toggle("checked", obj[key]);
+          onChange?.();
+        });
+        parent.appendChild(row);
+      }
+
+      function _dropdown(parent, obj, key, opts) {
+        const { label, options, onChange } = opts;
+        const row = document.createElement("div");
+        row.className = "prop-row";
+        let optHtml = "";
+        for (const [text, val] of Object.entries(options)) {
+          optHtml += `<option value="${val}" ${obj[key] === val ? "selected" : ""}>${text}</option>`;
+        }
+        row.innerHTML = `<span class="prop-label">${label}</span><div class="prop-value"><select class="prop-dropdown">${optHtml}</select></div>`;
+        const sel = row.querySelector(".prop-dropdown");
+        const isNum = typeof obj[key] === "number";
+        sel.addEventListener("change", () => {
+          obj[key] = isNum ? Number(sel.value) : sel.value;
+          onChange?.();
+        });
+        parent.appendChild(row);
+      }
+
+      function _button(parent, opts) {
+        const { title, onClick } = opts;
+        const btn = document.createElement("button");
+        btn.type = "button";
+        btn.className = "section-btn";
+        btn.textContent = title;
+        btn.addEventListener("click", onClick);
+        parent.appendChild(btn);
+      }
+
+      function _separator(parent) {
+        const el = document.createElement("div");
+        el.className = "ui-separator";
+        parent.appendChild(el);
+      }
+
+      function _text(parent, obj, key, opts) {
+        const { label, onChange } = opts;
+        const row = document.createElement("div");
+        row.className = "prop-row";
+        row.innerHTML = `<span class="prop-label">${label}</span><div class="prop-value"><input type="text" class="prop-input" value="${obj[key] ?? ""}"></div>`;
+        const inp = row.querySelector(".prop-input");
+        inp.addEventListener("change", () => {
+          obj[key] = inp.value;
+          onChange?.();
+        });
+        parent.appendChild(row);
+        return {
+          refresh() {
+            inp.value = obj[key] ?? "";
+          },
+        };
+      }
+
+      function _info(parent, label, getValue) {
+        const row = document.createElement("div");
+        row.className = "info-row";
+        const valSpan = document.createElement("span");
+        valSpan.className = "info-value";
+        valSpan.textContent = getValue();
+        row.innerHTML = `<span class="info-label">${label}</span>`;
+        row.appendChild(valSpan);
+        parent.appendChild(row);
+        return {
+          update(v) {
+            valSpan.textContent = v;
+          },
+        };
+      }
+      const _v3 = new THREE.Vector3();
+      const _euler = new THREE.Euler();
+      const _qCard = new THREE.Quaternion();
+      const _qAz = new THREE.Quaternion();
+      const _qOut = new THREE.Quaternion();
+      const _dummy = new THREE.Object3D();
+      const _yAxis = new THREE.Vector3(0, 1, 0);
+
+      function trunkRadiusAtWorldY(y, trunk) {
+        const H = Math.max(0.15, trunk.height);
+        const y0 = trunk.yOffset;
+        const f = THREE.MathUtils.clamp((y - y0) / H, 0, 1);
+        return THREE.MathUtils.lerp(trunk.radiusBottom, trunk.radiusTop, f);
+      }
+
+      /** Rotate UVs in 90° steps (geometry.rotateY does not update uv). */
+      function rotateGeometryUV(geo, quarterTurns) {
+        const uv = geo.attributes.uv;
+        if (!uv) return;
+        const n = ((Math.round(quarterTurns) % 4) + 4) % 4;
+        if (n === 0) return;
+        for (let i = 0; i < uv.count; i++) {
+          let u = uv.getX(i);
+          let v = uv.getY(i);
+          for (let t = 0; t < n; t++) {
+            const nu = v;
+            const nv = 1 - u;
+            u = nu;
+            v = nv;
+          }
+          uv.setXY(i, u, v);
+        }
+        uv.needsUpdate = true;
+      }
+
+      function applyMapTransform(tex, matParams) {
+        if (!tex) return;
+        const ru = matParams.texRepeatU ?? 1;
+        const rv = matParams.texRepeatV ?? 1;
+        let su = ru;
+        let sv = rv;
+        if (matParams.texFlipH) su = -Math.abs(ru);
+        if (matParams.texFlipV) sv = -Math.abs(rv);
+        tex.center.set(0.5, 0.5);
+        tex.rotation = (matParams.texRotDeg ?? 0) * DEG;
+        tex.repeat.set(su, sv);
+        tex.offset.set(matParams.texOffsetU ?? 0, matParams.texOffsetV ?? 0);
+        if (matParams.texFlipH) tex.offset.x += Math.abs(ru);
+        if (matParams.texFlipV) tex.offset.y += Math.abs(rv);
+        const tiled =
+          ru !== 1 || rv !== 1 || matParams.texFlipH || matParams.texFlipV;
+        tex.wrapS = tiled ? THREE.RepeatWrapping : THREE.ClampToEdgeWrapping;
+        tex.wrapT = tiled ? THREE.RepeatWrapping : THREE.ClampToEdgeWrapping;
+        tex.needsUpdate = true;
+      }
+
+      /**
+       * Build in centered XY (normal +Z), deform, move chosen edge midpoint to origin, then rotate +90° Y so:
+       * — plane is perpendicular to trunk (world Y): lies in XZ… after rot, spans Y + tangential Z, normal ≈ −X toward trunk.
+       * — pivot sits on the short-edge center (default: left edge if width ≥ height) for a clean trunk attach.
+       */
+      function createRectangleGeometry(w, h, segX, segY, shape, pivotEdge) {
+        const { bendX, bendY, skewX, skewY, taperX } = shape;
+        const geo = new THREE.PlaneGeometry(w, h, segX, segY);
+        const pos = geo.attributes.position;
+        const hw = w * 0.5;
+        const hh = h * 0.5;
+        for (let i = 0; i < pos.count; i++) {
+          let x = pos.getX(i);
+          let y = pos.getY(i);
+          const nx = hw > 1e-6 ? x / hw : 0;
+          const ny = hh > 1e-6 ? y / hh : 0;
+          const scaleX = 1 + taperX * ny;
+          x *= scaleX;
+          x += skewX * ny * hh;
+          y += skewY * nx * hw;
+          let z = pos.getZ(i);
+          z += bendX * nx * nx;
+          z += bendY * ny * ny;
+          pos.setXYZ(i, x, y, z);
+        }
+
+        let edge = pivotEdge;
+        if (edge === "auto") edge = w >= h ? "left" : "bottom";
+        let px = 0;
+        let py = 0;
+        const pz = 0;
+        switch (edge) {
+          case "bottom":
+            px = 0;
+            py = hh;
+            break;
+          case "top":
+            px = 0;
+            py = -hh;
+            break;
+          case "left":
+            px = hw;
+            py = 0;
+            break;
+          case "right":
+            px = -hw;
+            py = 0;
+            break;
+          default:
+            px = hw;
+            py = 0;
+        }
+        for (let i = 0; i < pos.count; i++) {
+          pos.setXYZ(i, pos.getX(i) + px, pos.getY(i) + py, pos.getZ(i) + pz);
+        }
+
+        geo.rotateY(Math.PI / 2);
+        rotateGeometryUV(geo, 1);
+        pos.needsUpdate = true;
+        geo.computeVertexNormals();
+        return geo;
+      }
+
+      /** Stylized branch: tapered cylinder along +Y, base at origin, quadratic bend in +Z (droops after card-style tilt). */
+      function createBranchGeometry(
+        length,
+        radiusBottom,
+        radiusTop,
+        radialSegs,
+        heightSegs,
+        bend,
+      ) {
+        const L = Math.max(0.08, length);
+        const r0 = Math.max(0.004, radiusBottom);
+        const r1 = Math.max(0.004, radiusTop);
+        const rs = Math.max(3, Math.round(radialSegs));
+        const hs = Math.max(1, Math.round(heightSegs));
+        const geo = new THREE.CylinderGeometry(r1, r0, L, rs, hs);
+        geo.translate(0, L * 0.5, 0);
+        const pos = geo.attributes.position;
+        for (let i = 0; i < pos.count; i++) {
+          const x = pos.getX(i);
+          const y = pos.getY(i);
+          let z = pos.getZ(i);
+          const t = L > 1e-6 ? THREE.MathUtils.clamp(y / L, 0, 1) : 0;
+          z += bend * t * t;
+          pos.setXYZ(i, x, y, z);
+        }
+        pos.needsUpdate = true;
+        geo.computeVertexNormals();
+        return geo;
+      }
+
+      function instanceScaleJitter(idx, amount) {
+        const s = Math.sin(idx * 12.9898) * 43758.5453;
+        return (s - Math.floor(s) - 0.5) * 2 * amount;
+      }
+
+      /** Stable 0…1 hash for ring / card randomization (seed changes → reshuffle). */
+      function foliageHash01(a, b, seed) {
+        const s =
+          Math.sin(a * 12.9898 + b * 78.233 + seed * 43.758) * 43758.5453;
+        return s - Math.floor(s);
+      }
+
+      function foliageRandomSignedDeg(a, b, seed, amount) {
+        if (!amount) return 0;
+        return (foliageHash01(a, b, seed) * 2 - 1) * amount;
+      }
+
+      function makeCheckerTexture() {
+        const t = new THREE.CanvasTexture(
+          (() => {
+            const c = document.createElement("canvas");
+            c.width = c.height = 256;
+            const g = c.getContext("2d");
+            const n = 8;
+            const s = 256 / n;
+            for (let j = 0; j < n; j++) {
+              for (let i = 0; i < n; i++) {
+                g.fillStyle = (i + j) % 2 ? "#c8d8e8" : "#f0f4f8";
+                g.fillRect(i * s, j * s, s, s);
+              }
+            }
+            g.strokeStyle = "rgba(60,80,120,0.35)";
+            g.lineWidth = 1;
+            for (let k = 0; k <= n; k++) {
+              g.beginPath();
+              g.moveTo(0, k * s);
+              g.lineTo(256, k * s);
+              g.stroke();
+              g.beginPath();
+              g.moveTo(k * s, 0);
+              g.lineTo(k * s, 256);
+              g.stroke();
+            }
+            return c;
+          })(),
+        );
+        t.wrapS = t.wrapT = THREE.RepeatWrapping;
+        t.repeat.set(4, 4);
+        t.colorSpace = THREE.SRGBColorSpace;
+        t.needsUpdate = true;
+        return t;
+      }
+
+      (async () => {
+        const params = {
+          rect: {
+            width: 2,
+            height: 0.95,
+            /** auto | left | right | bottom | top — short edge recommended for trunk hook */
+            pivotEdge: "auto",
+          },
+          /** Pine card: subdivide along width (bough) for bendX; height needs segY≥2 for bendY (ny² needs ny=0). */
+          grid: {
+            segX: 5,
+            segY: 2,
+          },
+          shape: {
+            bendX: 0.14,
+            bendY: -0.2,
+            skewX: 0,
+            skewY: 0,
+            taperX: 0,
+          },
+          transform: {
+            posX: 0.01,
+            posY: 0.69,
+            posZ: 0,
+            rotXDeg: -20,
+            rotYDeg: 0,
+            rotZDeg: 90,
+          },
+          foliage: {
+            layout: "pine",
+            levels: 8,
+            perRing: 9,
+            baseY: 1.68,
+            stepY: 0.47,
+            scaleBottom: 0.94,
+            scaleTop: 0.32,
+            scalePower: 1.15,
+            globalScale: 1,
+            radialInset: 0.02,
+            /** 0 = pivot on trunk axis (centered from top); 1 = pivot on surface at this azimuth (old behavior) */
+            pivotAlongRadius: 0,
+            azimuthOffsetDeg: 0,
+            staggerDeg: 0,
+            /** ±° random spin of whole ring per level (Y axis); use seed / reshuffle to reroll */
+            ringRandomDeg: 0,
+            ringRandomSeed: 0,
+            /** ±° extra azimuth per card on the ring (Y axis) */
+            cardRandomDeg: 0,
+            /** Per-leaf variation (same seed as ring/card random; reshuffle rerolls all) */
+            leafPitchRandomDeg: 6,
+            leafYRandom: 0.05,
+            leafScaleRandom: 0.1,
+            offsetX: 0,
+            offsetY: 0,
+            offsetZ: 0,
+          },
+          trunk: {
+            height: 5,
+            radiusBottom: 0.14,
+            radiusTop: 0.02,
+            yOffset: 0,
+            color: "#3d2e22",
+            visible: true,
+          },
+          material: {
+            roughness: 1,
+            metalness: 0,
+            useChecker: false,
+            alphaTest: 0.45,
+            depthWrite: true,
+            uploadName: "(none)",
+            /** 'tsl' = procedural leaf look; 'texture' = sample RGB from uploaded image */
+            colorSource: "tsl",
+            /** 'alpha' = map RGBA; 'luminance' = alphaMap (red channel) for B&amp;W / grayscale masks */
+            maskMode: "alpha",
+            bottomColor: "#1a4520",
+            topColor: "#6aab38",
+            colorVar: 0.14,
+            normalBias: 0.28,
+            leafWarp: 0.12,
+            radialUp: 0.35,
+            veinStrength: 0.1,
+            pivotAo: 0.35,
+            aoStrength: 0.4,
+            aoRadius: 2.2,
+            sssColor: "#b8d85a",
+            sssStrength: 0.38,
+            sssPower: 2.2,
+            rimColor: "#d8f0b0",
+            rimStrength: 0.14,
+            rimPower: 2.4,
+            /** U = along card width (bough), V = across card height — adjust if art export differs */
+            texRotDeg: 0,
+            texOffsetU: 0,
+            texOffsetV: 0,
+            texRepeatU: 1,
+            texRepeatV: 1,
+            texFlipH: false,
+            texFlipV: false,
+          },
+          scene: {
+            bgColor: "#87ceeb",
+            sunIntensity: 2.2,
+            ambientInt: 0.8,
+            sunX: 5,
+            sunY: 12,
+            sunZ: 4,
+            showGround: true,
+            showFog: false,
+          },
+          branches: {
+            enabled: false,
+            levels: 5,
+            perRing: 5,
+            baseY: 0.79,
+            stepY: 0.55,
+            scaleBottom: 1,
+            scaleTop: 0.72,
+            scalePower: 1.1,
+            scaleVariation: 0.14,
+            globalScale: 1,
+            radialInset: 0,
+            pivotAlongRadius: 0,
+            azimuthOffsetDeg: 18,
+            staggerDeg: 4,
+            offsetX: 0,
+            offsetY: 0,
+            offsetZ: 0,
+            length: 1.05,
+            radiusBottom: 0.038,
+            radiusTop: 0.02,
+            radialSegs: 6,
+            heightSegs: 5,
+            bend: 0.32,
+            rotXDeg: -28,
+            rotYDeg: 0,
+            rotZDeg: 90,
+            color: "#4a3528",
+            roughness: 0.88,
+          },
+          debug: {
+            wireframe: false,
+            showPivot: false,
+          },
+          presetName: "my_pine",
+          lodPreview: false,
+          lodDist1: 80,
+          lodDist2: 200,
+          trunkTris: 0,
+          totalLeaves: 0,
+          totalLeafTris: 0,
+          lod1Leaves: 0,
+          lod2Leaves: 0,
+        };
+
+        const LOD_SPACING = 12;
+        const LOD_LABEL_Z = 5.2;
+        const PRESET_VERSION = 1;
+        const PINE_LEAF_TEXTURES = [
+          { name: "Frame 56", path: "textures/pine-leaves/Frame 56.png" },
+          { name: "Frame 57", path: "textures/pine-leaves/Frame 57.png" },
+        ];
+        let activeLeafTexPath = "";
+        let activeLeafTexDataUrl = "";
+        let galleryImgs = [];
+        let lodMesh1 = null;
+        let lodMesh2 = null;
+        let lodTrunk0Clone = null;
+        let lodTrunk1Clone = null;
+        let lodTrunk2Clone = null;
+        const lodGroundLabels = [];
+        const infoEl = document.getElementById("hint");
+
+        const scene = new THREE.Scene();
+        scene.background = new THREE.Color(params.scene.bgColor);
+        scene.fog = null;
+
+        const camera = new THREE.PerspectiveCamera(
+          55,
+          innerWidth / innerHeight,
+          0.1,
+          500,
+        );
+        camera.position.set(7, 5, 10);
+
+        const renderer = new THREE.WebGPURenderer({ antialias: true });
+        renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
+        renderer.setSize(innerWidth, innerHeight);
+        renderer.shadowMap.enabled = true;
+        renderer.shadowMap.type = THREE.PCFSoftShadowMap;
+        renderer.shadowMap.transmitted = true;
+        document.body.appendChild(renderer.domElement);
+        await renderer.init();
+
+        const controls = new OrbitControls(camera, renderer.domElement);
+        controls.target.set(0, 3, 0);
+        controls.enableDamping = true;
+        controls.dampingFactor = 0.08;
+        controls.update();
+
+        const hemi = new THREE.HemisphereLight(
+          "#b8dfff",
+          "#3d6b20",
+          params.scene.ambientInt,
+        );
+        scene.add(hemi);
+
+        const sun = new THREE.DirectionalLight(
+          "#fff8e8",
+          params.scene.sunIntensity,
+        );
+        sun.position.set(
+          params.scene.sunX,
+          params.scene.sunY,
+          params.scene.sunZ,
+        );
+        sun.castShadow = true;
+        sun.shadow.mapSize.set(2048, 2048);
+        sun.shadow.camera.near = 0.5;
+        sun.shadow.camera.far = 60;
+        sun.shadow.camera.left = -20;
+        sun.shadow.camera.right = 20;
+        sun.shadow.camera.top = 12;
+        sun.shadow.camera.bottom = -12;
+        sun.shadow.bias = -0.001;
+        scene.add(sun);
+
+        const groundGeo = new THREE.CircleGeometry(40, 72);
+        const groundMat = new THREE.MeshStandardMaterial({
+          color: "#4a7c2a",
+          roughness: 0.92,
+          metalness: 0,
+        });
+        const ground = new THREE.Mesh(groundGeo, groundMat);
+        ground.rotation.x = -Math.PI / 2;
+        ground.receiveShadow = true;
+        scene.add(ground);
+
+        const pebbleGeo = new THREE.SphereGeometry(0.12, 5, 3);
+        const pebbleMat = new THREE.MeshStandardMaterial({
+          color: "#888",
+          roughness: 0.95,
+        });
+        [
+          [-1.8, 0, 1.4],
+          [2.2, 0, 0.9],
+          [-0.5, 0, 2.3],
+          [1.5, 0, -1.7],
+        ].forEach(([x, y, z]) => {
+          const p = new THREE.Mesh(pebbleGeo, pebbleMat);
+          p.position.set(x, 0.07, z);
+          p.scale.y = 0.5 + Math.random() * 0.5;
+          scene.add(p);
+        });
+
+        const checker = makeCheckerTexture();
+        const opaqueTex = new THREE.DataTexture(
+          new Uint8Array([255, 255, 255, 255]),
+          1,
+          1,
+        );
+        opaqueTex.colorSpace = THREE.SRGBColorSpace;
+        opaqueTex.needsUpdate = true;
+        let uploadedTex = null;
+
+        function configureMaskTexture(tex) {
+          tex.colorSpace = THREE.SRGBColorSpace;
+          tex.wrapS = tex.wrapT = THREE.ClampToEdgeWrapping;
+          tex.premultiplyAlpha = false;
+          tex.generateMipmaps = false;
+          tex.minFilter = THREE.LinearFilter;
+          tex.magFilter = THREE.LinearFilter;
+          tex.needsUpdate = true;
+        }
+
+        const leafU = {
+          bottomColor: uniform(new THREE.Color(params.material.bottomColor)),
+          topColor: uniform(new THREE.Color(params.material.topColor)),
+          colorVar: uniform(params.material.colorVar),
+          normalBias: uniform(params.material.normalBias),
+          leafWarp: uniform(params.material.leafWarp),
+          radialUp: uniform(params.material.radialUp),
+          veinStrength: uniform(params.material.veinStrength),
+          pivotAo: uniform(params.material.pivotAo),
+          aoStrength: uniform(params.material.aoStrength),
+          aoRadius: uniform(params.material.aoRadius),
+          yMin: uniform(0),
+          yMax: uniform(8),
+          alphaCutoff: uniform(params.material.alphaTest),
+          maskInAlpha: uniform(params.material.maskMode === "alpha" ? 1 : 0),
+          useMaskTex: uniform(0),
+          useImageColor: uniform(0),
+          texRot: uniform(0),
+          texOff: uniform(new THREE.Vector2(0, 0)),
+          texRep: uniform(new THREE.Vector2(1, 1)),
+          texFlip: uniform(new THREE.Vector2(0, 0)),
+          sssColor: uniform(new THREE.Color(params.material.sssColor)),
+          sssStrength: uniform(params.material.sssStrength),
+          sssPower: uniform(params.material.sssPower),
+          rimColor: uniform(new THREE.Color(params.material.rimColor)),
+          rimStrength: uniform(params.material.rimStrength),
+          rimPower: uniform(params.material.rimPower),
+          sunDir: uniform(new THREE.Vector3(5, 12, 4).normalize()),
+        };
+
+        const leafMapNode = texture(checker);
+        leafMapNode.value = checker;
+
+        const leafMaskUv = Fn(() => {
+          let u = uv();
+          u = rotateUV(u, leafU.texRot);
+          u = sub(u, vec2(0.5, 0.5));
+          u = vec2(
+            mix(u.x, sub(float(1), u.x), leafU.texFlip.x),
+            mix(u.y, sub(float(1), u.y), leafU.texFlip.y),
+          );
+          u = add(mul(u, leafU.texRep), vec2(0.5, 0.5));
+          u = add(u, leafU.texOff);
+          return u;
+        });
+
+        /** One outward dir per card (pivot on trunk), stable when orbiting. */
+        const leafInstancePivotW = modelWorldMatrix.mul(vec4(0, 0, 0, 1)).xyz;
+        const leafTrunkRadial = normalize(
+          vec3(leafInstancePivotW.x, leafU.radialUp, leafInstancePivotW.z),
+        );
+
+        const leafNormalNode = Fn(() => {
+          const warped = normalize(
+            add(normalLocal, mul(sin(mul(uv().x, float(10))), leafU.leafWarp)),
+          );
+          return normalize(mix(warped, leafTrunkRadial, leafU.normalBias));
+        })();
+
+        /** Mask alpha for opacityNode; alphaTest cutout in opaque pass (stable depth, no sort bugs). */
+        const leafMaskAlphaNode = Fn(() => {
+          const s = leafMapNode.sample(leafMaskUv());
+          const maskA = mix(s.r, s.a, leafU.maskInAlpha);
+          const raw = mix(float(1), maskA, step(float(0.5), leafU.useMaskTex));
+          return smoothstep(
+            leafU.alphaCutoff.sub(0.05),
+            leafU.alphaCutoff.add(0.05),
+            raw,
+          );
+        })();
+
+        const leafColorNode = Fn(() => {
+          const u = uv();
+          let col = mix(leafU.bottomColor, leafU.topColor, u.y);
+          const vein = sin(mul(u.x, float(3.14159)))
+            .mul(float(0.5))
+            .add(float(0.5));
+          col = mul(
+            col,
+            mix(float(1), sub(float(1), leafU.veinStrength), vein),
+          );
+          const hookAo = mix(
+            float(1),
+            sub(float(1), leafU.pivotAo),
+            smoothstep(float(0), float(0.38), u.y),
+          );
+          col = mul(col, hookAo);
+          const h = hash(instanceIndex);
+          const varMul = add(
+            mul(h, mul(leafU.colorVar, float(2))),
+            sub(float(1), leafU.colorVar),
+          );
+          col = mul(col, varMul);
+          const distXZ = length(vec2(positionWorld.x, positionWorld.z));
+          const aoInner = mix(
+            sub(float(1), leafU.aoStrength),
+            float(1),
+            clamp(
+              div(distXZ, max(leafU.aoRadius, float(0.001))),
+              float(0),
+              float(1),
+            ),
+          );
+          col = mul(col, aoInner);
+          const viewDir = normalize(sub(cameraPosition, positionWorld));
+          const backDot = max(
+            dot(negate(leafU.sunDir), leafTrunkRadial),
+            float(0),
+          );
+          const sss = mul(pow(backDot, leafU.sssPower), leafU.sssStrength);
+          col = add(col, mul(leafU.sssColor, sss));
+          const rimDot = sub(
+            float(1),
+            max(dot(leafTrunkRadial, viewDir), float(0)),
+          );
+          const rim = mul(pow(rimDot, leafU.rimPower), leafU.rimStrength);
+          col = add(col, mul(leafU.rimColor, rim));
+          col = mix(
+            col,
+            leafMapNode.sample(leafMaskUv()).rgb,
+            leafU.useImageColor,
+          );
+          return clamp(col, float(0), float(2));
+        })();
+
+        const mat = new THREE.MeshStandardNodeMaterial({
+          side: THREE.DoubleSide,
+          roughness: params.material.roughness,
+          metalness: params.material.metalness,
+          alphaTest: 0,
+          depthWrite: true,
+          transparent: false,
+          forceSinglePass: true,
+        });
+        mat.colorNode = leafColorNode;
+        mat.normalNode = leafNormalNode;
+        mat.envMapIntensity = 0;
+        mat.castShadowNode = Fn(() => {
+          const s = leafMapNode.sample(leafMaskUv());
+          const maskA = mix(s.r, s.a, leafU.maskInAlpha);
+          const raw = mix(float(1), maskA, step(float(0.5), leafU.useMaskTex));
+          const a = smoothstep(
+            leafU.alphaCutoff.sub(0.05),
+            leafU.alphaCutoff.add(0.05),
+            raw,
+          );
+          a.lessThan(leafU.alphaCutoff).discard();
+          return vec4(0, 0, 0, 1);
+        })();
+
+        let geo = null;
+        let branchGeo = null;
+        /** @type {THREE.Mesh | THREE.InstancedMesh | null} */
+        let foliageObject = null;
+        /** @type {THREE.InstancedMesh | null} */
+        let branchesObject = null;
+        /** @type {THREE.Object3D | null} */
+        let pivotHelperRoot = null;
+
+        const trunkMat = new THREE.MeshStandardMaterial({
+          color: params.trunk.color,
+          roughness: 0.92,
+          metalness: 0,
+        });
+        const branchMat = new THREE.MeshStandardMaterial({
+          color: params.branches.color,
+          roughness: params.branches.roughness,
+          metalness: 0,
+        });
+        let trunkGeo = null;
+        const trunkMesh = new THREE.Mesh();
+        trunkMesh.castShadow = true;
+        trunkMesh.receiveShadow = true;
+        scene.add(trunkMesh);
+
+        const fileInput = document.createElement("input");
+        fileInput.type = "file";
+        fileInput.accept = "image/png,image/jpeg,image/webp,image/*";
+        fileInput.style.display = "none";
+        document.body.appendChild(fileInput);
+
+        const texLoader = new THREE.TextureLoader();
+
+        function disposeUploadedTexture() {
+          if (uploadedTex) {
+            uploadedTex.dispose();
+            uploadedTex = null;
+          }
+        }
+
+        function syncLeafBounds() {
+          const f = params.foliage;
+          const tr = params.trunk;
+          const levels = Math.max(1, Math.round(f.levels));
+          leafU.yMin.value = f.baseY + f.offsetY;
+          leafU.yMax.value =
+            f.baseY + f.offsetY + Math.max(0.05, (levels - 1) * f.stepY) + 0.35;
+          leafU.aoRadius.value = params.material.aoRadius;
+        }
+
+        function syncLeafUniforms() {
+          const m = params.material;
+          leafU.bottomColor.value.set(m.bottomColor);
+          leafU.topColor.value.set(m.topColor);
+          leafU.colorVar.value = m.colorVar;
+          leafU.normalBias.value = m.normalBias;
+          leafU.leafWarp.value = m.leafWarp;
+          leafU.radialUp.value = m.radialUp;
+          leafU.veinStrength.value = m.veinStrength;
+          leafU.pivotAo.value = m.pivotAo;
+          leafU.aoStrength.value = m.aoStrength;
+          leafU.sssColor.value.set(m.sssColor);
+          leafU.sssStrength.value = m.sssStrength;
+          leafU.sssPower.value = m.sssPower;
+          leafU.rimColor.value.set(m.rimColor);
+          leafU.rimStrength.value = m.rimStrength;
+          leafU.rimPower.value = m.rimPower;
+          leafU.alphaCutoff.value = m.alphaTest;
+          leafU.maskInAlpha.value = m.maskMode === "alpha" ? 1 : 0;
+          leafU.texRot.value = (m.texRotDeg ?? 0) * DEG;
+          const ru = m.texRepeatU ?? 1;
+          const rv = m.texRepeatV ?? 1;
+          let su = ru;
+          let sv = rv;
+          if (m.texFlipH) su = -Math.abs(ru);
+          if (m.texFlipV) sv = -Math.abs(rv);
+          leafU.texRep.value.set(su, sv);
+          let ou = m.texOffsetU ?? 0;
+          let ov = m.texOffsetV ?? 0;
+          if (m.texFlipH) ou += Math.abs(ru);
+          if (m.texFlipV) ov += Math.abs(rv);
+          leafU.texOff.value.set(ou, ov);
+          leafU.texFlip.value.set(m.texFlipH ? 1 : 0, m.texFlipV ? 1 : 0);
+          const sc = params.scene;
+          leafU.sunDir.value.set(sc.sunX, sc.sunY, sc.sunZ).normalize();
+          syncLeafBounds();
+        }
+
+        function syncMaterial() {
+          syncLeafUniforms();
+          const m = params.material;
+          mat.roughness = m.roughness;
+          mat.metalness = m.metalness;
+          mat.wireframe = params.debug.wireframe;
+
+          leafU.useMaskTex.value = uploadedTex ? 1 : 0;
+          if (uploadedTex) {
+            leafMapNode.value = uploadedTex;
+          } else if (m.useChecker) {
+            leafMapNode.value = checker;
+            leafU.useMaskTex.value = 1;
+          } else {
+            leafMapNode.value = opaqueTex;
+          }
+
+          const hasMask = leafU.useMaskTex.value > 0.5;
+          if (hasMask) {
+            /* Opaque alphaTest + depthWrite — same as arborist (avoids transparent sort artifacts). */
+            mat.opacityNode = leafMaskAlphaNode;
+            mat.transparent = false;
+            mat.alphaTest = m.alphaTest;
+            mat.alphaTestNode = null;
+            mat.alphaToCoverage = false;
+            mat.depthWrite = m.depthWrite;
+          } else {
+            mat.opacityNode = null;
+            mat.transparent = false;
+            mat.alphaTest = 0;
+            mat.alphaTestNode = null;
+            mat.alphaToCoverage = false;
+            mat.depthWrite = true;
+          }
+
+          leafU.useImageColor.value =
+            m.colorSource === "texture" && hasMask ? 1 : 0;
+          mat.needsUpdate = true;
+        }
+
+        function applySingleTransform() {
+          if (!foliageObject || foliageObject.isInstancedMesh) return;
+          const t = params.transform;
+          const g = params.foliage.globalScale;
+          foliageObject.position.set(t.posX, t.posY, t.posZ);
+          foliageObject.rotation.set(
+            t.rotXDeg * DEG,
+            t.rotYDeg * DEG,
+            t.rotZDeg * DEG,
+            "XYZ",
+          );
+          foliageObject.scale.setScalar(Number.isFinite(g) && g > 0 ? g : 1);
+        }
+
+        function quaternionForAzimuth(thetaRad, pitchExtraDeg = 0) {
+          const t = params.transform;
+          _euler.set(
+            (t.rotXDeg + pitchExtraDeg) * DEG,
+            t.rotYDeg * DEG,
+            t.rotZDeg * DEG,
+            "XYZ",
+          );
+          _qCard.setFromEuler(_euler);
+          _qAz.setFromAxisAngle(_yAxis, thetaRad);
+          return _qOut.copy(_qAz).multiply(_qCard);
+        }
+
+        function quaternionForBranchAzimuth(thetaRad) {
+          const b = params.branches;
+          _euler.set(b.rotXDeg * DEG, b.rotYDeg * DEG, b.rotZDeg * DEG, "XYZ");
+          _qCard.setFromEuler(_euler);
+          _qAz.setFromAxisAngle(_yAxis, thetaRad);
+          return _qOut.copy(_qAz).multiply(_qCard);
+        }
+
+        function syncBranchMaterial() {
+          branchMat.color.set(params.branches.color);
+          branchMat.roughness = params.branches.roughness;
+          branchMat.wireframe = params.debug.wireframe;
+          branchMat.needsUpdate = true;
+        }
+
+        function updateBranchMatrices() {
+          if (!branchesObject) return;
+          const b = params.branches;
+          const tr = params.trunk;
+          const levels = Math.max(1, Math.round(b.levels));
+          const perRing = Math.max(1, Math.round(b.perRing));
+          const count = levels * perRing;
+          if (branchesObject.count !== count) return;
+
+          const pow = Math.max(0.05, b.scalePower);
+          const gScale =
+            Number.isFinite(b.globalScale) && b.globalScale > 0
+              ? b.globalScale
+              : 1;
+          const varAmt = Math.max(0, b.scaleVariation);
+
+          let idx = 0;
+          for (let level = 0; level < levels; level++) {
+            const tLin = levels <= 1 ? 0 : level / (levels - 1);
+            const u = Math.pow(tLin, pow);
+            const sRing = (b.scaleBottom * (1 - u) + b.scaleTop * u) * gScale;
+            const y = b.baseY + level * b.stepY + b.offsetY;
+            const R = Math.max(
+              0.001,
+              trunkRadiusAtWorldY(y, tr) - b.radialInset,
+            );
+            const along = THREE.MathUtils.clamp(
+              Number.isFinite(b.pivotAlongRadius) ? b.pivotAlongRadius : 0,
+              0,
+              1,
+            );
+
+            for (let k = 0; k < perRing; k++) {
+              const thetaDeg =
+                b.azimuthOffsetDeg + (k * 360) / perRing + b.staggerDeg * level;
+              const theta = thetaDeg * DEG;
+              const cx = Math.cos(theta);
+              const sz = Math.sin(theta);
+
+              const px = along * R * cx + b.offsetX;
+              const pz = along * R * sz + b.offsetZ;
+              const jitter = 1 + instanceScaleJitter(idx, varAmt);
+              _dummy.position.set(px, y, pz);
+              _dummy.quaternion.copy(quaternionForBranchAzimuth(theta));
+              _dummy.scale.setScalar(sRing * jitter);
+              _dummy.updateMatrix();
+              branchesObject.setMatrixAt(idx++, _dummy.matrix);
+            }
+          }
+          branchesObject.instanceMatrix.needsUpdate = true;
+        }
+
+        function disposeBranchesObject() {
+          if (!branchesObject) return;
+          scene.remove(branchesObject);
+          branchesObject.dispose();
+          branchesObject = null;
+        }
+
+        function ensureBranchesObject() {
+          const pine = params.foliage.layout === "pine";
+          const b = params.branches;
+          if (!b.enabled || !pine || !branchGeo) {
+            disposeBranchesObject();
+            return;
+          }
+
+          const levels = Math.max(1, Math.round(b.levels));
+          const perRing = Math.max(1, Math.round(b.perRing));
+          const needCount = levels * perRing;
+
+          const needNew = !branchesObject || branchesObject.count !== needCount;
+
+          if (needNew) {
+            disposeBranchesObject();
+            branchesObject = new THREE.InstancedMesh(
+              branchGeo,
+              branchMat,
+              needCount,
+            );
+            branchesObject.frustumCulled = false;
+            branchesObject.renderOrder = 0;
+            branchesObject.castShadow = true;
+            branchesObject.receiveShadow = false;
+            scene.add(branchesObject);
+          } else {
+            branchesObject.geometry = branchGeo;
+            branchesObject.material = branchMat;
+          }
+          syncBranchMaterial();
+          updateBranchMatrices();
+        }
+
+        function rebuildBranchGeometry() {
+          const b = params.branches;
+          const newGeo = createBranchGeometry(
+            b.length,
+            b.radiusBottom,
+            b.radiusTop,
+            b.radialSegs,
+            b.heightSegs,
+            b.bend,
+          );
+          if (branchGeo) branchGeo.dispose();
+          branchGeo = newGeo;
+          if (branchesObject) branchesObject.geometry = branchGeo;
+          ensureBranchesObject();
+        }
+
+        function pineInstanceCapacity() {
+          const f = params.foliage;
+          return (
+            Math.max(1, Math.round(f.levels)) *
+            Math.max(1, Math.round(f.perRing))
+          );
+        }
+
+        /** @returns {number} instances written */
+        function fillPineInstances(mesh, options = {}) {
+          const f = params.foliage;
+          const tr = params.trunk;
+          const levels = Math.max(1, Math.round(f.levels));
+          const perRing = Math.max(1, Math.round(f.perRing));
+          const keepFraction = options.keepFraction ?? 1;
+          const step = Math.max(1, Math.round(1 / keepFraction));
+          const xOffset = options.xOffset ?? 0;
+          const scaleMul = options.scaleMul ?? 1;
+          const pow = Math.max(0.05, f.scalePower);
+          const gScale =
+            Number.isFinite(f.globalScale) && f.globalScale > 0
+              ? f.globalScale
+              : 1;
+
+          let logical = 0;
+          let out = 0;
+          for (let level = 0; level < levels; level++) {
+            const tLin = levels <= 1 ? 0 : level / (levels - 1);
+            const u = Math.pow(tLin, pow);
+            const sRing = (f.scaleBottom * (1 - u) + f.scaleTop * u) * gScale;
+            const yRing = f.baseY + level * f.stepY + f.offsetY;
+            const R = Math.max(
+              0.001,
+              trunkRadiusAtWorldY(yRing, tr) - f.radialInset,
+            );
+            const along = THREE.MathUtils.clamp(
+              Number.isFinite(f.pivotAlongRadius) ? f.pivotAlongRadius : 0,
+              0,
+              1,
+            );
+            const ringRand = foliageRandomSignedDeg(
+              level,
+              0,
+              f.ringRandomSeed,
+              f.ringRandomDeg,
+            );
+            for (let k = 0; k < perRing; k++) {
+              if (logical % step === 0) {
+                const cardRand = foliageRandomSignedDeg(
+                  level,
+                  k + 1,
+                  f.ringRandomSeed,
+                  f.cardRandomDeg,
+                );
+                const thetaDeg =
+                  f.azimuthOffsetDeg +
+                  (k * 360) / perRing +
+                  f.staggerDeg * level +
+                  ringRand +
+                  cardRand;
+                const theta = thetaDeg * DEG;
+                const cx = Math.cos(theta);
+                const sz = Math.sin(theta);
+                const seed = f.ringRandomSeed;
+                const pitchJit = foliageRandomSignedDeg(
+                  level,
+                  k + 40,
+                  seed,
+                  f.leafPitchRandomDeg,
+                );
+                const yJit = foliageRandomSignedDeg(
+                  level,
+                  k + 50,
+                  seed,
+                  f.leafYRandom,
+                );
+                const scaleJit = foliageRandomSignedDeg(
+                  level,
+                  k + 60,
+                  seed,
+                  f.leafScaleRandom,
+                );
+                const px = along * R * cx + f.offsetX + xOffset;
+                const pz = along * R * sz + f.offsetZ;
+                const y = yRing + yJit;
+                const s = Math.max(0.02, sRing * (1 + scaleJit) * scaleMul);
+                _dummy.position.set(px, y, pz);
+                _dummy.quaternion.copy(quaternionForAzimuth(theta, pitchJit));
+                _dummy.scale.setScalar(s);
+                _dummy.updateMatrix();
+                mesh.setMatrixAt(out++, _dummy.matrix);
+              }
+              logical++;
+            }
+          }
+          mesh.count = out;
+          mesh.instanceMatrix.needsUpdate = true;
+          return out;
+        }
+
+        function updateInstanceMatrices() {
+          if (!foliageObject?.isInstancedMesh) return;
+          const xOff =
+            params.lodPreview && params.foliage.layout === "pine"
+              ? -LOD_SPACING
+              : 0;
+          fillPineInstances(foliageObject, {
+            keepFraction: 1,
+            xOffset: xOff,
+            scaleMul: 1,
+          });
+        }
+
+        function countLeafTris(leafCount) {
+          const trisPerCard = geo?.index
+            ? geo.index.count / 3
+            : geo
+              ? (geo.attributes.position.count / 3) * 2
+              : 2;
+          return Math.round(leafCount * trisPerCard);
+        }
+
+        function updateStats() {
+          const cap = pineInstanceCapacity();
+          const n0 =
+            foliageObject?.isInstancedMesh && params.foliage.layout === "pine"
+              ? foliageObject.count
+              : foliageObject
+                ? 1
+                : 0;
+          params.totalLeaves = n0;
+          params.totalLeafTris = countLeafTris(n0);
+          params.lod1Leaves = lodMesh1 ? lodMesh1.count : 0;
+          params.lod2Leaves = lodMesh2 ? lodMesh2.count : 0;
+          if (trunkGeo) {
+            params.trunkTris = trunkGeo.index
+              ? trunkGeo.index.count / 3
+              : trunkGeo.attributes.position.count / 3;
+          } else {
+            params.trunkTris = 0;
+          }
+          statTrunkTris?.update(String(params.trunkTris));
+          statLeaves0?.update(String(params.totalLeaves));
+          statLeafTris0?.update(String(params.totalLeafTris));
+          statLod1Leaves?.update(String(params.lod1Leaves));
+          statLod2Leaves?.update(String(params.lod2Leaves));
+        }
+
+        function lodLabelRoundRect(ctx, x, y, w, h, r) {
+          const rr = Math.min(r, w / 2, h / 2);
+          ctx.beginPath();
+          ctx.moveTo(x + rr, y);
+          ctx.arcTo(x + w, y, x + w, y + h, rr);
+          ctx.arcTo(x + w, y + h, x, y + h, rr);
+          ctx.arcTo(x, y + h, x, y, rr);
+          ctx.arcTo(x, y, x + w, y, rr);
+          ctx.closePath();
+        }
+
+        function createLodGroundLabel() {
+          const canvas = document.createElement("canvas");
+          const W = 640;
+          const H = 176;
+          canvas.width = W;
+          canvas.height = H;
+          const ctx = canvas.getContext("2d");
+          const tex = new THREE.CanvasTexture(canvas);
+          tex.colorSpace = THREE.SRGBColorSpace;
+          const matLabel = new THREE.MeshBasicMaterial({
+            map: tex,
+            transparent: true,
+            depthWrite: false,
+            toneMapped: false,
+          });
+          const geoLabel = new THREE.PlaneGeometry(5.8, 1.6);
+          geoLabel.rotateX(-Math.PI / 2);
+          const meshLabel = new THREE.Mesh(geoLabel, matLabel);
+          meshLabel.renderOrder = 25;
+          const label = { mesh: meshLabel, canvas, ctx, tex, W, H };
+          label.redraw = (title, sub) => {
+            const { ctx: c, tex: t, W: w, H: h } = label;
+            c.clearRect(0, 0, w, h);
+            lodLabelRoundRect(c, 8, 8, w - 16, h - 16, 14);
+            c.fillStyle = "rgba(12, 18, 12, 0.9)";
+            c.fill();
+            c.strokeStyle = "rgba(100, 160, 95, 0.5)";
+            c.lineWidth = 2;
+            c.stroke();
+            c.fillStyle = "#e8f0e4";
+            c.font = "bold 26px Segoe UI, system-ui, sans-serif";
+            c.textAlign = "center";
+            c.textBaseline = "middle";
+            c.fillText(title, w / 2, 56);
+            c.fillStyle = "#9cb090";
+            c.font = "17px Consolas, monospace";
+            c.fillText(sub, w / 2, 112);
+            t.needsUpdate = true;
+          };
+          return label;
+        }
+
+        function ensureLodGroundLabels() {
+          if (lodGroundLabels.length) return;
+          for (let i = 0; i < 3; i++) {
+            const lb = createLodGroundLabel();
+            lodGroundLabels.push(lb);
+            scene.add(lb.mesh);
+            lb.mesh.visible = false;
+          }
+        }
+
+        function setLodGroundLabelsVisible(visible) {
+          ensureLodGroundLabels();
+          lodGroundLabels.forEach((lb) => {
+            lb.mesh.visible = visible;
+          });
+        }
+
+        function clearLodTrunkClones() {
+          if (lodTrunk0Clone) {
+            scene.remove(lodTrunk0Clone);
+            lodTrunk0Clone = null;
+          }
+          if (lodTrunk1Clone) {
+            scene.remove(lodTrunk1Clone);
+            lodTrunk1Clone = null;
+          }
+          if (lodTrunk2Clone) {
+            scene.remove(lodTrunk2Clone);
+            lodTrunk2Clone = null;
+          }
+        }
+
+        function clearLodPreviews() {
+          if (lodMesh1) {
+            scene.remove(lodMesh1);
+            lodMesh1.dispose();
+            lodMesh1 = null;
+          }
+          if (lodMesh2) {
+            scene.remove(lodMesh2);
+            lodMesh2.dispose();
+            lodMesh2 = null;
+          }
+          clearLodTrunkClones();
+        }
+
+        function cloneTrunksForLod() {
+          clearLodTrunkClones();
+          if (!params.trunk.visible) return;
+          const src = trunkMesh;
+          const offsets = [-LOD_SPACING, 0, LOD_SPACING];
+          const clones = [];
+          for (let i = 0; i < 3; i++) {
+            const c = src.clone();
+            c.position.copy(src.position);
+            c.position.x = offsets[i];
+            c.visible = params.trunk.visible;
+            c.castShadow = true;
+            c.receiveShadow = true;
+            scene.add(c);
+            clones.push(c);
+          }
+          lodTrunk0Clone = clones[0];
+          lodTrunk1Clone = clones[1];
+          lodTrunk2Clone = clones[2];
+        }
+
+        function updateLodTrunkVisibility() {
+          if (params.lodPreview && params.foliage.layout === "pine") {
+            trunkMesh.visible = false;
+          } else {
+            trunkMesh.visible = params.trunk.visible;
+          }
+        }
+
+        function updateLodLabels() {
+          ensureLodGroundLabels();
+          if (!params.lodPreview || params.foliage.layout !== "pine") {
+            setLodGroundLabelsVisible(false);
+            return;
+          }
+          const offsets = [-LOD_SPACING, 0, LOD_SPACING];
+          const n0 = params.totalLeaves;
+          const n1 = params.lod1Leaves;
+          const n2 = params.lod2Leaves;
+          const titles = [
+            "LOD 0 — Full Detail",
+            "LOD 1 — Half Density",
+            "LOD 2 — Quarter Density",
+          ];
+          const subs = [
+            `${n0} leaves · < ${params.lodDist1}m · full trunk`,
+            `${n1} leaves · 1.4× size · ${params.lodDist1}–${params.lodDist2}m`,
+            `${n2} leaves · 2× size · ${params.lodDist2}m+`,
+          ];
+          offsets.forEach((xOff, i) => {
+            lodGroundLabels[i].mesh.position.set(xOff, 0.02, LOD_LABEL_Z);
+            lodGroundLabels[i].redraw(titles[i], subs[i]);
+          });
+          setLodGroundLabelsVisible(true);
+        }
+
+        function rebuildLodPreviews() {
+          clearLodPreviews();
+          if (!params.lodPreview || params.foliage.layout !== "pine" || !geo)
+            return;
+
+          updateInstanceMatrices();
+
+          const cap = pineInstanceCapacity();
+          lodMesh1 = new THREE.InstancedMesh(geo, mat, cap);
+          lodMesh1.frustumCulled = false;
+          lodMesh1.castShadow = true;
+          lodMesh1.receiveShadow = false;
+          fillPineInstances(lodMesh1, {
+            keepFraction: 0.5,
+            xOffset: 0,
+            scaleMul: 1.414,
+          });
+          scene.add(lodMesh1);
+
+          lodMesh2 = new THREE.InstancedMesh(geo, mat, cap);
+          lodMesh2.frustumCulled = false;
+          lodMesh2.castShadow = true;
+          lodMesh2.receiveShadow = false;
+          fillPineInstances(lodMesh2, {
+            keepFraction: 0.25,
+            xOffset: LOD_SPACING,
+            scaleMul: 2,
+          });
+          scene.add(lodMesh2);
+
+          cloneTrunksForLod();
+          updateLodTrunkVisibility();
+          updateLodLabels();
+        }
+
+        function refreshLodSystem() {
+          if (branchesObject) {
+            branchesObject.visible =
+              params.branches.enabled &&
+              !params.lodPreview &&
+              params.foliage.layout === "pine";
+          }
+          if (params.lodPreview && params.foliage.layout === "pine") {
+            rebuildLodPreviews();
+          } else {
+            clearLodPreviews();
+            updateInstanceMatrices();
+            updateLodTrunkVisibility();
+            setLodGroundLabelsVisible(false);
+          }
+          updateStats();
+        }
+
+        function toggleLodPreview() {
+          if (params.foliage.layout !== "pine") {
+            params.lodPreview = false;
+            infoEl.textContent = "LOD preview requires Pine layout.";
+            return;
+          }
+          if (params.lodPreview) {
+            controls.target.set(0, 3, 0);
+            camera.position.set(0, 6, 22);
+          } else {
+            controls.target.set(0, 3, 0);
+            camera.position.set(7, 5, 10);
+          }
+          controls.update();
+          refreshLodSystem();
+        }
+
+        function detectAlphaChannel(image) {
+          try {
+            const w = image.width || image.naturalWidth;
+            const h = image.height || image.naturalHeight;
+            if (!w || !h) return false;
+            const c = document.createElement("canvas");
+            c.width = w;
+            c.height = h;
+            const ctx = c.getContext("2d", { willReadFrequently: true });
+            ctx.drawImage(image, 0, 0);
+            const data = ctx.getImageData(0, 0, w, h).data;
+            for (let i = 3; i < data.length; i += 16) {
+              if (data[i] < 255) return true;
+            }
+            return false;
+          } catch {
+            return false;
+          }
+        }
+
+        function textureToDataUrl(tex) {
+          const img = tex?.image;
+          if (!img) return "";
+          try {
+            const w = img.width || img.naturalWidth;
+            const h = img.height || img.naturalHeight;
+            if (!w || !h) return "";
+            const c = document.createElement("canvas");
+            c.width = w;
+            c.height = h;
+            c.getContext("2d").drawImage(img, 0, 0);
+            return c.toDataURL("image/png");
+          } catch {
+            return "";
+          }
+        }
+
+        function updateGallerySelection() {
+          galleryImgs.forEach((img, i) => {
+            img.classList.toggle(
+              "active",
+              PINE_LEAF_TEXTURES[i].path === activeLeafTexPath,
+            );
+          });
+        }
+
+        function buildTexGallery(parent) {
+          const label = document.createElement("div");
+          label.className = "tex-gallery-label";
+          label.textContent = "Built-in pine textures";
+          parent.appendChild(label);
+
+          const galleryEl = document.createElement("div");
+          galleryEl.className = "tex-gallery";
+          parent.appendChild(galleryEl);
+
+          galleryImgs = [];
+          PINE_LEAF_TEXTURES.forEach((t) => {
+            const wrap = document.createElement("div");
+            wrap.className = "tex-item";
+            const img = document.createElement("img");
+            img.src = t.path;
+            img.title = t.name;
+            img.alt = t.name;
+            img.addEventListener("click", () => loadLeafTexFromPath(t.path));
+            wrap.appendChild(img);
+            const cap = document.createElement("div");
+            cap.className = "tex-label";
+            cap.textContent = t.name;
+            wrap.appendChild(cap);
+            galleryEl.appendChild(wrap);
+            galleryImgs.push(img);
+          });
+          updateGallerySelection();
+        }
+
+        function loadLeafTexFromPath(path) {
+          const entry = PINE_LEAF_TEXTURES.find((t) => t.path === path);
+          texLoader.load(
+            path,
+            (tex) => {
+              configureMaskTexture(tex);
+              disposeUploadedTexture();
+              uploadedTex = tex;
+              activeLeafTexPath = path;
+              activeLeafTexDataUrl = "";
+              params.material.uploadName =
+                entry?.name || path.split("/").pop() || path;
+              const img = tex.image;
+              if (img) {
+                params.material.maskMode = detectAlphaChannel(img)
+                  ? "alpha"
+                  : "luminance";
+              }
+              syncMaterial();
+              refreshUploadName();
+              updateGallerySelection();
+              infoEl.textContent = `Texture loaded: ${params.material.uploadName}`;
+            },
+            undefined,
+            (err) => {
+              console.error(err);
+              infoEl.textContent = `Failed to load texture: ${path}`;
+            },
+          );
+        }
+
+        function loadLeafTexFromDataUrl(dataUrl, displayName) {
+          const img = new Image();
+          img.onload = () => {
+            const tex = new THREE.Texture(img);
+            configureMaskTexture(tex);
+            disposeUploadedTexture();
+            uploadedTex = tex;
+            activeLeafTexPath = "";
+            activeLeafTexDataUrl = dataUrl;
+            params.material.uploadName = displayName || "(embedded)";
+            params.material.maskMode = detectAlphaChannel(img)
+              ? "alpha"
+              : "luminance";
+            syncMaterial();
+            refreshUploadName();
+            updateGallerySelection();
+            infoEl.textContent = `Texture loaded: ${params.material.uploadName}`;
+          };
+          img.src = dataUrl;
+        }
+
+        function buildPresetData() {
+          const snapshot = JSON.parse(JSON.stringify(params));
+          for (const k of [
+            "trunkTris",
+            "totalLeaves",
+            "totalLeafTris",
+            "lod1Leaves",
+            "lod2Leaves",
+          ]) {
+            delete snapshot[k];
+          }
+          return {
+            pineEditor: PRESET_VERSION,
+            presetName: params.presetName,
+            params: snapshot,
+            leafTexture:
+              activeLeafTexPath ||
+              activeLeafTexDataUrl ||
+              textureToDataUrl(uploadedTex) ||
+              "",
+            leafTextureName: params.material.uploadName,
+          };
+        }
+
+        async function savePreset() {
+          const data = buildPresetData();
+          const json = JSON.stringify(data, null, 2);
+          const name = (params.presetName || "pine_preset").replace(
+            /[^a-z0-9_\-]/gi,
+            "_",
+          );
+          if (window.showSaveFilePicker) {
+            try {
+              const handle = await showSaveFilePicker({
+                suggestedName: name + ".json",
+                types: [
+                  {
+                    description: "Pine editor preset",
+                    accept: { "application/json": [".json"] },
+                  },
+                ],
+              });
+              const writable = await handle.createWritable();
+              await writable.write(json);
+              await writable.close();
+              infoEl.textContent = `Preset saved: ${name}.json`;
+            } catch (e) {
+              if (e.name !== "AbortError") console.error(e);
+            }
+          } else {
+            const a = document.createElement("a");
+            a.href = URL.createObjectURL(
+              new Blob([json], { type: "application/json" }),
+            );
+            a.download = name + ".json";
+            a.click();
+            URL.revokeObjectURL(a.href);
+            infoEl.textContent = `Preset saved: ${name}.json`;
+          }
+        }
+
+        function deepAssign(target, source) {
+          if (!source || typeof source !== "object") return;
+          for (const key of Object.keys(source)) {
+            const sv = source[key];
+            if (sv && typeof sv === "object" && !Array.isArray(sv)) {
+              if (!target[key] || typeof target[key] !== "object")
+                target[key] = {};
+              deepAssign(target[key], sv);
+            } else {
+              target[key] = sv;
+            }
+          }
+        }
+
+        function applyPresetData(data) {
+          if (data.pineEditor !== PRESET_VERSION || !data.params) {
+            throw new Error("Not a pine-editor preset (pineEditor: 1)");
+          }
+          deepAssign(params, data.params);
+          if (data.presetName) params.presetName = data.presetName;
+          presetNameInput?.refresh();
+
+          rebuildTrunk();
+          rebuildGeometry();
+          rebuildBranchGeometry();
+          syncMaterial();
+          syncBranchMaterial();
+          syncScene();
+          if (params.foliage.layout === "pine") {
+            ensureFoliageObject();
+            updateInstanceMatrices();
+            ensureBranchesObject();
+            updateBranchMatrices();
+          } else {
+            ensureFoliageObject();
+            applySingleTransform();
+          }
+          refreshLodSystem();
+          updatePivotHelper();
+
+          if (data.leafTexture) {
+            if (data.leafTexture.startsWith("data:")) {
+              loadLeafTexFromDataUrl(
+                data.leafTexture,
+                data.leafTextureName || "(embedded)",
+              );
+            } else if (
+              data.leafTexture.startsWith("textures/") ||
+              data.leafTexture.includes("/")
+            ) {
+              loadLeafTexFromPath(data.leafTexture);
+            }
+          } else {
+            activeLeafTexPath = "";
+            activeLeafTexDataUrl = "";
+            clearUploadedTexture();
+          }
+        }
+
+        function loadPresetFromFile(file) {
+          const reader = new FileReader();
+          reader.onload = (ev) => {
+            try {
+              applyPresetData(JSON.parse(ev.target.result));
+              infoEl.textContent = `Preset loaded: ${file.name}`;
+            } catch (e) {
+              infoEl.textContent = "Invalid preset: " + e.message;
+            }
+          };
+          reader.readAsText(file);
+        }
+
+        function disposeFoliageObject() {
+          if (!foliageObject) return;
+          scene.remove(foliageObject);
+          if (foliageObject.isInstancedMesh) foliageObject.dispose();
+          foliageObject = null;
+        }
+
+        function ensureFoliageObject() {
+          const f = params.foliage;
+          const pine = f.layout === "pine";
+          const levels = Math.max(1, Math.round(f.levels));
+          const perRing = Math.max(1, Math.round(f.perRing));
+          const needCount = pine ? levels * perRing : 1;
+
+          const needNewType =
+            !foliageObject ||
+            (pine && !foliageObject.isInstancedMesh) ||
+            (!pine && foliageObject.isInstancedMesh) ||
+            (pine &&
+              foliageObject.isInstancedMesh &&
+              foliageObject.count !== needCount);
+
+          if (needNewType) {
+            disposeFoliageObject();
+            if (pine) {
+              foliageObject = new THREE.InstancedMesh(geo, mat, needCount);
+              foliageObject.frustumCulled = false;
+              foliageObject.renderOrder = 1;
+              foliageObject.castShadow = true;
+              foliageObject.receiveShadow = false;
+              scene.add(foliageObject);
+              updateInstanceMatrices();
+            } else {
+              foliageObject = new THREE.Mesh(geo, mat);
+              foliageObject.castShadow = true;
+              foliageObject.receiveShadow = false;
+              scene.add(foliageObject);
+              applySingleTransform();
+            }
+          } else {
+            foliageObject.geometry = geo;
+            foliageObject.material = mat;
+            foliageObject.castShadow = true;
+            foliageObject.receiveShadow = false;
+            if (pine) updateInstanceMatrices();
+            else applySingleTransform();
+          }
+          updatePivotHelper();
+        }
+
+        function rebuildTrunk() {
+          const t = params.trunk;
+          if (trunkGeo) trunkGeo.dispose();
+          const H = Math.max(0.15, t.height);
+          const r0 = Math.max(0.02, t.radiusBottom);
+          const r1 = Math.max(0.02, t.radiusTop);
+          trunkGeo = new THREE.CylinderGeometry(r1, r0, H, 24);
+          trunkMesh.geometry = trunkGeo;
+          trunkMesh.material = trunkMat;
+          trunkMesh.position.set(0, t.yOffset + H * 0.5, 0);
+          trunkMesh.visible = t.visible;
+          trunkMat.color.set(t.color);
+        }
+
+        function updatePivotHelper() {
+          if (pivotHelperRoot) {
+            scene.remove(pivotHelperRoot);
+            pivotHelperRoot.traverse((o) => {
+              o.geometry?.dispose?.();
+              const m = o.material;
+              if (m) (Array.isArray(m) ? m : [m]).forEach((x) => x.dispose?.());
+            });
+            pivotHelperRoot = null;
+          }
+          if (!params.debug.showPivot || !foliageObject) return;
+
+          const axes = new THREE.AxesHelper(0.2);
+          if (foliageObject.isInstancedMesh) {
+            const m = new THREE.Matrix4();
+            foliageObject.getMatrixAt(0, m);
+            m.decompose(_dummy.position, _dummy.quaternion, _v3);
+            const g = new THREE.Group();
+            g.position.copy(_dummy.position);
+            g.quaternion.copy(_dummy.quaternion);
+            g.add(axes);
+            scene.add(g);
+            pivotHelperRoot = g;
+          } else {
+            foliageObject.add(axes);
+            pivotHelperRoot = axes;
+          }
+        }
+
+        function rebuildGeometry() {
+          const r = params.rect;
+          const g = params.grid;
+          const w = Math.max(0.05, r.width);
+          const h = Math.max(0.05, r.height);
+          const sx = Math.max(1, Math.round(g.segX));
+          let sy = Math.max(1, Math.round(g.segY));
+          // bendY uses ny² — needs an interior row (ny≈0). segY=1 puts every vert on y=±hh so ny²=1 everywhere.
+          if (Math.abs(params.shape.bendY) > 1e-8) sy = Math.max(sy, 2);
+          const newGeo = createRectangleGeometry(
+            w,
+            h,
+            sx,
+            sy,
+            params.shape,
+            params.rect.pivotEdge,
+          );
+          if (foliageObject) foliageObject.geometry = newGeo;
+          if (geo) geo.dispose();
+          geo = newGeo;
+          ensureFoliageObject();
+        }
+
+        function syncScene() {
+          const sc = params.scene;
+          scene.background.set(sc.bgColor);
+          hemi.intensity = sc.ambientInt;
+          sun.intensity = sc.sunIntensity;
+          sun.position.set(sc.sunX, sc.sunY, sc.sunZ);
+          ground.visible = sc.showGround;
+          scene.fog = sc.showFog ? new THREE.FogExp2(sc.bgColor, 0.018) : null;
+          syncLeafUniforms();
+        }
+
+        rebuildTrunk();
+        rebuildGeometry();
+        rebuildBranchGeometry();
+        syncMaterial();
+        syncBranchMaterial();
+        syncScene();
+
+        let refreshUploadName = () => {};
+        let presetNameInput = null;
+        let statTrunkTris = null;
+        let statLeaves0 = null;
+        let statLeafTris0 = null;
+        let statLod1Leaves = null;
+        let statLod2Leaves = null;
+
+        const onTrunk = () => {
+          rebuildTrunk();
+          refreshLodSystem();
+          updateBranchMatrices();
+          updatePivotHelper();
+        };
+        const onFoliage = () => {
+          syncLeafBounds();
+          ensureFoliageObject();
+          ensureBranchesObject();
+          refreshLodSystem();
+        };
+        const onFoliageMatrices = () => {
+          syncLeafBounds();
+          if (params.foliage.layout === "pine") refreshLodSystem();
+          else applySingleTransform();
+        };
+        const onGeom = () => {
+          rebuildGeometry();
+          refreshLodSystem();
+        };
+        const onCardTilt = () => {
+          if (params.foliage.layout === "pine") refreshLodSystem();
+          else applySingleTransform();
+          if (params.debug.showPivot) updatePivotHelper();
+        };
+        const onBranchStruct = () => ensureBranchesObject();
+        const onBranchMat = () => syncBranchMaterial();
+        const onBranchGeom = () => rebuildBranchGeometry();
+        const onBranchLayout = () => updateBranchMatrices();
+        const onMaterial = () => syncMaterial();
+        const onScene = () => syncScene();
+        const onDebug = () => {
+          syncMaterial();
+          syncBranchMaterial();
+          updatePivotHelper();
+        };
+
+        fileInput.addEventListener("change", () => {
+          const file = fileInput.files?.[0];
+          if (!file) return;
+          const reader = new FileReader();
+          reader.onload = (ev) => {
+            loadLeafTexFromDataUrl(ev.target.result, file.name);
+          };
+          reader.readAsDataURL(file);
+        });
+
+        function clearUploadedTexture() {
+          fileInput.value = "";
+          disposeUploadedTexture();
+          activeLeafTexPath = "";
+          activeLeafTexDataUrl = "";
+          params.material.uploadName = "(none)";
+          syncMaterial();
+          refreshUploadName();
+          updateGallerySelection();
+        }
+
+        const uiRoot = document.getElementById("ui-scroll");
+        const t = params.trunk;
+        const f = params.foliage;
+        const b = params.branches;
+        const r = params.rect;
+        const g = params.grid;
+        const sh = params.shape;
+        const xf = params.transform;
+        const m = params.material;
+        const sc = params.scene;
+        const dbg = params.debug;
+
+        const sTrunk = _section(uiRoot, "Trunk", true);
+        _slider(sTrunk, t, "height", {
+          label: "height",
+          min: 0.2,
+          max: 24,
+          step: 0.05,
+          onChange: onTrunk,
+        });
+        _slider(sTrunk, t, "radiusBottom", {
+          label: "radius bottom",
+          min: 0.03,
+          max: 2,
+          step: 0.01,
+          onChange: onTrunk,
+        });
+        _slider(sTrunk, t, "radiusTop", {
+          label: "radius top",
+          min: 0.02,
+          max: 1.5,
+          step: 0.01,
+          onChange: onTrunk,
+        });
+        _slider(sTrunk, t, "yOffset", {
+          label: "base Y",
+          min: -1,
+          max: 2,
+          step: 0.01,
+          onChange: onTrunk,
+        });
+        _color(sTrunk, t, "color", { label: "color", onChange: onTrunk });
+        _toggle(sTrunk, t, "visible", { label: "visible", onChange: onTrunk });
+
+        const sFol = _section(uiRoot, "Foliage layout", true);
+        _dropdown(sFol, f, "layout", {
+          label: "mode",
+          options: { pine: "pine", single: "single" },
+          onChange: onFoliage,
+        });
+        _slider(sFol, f, "levels", {
+          label: "levels",
+          min: 1,
+          max: 32,
+          step: 1,
+          onChange: onFoliage,
+        });
+        _slider(sFol, f, "perRing", {
+          label: "per ring",
+          min: 1,
+          max: 32,
+          step: 1,
+          onChange: onFoliage,
+        });
+        _slider(sFol, f, "baseY", {
+          label: "base Y",
+          min: -2,
+          max: 24,
+          step: 0.02,
+          onChange: onFoliage,
+        });
+        _slider(sFol, f, "stepY", {
+          label: "ΔY / level",
+          min: 0.05,
+          max: 4,
+          step: 0.02,
+          onChange: onFoliage,
+        });
+        _slider(sFol, f, "scaleBottom", {
+          label: "scale bottom",
+          min: 0.05,
+          max: 3,
+          step: 0.02,
+          onChange: onFoliage,
+        });
+        _slider(sFol, f, "scaleTop", {
+          label: "scale top",
+          min: 0.05,
+          max: 3,
+          step: 0.02,
+          onChange: onFoliage,
+        });
+        _slider(sFol, f, "scalePower", {
+          label: "scale curve",
+          min: 0.2,
+          max: 4,
+          step: 0.02,
+          onChange: onFoliage,
+        });
+        _slider(sFol, f, "globalScale", {
+          label: "global ×",
+          min: 0.1,
+          max: 3,
+          step: 0.02,
+          onChange: onFoliage,
+        });
+        _slider(sFol, f, "radialInset", {
+          label: "trunk inset",
+          min: -0.2,
+          max: 0.5,
+          step: 0.005,
+          onChange: onFoliage,
+        });
+        _slider(sFol, f, "pivotAlongRadius", {
+          label: "pivot → surface",
+          min: 0,
+          max: 1,
+          step: 0.02,
+          onChange: onFoliage,
+        });
+        _slider(sFol, f, "azimuthOffsetDeg", {
+          label: "ring rotate °",
+          min: -180,
+          max: 180,
+          step: 0.5,
+          onChange: onFoliageMatrices,
+        });
+        _slider(sFol, f, "staggerDeg", {
+          label: "stagger / level °",
+          min: -45,
+          max: 45,
+          step: 0.5,
+          onChange: onFoliageMatrices,
+        });
+        _slider(sFol, f, "ringRandomDeg", {
+          label: "ring random ° (±)",
+          min: 0,
+          max: 180,
+          step: 1,
+          onChange: onFoliageMatrices,
+        });
+        _slider(sFol, f, "cardRandomDeg", {
+          label: "card random ° (±)",
+          min: 0,
+          max: 90,
+          step: 1,
+          onChange: onFoliageMatrices,
+        });
+        _slider(sFol, f, "leafPitchRandomDeg", {
+          label: "leaf pitch ± °",
+          min: 0,
+          max: 25,
+          step: 0.5,
+          onChange: onFoliageMatrices,
+        });
+        _slider(sFol, f, "leafYRandom", {
+          label: "leaf height ±",
+          min: 0,
+          max: 0.35,
+          step: 0.005,
+          onChange: onFoliageMatrices,
+        });
+        _slider(sFol, f, "leafScaleRandom", {
+          label: "leaf scale ±",
+          min: 0,
+          max: 0.35,
+          step: 0.01,
+          onChange: onFoliageMatrices,
+        });
+        _button(sFol, {
+          title: "Reshuffle all random",
+          onClick: () => {
+            f.ringRandomSeed = (f.ringRandomSeed | 0) + 1;
+            onFoliageMatrices();
+          },
+        });
+        _slider(sFol, f, "offsetX", {
+          label: "offset X",
+          min: -2,
+          max: 2,
+          step: 0.02,
+          onChange: onFoliage,
+        });
+        _slider(sFol, f, "offsetY", {
+          label: "offset Y",
+          min: -2,
+          max: 2,
+          step: 0.02,
+          onChange: onFoliage,
+        });
+        _slider(sFol, f, "offsetZ", {
+          label: "offset Z",
+          min: -2,
+          max: 2,
+          step: 0.02,
+          onChange: onFoliage,
+        });
+
+        const sBr = _section(uiRoot, "Branches (curved cylinders)", true);
+        _toggle(sBr, b, "enabled", {
+          label: "enable",
+          onChange: onBranchStruct,
+        });
+        _slider(sBr, b, "levels", {
+          label: "levels",
+          min: 1,
+          max: 24,
+          step: 1,
+          onChange: onBranchStruct,
+        });
+        _slider(sBr, b, "perRing", {
+          label: "per ring",
+          min: 1,
+          max: 24,
+          step: 1,
+          onChange: onBranchStruct,
+        });
+        _slider(sBr, b, "baseY", {
+          label: "base Y",
+          min: -2,
+          max: 24,
+          step: 0.02,
+          onChange: onBranchLayout,
+        });
+        _slider(sBr, b, "stepY", {
+          label: "ΔY / level",
+          min: 0.05,
+          max: 4,
+          step: 0.02,
+          onChange: onBranchLayout,
+        });
+        _slider(sBr, b, "scaleBottom", {
+          label: "scale bottom",
+          min: 0.05,
+          max: 3,
+          step: 0.02,
+          onChange: onBranchLayout,
+        });
+        _slider(sBr, b, "scaleTop", {
+          label: "scale top",
+          min: 0.05,
+          max: 3,
+          step: 0.02,
+          onChange: onBranchLayout,
+        });
+        _slider(sBr, b, "scalePower", {
+          label: "scale curve",
+          min: 0.2,
+          max: 4,
+          step: 0.02,
+          onChange: onBranchLayout,
+        });
+        _slider(sBr, b, "scaleVariation", {
+          label: "scale jitter",
+          min: 0,
+          max: 0.5,
+          step: 0.01,
+          onChange: onBranchLayout,
+        });
+        _slider(sBr, b, "globalScale", {
+          label: "global ×",
+          min: 0.1,
+          max: 3,
+          step: 0.02,
+          onChange: onBranchLayout,
+        });
+        _slider(sBr, b, "radialInset", {
+          label: "trunk inset",
+          min: -0.2,
+          max: 0.5,
+          step: 0.005,
+          onChange: onBranchLayout,
+        });
+        _slider(sBr, b, "pivotAlongRadius", {
+          label: "pivot → surface",
+          min: 0,
+          max: 1,
+          step: 0.02,
+          onChange: onBranchLayout,
+        });
+        _slider(sBr, b, "azimuthOffsetDeg", {
+          label: "ring rotate °",
+          min: -180,
+          max: 180,
+          step: 0.5,
+          onChange: onBranchLayout,
+        });
+        _slider(sBr, b, "staggerDeg", {
+          label: "stagger / level °",
+          min: -45,
+          max: 45,
+          step: 0.5,
+          onChange: onBranchLayout,
+        });
+        _slider(sBr, b, "offsetX", {
+          label: "offset X",
+          min: -2,
+          max: 2,
+          step: 0.02,
+          onChange: onBranchLayout,
+        });
+        _slider(sBr, b, "offsetY", {
+          label: "offset Y",
+          min: -2,
+          max: 2,
+          step: 0.02,
+          onChange: onBranchLayout,
+        });
+        _slider(sBr, b, "offsetZ", {
+          label: "offset Z",
+          min: -2,
+          max: 2,
+          step: 0.02,
+          onChange: onBranchLayout,
+        });
+        _slider(sBr, b, "length", {
+          label: "length",
+          min: 0.1,
+          max: 6,
+          step: 0.02,
+          onChange: onBranchGeom,
+        });
+        _slider(sBr, b, "radiusBottom", {
+          label: "radius base",
+          min: 0.005,
+          max: 0.25,
+          step: 0.002,
+          onChange: onBranchGeom,
+        });
+        _slider(sBr, b, "radiusTop", {
+          label: "radius tip",
+          min: 0.003,
+          max: 0.2,
+          step: 0.002,
+          onChange: onBranchGeom,
+        });
+        _slider(sBr, b, "radialSegs", {
+          label: "radial segs",
+          min: 3,
+          max: 16,
+          step: 1,
+          onChange: onBranchGeom,
+        });
+        _slider(sBr, b, "heightSegs", {
+          label: "length segs",
+          min: 1,
+          max: 16,
+          step: 1,
+          onChange: onBranchGeom,
+        });
+        _slider(sBr, b, "bend", {
+          label: "bend (+ droop)",
+          min: -1.5,
+          max: 1.5,
+          step: 0.02,
+          onChange: onBranchGeom,
+        });
+        _slider(sBr, b, "rotXDeg", {
+          label: "tilt X °",
+          min: -180,
+          max: 180,
+          step: 0.5,
+          onChange: onBranchLayout,
+        });
+        _slider(sBr, b, "rotYDeg", {
+          label: "tilt Y °",
+          min: -180,
+          max: 180,
+          step: 0.5,
+          onChange: onBranchLayout,
+        });
+        _slider(sBr, b, "rotZDeg", {
+          label: "tilt Z °",
+          min: -180,
+          max: 180,
+          step: 0.5,
+          onChange: onBranchLayout,
+        });
+        _color(sBr, b, "color", { label: "color", onChange: onBranchMat });
+        _slider(sBr, b, "roughness", {
+          label: "roughness",
+          min: 0,
+          max: 1,
+          step: 0.02,
+          onChange: onBranchMat,
+        });
+
+        const sRect = _section(uiRoot, "Rectangle (pivot = short edge)", true);
+        _slider(sRect, r, "width", {
+          label: "width",
+          min: 0.1,
+          max: 8,
+          step: 0.05,
+          onChange: onGeom,
+        });
+        _slider(sRect, r, "height", {
+          label: "height",
+          min: 0.1,
+          max: 8,
+          step: 0.05,
+          onChange: onGeom,
+        });
+        _dropdown(sRect, r, "pivotEdge", {
+          label: "pivot edge",
+          options: {
+            auto: "auto",
+            left: "left",
+            right: "right",
+            bottom: "bottom",
+            top: "top",
+          },
+          onChange: onGeom,
+        });
+
+        const sGrid = _section(uiRoot, "Subdivision (UV grid)", true);
+        _slider(sGrid, g, "segX", {
+          label: "segments X",
+          min: 1,
+          max: 128,
+          step: 1,
+          onChange: onGeom,
+        });
+        _slider(sGrid, g, "segY", {
+          label: "segments Y",
+          min: 1,
+          max: 128,
+          step: 1,
+          onChange: onGeom,
+        });
+
+        const sShape = _section(uiRoot, "Shape (still a rectangle)", true);
+        _slider(sShape, sh, "bendX", {
+          label: "bend width (+ convex)",
+          min: -2,
+          max: 2,
+          step: 0.02,
+          onChange: onGeom,
+        });
+        _slider(sShape, sh, "bendY", {
+          label: "bend height (+ convex)",
+          min: -2,
+          max: 2,
+          step: 0.02,
+          onChange: onGeom,
+        });
+        _slider(sShape, sh, "skewX", {
+          label: "shear X by Y",
+          min: -1,
+          max: 1,
+          step: 0.02,
+          onChange: onGeom,
+        });
+        _slider(sShape, sh, "skewY", {
+          label: "shear Y by X",
+          min: -1,
+          max: 1,
+          step: 0.02,
+          onChange: onGeom,
+        });
+        _slider(sShape, sh, "taperX", {
+          label: "width taper vs Y",
+          min: -0.85,
+          max: 0.85,
+          step: 0.02,
+          onChange: onGeom,
+        });
+
+        const sTilt = _section(uiRoot, "Card tilt (rot: pine + single)", true);
+        _slider(sTilt, xf, "posX", {
+          label: "pos X (single)",
+          min: -4,
+          max: 4,
+          step: 0.02,
+          onChange: onCardTilt,
+        });
+        _slider(sTilt, xf, "posY", {
+          label: "pos Y (single)",
+          min: -4,
+          max: 4,
+          step: 0.02,
+          onChange: onCardTilt,
+        });
+        _slider(sTilt, xf, "posZ", {
+          label: "pos Z (single)",
+          min: -4,
+          max: 4,
+          step: 0.02,
+          onChange: onCardTilt,
+        });
+        _slider(sTilt, xf, "rotXDeg", {
+          label: "pitch ° (tip ↓ = −)",
+          min: -180,
+          max: 180,
+          step: 0.5,
+          onChange: onCardTilt,
+        });
+        _slider(sTilt, xf, "rotYDeg", {
+          label: "yaw °",
+          min: -180,
+          max: 180,
+          step: 0.5,
+          onChange: onCardTilt,
+        });
+        _slider(sTilt, xf, "rotZDeg", {
+          label: "roll °",
+          min: -180,
+          max: 180,
+          step: 0.5,
+          onChange: onCardTilt,
+        });
+
+        const sMat = _section(uiRoot, "Material", false);
+        _slider(sMat, m, "roughness", {
+          label: "roughness",
+          min: 0,
+          max: 1,
+          step: 0.02,
+          onChange: onMaterial,
+        });
+        _slider(sMat, m, "metalness", {
+          label: "metalness",
+          min: 0,
+          max: 1,
+          step: 0.02,
+          onChange: onMaterial,
+        });
+        _toggle(sMat, m, "useChecker", {
+          label: "checker mask preview",
+          onChange: onMaterial,
+        });
+
+        const sTex = _section(uiRoot, "Texture / alpha", true);
+        buildTexGallery(sTex);
+        _separator(sTex);
+        const uploadInfo = _info(sTex, "current file", () => m.uploadName);
+        refreshUploadName = () => uploadInfo.update(m.uploadName);
+        _button(sTex, {
+          title: "Upload image…",
+          onClick: () => fileInput.click(),
+        });
+        _button(sTex, {
+          title: "Clear uploaded",
+          onClick: () => clearUploadedTexture(),
+        });
+        _dropdown(sTex, m, "colorSource", {
+          label: "leaf color from",
+          options: {
+            "TSL procedural": "tsl",
+            "Uploaded image (RGB)": "texture",
+          },
+          onChange: onMaterial,
+        });
+        _dropdown(sTex, m, "maskMode", {
+          label: "cutout from",
+          options: {
+            "PNG alpha (RGBA)": "alpha",
+            "B&W / gray (red)": "luminance",
+          },
+          onChange: onMaterial,
+        });
+        _slider(sTex, m, "alphaTest", {
+          label: "alpha test",
+          min: 0,
+          max: 0.99,
+          step: 0.01,
+          onChange: onMaterial,
+        });
+        _toggle(sTex, m, "depthWrite", {
+          label: "depth write",
+          onChange: onMaterial,
+        });
+        _info(
+          sTex,
+          "mask",
+          () => "opaque alpha cutout · depth write on recommended",
+        );
+        _slider(sTex, m, "texRotDeg", {
+          label: "image rot °",
+          min: -180,
+          max: 180,
+          step: 1,
+          onChange: onMaterial,
+        });
+        _slider(sTex, m, "texOffsetU", {
+          label: "offset U (bough)",
+          min: -2,
+          max: 2,
+          step: 0.01,
+          onChange: onMaterial,
+        });
+        _slider(sTex, m, "texOffsetV", {
+          label: "offset V (across)",
+          min: -2,
+          max: 2,
+          step: 0.01,
+          onChange: onMaterial,
+        });
+        _slider(sTex, m, "texRepeatU", {
+          label: "repeat U",
+          min: 0.05,
+          max: 8,
+          step: 0.01,
+          onChange: onMaterial,
+        });
+        _slider(sTex, m, "texRepeatV", {
+          label: "repeat V",
+          min: 0.05,
+          max: 8,
+          step: 0.01,
+          onChange: onMaterial,
+        });
+        _toggle(sTex, m, "texFlipH", { label: "flip U", onChange: onMaterial });
+        _toggle(sTex, m, "texFlipV", { label: "flip V", onChange: onMaterial });
+
+        const sLeaf = _section(uiRoot, "Leaf look (TSL)", true);
+        _color(sLeaf, m, "bottomColor", {
+          label: "base green",
+          onChange: onMaterial,
+        });
+        _color(sLeaf, m, "topColor", {
+          label: "tip green",
+          onChange: onMaterial,
+        });
+        _slider(sLeaf, m, "colorVar", {
+          label: "color var",
+          min: 0,
+          max: 0.35,
+          step: 0.01,
+          onChange: onMaterial,
+        });
+        _slider(sLeaf, m, "veinStrength", {
+          label: "vein dark",
+          min: 0,
+          max: 0.35,
+          step: 0.01,
+          onChange: onMaterial,
+        });
+        _slider(sLeaf, m, "pivotAo", {
+          label: "hook AO",
+          min: 0,
+          max: 0.7,
+          step: 0.02,
+          onChange: onMaterial,
+        });
+        _slider(sLeaf, m, "normalBias", {
+          label: "lighting → trunk",
+          min: 0,
+          max: 1,
+          step: 0.02,
+          onChange: onMaterial,
+        });
+        _slider(sLeaf, m, "leafWarp", {
+          label: "normal warp",
+          min: 0,
+          max: 0.35,
+          step: 0.01,
+          onChange: onMaterial,
+        });
+        _slider(sLeaf, m, "radialUp", {
+          label: "trunk radial Y",
+          min: 0,
+          max: 1,
+          step: 0.02,
+          onChange: onMaterial,
+        });
+        _slider(sLeaf, m, "aoStrength", {
+          label: "inner AO",
+          min: 0,
+          max: 0.85,
+          step: 0.02,
+          onChange: onMaterial,
+        });
+        _slider(sLeaf, m, "aoRadius", {
+          label: "inner AO radius",
+          min: 0.3,
+          max: 6,
+          step: 0.05,
+          onChange: onMaterial,
+        });
+        _slider(sLeaf, m, "sssStrength", {
+          label: "SSS",
+          min: 0,
+          max: 1,
+          step: 0.02,
+          onChange: onMaterial,
+        });
+        _color(sLeaf, m, "sssColor", {
+          label: "SSS color",
+          onChange: onMaterial,
+        });
+        _slider(sLeaf, m, "sssPower", {
+          label: "SSS power",
+          min: 0.5,
+          max: 6,
+          step: 0.1,
+          onChange: onMaterial,
+        });
+        _slider(sLeaf, m, "rimStrength", {
+          label: "rim",
+          min: 0,
+          max: 0.5,
+          step: 0.01,
+          onChange: onMaterial,
+        });
+        _color(sLeaf, m, "rimColor", {
+          label: "rim color",
+          onChange: onMaterial,
+        });
+        _slider(sLeaf, m, "rimPower", {
+          label: "rim power",
+          min: 0.5,
+          max: 6,
+          step: 0.1,
+          onChange: onMaterial,
+        });
+
+        const sSc = _section(uiRoot, "Scene", false);
+        _color(sSc, sc, "bgColor", {
+          label: "Sky color",
+          onChange: () => {
+            scene.background.set(sc.bgColor);
+            if (scene.fog) scene.fog.color.set(sc.bgColor);
+          },
+        });
+        _slider(sSc, sc, "sunIntensity", {
+          label: "Sun intensity",
+          min: 0,
+          max: 6,
+          step: 0.05,
+          onChange: onScene,
+        });
+        _slider(sSc, sc, "ambientInt", {
+          label: "Ambient light",
+          min: 0,
+          max: 3,
+          step: 0.05,
+          onChange: onScene,
+        });
+        _slider(sSc, sc, "sunX", {
+          label: "Sun X",
+          min: -20,
+          max: 20,
+          step: 0.5,
+          onChange: onScene,
+        });
+        _slider(sSc, sc, "sunY", {
+          label: "Sun Y",
+          min: 0.5,
+          max: 20,
+          step: 0.5,
+          onChange: onScene,
+        });
+        _slider(sSc, sc, "sunZ", {
+          label: "Sun Z",
+          min: -20,
+          max: 20,
+          step: 0.5,
+          onChange: onScene,
+        });
+        _toggle(sSc, sc, "showFog", { label: "Show fog", onChange: onScene });
+        _toggle(sSc, sc, "showGround", {
+          label: "Show ground",
+          onChange: onScene,
+        });
+
+        const sDbg = _section(uiRoot, "Debug", false);
+        _toggle(sDbg, dbg, "wireframe", {
+          label: "wireframe",
+          onChange: onDebug,
+        });
+        _toggle(sDbg, dbg, "showPivot", {
+          label: "axes at pivot",
+          onChange: onDebug,
+        });
+
+        _separator(uiRoot);
+        const sLod = _section(uiRoot, "LOD Preview", true);
+        _toggle(sLod, params, "lodPreview", {
+          label: "Show LOD side-by-side",
+          onChange: () => toggleLodPreview(),
+        });
+        _separator(sLod);
+        _slider(sLod, params, "lodDist1", {
+          label: "LOD0 → LOD1 dist",
+          min: 20,
+          max: 300,
+          step: 5,
+          onChange: () => updateLodLabels(),
+        });
+        _slider(sLod, params, "lodDist2", {
+          label: "LOD1 → LOD2 dist",
+          min: 50,
+          max: 600,
+          step: 10,
+          onChange: () => updateLodLabels(),
+        });
+        _separator(sLod);
+        statLod1Leaves = _info(sLod, "LOD1 leaves", () =>
+          String(params.lod1Leaves),
+        );
+        statLod2Leaves = _info(sLod, "LOD2 leaves", () =>
+          String(params.lod2Leaves),
+        );
+
+        const sStats = _section(uiRoot, "Stats", true);
+        statTrunkTris = _info(sStats, "Trunk tris", () =>
+          String(params.trunkTris),
+        );
+        statLeaves0 = _info(sStats, "LOD0 leaves", () =>
+          String(params.totalLeaves),
+        );
+        statLeafTris0 = _info(sStats, "LOD0 leaf tris", () =>
+          String(params.totalLeafTris),
+        );
+
+        _separator(uiRoot);
+        const sPreset = _section(uiRoot, "Save / Load", true);
+        presetNameInput = _text(sPreset, params, "presetName", {
+          label: "Preset name",
+        });
+        _button(sPreset, { title: "Save preset to file", onClick: savePreset });
+        _button(sPreset, {
+          title: "Load preset from file",
+          onClick: () => {
+            const i = document.createElement("input");
+            i.type = "file";
+            i.accept = ".json";
+            i.onchange = () => i.files[0] && loadPresetFromFile(i.files[0]);
+            i.click();
+          },
+        });
+        _button(sPreset, {
+          title: "Copy to clipboard",
+          onClick: () => {
+            const json = JSON.stringify(buildPresetData(), null, 2);
+            navigator.clipboard
+              .writeText(json)
+              .then(() => {
+                infoEl.textContent = "Settings copied to clipboard.";
+              })
+              .catch(() => {
+                const ta = document.createElement("textarea");
+                ta.value = json;
+                document.body.appendChild(ta);
+                ta.select();
+                document.execCommand("copy");
+                ta.remove();
+                infoEl.textContent = "Settings copied to clipboard.";
+              });
+          },
+        });
+
+        refreshLodSystem();
+
+        addEventListener("resize", () => {
+          camera.aspect = innerWidth / innerHeight;
+          camera.updateProjectionMatrix();
+          renderer.setSize(innerWidth, innerHeight);
+        });
+
+        function tick() {
+          requestAnimationFrame(tick);
+          controls.update();
+          renderer.render(scene, camera);
+        }
+        tick();
+      })();
+    </script>
+  </body>
+</html>
