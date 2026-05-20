@@ -15,7 +15,7 @@
         width: 100%;
         height: 100%;
         overflow: hidden;
-        background: #9ec8e8;
+        background: #87ceeb;
       }
       canvas {
         display: block;
@@ -757,7 +757,7 @@
           },
           transform: {
             posX: 0.01,
-            posY: 1.35,
+            posY: 0.69,
             posZ: 0,
             rotXDeg: -20,
             rotYDeg: 0,
@@ -767,7 +767,7 @@
             layout: "pine",
             levels: 8,
             perRing: 9,
-            baseY: 2.34,
+            baseY: 1.68,
             stepY: 0.47,
             scaleBottom: 0.94,
             scaleTop: 0.32,
@@ -795,7 +795,7 @@
             height: 5,
             radiusBottom: 0.14,
             radiusTop: 0.02,
-            yOffset: 0.66,
+            yOffset: 0,
             color: "#3d2e22",
             visible: true,
           },
@@ -836,15 +836,20 @@
             texFlipV: false,
           },
           scene: {
-            bg: "#9ec8e8",
-            amb: 0.55,
-            key: 1.1,
+            bgColor: "#87ceeb",
+            sunIntensity: 2.2,
+            ambientInt: 0.8,
+            sunX: 5,
+            sunY: 12,
+            sunZ: 4,
+            showGround: true,
+            showFog: false,
           },
           branches: {
             enabled: false,
             levels: 5,
             perRing: 5,
-            baseY: 1.45,
+            baseY: 0.79,
             stepY: 0.55,
             scaleBottom: 1,
             scaleTop: 0.72,
@@ -877,28 +882,75 @@
         };
 
         const scene = new THREE.Scene();
-        scene.background = new THREE.Color(params.scene.bg);
+        scene.background = new THREE.Color(params.scene.bgColor);
+        scene.fog = null;
 
-        const camera = new THREE.PerspectiveCamera(45, innerWidth / innerHeight, 0.05, 200);
-        camera.position.set(1.6, 0.9, 2.2);
+        const camera = new THREE.PerspectiveCamera(
+          55,
+          innerWidth / innerHeight,
+          0.1,
+          500
+        );
+        camera.position.set(7, 5, 10);
 
         const renderer = new THREE.WebGPURenderer({ antialias: true });
         renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
         renderer.setSize(innerWidth, innerHeight);
+        renderer.shadowMap.enabled = true;
+        renderer.shadowMap.type = THREE.PCFSoftShadowMap;
+        renderer.shadowMap.transmitted = true;
         document.body.appendChild(renderer.domElement);
         await renderer.init();
 
         const controls = new OrbitControls(camera, renderer.domElement);
-        controls.target.set(0, 1.1, 0);
+        controls.target.set(0, 3, 0);
         controls.enableDamping = true;
+        controls.dampingFactor = 0.08;
         controls.update();
 
-        const ambient = new THREE.AmbientLight(0xc8d8f0, params.scene.amb);
-        scene.add(ambient);
-        const key = new THREE.DirectionalLight(0xfff5e8, params.scene.key);
-        key.position.set(2.5, 4, 2.5);
-        scene.add(key);
-        scene.add(new THREE.DirectionalLight(0xa8b8e8, 0.35).translateX(-3).translateY(2));
+        const hemi = new THREE.HemisphereLight("#b8dfff", "#3d6b20", params.scene.ambientInt);
+        scene.add(hemi);
+
+        const sun = new THREE.DirectionalLight("#fff8e8", params.scene.sunIntensity);
+        sun.position.set(params.scene.sunX, params.scene.sunY, params.scene.sunZ);
+        sun.castShadow = true;
+        sun.shadow.mapSize.set(2048, 2048);
+        sun.shadow.camera.near = 0.5;
+        sun.shadow.camera.far = 60;
+        sun.shadow.camera.left = -20;
+        sun.shadow.camera.right = 20;
+        sun.shadow.camera.top = 12;
+        sun.shadow.camera.bottom = -12;
+        sun.shadow.bias = -0.001;
+        scene.add(sun);
+
+        const groundGeo = new THREE.CircleGeometry(40, 72);
+        const groundMat = new THREE.MeshStandardMaterial({
+          color: "#4a7c2a",
+          roughness: 0.92,
+          metalness: 0,
+        });
+        const ground = new THREE.Mesh(groundGeo, groundMat);
+        ground.rotation.x = -Math.PI / 2;
+        ground.receiveShadow = true;
+        scene.add(ground);
+
+        const pebbleGeo = new THREE.SphereGeometry(0.12, 5, 3);
+        const pebbleMat = new THREE.MeshStandardMaterial({
+          color: "#888",
+          roughness: 0.95,
+        });
+        [
+          [-1.8, 0, 1.4],
+          [2.2, 0, 0.9],
+          [-0.5, 0, 2.3],
+          [1.5, 0, -1.7],
+        ].forEach(([x, y, z]) => {
+          const p = new THREE.Mesh(pebbleGeo, pebbleMat);
+          p.position.set(x, 0.07, z);
+          p.scale.y = 0.5 + Math.random() * 0.5;
+          scene.add(p);
+        });
 
         const checker = makeCheckerTexture();
         const opaqueTex = new THREE.DataTexture(
@@ -947,7 +999,7 @@
           rimColor: uniform(new THREE.Color(params.material.rimColor)),
           rimStrength: uniform(params.material.rimStrength),
           rimPower: uniform(params.material.rimPower),
-          sunDir: uniform(new THREE.Vector3(0.4, 0.85, 0.35).normalize()),
+          sunDir: uniform(new THREE.Vector3(5, 12, 4).normalize()),
         };
 
         const leafMapNode = texture(checker);
@@ -1035,6 +1087,13 @@
         mat.colorNode = leafColorNode;
         mat.normalNode = leafNormalNode;
         mat.envMapIntensity = 0;
+        mat.castShadowNode = Fn(() => {
+          const s = leafMapNode.sample(leafMaskUv());
+          const maskA = mix(s.r, s.a, leafU.maskInAlpha);
+          const a = mix(float(1), maskA, step(float(0.5), leafU.useMaskTex));
+          a.lessThanEqual(leafU.alphaCutoff).discard();
+          return vec4(0, 0, 0, 1);
+        })();
 
         let geo = null;
         let branchGeo = null;
@@ -1057,8 +1116,8 @@
         });
         let trunkGeo = null;
         const trunkMesh = new THREE.Mesh();
-        trunkMesh.castShadow = false;
-        trunkMesh.receiveShadow = false;
+        trunkMesh.castShadow = true;
+        trunkMesh.receiveShadow = true;
         scene.add(trunkMesh);
 
         const fileInput = document.createElement("input");
@@ -1119,8 +1178,8 @@
           if (m.texFlipV) ov += Math.abs(rv);
           leafU.texOff.value.set(ou, ov);
           leafU.texFlip.value.set(m.texFlipH ? 1 : 0, m.texFlipV ? 1 : 0);
-          key.position.normalize();
-          leafU.sunDir.value.copy(key.position);
+          const sc = params.scene;
+          leafU.sunDir.value.set(sc.sunX, sc.sunY, sc.sunZ).normalize();
           syncLeafBounds();
         }
 
@@ -1272,6 +1331,8 @@
             branchesObject = new THREE.InstancedMesh(branchGeo, branchMat, needCount);
             branchesObject.frustumCulled = false;
             branchesObject.renderOrder = 0;
+            branchesObject.castShadow = true;
+            branchesObject.receiveShadow = false;
             scene.add(branchesObject);
           } else {
             branchesObject.geometry = branchGeo;
@@ -1406,16 +1467,22 @@
               foliageObject = new THREE.InstancedMesh(geo, mat, needCount);
               foliageObject.frustumCulled = false;
               foliageObject.renderOrder = 1;
+              foliageObject.castShadow = true;
+              foliageObject.receiveShadow = false;
               scene.add(foliageObject);
               updateInstanceMatrices();
             } else {
               foliageObject = new THREE.Mesh(geo, mat);
+              foliageObject.castShadow = true;
+              foliageObject.receiveShadow = false;
               scene.add(foliageObject);
               applySingleTransform();
             }
           } else {
             foliageObject.geometry = geo;
             foliageObject.material = mat;
+            foliageObject.castShadow = true;
+            foliageObject.receiveShadow = false;
             if (pine) updateInstanceMatrices();
             else applySingleTransform();
           }
@@ -1482,9 +1549,16 @@
         }
 
         function syncScene() {
-          scene.background.set(params.scene.bg);
-          ambient.intensity = params.scene.amb;
-          key.intensity = params.scene.key;
+          const sc = params.scene;
+          scene.background.set(sc.bgColor);
+          hemi.intensity = sc.ambientInt;
+          sun.intensity = sc.sunIntensity;
+          sun.position.set(sc.sunX, sc.sunY, sc.sunZ);
+          ground.visible = sc.showGround;
+          scene.fog = sc.showFog
+            ? new THREE.FogExp2(sc.bgColor, 0.018)
+            : null;
+          syncLeafUniforms();
         }
 
         rebuildTrunk();
@@ -1753,9 +1827,32 @@
         _slider(sLeaf, m, "rimPower", { label: "rim power", min: 0.5, max: 6, step: 0.1, onChange: onMaterial });
 
         const sSc = _section(uiRoot, "Scene", false);
-        _color(sSc, sc, "bg", { label: "background", onChange: onScene });
-        _slider(sSc, sc, "amb", { label: "ambient", min: 0, max: 1.5, step: 0.02, onChange: onScene });
-        _slider(sSc, sc, "key", { label: "key light", min: 0, max: 2.5, step: 0.02, onChange: onScene });
+        _color(sSc, sc, "bgColor", {
+          label: "Sky color",
+          onChange: () => {
+            scene.background.set(sc.bgColor);
+            if (scene.fog) scene.fog.color.set(sc.bgColor);
+          },
+        });
+        _slider(sSc, sc, "sunIntensity", {
+          label: "Sun intensity",
+          min: 0,
+          max: 6,
+          step: 0.05,
+          onChange: onScene,
+        });
+        _slider(sSc, sc, "ambientInt", {
+          label: "Ambient light",
+          min: 0,
+          max: 3,
+          step: 0.05,
+          onChange: onScene,
+        });
+        _slider(sSc, sc, "sunX", { label: "Sun X", min: -20, max: 20, step: 0.5, onChange: onScene });
+        _slider(sSc, sc, "sunY", { label: "Sun Y", min: 0.5, max: 20, step: 0.5, onChange: onScene });
+        _slider(sSc, sc, "sunZ", { label: "Sun Z", min: -20, max: 20, step: 0.5, onChange: onScene });
+        _toggle(sSc, sc, "showFog", { label: "Show fog", onChange: onScene });
+        _toggle(sSc, sc, "showGround", { label: "Show ground", onChange: onScene });
 
         const sDbg = _section(uiRoot, "Debug", false);
         _toggle(sDbg, dbg, "wireframe", { label: "wireframe", onChange: onDebug });
