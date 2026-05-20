@@ -1,0 +1,265 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Mancini Lens Flare — WebGPU + TSL (r183)</title>
+    <style>
+      * {
+        margin: 0;
+        padding: 0;
+        box-sizing: border-box;
+      }
+      body {
+        background: #0a0a12;
+        overflow: hidden;
+        font-family: system-ui, sans-serif;
+      }
+      canvas {
+        display: block;
+        width: 100vw;
+        height: 100vh;
+      }
+      #info {
+        position: fixed;
+        left: 12px;
+        bottom: 12px;
+        z-index: 10;
+        max-width: 420px;
+        padding: 10px 14px;
+        border-radius: 8px;
+        background: rgba(0, 0, 0, 0.55);
+        color: #c8d4e8;
+        font-size: 12px;
+        line-height: 1.55;
+        pointer-events: none;
+      }
+      #info b {
+        color: #fff;
+      }
+    </style>
+    <script type="importmap">
+      {
+        "imports": {
+          "three": "https://cdn.jsdelivr.net/npm/three@0.183.1/build/three.webgpu.js",
+          "three/webgpu": "https://cdn.jsdelivr.net/npm/three@0.183.1/build/three.webgpu.js",
+          "three/tsl": "https://cdn.jsdelivr.net/npm/three@0.183.1/build/three.tsl.js",
+          "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.183.1/examples/jsm/"
+        }
+      }
+    </script>
+  </head>
+  <body>
+    <p id="info">
+      <b>Anderson Mancini lens flare</b> — WebGPU + TSL (<code>wgslFn</code>)<br />
+      Dirt: <code>textures/lensDirtTexture.png</code> · Orbit: drag · Toggle sun / mouse in GUI
+    </p>
+    <script type="module">
+      import * as THREE from "three/webgpu";
+      import { OrbitControls } from "three/addons/controls/OrbitControls.js";
+      import { EXRLoader } from "three/addons/loaders/EXRLoader.js";
+      import { GLTFLoader } from "three/addons/loaders/GLTFLoader.js";
+      import { DRACOLoader } from "three/addons/loaders/DRACOLoader.js";
+      import GUI from "three/addons/libs/lil-gui.module.min.js";
+      import { createManciniLensFlare } from "./effects/lensflare-mancini.js";
+
+      if (!navigator.gpu) {
+        document.body.innerHTML =
+          "<p style='color:#fff;padding:2rem'>WebGPU is not available in this browser.</p>";
+        throw new Error("WebGPU not supported");
+      }
+
+      // Match original demo: ColorManagement disabled, linear-sRGB output.
+      THREE.ColorManagement.enabled = false;
+
+      const renderer = new THREE.WebGPURenderer({ antialias: true });
+      renderer.outputColorSpace = THREE.LinearSRGBColorSpace;
+      renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
+      renderer.setSize(innerWidth, innerHeight);
+      document.body.appendChild(renderer.domElement);
+      await renderer.init();
+
+      const scene = new THREE.Scene();
+
+      const camera = new THREE.PerspectiveCamera(
+        45,
+        innerWidth / innerHeight,
+        0.1,
+        1000,
+      );
+      camera.position.set(0, 0, 8.5);
+      scene.add(camera);
+
+      const controls = new OrbitControls(camera, renderer.domElement);
+      controls.enableDamping = true;
+      controls.maxDistance = 20;
+
+      /* Sky sphere — JPG holds the painted "sun" the lens flare lines up with. */
+      const skyTex = new THREE.TextureLoader().load(
+        "./textures/mancinilensflare/digital_painting_golden_hour_sunset.jpg",
+      );
+      skyTex.flipY = true;
+      const sky = new THREE.Mesh(
+        new THREE.SphereGeometry(45, 40, 40),
+        new THREE.MeshBasicMaterial({
+          map: skyTex,
+          side: THREE.BackSide,
+          depthTest: false,
+        }),
+      );
+      sky.userData = "no-occlusion";
+      scene.add(sky);
+
+      /* Lights — DirectionalLight only adds shading; the visible sun is in the sky JPG. */
+      const sunLight = new THREE.DirectionalLight(0xffffff, 1.0);
+      sunLight.position.set(-20, 20, 50);
+      scene.add(sunLight);
+
+      const amb = new THREE.AmbientLight(0xffffff, 0.9);
+      scene.add(amb);
+
+      function addSphere(x, material) {
+        const m = new THREE.Mesh(new THREE.SphereGeometry(1, 40, 40), material);
+        m.position.x = x;
+        scene.add(m);
+        return m;
+      }
+
+      addSphere(
+        4.5,
+        new THREE.MeshPhysicalMaterial({
+          transmission: 1,
+          thickness: 0.3,
+          ior: 1.64,
+          color: "orange",
+          roughness: 0.2,
+          side: THREE.DoubleSide,
+          envMapIntensity: 3,
+        }),
+      );
+      addSphere(
+        6.5,
+        new THREE.MeshPhongMaterial({
+          color: 0x333634,
+          transparent: true,
+          opacity: 0.7,
+        }),
+      );
+      addSphere(
+        8.5,
+        new THREE.MeshPhysicalMaterial({ metalness: 0.9, roughness: 0.25 }),
+      );
+      addSphere(
+        10.5,
+        new THREE.MeshPhysicalMaterial({
+          transmission: 0.4,
+          thickness: 0.2,
+          clearcoat: 0.5,
+          ior: 1.1,
+          color: 0x1c1036,
+          roughness: 0.2,
+          envMapIntensity: 20,
+          side: THREE.DoubleSide,
+        }),
+      );
+
+      /* EXR envmap → PMREM for PBR reflections (orange/glass spheres). */
+      const pmrem = new THREE.PMREMGenerator(renderer);
+      pmrem.compileEquirectangularShader?.();
+      new EXRLoader().load(
+        "./textures/mancinilensflare/background.exr",
+        (exr) => {
+          const rt = pmrem.fromEquirectangular(exr);
+          scene.environment = rt.texture;
+          exr.dispose();
+        },
+      );
+
+      /* Glass dome GLB — same iridescent material tweaks as the original demo. */
+      const dracoLoader = new DRACOLoader();
+      dracoLoader.setDecoderPath("https://www.gstatic.com/draco/v1/decoders/");
+      dracoLoader.setDecoderConfig({ type: "js" });
+      const gltfLoader = new GLTFLoader();
+      gltfLoader.setDRACOLoader(dracoLoader);
+      let glassDome;
+      gltfLoader.load(
+        "./textures/mancinilensflare/sphere-transformed.glb",
+        (gltf) => {
+          glassDome = gltf.scene;
+          const m0 = glassDome.children[0]?.material;
+          const m1 = glassDome.children[1]?.material;
+          if (m0) {
+            m0.iridescence = 0.7;
+            m0.iridescenceIOR = 3.46;
+            m0.thickness = 0.05;
+            m0.ior = 1.4;
+            m0.side = THREE.DoubleSide;
+            m0.roughness = 0.15;
+            m0.clearcoat = 1;
+            m0.metalness = 0.22;
+          }
+          if (m1) m1.roughness = 0.6;
+          glassDome.scale.setScalar(0.7);
+          scene.add(glassDome);
+        },
+      );
+
+      /* Lens flare — let it use its built-in default lensPosition (25, 2, -40),
+         which is where the sun is painted in the sky JPG. */
+      const lensFlare = createManciniLensFlare({
+        scene,
+        camera,
+        dirtTextureUrl: "./textures/mancinilensflare/lensDirtTexture.png",
+        params: {
+          followSun: false,
+          followMouse: false,
+        },
+      });
+
+      window.addEventListener("mousemove", (e) => {
+        lensFlare.onMouseMove(e.clientX, e.clientY);
+      });
+
+      const gui = new GUI({ title: "Lens flare (Mancini / WGSL)" });
+      const p = lensFlare.params;
+      gui.add(p, "enabled").name("Enabled");
+      gui.add(p, "followMouse").name("Follow mouse");
+      gui.add(p, "followSun").name("Follow sun light");
+      gui.add(p, "opacity", 0, 1, 0.01).name("Opacity");
+      gui.add(p, "starPoints", 0, 9, 1).name("Star points");
+      gui.add(p, "glareSize", 0, 2, 0.01).name("Glare size");
+      gui.add(p, "flareSize", 0, 0.1, 0.001).name("Flare size");
+      gui.add(p, "flareSpeed", 0, 1, 0.01).name("Flare speed");
+      gui.add(p, "flareShape", 0, 2, 0.01).name("Flare shape");
+      gui.add(p, "haloScale", -0.5, 1, 0.01).name("Halo scale");
+      gui.add(p, "ghostScale", 0, 2, 0.01).name("Ghost scale");
+      gui.add(p, "animated").name("Animated");
+      gui.add(p, "anamorphic").name("Anamorphic");
+      gui.add(p, "secondaryGhosts").name("Secondary ghosts");
+      gui.add(p, "starBurst").name("Star burst (heavy)");
+      gui.add(p, "aditionalStreaks").name("Extra streaks");
+      gui.addColor(p, "colorGain").name("Color gain");
+      gui.close();
+
+      function onResize() {
+        camera.aspect = innerWidth / innerHeight;
+        camera.updateProjectionMatrix();
+        renderer.setSize(innerWidth, innerHeight);
+      }
+      window.addEventListener("resize", onResize);
+
+      const timer = new THREE.Timer();
+      renderer.setAnimationLoop(() => {
+        timer.update();
+        controls.update();
+        lensFlare.update(renderer);
+        if (glassDome) {
+          glassDome.rotation.y += 0.004;
+          glassDome.rotation.x += 0.002;
+          glassDome.position.y = Math.sin(timer.getElapsed()) / 4.3;
+        }
+        renderer.render(scene, camera);
+      });
+    </script>
+  </body>
+</html>

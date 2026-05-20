@@ -63,9 +63,12 @@
     </script>
   </head>
   <body>
-    <div id="title">Pine — 5 cards / ring · 7 levels (default) · pivot on trunk</div>
+    <div id="title">
+      Pine — 5 cards / ring · 7 levels (default) · pivot on trunk
+    </div>
     <div id="hint">
-      Pine: foliage + optional instanced branches (trunk-axis pivot). Toggle “Branches → enable”. Single card: use position + rotation.
+      Pine: foliage + optional instanced branches (trunk-axis pivot). Toggle
+      “Branches → enable”. Single card: use position + rotation.
     </div>
     <script type="module">
       import * as THREE from "three";
@@ -88,59 +91,13 @@
         return THREE.MathUtils.lerp(trunk.radiusBottom, trunk.radiusTop, f);
       }
 
-      /** Rotate UVs in 90° steps (geometry.rotateY does not update uv). */
-      function rotateGeometryUV(geo, quarterTurns) {
-        const uv = geo.attributes.uv;
-        if (!uv) return;
-        const n = ((Math.round(quarterTurns) % 4) + 4) % 4;
-        if (n === 0) return;
-        for (let i = 0; i < uv.count; i++) {
-          let u = uv.getX(i);
-          let v = uv.getY(i);
-          for (let t = 0; t < n; t++) {
-            const nu = v;
-            const nv = 1 - u;
-            u = nu;
-            v = nv;
-          }
-          uv.setXY(i, u, v);
-        }
-        uv.needsUpdate = true;
-      }
-
-      function applyMapTransform(tex, matParams) {
-        if (!tex) return;
-        const ru = matParams.texRepeatU ?? 1;
-        const rv = matParams.texRepeatV ?? 1;
-        let su = ru;
-        let sv = rv;
-        if (matParams.texFlipH) su = -Math.abs(ru);
-        if (matParams.texFlipV) sv = -Math.abs(rv);
-        tex.center.set(0.5, 0.5);
-        tex.rotation = (matParams.texRotDeg ?? 0) * DEG;
-        tex.repeat.set(su, sv);
-        tex.offset.set(matParams.texOffsetU ?? 0, matParams.texOffsetV ?? 0);
-        if (matParams.texFlipH) tex.offset.x += Math.abs(ru);
-        if (matParams.texFlipV) tex.offset.y += Math.abs(rv);
-        const tiled = ru !== 1 || rv !== 1 || matParams.texFlipH || matParams.texFlipV;
-        tex.wrapS = tiled ? THREE.RepeatWrapping : THREE.ClampToEdgeWrapping;
-        tex.wrapT = tiled ? THREE.RepeatWrapping : THREE.ClampToEdgeWrapping;
-        tex.needsUpdate = true;
-      }
-
       /**
        * Build in centered XY (normal +Z), deform, move chosen edge midpoint to origin, then rotate +90° Y so:
        * — plane is perpendicular to trunk (world Y): lies in XZ… after rot, spans Y + tangential Z, normal ≈ −X toward trunk.
        * — pivot sits on the short-edge center (default: left edge if width ≥ height) for a clean trunk attach.
        */
       function createRectangleGeometry(w, h, segX, segY, shape, pivotEdge) {
-        const {
-          bendX,
-          bendY,
-          skewX,
-          skewY,
-          taperX,
-        } = shape;
+        const { bendX, bendY, skewX, skewY, taperX } = shape;
         const geo = new THREE.PlaneGeometry(w, h, segX, segY);
         const pos = geo.attributes.position;
         const hw = w * 0.5;
@@ -191,14 +148,20 @@
         }
 
         geo.rotateY(Math.PI / 2);
-        rotateGeometryUV(geo, 1);
         pos.needsUpdate = true;
         geo.computeVertexNormals();
         return geo;
       }
 
       /** Stylized branch: tapered cylinder along +Y, base at origin, quadratic bend in +Z (droops after card-style tilt). */
-      function createBranchGeometry(length, radiusBottom, radiusTop, radialSegs, heightSegs, bend) {
+      function createBranchGeometry(
+        length,
+        radiusBottom,
+        radiusTop,
+        radialSegs,
+        heightSegs,
+        bend,
+      ) {
         const L = Math.max(0.08, length);
         const r0 = Math.max(0.004, radiusBottom);
         const r1 = Math.max(0.004, radiusTop);
@@ -252,7 +215,7 @@
               g.stroke();
             }
             return c;
-          })()
+          })(),
         );
         t.wrapS = t.wrapT = THREE.RepeatWrapping;
         t.repeat.set(4, 4);
@@ -269,14 +232,14 @@
             /** auto | left | right | bottom | top — short edge recommended for trunk hook */
             pivotEdge: "auto",
           },
-          /** Pine card: subdivide along width (bough) for bendX; height needs segY≥2 for bendY (ny² needs ny=0). */
+          /** Blender-style pine card: 12 verts = 6 along the bough × 2 across → 5 quads; curve = bendX (long axis). */
           grid: {
             segX: 5,
-            segY: 2,
+            segY: 1,
           },
           shape: {
             bendX: 0.14,
-            bendY: -0.2,
+            bendY: 0,
             skewX: 0,
             skewY: 0,
             taperX: 0,
@@ -326,14 +289,6 @@
             uploadName: "(none)",
             /** 'alpha' = map RGBA; 'luminance' = alphaMap (red channel) for B&amp;W / grayscale masks */
             maskMode: "alpha",
-            /** U = along card width (bough), V = across card height — adjust if art export differs */
-            texRotDeg: 0,
-            texOffsetU: 0,
-            texOffsetV: 0,
-            texRepeatU: 1,
-            texRepeatV: 1,
-            texFlipH: false,
-            texFlipV: false,
           },
           scene: {
             bg: "#9ec8e8",
@@ -379,7 +334,12 @@
         const scene = new THREE.Scene();
         scene.background = new THREE.Color(params.scene.bg);
 
-        const camera = new THREE.PerspectiveCamera(45, innerWidth / innerHeight, 0.05, 200);
+        const camera = new THREE.PerspectiveCamera(
+          45,
+          innerWidth / innerHeight,
+          0.05,
+          200,
+        );
         camera.position.set(1.6, 0.9, 2.2);
 
         const renderer = new THREE.WebGPURenderer({ antialias: true });
@@ -398,7 +358,11 @@
         const key = new THREE.DirectionalLight(0xfff5e8, params.scene.key);
         key.position.set(2.5, 4, 2.5);
         scene.add(key);
-        scene.add(new THREE.DirectionalLight(0xa8b8e8, 0.35).translateX(-3).translateY(2));
+        scene.add(
+          new THREE.DirectionalLight(0xa8b8e8, 0.35)
+            .translateX(-3)
+            .translateY(2),
+        );
 
         const checker = makeCheckerTexture();
         let uploadedTex = null;
@@ -466,8 +430,8 @@
             mat.alphaTest = params.material.alphaTest;
             mat.depthWrite = params.material.depthWrite;
             /* B&W masks usually have A=255 everywhere; alphaMap uses the red channel for cutout. */
-            mat.alphaMap = params.material.maskMode === "luminance" ? uploadedTex : null;
-            applyMapTransform(uploadedTex, params.material);
+            mat.alphaMap =
+              params.material.maskMode === "luminance" ? uploadedTex : null;
           } else {
             mat.map = params.material.useChecker ? checker : null;
             mat.alphaMap = null;
@@ -476,7 +440,6 @@
             mat.depthWrite = true;
           }
 
-          if (mat.map) applyMapTransform(mat.map, params.material);
           mat.needsUpdate = true;
         }
 
@@ -485,7 +448,12 @@
           const t = params.transform;
           const g = params.foliage.globalScale;
           foliageObject.position.set(t.posX, t.posY, t.posZ);
-          foliageObject.rotation.set(t.rotXDeg * DEG, t.rotYDeg * DEG, t.rotZDeg * DEG, "XYZ");
+          foliageObject.rotation.set(
+            t.rotXDeg * DEG,
+            t.rotYDeg * DEG,
+            t.rotZDeg * DEG,
+            "XYZ",
+          );
           foliageObject.scale.setScalar(Number.isFinite(g) && g > 0 ? g : 1);
         }
 
@@ -522,7 +490,10 @@
           if (branchesObject.count !== count) return;
 
           const pow = Math.max(0.05, b.scalePower);
-          const gScale = Number.isFinite(b.globalScale) && b.globalScale > 0 ? b.globalScale : 1;
+          const gScale =
+            Number.isFinite(b.globalScale) && b.globalScale > 0
+              ? b.globalScale
+              : 1;
           const varAmt = Math.max(0, b.scaleVariation);
 
           let idx = 0;
@@ -531,11 +502,14 @@
             const u = Math.pow(tLin, pow);
             const sRing = (b.scaleBottom * (1 - u) + b.scaleTop * u) * gScale;
             const y = b.baseY + level * b.stepY + b.offsetY;
-            const R = Math.max(0.001, trunkRadiusAtWorldY(y, tr) - b.radialInset);
+            const R = Math.max(
+              0.001,
+              trunkRadiusAtWorldY(y, tr) - b.radialInset,
+            );
             const along = THREE.MathUtils.clamp(
               Number.isFinite(b.pivotAlongRadius) ? b.pivotAlongRadius : 0,
               0,
-              1
+              1,
             );
 
             for (let k = 0; k < perRing; k++) {
@@ -577,12 +551,15 @@
           const perRing = Math.max(1, Math.round(b.perRing));
           const needCount = levels * perRing;
 
-          const needNew =
-            !branchesObject || branchesObject.count !== needCount;
+          const needNew = !branchesObject || branchesObject.count !== needCount;
 
           if (needNew) {
             disposeBranchesObject();
-            branchesObject = new THREE.InstancedMesh(branchGeo, branchMat, needCount);
+            branchesObject = new THREE.InstancedMesh(
+              branchGeo,
+              branchMat,
+              needCount,
+            );
             branchesObject.frustumCulled = false;
             branchesObject.renderOrder = 0;
             scene.add(branchesObject);
@@ -602,7 +579,7 @@
             b.radiusTop,
             b.radialSegs,
             b.heightSegs,
-            b.bend
+            b.bend,
           );
           if (branchGeo) branchGeo.dispose();
           branchGeo = newGeo;
@@ -620,20 +597,25 @@
           if (foliageObject.count !== count) return;
 
           const pow = Math.max(0.05, f.scalePower);
-          const gScale = Number.isFinite(f.globalScale) && f.globalScale > 0 ? f.globalScale : 1;
+          const gScale =
+            Number.isFinite(f.globalScale) && f.globalScale > 0
+              ? f.globalScale
+              : 1;
 
           let idx = 0;
           for (let level = 0; level < levels; level++) {
             const tLin = levels <= 1 ? 0 : level / (levels - 1);
             const u = Math.pow(tLin, pow);
-            const s =
-              (f.scaleBottom * (1 - u) + f.scaleTop * u) * gScale;
+            const s = (f.scaleBottom * (1 - u) + f.scaleTop * u) * gScale;
             const y = f.baseY + level * f.stepY + f.offsetY;
-            const R = Math.max(0.001, trunkRadiusAtWorldY(y, tr) - f.radialInset);
+            const R = Math.max(
+              0.001,
+              trunkRadiusAtWorldY(y, tr) - f.radialInset,
+            );
             const along = THREE.MathUtils.clamp(
               Number.isFinite(f.pivotAlongRadius) ? f.pivotAlongRadius : 0,
               0,
-              1
+              1,
             );
 
             for (let k = 0; k < perRing; k++) {
@@ -673,7 +655,9 @@
             !foliageObject ||
             (pine && !foliageObject.isInstancedMesh) ||
             (!pine && foliageObject.isInstancedMesh) ||
-            (pine && foliageObject.isInstancedMesh && foliageObject.count !== needCount);
+            (pine &&
+              foliageObject.isInstancedMesh &&
+              foliageObject.count !== needCount);
 
           if (needNewType) {
             disposeFoliageObject();
@@ -746,10 +730,15 @@
           const w = Math.max(0.05, r.width);
           const h = Math.max(0.05, r.height);
           const sx = Math.max(1, Math.round(g.segX));
-          let sy = Math.max(1, Math.round(g.segY));
-          // bendY uses ny² — needs an interior row (ny≈0). segY=1 puts every vert on y=±hh so ny²=1 everywhere.
-          if (Math.abs(params.shape.bendY) > 1e-8) sy = Math.max(sy, 2);
-          const newGeo = createRectangleGeometry(w, h, sx, sy, params.shape, params.rect.pivotEdge);
+          const sy = Math.max(1, Math.round(g.segY));
+          const newGeo = createRectangleGeometry(
+            w,
+            h,
+            sx,
+            sy,
+            params.shape,
+            params.rect.pivotEdge,
+          );
           if (foliageObject) foliageObject.geometry = newGeo;
           if (geo) geo.dispose();
           geo = newGeo;
@@ -795,7 +784,7 @@
             undefined,
             () => {
               URL.revokeObjectURL(url);
-            }
+            },
           );
         });
 
@@ -808,10 +797,27 @@
         }
 
         const fTrunk = pane.addFolder({ title: "Trunk", expanded: true });
-        fTrunk.addBinding(params.trunk, "height", { min: 0.2, max: 24, step: 0.05 });
-        fTrunk.addBinding(params.trunk, "radiusBottom", { min: 0.03, max: 2, step: 0.01 });
-        fTrunk.addBinding(params.trunk, "radiusTop", { min: 0.02, max: 1.5, step: 0.01 });
-        fTrunk.addBinding(params.trunk, "yOffset", { min: -1, max: 2, step: 0.01, label: "base Y" });
+        fTrunk.addBinding(params.trunk, "height", {
+          min: 0.2,
+          max: 24,
+          step: 0.05,
+        });
+        fTrunk.addBinding(params.trunk, "radiusBottom", {
+          min: 0.03,
+          max: 2,
+          step: 0.01,
+        });
+        fTrunk.addBinding(params.trunk, "radiusTop", {
+          min: 0.02,
+          max: 1.5,
+          step: 0.01,
+        });
+        fTrunk.addBinding(params.trunk, "yOffset", {
+          min: -1,
+          max: 2,
+          step: 0.01,
+          label: "base Y",
+        });
         fTrunk.addBinding(params.trunk, "color");
         fTrunk.addBinding(params.trunk, "visible");
         fTrunk.on("change", () => {
@@ -821,20 +827,68 @@
           updatePivotHelper();
         });
 
-        const fFoliage = pane.addFolder({ title: "Foliage layout", expanded: true });
+        const fFoliage = pane.addFolder({
+          title: "Foliage layout",
+          expanded: true,
+        });
         fFoliage.addBinding(params.foliage, "layout", {
           label: "mode",
           options: { pine: "pine", single: "single" },
         });
-        fFoliage.addBinding(params.foliage, "levels", { min: 1, max: 32, step: 1, label: "levels" });
-        fFoliage.addBinding(params.foliage, "perRing", { min: 1, max: 32, step: 1, label: "per ring" });
-        fFoliage.addBinding(params.foliage, "baseY", { min: -2, max: 24, step: 0.02, label: "base Y" });
-        fFoliage.addBinding(params.foliage, "stepY", { min: 0.05, max: 4, step: 0.02, label: "ΔY / level" });
-        fFoliage.addBinding(params.foliage, "scaleBottom", { min: 0.05, max: 3, step: 0.02, label: "scale bottom" });
-        fFoliage.addBinding(params.foliage, "scaleTop", { min: 0.05, max: 3, step: 0.02, label: "scale top" });
-        fFoliage.addBinding(params.foliage, "scalePower", { min: 0.2, max: 4, step: 0.02, label: "scale curve" });
-        fFoliage.addBinding(params.foliage, "globalScale", { min: 0.1, max: 3, step: 0.02, label: "global ×" });
-        fFoliage.addBinding(params.foliage, "radialInset", { min: -0.2, max: 0.5, step: 0.005, label: "trunk inset" });
+        fFoliage.addBinding(params.foliage, "levels", {
+          min: 1,
+          max: 32,
+          step: 1,
+          label: "levels",
+        });
+        fFoliage.addBinding(params.foliage, "perRing", {
+          min: 1,
+          max: 32,
+          step: 1,
+          label: "per ring",
+        });
+        fFoliage.addBinding(params.foliage, "baseY", {
+          min: -2,
+          max: 24,
+          step: 0.02,
+          label: "base Y",
+        });
+        fFoliage.addBinding(params.foliage, "stepY", {
+          min: 0.05,
+          max: 4,
+          step: 0.02,
+          label: "ΔY / level",
+        });
+        fFoliage.addBinding(params.foliage, "scaleBottom", {
+          min: 0.05,
+          max: 3,
+          step: 0.02,
+          label: "scale bottom",
+        });
+        fFoliage.addBinding(params.foliage, "scaleTop", {
+          min: 0.05,
+          max: 3,
+          step: 0.02,
+          label: "scale top",
+        });
+        fFoliage.addBinding(params.foliage, "scalePower", {
+          min: 0.2,
+          max: 4,
+          step: 0.02,
+          label: "scale curve",
+        });
+        fFoliage.addBinding(params.foliage, "globalScale", {
+          min: 0.1,
+          max: 3,
+          step: 0.02,
+          label: "global ×",
+        });
+        fFoliage.addBinding(params.foliage, "radialInset", {
+          min: -0.2,
+          max: 0.5,
+          step: 0.005,
+          label: "trunk inset",
+        });
         fFoliage.addBinding(params.foliage, "pivotAlongRadius", {
           min: 0,
           max: 1,
@@ -853,31 +907,93 @@
           step: 0.5,
           label: "stagger / level °",
         });
-        fFoliage.addBinding(params.foliage, "offsetX", { min: -2, max: 2, step: 0.02, label: "offset X" });
-        fFoliage.addBinding(params.foliage, "offsetY", { min: -2, max: 2, step: 0.02, label: "offset Y" });
-        fFoliage.addBinding(params.foliage, "offsetZ", { min: -2, max: 2, step: 0.02, label: "offset Z" });
+        fFoliage.addBinding(params.foliage, "offsetX", {
+          min: -2,
+          max: 2,
+          step: 0.02,
+          label: "offset X",
+        });
+        fFoliage.addBinding(params.foliage, "offsetY", {
+          min: -2,
+          max: 2,
+          step: 0.02,
+          label: "offset Y",
+        });
+        fFoliage.addBinding(params.foliage, "offsetZ", {
+          min: -2,
+          max: 2,
+          step: 0.02,
+          label: "offset Z",
+        });
         fFoliage.on("change", () => {
           ensureFoliageObject();
           ensureBranchesObject();
         });
 
-        const fBranches = pane.addFolder({ title: "Branches (curved cylinders)", expanded: true });
+        const fBranches = pane.addFolder({
+          title: "Branches (curved cylinders)",
+          expanded: true,
+        });
         fBranches.addBinding(params.branches, "enabled", { label: "enable" });
-        fBranches.addBinding(params.branches, "levels", { min: 1, max: 24, step: 1 });
-        fBranches.addBinding(params.branches, "perRing", { min: 1, max: 24, step: 1, label: "per ring" });
-        fBranches.addBinding(params.branches, "baseY", { min: -2, max: 24, step: 0.02, label: "base Y" });
-        fBranches.addBinding(params.branches, "stepY", { min: 0.05, max: 4, step: 0.02, label: "ΔY / level" });
-        fBranches.addBinding(params.branches, "scaleBottom", { min: 0.05, max: 3, step: 0.02, label: "scale bottom" });
-        fBranches.addBinding(params.branches, "scaleTop", { min: 0.05, max: 3, step: 0.02, label: "scale top" });
-        fBranches.addBinding(params.branches, "scalePower", { min: 0.2, max: 4, step: 0.02, label: "scale curve" });
+        fBranches.addBinding(params.branches, "levels", {
+          min: 1,
+          max: 24,
+          step: 1,
+        });
+        fBranches.addBinding(params.branches, "perRing", {
+          min: 1,
+          max: 24,
+          step: 1,
+          label: "per ring",
+        });
+        fBranches.addBinding(params.branches, "baseY", {
+          min: -2,
+          max: 24,
+          step: 0.02,
+          label: "base Y",
+        });
+        fBranches.addBinding(params.branches, "stepY", {
+          min: 0.05,
+          max: 4,
+          step: 0.02,
+          label: "ΔY / level",
+        });
+        fBranches.addBinding(params.branches, "scaleBottom", {
+          min: 0.05,
+          max: 3,
+          step: 0.02,
+          label: "scale bottom",
+        });
+        fBranches.addBinding(params.branches, "scaleTop", {
+          min: 0.05,
+          max: 3,
+          step: 0.02,
+          label: "scale top",
+        });
+        fBranches.addBinding(params.branches, "scalePower", {
+          min: 0.2,
+          max: 4,
+          step: 0.02,
+          label: "scale curve",
+        });
         fBranches.addBinding(params.branches, "scaleVariation", {
           min: 0,
           max: 0.5,
           step: 0.01,
           label: "scale jitter",
         });
-        fBranches.addBinding(params.branches, "globalScale", { min: 0.1, max: 3, step: 0.02, label: "global ×" });
-        fBranches.addBinding(params.branches, "radialInset", { min: -0.2, max: 0.5, step: 0.005, label: "trunk inset" });
+        fBranches.addBinding(params.branches, "globalScale", {
+          min: 0.1,
+          max: 3,
+          step: 0.02,
+          label: "global ×",
+        });
+        fBranches.addBinding(params.branches, "radialInset", {
+          min: -0.2,
+          max: 0.5,
+          step: 0.005,
+          label: "trunk inset",
+        });
         fBranches.addBinding(params.branches, "pivotAlongRadius", {
           min: 0,
           max: 1,
@@ -896,24 +1012,98 @@
           step: 0.5,
           label: "stagger / level °",
         });
-        fBranches.addBinding(params.branches, "offsetX", { min: -2, max: 2, step: 0.02, label: "offset X" });
-        fBranches.addBinding(params.branches, "offsetY", { min: -2, max: 2, step: 0.02, label: "offset Y" });
-        fBranches.addBinding(params.branches, "offsetZ", { min: -2, max: 2, step: 0.02, label: "offset Z" });
-        fBranches.addBinding(params.branches, "length", { min: 0.1, max: 6, step: 0.02 });
-        fBranches.addBinding(params.branches, "radiusBottom", { min: 0.005, max: 0.25, step: 0.002, label: "radius base" });
-        fBranches.addBinding(params.branches, "radiusTop", { min: 0.003, max: 0.2, step: 0.002, label: "radius tip" });
-        fBranches.addBinding(params.branches, "radialSegs", { min: 3, max: 16, step: 1, label: "radial segs" });
-        fBranches.addBinding(params.branches, "heightSegs", { min: 1, max: 16, step: 1, label: "length segs" });
-        fBranches.addBinding(params.branches, "bend", { min: -1.5, max: 1.5, step: 0.02, label: "bend (+ droop)" });
-        fBranches.addBinding(params.branches, "rotXDeg", { min: -180, max: 180, step: 0.5, label: "tilt X °" });
-        fBranches.addBinding(params.branches, "rotYDeg", { min: -180, max: 180, step: 0.5, label: "tilt Y °" });
-        fBranches.addBinding(params.branches, "rotZDeg", { min: -180, max: 180, step: 0.5, label: "tilt Z °" });
+        fBranches.addBinding(params.branches, "offsetX", {
+          min: -2,
+          max: 2,
+          step: 0.02,
+          label: "offset X",
+        });
+        fBranches.addBinding(params.branches, "offsetY", {
+          min: -2,
+          max: 2,
+          step: 0.02,
+          label: "offset Y",
+        });
+        fBranches.addBinding(params.branches, "offsetZ", {
+          min: -2,
+          max: 2,
+          step: 0.02,
+          label: "offset Z",
+        });
+        fBranches.addBinding(params.branches, "length", {
+          min: 0.1,
+          max: 6,
+          step: 0.02,
+        });
+        fBranches.addBinding(params.branches, "radiusBottom", {
+          min: 0.005,
+          max: 0.25,
+          step: 0.002,
+          label: "radius base",
+        });
+        fBranches.addBinding(params.branches, "radiusTop", {
+          min: 0.003,
+          max: 0.2,
+          step: 0.002,
+          label: "radius tip",
+        });
+        fBranches.addBinding(params.branches, "radialSegs", {
+          min: 3,
+          max: 16,
+          step: 1,
+          label: "radial segs",
+        });
+        fBranches.addBinding(params.branches, "heightSegs", {
+          min: 1,
+          max: 16,
+          step: 1,
+          label: "length segs",
+        });
+        fBranches.addBinding(params.branches, "bend", {
+          min: -1.5,
+          max: 1.5,
+          step: 0.02,
+          label: "bend (+ droop)",
+        });
+        fBranches.addBinding(params.branches, "rotXDeg", {
+          min: -180,
+          max: 180,
+          step: 0.5,
+          label: "tilt X °",
+        });
+        fBranches.addBinding(params.branches, "rotYDeg", {
+          min: -180,
+          max: 180,
+          step: 0.5,
+          label: "tilt Y °",
+        });
+        fBranches.addBinding(params.branches, "rotZDeg", {
+          min: -180,
+          max: 180,
+          step: 0.5,
+          label: "tilt Z °",
+        });
         fBranches.addBinding(params.branches, "color");
-        fBranches.addBinding(params.branches, "roughness", { min: 0, max: 1, step: 0.02 });
+        fBranches.addBinding(params.branches, "roughness", {
+          min: 0,
+          max: 1,
+          step: 0.02,
+        });
 
-        const fRect = pane.addFolder({ title: "Rectangle (pivot = short edge)", expanded: true });
-        fRect.addBinding(params.rect, "width", { min: 0.1, max: 8, step: 0.05 });
-        fRect.addBinding(params.rect, "height", { min: 0.1, max: 8, step: 0.05 });
+        const fRect = pane.addFolder({
+          title: "Rectangle (pivot = short edge)",
+          expanded: true,
+        });
+        fRect.addBinding(params.rect, "width", {
+          min: 0.1,
+          max: 8,
+          step: 0.05,
+        });
+        fRect.addBinding(params.rect, "height", {
+          min: 0.1,
+          max: 8,
+          step: 0.05,
+        });
         fRect.addBinding(params.rect, "pivotEdge", {
           label: "pivot edge",
           options: {
@@ -925,11 +1115,27 @@
           },
         });
 
-        const fGrid = pane.addFolder({ title: "Subdivision (UV grid)", expanded: true });
-        fGrid.addBinding(params.grid, "segX", { min: 1, max: 128, step: 1, label: "segments X" });
-        fGrid.addBinding(params.grid, "segY", { min: 1, max: 128, step: 1, label: "segments Y" });
+        const fGrid = pane.addFolder({
+          title: "Subdivision (UV grid)",
+          expanded: true,
+        });
+        fGrid.addBinding(params.grid, "segX", {
+          min: 1,
+          max: 128,
+          step: 1,
+          label: "segments X",
+        });
+        fGrid.addBinding(params.grid, "segY", {
+          min: 1,
+          max: 128,
+          step: 1,
+          label: "segments Y",
+        });
 
-        const fShape = pane.addFolder({ title: "Shape (still a rectangle)", expanded: true });
+        const fShape = pane.addFolder({
+          title: "Shape (still a rectangle)",
+          expanded: true,
+        });
         fShape.addBinding(params.shape, "bendX", {
           min: -2,
           max: 2,
@@ -962,65 +1168,78 @@
         });
 
         const fXf = pane.addFolder({
-          title: "Card tilt (rot: pine + single)",
+          title: "Card tilt (single: full transform)",
           expanded: true,
         });
         fXf.addBinding(params.transform, "posX", {
           min: -4,
           max: 4,
           step: 0.02,
-          label: "pos X (single only)",
         });
         fXf.addBinding(params.transform, "posY", {
           min: -4,
           max: 4,
           step: 0.02,
-          label: "pos Y (single only)",
         });
         fXf.addBinding(params.transform, "posZ", {
           min: -4,
           max: 4,
           step: 0.02,
-          label: "pos Z (single only)",
         });
         fXf.addBinding(params.transform, "rotXDeg", {
           min: -180,
           max: 180,
           step: 0.5,
-          label: "pitch ° (tip lower → more −)",
+          label: "rot X °",
         });
         fXf.addBinding(params.transform, "rotYDeg", {
           min: -180,
           max: 180,
           step: 0.5,
-          label: "yaw ° (spin around trunk)",
+          label: "rot Y °",
         });
         fXf.addBinding(params.transform, "rotZDeg", {
           min: -180,
           max: 180,
           step: 0.5,
-          label: "roll ° (card spin in plane)",
-        });
-        fXf.on("change", () => {
-          if (params.foliage.layout === "pine") updateInstanceMatrices();
-          else applySingleTransform();
-          if (params.debug.showPivot) updatePivotHelper();
+          label: "rot Z °",
         });
 
         const fMat = pane.addFolder({ title: "Material", expanded: false });
         fMat.addBinding(params.material, "color");
-        fMat.addBinding(params.material, "roughness", { min: 0, max: 1, step: 0.02 });
-        fMat.addBinding(params.material, "metalness", { min: 0, max: 1, step: 0.02 });
-        fMat.addBinding(params.material, "useChecker", { label: "checker (UV preview)" });
-
-        const fTex = pane.addFolder({ title: "Texture / alpha", expanded: true });
-        const uploadNameBinding = fTex.addBinding(params.material, "uploadName", {
-          readonly: true,
-          label: "current file",
+        fMat.addBinding(params.material, "roughness", {
+          min: 0,
+          max: 1,
+          step: 0.02,
         });
+        fMat.addBinding(params.material, "metalness", {
+          min: 0,
+          max: 1,
+          step: 0.02,
+        });
+        fMat.addBinding(params.material, "useChecker", {
+          label: "checker (UV preview)",
+        });
+
+        const fTex = pane.addFolder({
+          title: "Texture / alpha",
+          expanded: true,
+        });
+        const uploadNameBinding = fTex.addBinding(
+          params.material,
+          "uploadName",
+          {
+            readonly: true,
+            label: "current file",
+          },
+        );
         refreshUploadName = () => uploadNameBinding.refresh();
-        fTex.addButton({ title: "Upload image…" }).on("click", () => fileInput.click());
-        fTex.addButton({ title: "Clear uploaded" }).on("click", () => clearUploadedTexture());
+        fTex
+          .addButton({ title: "Upload image…" })
+          .on("click", () => fileInput.click());
+        fTex
+          .addButton({ title: "Clear uploaded" })
+          .on("click", () => clearUploadedTexture());
         fTex.addBinding(params.material, "maskMode", {
           label: "cutout from",
           options: {
@@ -1034,50 +1253,100 @@
           step: 0.01,
           label: "alpha test",
         });
-        fTex.addBinding(params.material, "depthWrite", { label: "depth write" });
-        fTex.addBinding(params.material, "texRotDeg", {
-          min: -180,
-          max: 180,
-          step: 1,
-          label: "image rot °",
+        fTex.addBinding(params.material, "depthWrite", {
+          label: "depth write",
         });
-        fTex.addBinding(params.material, "texOffsetU", {
-          min: -2,
-          max: 2,
-          step: 0.01,
-          label: "offset U (along bough)",
-        });
-        fTex.addBinding(params.material, "texOffsetV", {
-          min: -2,
-          max: 2,
-          step: 0.01,
-          label: "offset V (across card)",
-        });
-        fTex.addBinding(params.material, "texRepeatU", {
-          min: 0.05,
-          max: 8,
-          step: 0.01,
-          label: "repeat U",
-        });
-        fTex.addBinding(params.material, "texRepeatV", {
-          min: 0.05,
-          max: 8,
-          step: 0.01,
-          label: "repeat V",
-        });
-        fTex.addBinding(params.material, "texFlipH", { label: "flip U" });
-        fTex.addBinding(params.material, "texFlipV", { label: "flip V" });
-        fTex.on("change", () => syncMaterial());
 
         const fSc = pane.addFolder({ title: "Scene", expanded: false });
         fSc.addBinding(params.scene, "bg");
-        fSc.addBinding(params.scene, "amb", { min: 0, max: 1.5, step: 0.02, label: "ambient" });
-        fSc.addBinding(params.scene, "key", { min: 0, max: 2.5, step: 0.02, label: "key" });
+        fSc.addBinding(params.scene, "amb", {
+          min: 0,
+          max: 1.5,
+          step: 0.02,
+          label: "ambient",
+        });
+        fSc.addBinding(params.scene, "key", {
+          min: 0,
+          max: 2.5,
+          step: 0.02,
+          label: "key",
+        });
 
         const fDbg = pane.addFolder({ title: "Debug", expanded: false });
         fDbg.addBinding(params.debug, "wireframe");
         fDbg.addBinding(params.debug, "showPivot", { label: "axes at pivot" });
 
+        const GEOM_KEYS = new Set([
+          "width",
+          "height",
+          "pivotEdge",
+          "segX",
+          "segY",
+          "bendX",
+          "bendY",
+          "skewX",
+          "skewY",
+          "taperX",
+        ]);
+        const FOLIAGE_KEYS = new Set([
+          "layout",
+          "levels",
+          "perRing",
+          "baseY",
+          "stepY",
+          "scaleBottom",
+          "scaleTop",
+          "scalePower",
+          "globalScale",
+          "radialInset",
+          "pivotAlongRadius",
+          "azimuthOffsetDeg",
+          "staggerDeg",
+          "offsetX",
+          "offsetY",
+          "offsetZ",
+        ]);
+        const XF_KEYS = new Set([
+          "posX",
+          "posY",
+          "posZ",
+          "rotXDeg",
+          "rotYDeg",
+          "rotZDeg",
+        ]);
+        const MAT_KEYS = new Set([
+          "color",
+          "roughness",
+          "metalness",
+          "useChecker",
+        ]);
+        const TEX_KEYS = new Set(["alphaTest", "depthWrite", "maskMode"]);
+        const SCENE_KEYS = new Set(["bg", "amb", "key"]);
+        const DBG_KEYS = new Set(["wireframe", "showPivot"]);
+        const BRANCH_LAYOUT_KEYS = new Set([
+          "enabled",
+          "levels",
+          "perRing",
+          "baseY",
+          "stepY",
+          "scaleBottom",
+          "scaleTop",
+          "scalePower",
+          "scaleVariation",
+          "globalScale",
+          "radialInset",
+          "pivotAlongRadius",
+          "azimuthOffsetDeg",
+          "staggerDeg",
+          "offsetX",
+          "offsetY",
+          "offsetZ",
+          "rotXDeg",
+          "rotYDeg",
+          "rotZDeg",
+          "color",
+          "roughness",
+        ]);
         const BRANCH_GEOM_KEYS = new Set([
           "length",
           "radiusBottom",
@@ -1087,62 +1356,26 @@
           "bend",
         ]);
 
-        fBranches.on("change", (ev) => {
-          const k = ev.presetKey;
-          if (k === "enabled" || k === "levels" || k === "perRing") ensureBranchesObject();
-          else if (k === "color" || k === "roughness") syncBranchMaterial();
-          else if (BRANCH_GEOM_KEYS.has(k)) rebuildBranchGeometry();
-          else updateBranchMatrices();
-        });
-
-        /** Which params object was edited (presetKey alone is ambiguous: rotXDeg exists on transform + branches). */
-        function bindingParamsObject(ev) {
-          return ev.target?.controller_?.binding?.target?.obj_;
-        }
-
         pane.on("change", (ev) => {
-          const k = ev.presetKey;
-          if (!k) return;
-          const obj = bindingParamsObject(ev);
-
-          if (obj === params.rect || obj === params.shape || obj === params.grid) {
-            rebuildGeometry();
-            return;
-          }
-          if (obj === params.transform) {
+          const k = ev.target.key;
+          if (GEOM_KEYS.has(k)) rebuildGeometry();
+          else if (FOLIAGE_KEYS.has(k)) {
+            ensureFoliageObject();
+            ensureBranchesObject();
+          } else if (BRANCH_LAYOUT_KEYS.has(k)) {
+            if (k === "enabled" || k === "levels" || k === "perRing")
+              ensureBranchesObject();
+            else if (k === "color" || k === "roughness") syncBranchMaterial();
+            else updateBranchMatrices();
+          } else if (BRANCH_GEOM_KEYS.has(k)) rebuildBranchGeometry();
+          else if (XF_KEYS.has(k)) {
             if (params.foliage.layout === "pine") updateInstanceMatrices();
             else applySingleTransform();
             if (params.debug.showPivot) updatePivotHelper();
-            return;
-          }
-          if (obj === params.foliage) {
-            ensureFoliageObject();
-            ensureBranchesObject();
-            return;
-          }
-          if (obj === params.branches) {
-            if (k === "enabled" || k === "levels" || k === "perRing") ensureBranchesObject();
-            else if (k === "color" || k === "roughness") syncBranchMaterial();
-            else if (BRANCH_GEOM_KEYS.has(k)) rebuildBranchGeometry();
-            else updateBranchMatrices();
-            return;
-          }
-          if (obj === params.trunk) {
-            rebuildTrunk();
-            updateInstanceMatrices();
-            updateBranchMatrices();
-            if (params.debug.showPivot) updatePivotHelper();
-            return;
-          }
-          if (obj === params.material) {
-            syncMaterial();
-            return;
-          }
-          if (obj === params.scene) {
-            syncScene();
-            return;
-          }
-          if (obj === params.debug) {
+          } else if (MAT_KEYS.has(k)) syncMaterial();
+          else if (TEX_KEYS.has(k)) syncMaterial();
+          else if (SCENE_KEYS.has(k)) syncScene();
+          else if (DBG_KEYS.has(k)) {
             syncMaterial();
             syncBranchMaterial();
             if (k === "showPivot") updatePivotHelper();
