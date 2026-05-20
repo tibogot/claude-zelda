@@ -449,6 +449,7 @@
         add,
         sub,
         div,
+        floor,
         instanceIndex,
         hash,
         rotateUV,
@@ -916,6 +917,10 @@
             colorSource: "tsl",
             /** 'alpha' = map RGBA; 'luminance' = alphaMap (red channel) for B&amp;W / grayscale masks */
             maskMode: "alpha",
+            /** single = full image on each card; atlas = 2×2 cells, random variant per instance */
+            textureMode: "single",
+            atlasCols: 2,
+            atlasRows: 2,
             bottomColor: "#1a4520",
             topColor: "#6aab38",
             colorVar: 0.14,
@@ -1000,8 +1005,13 @@
         const LOD_LABEL_Z = 5.2;
         const PRESET_VERSION = 1;
         const PINE_LEAF_TEXTURES = [
-          { name: "Frame 56", path: "textures/pine-leaves/Frame 56.png" },
-          { name: "Frame 57", path: "textures/pine-leaves/Frame 57.png" },
+          { name: "Frame 56", path: "textures/pine-leaves/Frame 56.png", mode: "single" },
+          { name: "Frame 57", path: "textures/pine-leaves/Frame 57.png", mode: "single" },
+          {
+            name: "Atlas 4×128×256",
+            path: "textures/pine-leaves/pine-atlas-4.png",
+            mode: "atlas",
+          },
         ];
         let activeLeafTexPath = "";
         let activeLeafTexDataUrl = "";
@@ -1132,6 +1142,10 @@
           alphaCutoff: uniform(params.material.alphaTest),
           maskInAlpha: uniform(params.material.maskMode === "alpha" ? 1 : 0),
           useMaskTex: uniform(0),
+          useAtlas: uniform(0),
+          atlasCols: uniform(2),
+          atlasRows: uniform(2),
+          atlasCount: uniform(4),
           useImageColor: uniform(0),
           texRot: uniform(0),
           texOff: uniform(new THREE.Vector2(0, 0)),
@@ -1159,6 +1173,17 @@
           );
           u = add(mul(u, leafU.texRep), vec2(0.5, 0.5));
           u = add(u, leafU.texOff);
+          const variantIdx = floor(mul(hash(instanceIndex), leafU.atlasCount));
+          const colIdx = sub(variantIdx, mul(floor(div(variantIdx, leafU.atlasCols)), leafU.atlasCols));
+          const rowIdx = floor(div(variantIdx, leafU.atlasCols));
+          const invCols = div(float(1), leafU.atlasCols);
+          const invRows = div(float(1), leafU.atlasRows);
+          const atlasU = add(mul(u.x, invCols), mul(colIdx, invCols));
+          const atlasV = add(mul(u.y, invRows), mul(rowIdx, invRows));
+          u = vec2(
+            mix(u.x, atlasU, leafU.useAtlas),
+            mix(u.y, atlasV, leafU.useAtlas)
+          );
           return u;
         });
 
@@ -1335,6 +1360,12 @@
           leafU.rimPower.value = m.rimPower;
           leafU.alphaCutoff.value = m.alphaTest;
           leafU.maskInAlpha.value = m.maskMode === "alpha" ? 1 : 0;
+          const atlasCols = Math.max(1, Math.round(m.atlasCols ?? 2));
+          const atlasRows = Math.max(1, Math.round(m.atlasRows ?? 2));
+          leafU.useAtlas.value = m.textureMode === "atlas" ? 1 : 0;
+          leafU.atlasCols.value = atlasCols;
+          leafU.atlasRows.value = atlasRows;
+          leafU.atlasCount.value = atlasCols * atlasRows;
           leafU.texRot.value = (m.texRotDeg ?? 0) * DEG;
           const ru = m.texRepeatU ?? 1;
           const rv = m.texRepeatV ?? 1;
@@ -1982,7 +2013,7 @@
             img.src = t.path;
             img.title = t.name;
             img.alt = t.name;
-            img.addEventListener("click", () => loadLeafTexFromPath(t.path));
+            img.addEventListener("click", () => loadLeafTexFromPath(t.path, t.mode));
             wrap.appendChild(img);
             const cap = document.createElement("div");
             cap.className = "tex-label";
@@ -1994,7 +2025,7 @@
           updateGallerySelection();
         }
 
-        function loadLeafTexFromPath(path) {
+        function loadLeafTexFromPath(path, mode) {
           const entry = PINE_LEAF_TEXTURES.find((t) => t.path === path);
           texLoader.load(
             path,
@@ -2004,6 +2035,11 @@
               uploadedTex = tex;
               activeLeafTexPath = path;
               activeLeafTexDataUrl = "";
+              if (entry?.mode) {
+                params.material.textureMode = entry.mode;
+              } else if (mode === "atlas" || mode === "single") {
+                params.material.textureMode = mode;
+              }
               params.material.uploadName =
                 entry?.name || path.split("/").pop() || path;
               const img = tex.image;
@@ -2924,6 +2960,28 @@
           title: "Clear uploaded",
           onClick: () => clearUploadedTexture(),
         });
+        _dropdown(sTex, m, "textureMode", {
+          label: "texture layout",
+          options: {
+            "Single image (full UV)": "single",
+            "Atlas 2×2 (random cell)": "atlas",
+          },
+          onChange: onMaterial,
+        });
+        _slider(sTex, m, "atlasCols", {
+          label: "atlas columns",
+          min: 1,
+          max: 4,
+          step: 1,
+          onChange: onMaterial,
+        });
+        _slider(sTex, m, "atlasRows", {
+          label: "atlas rows",
+          min: 1,
+          max: 4,
+          step: 1,
+          onChange: onMaterial,
+        });
         _dropdown(sTex, m, "colorSource", {
           label: "leaf color from",
           options: {
@@ -2954,7 +3012,10 @@
         _info(
           sTex,
           "mask",
-          () => "opaque alpha cutout · depth write on recommended",
+          () =>
+            m.textureMode === "atlas"
+              ? `atlas ${m.atlasCols}×${m.atlasRows} · 256×512 → ${128}×${256}/cell`
+              : "single image · full card UV",
         );
         _slider(sTex, m, "texRotDeg", {
           label: "image rot °",
