@@ -1062,16 +1062,29 @@ function _section(parent, title, expanded = true) {
 
 const _liveSliders = [];
 function _slider(parent, obj, key, opts) {
-  const { label, min, max, step = 0.01, onChange } = opts;
+  const { label, min, max, step = 0.01, curve, onChange } = opts;
+  const isLog = curve === 'log' && min > 0 && max > min;
   const row = document.createElement('div');
   row.className = 'prop-row';
   const cur = obj[key];
-  row.innerHTML = `<span class="prop-label">${label}</span><div class="prop-value"><div class="prop-slider-wrap"><input type="range" class="prop-slider" min="${min}" max="${max}" step="${step}" value="${cur}"><input type="number" class="prop-num-input" title="Type an exact value" min="${min}" max="${max}" step="${step}" value="${_fmt(cur, step)}"></div></div>`;
+  // Log-curve sliders use an internal 0..1 range mapped exponentially so fine values
+  // near `min` get most of the slider travel. The number input still uses real units.
+  const logK = isLog ? Math.log(max / min) : 0;
+  const valToSlider = (v) => isLog ? Math.log(Math.max(v, min) / min) / logK : v;
+  const sliderToVal = (s) => isLog ? min * Math.exp(s * logK) : s;
+  const sliderMin = isLog ? 0 : min;
+  const sliderMax = isLog ? 1 : max;
+  const sliderStep = isLog ? 0.0001 : step;
+  const sliderInit = valToSlider(cur);
+  row.innerHTML = `<span class="prop-label">${label}</span><div class="prop-value"><div class="prop-slider-wrap"><input type="range" class="prop-slider" min="${sliderMin}" max="${sliderMax}" step="${sliderStep}" value="${sliderInit}"><input type="number" class="prop-num-input" title="Type an exact value" min="${min}" max="${max}" step="${step}" value="${_fmt(cur, step)}"></div></div>`;
   const sl = row.querySelector('.prop-slider');
   const num = row.querySelector('.prop-num-input');
   const syncNumDisplay = () => { num.value = _fmt(obj[key], step); };
+  const syncSliderFromValue = () => { sl.value = String(valToSlider(obj[key])); };
   const applyFromSlider = () => {
-    obj[key] = parseFloat(sl.value);
+    let v = sliderToVal(parseFloat(sl.value));
+    if (isLog) v = _clampSnap(v, min, max, step);
+    obj[key] = v;
     syncNumDisplay();
     onChange?.();
   };
@@ -1088,7 +1101,7 @@ function _slider(parent, obj, key, opts) {
     }
     v = _clampSnap(v, min, max, step);
     obj[key] = v;
-    sl.value = String(v);
+    syncSliderFromValue();
     syncNumDisplay();
     onChange?.();
   };
@@ -1099,7 +1112,7 @@ function _slider(parent, obj, key, opts) {
   parent.appendChild(row);
   const handle = {
     row,
-    refresh() { sl.value = obj[key]; syncNumDisplay(); },
+    refresh() { syncSliderFromValue(); syncNumDisplay(); },
     _obj: obj,
     _key: key,
     _sl: sl,
@@ -2157,7 +2170,7 @@ function buildPropsPanel(app) {
           });
           const propMat = app.propTextureLibrary.getById(proxy.materialId);
           if (propMat) {
-            _slider(row, propMat, 'uvScale', { label: 'UV tile', min: 0.01, max: 20, step: 0.01,
+            _slider(row, propMat, 'uvScale', { label: 'UV tile', min: 0.01, max: 20, step: 0.001, curve: 'log',
               onChange: () => { propMat.uUVScale.value = propMat.uvScale; } });
             _slider(row, propMat, 'normalStrength', { label: 'Normal', min: 0, max: 3, step: 0.05,
               onChange: () => { propMat.uNormalStr.value = propMat.normalStrength; } });

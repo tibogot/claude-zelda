@@ -806,6 +806,8 @@
             alphaTest: 0.45,
             depthWrite: true,
             uploadName: "(none)",
+            /** 'tsl' = procedural leaf look; 'texture' = sample RGB from uploaded image */
+            colorSource: "tsl",
             /** 'alpha' = map RGBA; 'luminance' = alphaMap (red channel) for B&amp;W / grayscale masks */
             maskMode: "alpha",
             bottomColor: "#1a4520",
@@ -917,6 +919,7 @@
           alphaCutoff: uniform(params.material.alphaTest),
           maskInAlpha: uniform(params.material.maskMode === "alpha" ? 1 : 0),
           useMaskTex: uniform(0),
+          useImageColor: uniform(0),
           texRot: uniform(0),
           texOff: uniform(new THREE.Vector2(0, 0)),
           texRep: uniform(new THREE.Vector2(1, 1)),
@@ -997,6 +1000,7 @@
           const rimDot = sub(float(1), max(dot(radial, viewDir), float(0)));
           const rim = mul(pow(rimDot, leafU.rimPower), leafU.rimStrength);
           col = add(col, mul(leafU.rimColor, rim));
+          col = mix(col, s.rgb, leafU.useImageColor);
           return clamp(col, float(0), float(2));
         })();
 
@@ -1121,6 +1125,8 @@
             d.needsUpdate = true;
             leafMapNode.value = d;
           }
+          leafU.useImageColor.value =
+            params.material.colorSource === "texture" && leafU.useMaskTex.value ? 1 : 0;
           mat.needsUpdate = true;
         }
 
@@ -1663,6 +1669,11 @@
         refreshUploadName = () => uploadInfo.update(m.uploadName);
         _button(sTex, { title: "Upload image…", onClick: () => fileInput.click() });
         _button(sTex, { title: "Clear uploaded", onClick: () => clearUploadedTexture() });
+        _dropdown(sTex, m, "colorSource", {
+          label: "leaf color from",
+          options: { "TSL procedural": "tsl", "Uploaded image (RGB)": "texture" },
+          onChange: onMaterial,
+        });
         _dropdown(sTex, m, "maskMode", {
           label: "cutout from",
           options: { "PNG alpha (RGBA)": "alpha", "B&W / gray (red)": "luminance" },
