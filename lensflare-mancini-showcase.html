@@ -198,7 +198,20 @@
             m0.clearcoat = 1;
             m0.metalness = 0.22;
           }
-          if (m1) m1.roughness = 0.6;
+          if (m1) {
+            // Force the inner mesh to stable matte black — otherwise WebGPU's PBR computes
+            // a per-frame colour for whatever the GLB ships with, and the triangle gaps in
+            // the outer iridescent shell reveal that shifting colour as the dome rotates.
+            m1.color?.setHex(0x000000);
+            m1.metalness = 0;
+            m1.roughness = 0.6;
+          }
+          // Stop the dome from triggering flare occlusion. Its WebGPU material reads can flip
+          // between transmissive / opaque per frame, which made the flare blink as it rotated
+          // and cut the flare entirely at orbit angles where the dome lined up with the sun.
+          glassDome.traverse((c) => {
+            if (c.isMesh) c.userData = "no-occlusion";
+          });
           glassDome.scale.setScalar(0.7);
           scene.add(glassDome);
         },
