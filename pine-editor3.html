@@ -420,6 +420,7 @@
     </div>
     <script type="module">
       import * as THREE from "three";
+      import { mergeGeometries } from "three/addons/utils/BufferGeometryUtils.js";
       import {
         Fn,
         float,
@@ -647,12 +648,111 @@
       const _qOut = new THREE.Quaternion();
       const _dummy = new THREE.Object3D();
       const _yAxis = new THREE.Vector3(0, 1, 0);
+      const _trunkP0 = new THREE.Vector3();
+      const _trunkP1 = new THREE.Vector3();
+      const _trunkP2 = new THREE.Vector3();
+      const _trunkTan = new THREE.Vector3();
+      const _trunkRight = new THREE.Vector3();
+      const _trunkFwd = new THREE.Vector3();
+      const _trunkOut = new THREE.Vector3();
+      const _trunkCenter = new THREE.Vector3();
+      const _qSeg = new THREE.Quaternion();
+      const _mSeg = new THREE.Matrix4();
 
-      function trunkRadiusAtWorldY(y, trunk) {
+      function trunkHeightT(y, trunk) {
         const H = Math.max(0.15, trunk.height);
         const y0 = trunk.yOffset;
-        const f = THREE.MathUtils.clamp((y - y0) / H, 0, 1);
-        return THREE.MathUtils.lerp(trunk.radiusBottom, trunk.radiusTop, f);
+        return THREE.MathUtils.clamp((y - y0) / H, 0, 1);
+      }
+
+      function trunkRadiusAtT(t, trunk) {
+        return THREE.MathUtils.lerp(
+          trunk.radiusBottom,
+          trunk.radiusTop,
+          THREE.MathUtils.clamp(t, 0, 1),
+        );
+      }
+
+      function trunkRadiusAtWorldY(y, trunk) {
+        return trunkRadiusAtT(trunkHeightT(y, trunk), trunk);
+      }
+
+      /** Lateral bow along trunk; base + tip stay on vertical axis (not tip-lean). */
+      function trunkSpineParams(trunk) {
+        let bend = trunk.curveBend ?? 0;
+        let s = trunk.curveS ?? 0;
+        let angleRad = (trunk.curveAngleDeg ?? 0) * DEG;
+        const lx = trunk.curveX ?? 0;
+        const lz = trunk.curveZ ?? 0;
+        if (
+          bend < 1e-6 &&
+          s < 1e-6 &&
+          (Math.abs(lx) > 1e-5 || Math.abs(lz) > 1e-5)
+        ) {
+          bend = Math.hypot(lx, lz) * 0.45;
+          angleRad = Math.atan2(lz, lx);
+        }
+        return { bend, s, angleRad };
+      }
+
+      function trunkHasSpineCurve(trunk) {
+        const { bend, s } = trunkSpineParams(trunk);
+        return bend > 1e-5 || Math.abs(s) > 1e-5;
+      }
+
+      function trunkCenterAtT(t, trunk, target) {
+        const H = Math.max(0.15, trunk.height);
+        const y0 = trunk.yOffset;
+        const u = THREE.MathUtils.clamp(t, 0, 1);
+        const { bend, s, angleRad } = trunkSpineParams(trunk);
+        const wC = Math.sin(Math.PI * u);
+        const wS = s * Math.sin(2 * Math.PI * u);
+        const lateral = bend * (wC + wS);
+        const cx = Math.cos(angleRad);
+        const cz = Math.sin(angleRad);
+        return target.set(cx * lateral, y0 + H * u, cz * lateral);
+      }
+
+      function trunkTangentAtT(t, trunk, target) {
+        const H = Math.max(0.15, trunk.height);
+        const u = THREE.MathUtils.clamp(t, 0, 1);
+        const { bend, s, angleRad } = trunkSpineParams(trunk);
+        const dLateral =
+          bend *
+          (Math.PI * Math.cos(Math.PI * u) +
+            s * 2 * Math.PI * Math.cos(2 * Math.PI * u));
+        const cx = Math.cos(angleRad);
+        const cz = Math.sin(angleRad);
+        target.set(cx * dLateral, H, cz * dLateral);
+        const len = target.length();
+        if (len > 1e-6) target.multiplyScalar(1 / len);
+        else target.set(0, 1, 0);
+        return target;
+      }
+
+      function trunkOutwardAtT(t, thetaRad, trunk, target) {
+        trunkTangentAtT(t, trunk, _trunkTan);
+        _trunkRight.crossVectors(_yAxis, _trunkTan);
+        if (_trunkRight.lengthSq() < 1e-8) _trunkRight.set(1, 0, 0);
+        _trunkRight.normalize();
+        _trunkFwd.crossVectors(_trunkTan, _trunkRight).normalize();
+        return target
+          .copy(_trunkRight)
+          .multiplyScalar(Math.cos(thetaRad))
+          .addScaledVector(_trunkFwd, Math.sin(thetaRad));
+      }
+
+      function trunkPathSegmentCount(trunk) {
+        const manual = Math.round(trunk.pathSegs ?? 0);
+        if (manual >= 4) return Math.min(64, manual);
+        const H = Math.max(0.15, trunk.height);
+        const { bend, s } = trunkSpineParams(trunk);
+        const curve = bend + Math.abs(s) * 0.5;
+        return THREE.MathUtils.clamp(
+          Math.ceil(H * 4) + Math.ceil(curve * 12),
+          4,
+          48,
+        );
       }
 
       /** Rotate UVs in 90° steps (geometry.rotateY does not update uv). */
@@ -871,6 +971,7 @@
             rotZDeg: 90,
           },
           foliage: {
+            enabled: true,
             layout: "pine",
             levels: 8,
             perRing: 9,
@@ -903,6 +1004,13 @@
             radiusBottom: 0.14,
             radiusTop: 0.02,
             yOffset: 0,
+            /** Mid-trunk lateral bow (m); base/tip stay on axis. sin(π·t) + optional S term. */
+            curveBend: 0.12,
+            curveAngleDeg: 0,
+            curveS: 0,
+            /** 0 = auto segment count from height + curve; otherwise 4–64 along path. */
+            pathSegs: 0,
+            radialSegs: 20,
             color: "#3d2e22",
             visible: true,
           },
@@ -912,7 +1020,7 @@
             useChecker: false,
             alphaTest: 0.45,
             depthWrite: true,
-            uploadName: "(none)",
+            uploadName: "Frame 56",
             /** 'tsl' = procedural leaf look; 'texture' = sample RGB from uploaded image */
             colorSource: "tsl",
             /** 'alpha' = map RGBA; 'luminance' = alphaMap (red channel) for B&amp;W / grayscale masks */
@@ -955,6 +1063,10 @@
             sunZ: 4,
             showGround: true,
             showFog: false,
+            /** Ortho half-extent (m) around tree — smaller = sharper ground shadows */
+            shadowFocus: 11,
+            shadowMapSize: 4096,
+            castFoliageShadows: true,
           },
           branches: {
             enabled: false,
@@ -1068,14 +1180,57 @@
           params.scene.sunZ,
         );
         sun.castShadow = true;
-        sun.shadow.mapSize.set(2048, 2048);
-        sun.shadow.camera.near = 0.5;
-        sun.shadow.camera.far = 60;
-        sun.shadow.camera.left = -20;
-        sun.shadow.camera.right = 20;
-        sun.shadow.camera.top = 12;
-        sun.shadow.camera.bottom = -12;
-        sun.shadow.bias = -0.001;
+        const sunTarget = new THREE.Object3D();
+        sunTarget.position.set(0, 2.5, 0);
+        scene.add(sunTarget);
+        sun.target = sunTarget;
+
+        function applySunShadowSettings() {
+          const sc = params.scene;
+          const focus = Math.max(4, sc.shadowFocus ?? 11);
+          const mapSize = THREE.MathUtils.clamp(
+            Math.round(sc.shadowMapSize ?? 4096),
+            512,
+            8192,
+          );
+          if (
+            sun.shadow.map &&
+            (sun.shadow.mapSize.x !== mapSize || sun.shadow.mapSize.y !== mapSize)
+          ) {
+            sun.shadow.map.dispose();
+            sun.shadow.map = null;
+          }
+          sun.shadow.mapSize.set(mapSize, mapSize);
+          sun.shadow.camera.near = 0.5;
+          sun.shadow.camera.far = Math.max(25, focus * 4);
+          sun.shadow.camera.left = -focus;
+          sun.shadow.camera.right = focus;
+          sun.shadow.camera.top = focus;
+          sun.shadow.camera.bottom = -focus;
+          sun.shadow.bias = -0.00015;
+          sun.shadow.normalBias = 0.025;
+          sun.shadow.radius = 2;
+        }
+        applySunShadowSettings();
+
+        function applyCastShadowFlags() {
+          const leafShadow = params.scene.castFoliageShadows !== false;
+          trunkMesh.castShadow = true;
+          if (foliageObject) foliageObject.castShadow = leafShadow;
+          if (lodMesh1) lodMesh1.castShadow = leafShadow;
+          if (lodMesh2) lodMesh2.castShadow = leafShadow;
+          if (branchesObject) {
+            branchesObject.castShadow =
+              leafShadow && params.branches.enabled;
+          }
+          for (const c of [
+            lodTrunk0Clone,
+            lodTrunk1Clone,
+            lodTrunk2Clone,
+          ]) {
+            if (c) c.castShadow = true;
+          }
+        }
         scene.add(sun);
 
         const groundGeo = new THREE.CircleGeometry(40, 72);
@@ -1439,7 +1594,7 @@
           foliageObject.scale.setScalar(Number.isFinite(g) && g > 0 ? g : 1);
         }
 
-        function quaternionForAzimuth(thetaRad, pitchExtraDeg = 0) {
+        function quaternionForAzimuth(thetaRad, pitchExtraDeg = 0, trunkT = 0) {
           const t = params.transform;
           _euler.set(
             (t.rotXDeg + pitchExtraDeg) * DEG,
@@ -1448,15 +1603,17 @@
             "XYZ",
           );
           _qCard.setFromEuler(_euler);
-          _qAz.setFromAxisAngle(_yAxis, thetaRad);
+          trunkTangentAtT(trunkT, params.trunk, _trunkTan);
+          _qAz.setFromAxisAngle(_trunkTan, thetaRad);
           return _qOut.copy(_qAz).multiply(_qCard);
         }
 
-        function quaternionForBranchAzimuth(thetaRad) {
+        function quaternionForBranchAzimuth(thetaRad, trunkT = 0) {
           const b = params.branches;
           _euler.set(b.rotXDeg * DEG, b.rotYDeg * DEG, b.rotZDeg * DEG, "XYZ");
           _qCard.setFromEuler(_euler);
-          _qAz.setFromAxisAngle(_yAxis, thetaRad);
+          trunkTangentAtT(trunkT, params.trunk, _trunkTan);
+          _qAz.setFromAxisAngle(_trunkTan, thetaRad);
           return _qOut.copy(_qAz).multiply(_qCard);
         }
 
@@ -1488,11 +1645,9 @@
             const tLin = levels <= 1 ? 0 : level / (levels - 1);
             const u = Math.pow(tLin, pow);
             const sRing = (b.scaleBottom * (1 - u) + b.scaleTop * u) * gScale;
-            const y = b.baseY + level * b.stepY + b.offsetY;
-            const R = Math.max(
-              0.001,
-              trunkRadiusAtWorldY(y, tr) - b.radialInset,
-            );
+            const yRing = b.baseY + level * b.stepY + b.offsetY;
+            const trunkT = trunkHeightT(yRing, tr);
+            const R = Math.max(0.001, trunkRadiusAtT(trunkT, tr) - b.radialInset);
             const along = THREE.MathUtils.clamp(
               Number.isFinite(b.pivotAlongRadius) ? b.pivotAlongRadius : 0,
               0,
@@ -1503,14 +1658,13 @@
               const thetaDeg =
                 b.azimuthOffsetDeg + (k * 360) / perRing + b.staggerDeg * level;
               const theta = thetaDeg * DEG;
-              const cx = Math.cos(theta);
-              const sz = Math.sin(theta);
-
-              const px = along * R * cx + b.offsetX;
-              const pz = along * R * sz + b.offsetZ;
+              trunkCenterAtT(trunkT, tr, _dummy.position);
+              trunkOutwardAtT(trunkT, theta, tr, _trunkOut);
+              _dummy.position.addScaledVector(_trunkOut, along * R);
+              _dummy.position.x += b.offsetX;
+              _dummy.position.z += b.offsetZ;
               const jitter = 1 + instanceScaleJitter(idx, varAmt);
-              _dummy.position.set(px, y, pz);
-              _dummy.quaternion.copy(quaternionForBranchAzimuth(theta));
+              _dummy.quaternion.copy(quaternionForBranchAzimuth(theta, trunkT));
               _dummy.scale.setScalar(sRing * jitter);
               _dummy.updateMatrix();
               branchesObject.setMatrixAt(idx++, _dummy.matrix);
@@ -1607,10 +1761,8 @@
             const u = Math.pow(tLin, pow);
             const sRing = (f.scaleBottom * (1 - u) + f.scaleTop * u) * gScale;
             const yRing = f.baseY + level * f.stepY + f.offsetY;
-            const R = Math.max(
-              0.001,
-              trunkRadiusAtWorldY(yRing, tr) - f.radialInset,
-            );
+            const trunkT = trunkHeightT(yRing, tr);
+            const R = Math.max(0.001, trunkRadiusAtT(trunkT, tr) - f.radialInset);
             const along = THREE.MathUtils.clamp(
               Number.isFinite(f.pivotAlongRadius) ? f.pivotAlongRadius : 0,
               0,
@@ -1637,8 +1789,6 @@
                   ringRand +
                   cardRand;
                 const theta = thetaDeg * DEG;
-                const cx = Math.cos(theta);
-                const sz = Math.sin(theta);
                 const seed = f.ringRandomSeed;
                 const pitchJit = foliageRandomSignedDeg(
                   level,
@@ -1658,12 +1808,19 @@
                   seed,
                   f.leafScaleRandom,
                 );
-                const px = along * R * cx + f.offsetX + xOffset;
-                const pz = along * R * sz + f.offsetZ;
-                const y = yRing + yJit;
+                trunkCenterAtT(trunkT, tr, _dummy.position);
+                trunkOutwardAtT(trunkT, theta, tr, _trunkOut);
+                _dummy.position.addScaledVector(_trunkOut, along * R);
+                _dummy.position.x += f.offsetX + xOffset;
+                _dummy.position.z += f.offsetZ;
+                if (Math.abs(yJit) > 1e-6) {
+                  trunkTangentAtT(trunkT, tr, _trunkTan);
+                  _dummy.position.addScaledVector(_trunkTan, yJit);
+                }
                 const s = Math.max(0.02, sRing * (1 + scaleJit) * scaleMul);
-                _dummy.position.set(px, y, pz);
-                _dummy.quaternion.copy(quaternionForAzimuth(theta, pitchJit));
+                _dummy.quaternion.copy(
+                  quaternionForAzimuth(theta, pitchJit, trunkT),
+                );
                 _dummy.scale.setScalar(s);
                 _dummy.updateMatrix();
                 mesh.setMatrixAt(out++, _dummy.matrix);
@@ -1929,6 +2086,8 @@
             updateLodTrunkVisibility();
             setLodGroundLabelsVisible(false);
           }
+          syncFoliageVisibility();
+          applyCastShadowFlags();
           updateStats();
         }
 
@@ -2222,6 +2381,13 @@
           foliageObject = null;
         }
 
+        function syncFoliageVisibility() {
+          const show = params.foliage.enabled !== false;
+          if (foliageObject) foliageObject.visible = show;
+          if (lodMesh1) lodMesh1.visible = show;
+          if (lodMesh2) lodMesh2.visible = show;
+        }
+
         function ensureFoliageObject() {
           const f = params.foliage;
           const pine = f.layout === "pine";
@@ -2262,19 +2428,65 @@
             if (pine) updateInstanceMatrices();
             else applySingleTransform();
           }
+          syncFoliageVisibility();
+          applyCastShadowFlags();
           updatePivotHelper();
         }
 
         function rebuildTrunk() {
           const t = params.trunk;
           if (trunkGeo) trunkGeo.dispose();
-          const H = Math.max(0.15, t.height);
-          const r0 = Math.max(0.02, t.radiusBottom);
-          const r1 = Math.max(0.02, t.radiusTop);
-          trunkGeo = new THREE.CylinderGeometry(r1, r0, H, 24);
+          const segs = trunkPathSegmentCount(t);
+          const radialSegs = Math.max(6, Math.round(t.radialSegs ?? 20));
+          const parts = [];
+          const straight = !trunkHasSpineCurve(t);
+
+          if (straight) {
+            const H = Math.max(0.15, t.height);
+            const r0 = Math.max(0.02, t.radiusBottom);
+            const r1 = Math.max(0.02, t.radiusTop);
+            trunkGeo = new THREE.CylinderGeometry(r1, r0, H, radialSegs);
+            trunkMesh.position.set(0, t.yOffset + H * 0.5, 0);
+          } else {
+            for (let i = 0; i < segs; i++) {
+              const t0 = i / segs;
+              const t1 = (i + 1) / segs;
+              trunkCenterAtT(t0, t, _trunkP0);
+              trunkCenterAtT(t1, t, _trunkP2);
+              const r0 = Math.max(0.02, trunkRadiusAtT(t0, t));
+              const r1 = Math.max(0.02, trunkRadiusAtT(t1, t));
+              _v3.subVectors(_trunkP2, _trunkP0);
+              const len = _v3.length();
+              if (len < 1e-5) continue;
+              _v3.normalize();
+              _trunkCenter.addVectors(_trunkP0, _trunkP2).multiplyScalar(0.5);
+              const cyl = new THREE.CylinderGeometry(r1, r0, len, radialSegs, 1);
+              _qSeg.setFromUnitVectors(_yAxis, _v3);
+              _mSeg.compose(_trunkCenter, _qSeg, new THREE.Vector3(1, 1, 1));
+              cyl.applyMatrix4(_mSeg);
+              parts.push(cyl);
+            }
+            if (parts.length === 0) {
+              const H = Math.max(0.15, t.height);
+              trunkGeo = new THREE.CylinderGeometry(
+                Math.max(0.02, t.radiusTop),
+                Math.max(0.02, t.radiusBottom),
+                H,
+                radialSegs,
+              );
+              trunkMesh.position.set(0, t.yOffset + H * 0.5, 0);
+            } else {
+              trunkGeo =
+                parts.length === 1 ? parts[0] : mergeGeometries(parts);
+              for (const g of parts) {
+                if (g !== trunkGeo) g.dispose();
+              }
+              trunkMesh.position.set(0, 0, 0);
+            }
+          }
+
           trunkMesh.geometry = trunkGeo;
           trunkMesh.material = trunkMat;
-          trunkMesh.position.set(0, t.yOffset + H * 0.5, 0);
           trunkMesh.visible = t.visible;
           trunkMat.color.set(t.color);
         }
@@ -2289,7 +2501,12 @@
             });
             pivotHelperRoot = null;
           }
-          if (!params.debug.showPivot || !foliageObject) return;
+          if (
+            !params.debug.showPivot ||
+            !foliageObject ||
+            params.foliage.enabled === false
+          )
+            return;
 
           const axes = new THREE.AxesHelper(0.2);
           if (foliageObject.isInstancedMesh) {
@@ -2337,6 +2554,8 @@
           hemi.intensity = sc.ambientInt;
           sun.intensity = sc.sunIntensity;
           sun.position.set(sc.sunX, sc.sunY, sc.sunZ);
+          applySunShadowSettings();
+          applyCastShadowFlags();
           ground.visible = sc.showGround;
           scene.fog = sc.showFog ? new THREE.FogExp2(sc.bgColor, 0.018) : null;
           syncLeafUniforms();
@@ -2359,6 +2578,7 @@
 
         const onTrunk = () => {
           rebuildTrunk();
+          if (params.foliage.layout === "pine") updateInstanceMatrices();
           refreshLodSystem();
           updateBranchMatrices();
           updatePivotHelper();
@@ -2457,10 +2677,59 @@
           step: 0.01,
           onChange: onTrunk,
         });
+        _slider(sTrunk, t, "curveBend", {
+          label: "spine bend",
+          min: 0,
+          max: 1.2,
+          step: 0.01,
+          onChange: onTrunk,
+        });
+        _slider(sTrunk, t, "curveAngleDeg", {
+          label: "bend direction °",
+          min: 0,
+          max: 360,
+          step: 1,
+          onChange: onTrunk,
+        });
+        _slider(sTrunk, t, "curveS", {
+          label: "S-curve amount",
+          min: 0,
+          max: 0.5,
+          step: 0.01,
+          onChange: onTrunk,
+        });
+        _info(
+          sTrunk,
+          "spine",
+          () =>
+            "Bow along trunk; base + tip on center axis (not falling-over lean).",
+        );
+        _slider(sTrunk, t, "pathSegs", {
+          label: "path segments (0=auto)",
+          min: 0,
+          max: 64,
+          step: 1,
+          onChange: onTrunk,
+        });
+        _slider(sTrunk, t, "radialSegs", {
+          label: "radial segments",
+          min: 8,
+          max: 32,
+          step: 1,
+          onChange: onTrunk,
+        });
         _color(sTrunk, t, "color", { label: "color", onChange: onTrunk });
         _toggle(sTrunk, t, "visible", { label: "visible", onChange: onTrunk });
 
         const sFol = _section(uiRoot, "Foliage layout", true);
+        _toggle(sFol, f, "enabled", {
+          label: "show foliage",
+          onChange: () => {
+            syncFoliageVisibility();
+            if (params.debug.showPivot) updatePivotHelper();
+            refreshLodSystem();
+          },
+        });
         _dropdown(sFol, f, "layout", {
           label: "mode",
           options: { pine: "pine", single: "single" },
@@ -3205,6 +3474,30 @@
           label: "Show ground",
           onChange: onScene,
         });
+        _slider(sSc, sc, "shadowFocus", {
+          label: "shadow focus (m)",
+          min: 5,
+          max: 24,
+          step: 0.5,
+          onChange: onScene,
+        });
+        _slider(sSc, sc, "shadowMapSize", {
+          label: "shadow map size",
+          min: 1024,
+          max: 8192,
+          step: 512,
+          onChange: onScene,
+        });
+        _toggle(sSc, sc, "castFoliageShadows", {
+          label: "foliage casts shadow",
+          onChange: onScene,
+        });
+        _info(
+          sSc,
+          "shadow-hint",
+          () =>
+            "Blurry ground shadows: huge shadow frustum + dozens of leaf cards. Tighten focus, raise map size, or disable foliage shadow.",
+        );
 
         const sDbg = _section(uiRoot, "Debug", false);
         _toggle(sDbg, dbg, "wireframe", {
@@ -3294,6 +3587,11 @@
         });
 
         refreshLodSystem();
+
+        loadLeafTexFromPath(
+          PINE_LEAF_TEXTURES[0].path,
+          PINE_LEAF_TEXTURES[0].mode,
+        );
 
         addEventListener("resize", () => {
           camera.aspect = innerWidth / innerHeight;
