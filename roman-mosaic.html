@@ -3,9 +3,7 @@
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width,initial-scale=1.0" />
-
-    <title>Roman Mosaic Generator — Three.js WebGPU TSL</title>
-
+    <title>Roman Mosaic — yobeatz/mosaic port (WebGPU TSL)</title>
     <style>
       html,
       body {
@@ -14,7 +12,6 @@
         background: #171412;
         font-family: monospace;
       }
-
       #ui {
         position: absolute;
         top: 0;
@@ -25,45 +22,58 @@
         background: rgba(0, 0, 0, 0.82);
         backdrop-filter: blur(12px);
         border-right: 1px solid #444;
-        color: white;
+        color: #eee;
         padding: 16px;
         box-sizing: border-box;
         z-index: 10;
+        pointer-events: auto;
       }
-
       canvas {
         display: block;
+        position: fixed;
+        left: 340px;
+        top: 0;
+        width: calc(100% - 340px);
+        height: 100%;
+        z-index: 0;
       }
-
       input[type="file"] {
         width: 100%;
         margin-top: 12px;
       }
-
       h2 {
         margin-top: 0;
+        font-size: 1rem;
+      }
+      #status {
+        margin-top: 12px;
+        color: #9ab;
+        font-size: 12px;
+        min-height: 2.5em;
+      }
+      a {
+        color: #8cf;
       }
     </style>
   </head>
-
   <body>
     <div id="ui">
-      <h2>Roman Mosaic Generator</h2>
-
-      <input type="file" id="upload" accept="image/*" />
-
-      <div id="pane"></div>
-
-      <p>
-        Upload any image and transform it into:
-        <br /><br />
-        • Roman mosaic tesserae<br />
-        • Antique stone tiles<br />
-        • Procedural grout<br />
-        • Tile rotation<br />
-        • Stone displacement<br />
-        • Color quantization<br />
+      <h2>Roman Mosaic (Di Blasi port)</h2>
+      <p style="font-size: 12px; line-height: 1.4">
+        Port of
+        <a href="https://github.com/yobeatz/mosaic" target="_blank" rel="noreferrer"
+          >yobeatz/mosaic</a
+        >
+        (<a
+          href="https://towardsdatascience.com/how-to-generate-roman-style-mosaics-with-python-11d5aa021b09/"
+          target="_blank"
+          rel="noreferrer"
+          >Di Blasi method</a
+        >): curved rows along EDT guidelines, rotated quads, gap fill. CPU + WebGPU display.
       </p>
+      <input type="file" id="upload" accept="image/*" />
+      <div id="pane"></div>
+      <div id="status">Loading textures/mosaic.avif…</div>
     </div>
 
     <script type="importmap">
@@ -73,476 +83,314 @@
           "three/webgpu": "https://cdn.jsdelivr.net/npm/three@0.183.1/build/three.webgpu.js",
           "three/tsl": "https://cdn.jsdelivr.net/npm/three@0.183.1/build/three.tsl.js",
           "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.183.1/examples/jsm/",
-          "tweakpane": "https://cdn.jsdelivr.net/npm/tweakpane@4.0.3/dist/tweakpane.min.js"
+          "tweakpane": "https://cdn.jsdelivr.net/npm/tweakpane@4.0.3/dist/tweakpane.min.js",
+          "./roman-mosaic-pipeline.js": "./roman-mosaic-pipeline.js"
         }
       }
     </script>
 
     <script type="module">
       import * as THREE from "three/webgpu";
-
-      import {
-        texture,
-        uv,
-        vec2,
-        vec3,
-        vec4,
-        float,
-        floor,
-        fract,
-        sin,
-        cos,
-        dot,
-        mix,
-        smoothstep,
-        max,
-        Fn,
-      } from "three/tsl";
-
+      import { texture, uv, vec4 } from "three/tsl";
       import { OrbitControls } from "three/addons/controls/OrbitControls.js";
-
       import { Pane } from "tweakpane";
+      import { DEFAULT_PARAMS } from "./roman-mosaic-pipeline.js";
 
-      // =====================================================
-      // CORE
-      // =====================================================
+      let renderer, scene, camera, controls, plane, mosaicTexture;
+      let busy = false;
+      let worker = null;
+      let jobId = 0;
+      let activeJobId = 0;
+      let lastSourceFile = null;
+      let regenTimer = null;
+      let uiReady = false;
+      let pendingRegen = false;
 
-      let renderer;
-      let scene;
-      let camera;
-      let controls;
+      const DEFAULT_IMAGE = "./textures/mosaic.avif";
+      const params = { ...DEFAULT_PARAMS };
 
-      let mosaicMesh;
-      let uploadedTexture = null;
-
-      // =====================================================
-      // PARAMETERS
-      // =====================================================
-
-      const params = {
-        tileSize: 70,
-        groutWidth: 0.08,
-
-        colorLevels: 6,
-
-        tileVariation: 0.22,
-
-        edgeDarkness: 0.45,
-
-        saturation: 1.05,
-
-        antiqueTint: 0.12,
-
-        displacement: 0.08,
-
-        rotationStrength: 1,
-
-        roughness: 0.95,
+      const statusEl = document.getElementById("status");
+      const setStatus = (t) => {
+        statusEl.textContent = t;
       };
-
-      // =====================================================
-      // INIT
-      // =====================================================
 
       init();
 
       async function init() {
-        renderer = new THREE.WebGPURenderer({
-          antialias: true,
-        });
-
-        renderer.setSize(innerWidth, innerHeight);
-
+        renderer = new THREE.WebGPURenderer({ antialias: true });
         document.body.appendChild(renderer.domElement);
-
         await renderer.init();
 
-        // =================================================
-        // SCENE
-        // =================================================
-
         scene = new THREE.Scene();
-
         scene.background = new THREE.Color(0x171412);
 
-        // =================================================
-        // CAMERA
-        // =================================================
+        camera = new THREE.PerspectiveCamera(45, 1, 0.1, 100);
+        camera.position.set(0, 0, 3.2);
 
-        camera = new THREE.PerspectiveCamera(
-          45,
-          innerWidth / innerHeight,
-          0.1,
-          100,
-        );
-
-        camera.position.set(0, 0, 4);
-
-        // =================================================
-        // CONTROLS
-        // =================================================
+        layoutRenderer();
 
         controls = new OrbitControls(camera, renderer.domElement);
-
         controls.enableDamping = true;
 
-        // =================================================
-        // LIGHTS
-        // =================================================
-
-        scene.add(new THREE.AmbientLight(0xffffff, 2));
-
-        const dir = new THREE.DirectionalLight(0xffffff, 2);
-
-        dir.position.set(3, 5, 4);
-
+        scene.add(new THREE.AmbientLight(0xffffff, 1.2));
+        const dir = new THREE.DirectionalLight(0xffffff, 0.6);
+        dir.position.set(1, 2, 3);
         scene.add(dir);
 
-        // =================================================
-        // GEOMETRY
-        // =================================================
-
-        const geo = new THREE.PlaneGeometry(4, 4, 300, 300);
-
-        const mat = new THREE.MeshStandardNodeMaterial({
-          roughness: 1,
-          metalness: 0,
-        });
-
-        mosaicMesh = new THREE.Mesh(geo, mat);
-
-        scene.add(mosaicMesh);
-
-        // =================================================
-        // UI
-        // =================================================
-
         buildPane();
-
-        // =================================================
-        // IMAGE UPLOAD
-        // =================================================
-
+        fitPlaceholderPlane();
         document.getElementById("upload").addEventListener("change", onUpload);
-
-        rebuildMaterial();
-
-        animate();
-
         window.addEventListener("resize", onResize);
+        animate();
+        loadDefaultImage();
       }
 
-      // =====================================================
-      // HASH
-      // =====================================================
-
-      function hash2(v) {
-        return fract(sin(dot(v, vec2(127.1, 311.7))).mul(43758.5453123));
+      function fitPlaceholderPlane() {
+        const geo = new THREE.PlaneGeometry(3.2, 2.4);
+        const mat = new THREE.MeshBasicNodeMaterial();
+        mat.colorNode = vec4(0.15, 0.13, 0.11, 1);
+        plane = new THREE.Mesh(geo, mat);
+        scene.add(plane);
       }
 
-      // =====================================================
-      // MATERIAL
-      // =====================================================
+      function rebuildDisplay(canvas) {
+        if (mosaicTexture) mosaicTexture.dispose();
+        mosaicTexture = new THREE.CanvasTexture(canvas);
+        mosaicTexture.colorSpace = THREE.SRGBColorSpace;
+        mosaicTexture.minFilter = THREE.LinearFilter;
+        mosaicTexture.magFilter = THREE.LinearFilter;
+        mosaicTexture.needsUpdate = true;
 
-      function rebuildMaterial() {
-        const mat = mosaicMesh.material;
+        const aspect = canvas.width / canvas.height;
+        const maxW = 3.6;
+        const pw = maxW;
+        const ph = maxW / aspect;
 
-        // =================================================
-        // COLOR NODE
-        // =================================================
+        if (plane) {
+          scene.remove(plane);
+          plane.geometry.dispose();
+          plane.material.dispose();
+        }
 
-        mat.colorNode = Fn(() => {
-          // ---------------------------------------------
-          // TILE UV
-          // ---------------------------------------------
+        const geo = new THREE.PlaneGeometry(pw, ph);
+        const mat = new THREE.MeshBasicNodeMaterial();
+        // texture() requires a THREE.Texture instance — not uniform(texture)
+        mat.colorNode = texture(mosaicTexture, uv());
+        mat.toneMapped = false;
 
-          const scaledUV = uv().mul(params.tileSize);
-
-          const tileID = floor(scaledUV);
-
-          const localUV = fract(scaledUV);
-
-          // ---------------------------------------------
-          // RANDOM
-          // ---------------------------------------------
-
-          const rnd = hash2(tileID);
-
-          // ---------------------------------------------
-          // ROTATION
-          // ---------------------------------------------
-
-          const angle = rnd.mul(6.28318).mul(params.rotationStrength);
-
-          const centered = localUV.sub(0.5);
-
-          const rotated = vec2(
-            centered.x.mul(cos(angle)).sub(centered.y.mul(sin(angle))),
-
-            centered.x.mul(sin(angle)).add(centered.y.mul(cos(angle))),
-          ).add(0.5);
-
-          // ---------------------------------------------
-          // SAMPLE UV
-          // ---------------------------------------------
-
-          const sampleUV = tileID.add(0.5).div(params.tileSize);
-
-          // ---------------------------------------------
-          // BASE COLOR
-          // ---------------------------------------------
-
-          const baseCol = uploadedTexture
-            ? texture(uploadedTexture, sampleUV)
-            : vec4(0.82, 0.72, 0.62, 1);
-
-          // ---------------------------------------------
-          // QUANTIZATION
-          // ---------------------------------------------
-
-          const quantized = floor(baseCol.rgb.mul(params.colorLevels)).div(
-            params.colorLevels,
-          );
-
-          // ---------------------------------------------
-          // SATURATION
-          // ---------------------------------------------
-
-          const lum = dot(quantized, vec3(0.299, 0.587, 0.114));
-
-          const saturated = mix(
-            vec3(lum),
-
-            quantized,
-
-            params.saturation,
-          );
-
-          // ---------------------------------------------
-          // EDGE MASK
-          // ---------------------------------------------
-
-          const edgeMask = smoothstep(
-            0.5,
-
-            0.5 - params.groutWidth,
-
-            max(
-              rotated.x.sub(0.5).abs(),
-
-              rotated.y.sub(0.5).abs(),
-            ),
-          );
-
-          // ---------------------------------------------
-          // NOISE
-          // ---------------------------------------------
-
-          const noise = sin(rotated.x.mul(30).add(rnd.mul(20))).mul(
-            sin(rotated.y.mul(30)),
-          );
-
-          // ---------------------------------------------
-          // VARIATION
-          // ---------------------------------------------
-
-          const varied = saturated.add(noise.mul(params.tileVariation));
-
-          // ---------------------------------------------
-          // ANTIQUE
-          // ---------------------------------------------
-
-          const antique = mix(
-            varied,
-
-            vec3(0.6, 0.52, 0.42),
-
-            params.antiqueTint,
-          );
-
-          // ---------------------------------------------
-          // EDGE DARKNESS
-          // ---------------------------------------------
-
-          const darkened = mix(
-            antique.mul(1.0 - params.edgeDarkness),
-
-            antique,
-
-            edgeMask,
-          );
-
-          // ---------------------------------------------
-          // GROUT
-          // ---------------------------------------------
-
-          const finalColor = mix(
-            vec3(0.12, 0.1, 0.08),
-
-            darkened,
-
-            edgeMask,
-          );
-
-          return vec4(finalColor, 1);
-        })();
-
-        // =================================================
-        // DISPLACEMENT
-        // =================================================
-
-        mat.positionNode = Fn(() => {
-          const scaledUV = uv().mul(params.tileSize);
-
-          const tileID = floor(scaledUV);
-
-          const localUV = fract(scaledUV);
-
-          const rnd = hash2(tileID);
-
-          const noise = sin(localUV.x.mul(30).add(rnd.mul(20))).mul(
-            sin(localUV.y.mul(30)),
-          );
-
-          return vec3(
-            0,
-
-            noise.mul(params.displacement),
-
-            0,
-          );
-        })();
-
-        // =================================================
-        // ROUGHNESS
-        // =================================================
-
-        mat.roughnessNode = float(params.roughness);
+        plane = new THREE.Mesh(geo, mat);
+        scene.add(plane);
+        controls.target.set(0, 0, 0);
       }
 
-      // =====================================================
-      // IMAGE UPLOAD
-      // =====================================================
+      function layoutRenderer() {
+        const uiW = 340;
+        const w = Math.max(1, innerWidth - uiW);
+        const h = innerHeight;
+        renderer.setSize(w, h);
+        renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
+        renderer.domElement.style.left = `${uiW}px`;
+        renderer.domElement.style.width = `${w}px`;
+        renderer.domElement.style.height = `${h}px`;
+        if (camera) {
+          camera.aspect = w / h;
+          camera.updateProjectionMatrix();
+        }
+      }
+
+      function ensureWorker() {
+        if (worker) return worker;
+        worker = new Worker("./roman-mosaic-worker.js", { type: "module" });
+        worker.onmessage = (ev) => {
+          const data = ev.data;
+          if (data.id !== activeJobId) return;
+
+          if (data.type === "progress") {
+            setStatus(data.msg);
+            return;
+          }
+
+          if (data.type === "error") {
+            if (data.id === activeJobId) {
+              busy = false;
+              uiReady = true;
+              setStatus(`Error: ${data.message}`);
+            }
+            return;
+          }
+
+          if (data.type === "done" && data.id === activeJobId) {
+            const canvas = document.createElement("canvas");
+            canvas.width = data.w;
+            canvas.height = data.h;
+            canvas.getContext("2d").drawImage(data.bitmap, 0, 0);
+            data.bitmap.close();
+            rebuildDisplay(canvas);
+            const est = Math.round((2 * data.w * data.h) / (2 * params.halfTile) ** 2);
+            setStatus(
+              `Done — ${data.tileCount} tesserae (${data.chainTileCount ?? "?"} chain + gap, ${data.chainCount ?? "?"} chains, ${data.w}×${data.h}, halfTile ${params.halfTile}, ~${est} max est.)`,
+            );
+            busy = false;
+            uiReady = true;
+            if (pendingRegen && lastSourceFile) {
+              pendingRegen = false;
+              processFile(lastSourceFile);
+            }
+          }
+        };
+        worker.onerror = (err) => {
+          console.error(err);
+          busy = false;
+          uiReady = true;
+          setStatus(`Worker error: ${err.message}`);
+        };
+        return worker;
+      }
+
+      function runMosaicInWorker(file, id) {
+        ensureWorker();
+        worker.postMessage({ id, file, params: { ...params } });
+      }
+
+      function pumpMosaic(file) {
+        if (!file) return;
+        applyDensityLock();
+        if (busy) {
+          pendingRegen = true;
+          setStatus("Queued…");
+          return;
+        }
+        lastSourceFile = file;
+        activeJobId = ++jobId;
+        busy = true;
+        setStatus("Starting…");
+        runMosaicInWorker(file, activeJobId);
+      }
+
+      async function loadDefaultImage() {
+        try {
+          const res = await fetch(DEFAULT_IMAGE);
+          if (!res.ok) throw new Error(`HTTP ${res.status}`);
+          const blob = await res.blob();
+          const file = new File([blob], "mosaic.avif", {
+            type: blob.type || "image/avif",
+          });
+          pumpMosaic(file);
+        } catch (err) {
+          console.error(err);
+          setStatus(`Debug image failed: ${err.message}`);
+        }
+      }
+
+      function applyDensityLock() {
+        if (!params.lockTileDensity) return;
+        const refW = params.densityRefWidth ?? 500;
+        const refH = params.densityRefHalfTile ?? 5;
+            params.halfTile = Math.max(
+          2,
+          Math.min(8, Math.round((refH * params.maxWidth) / refW)),
+        );
+      }
+
+      function scheduleRegenerate() {
+        if (!uiReady || !lastSourceFile) return;
+        clearTimeout(regenTimer);
+        regenTimer = setTimeout(() => pumpMosaic(lastSourceFile), 500);
+      }
 
       function onUpload(e) {
-        const file = e.target.files[0];
-
+        const file = e.target.files?.[0];
         if (!file) return;
-
-        const url = URL.createObjectURL(file);
-
-        new THREE.TextureLoader().load(url, (tex) => {
-          tex.colorSpace = THREE.SRGBColorSpace;
-
-          tex.wrapS = THREE.ClampToEdgeWrapping;
-
-          tex.wrapT = THREE.ClampToEdgeWrapping;
-
-          uploadedTexture = tex;
-
-          rebuildMaterial();
-        });
+        pumpMosaic(file);
+        e.target.value = "";
       }
 
-      // =====================================================
-      // UI
-      // =====================================================
+      function bindParam(pane, key, opts) {
+        const b = pane.addBinding(params, key, opts);
+        b.on("change", scheduleRegenerate);
+        return b;
+      }
 
       function buildPane() {
         const pane = new Pane({
           container: document.getElementById("pane"),
-
-          title: "Mosaic Controls",
+          title: "mosaic.py params",
         });
 
-        pane
-          .addBinding(params, "tileSize", {
-            min: 10,
-            max: 200,
-            step: 1,
-          })
-          .on("change", rebuildMaterial);
+        const sizeFolder = pane.addFolder({ title: "Output size" });
+        const maxWidthBinding = sizeFolder.addBinding(params, "maxWidth", {
+          label: "max width (px)",
+          min: 300,
+          max: 1200,
+          step: 25,
+        });
+        sizeFolder
+          .addBinding(params, "lockTileDensity", { label: "lock tessera size on image" })
+          .on("change", () => {
+            applyDensityLock();
+            pane.refresh();
+            scheduleRegenerate();
+          });
+        maxWidthBinding.on("change", () => {
+          applyDensityLock();
+          pane.refresh();
+          scheduleRegenerate();
+        });
+        sizeFolder
+          .addButton({ title: "Coffee preset (500px, ~article)" })
+          .on("click", () => {
+            params.maxWidth = 500;
+            params.lockTileDensity = true;
+            applyDensityLock();
+            pane.refresh();
+            scheduleRegenerate();
+          });
+        sizeFolder
+          .addButton({ title: "Large 900px (same tile size on image)" })
+          .on("click", () => {
+            params.maxWidth = 900;
+            params.lockTileDensity = true;
+            applyDensityLock();
+            pane.refresh();
+            scheduleRegenerate();
+          });
+        applyDensityLock();
 
-        pane
-          .addBinding(params, "groutWidth", {
-            min: 0.01,
-            max: 0.25,
-          })
-          .on("change", rebuildMaterial);
+        bindParam(pane, "halfTile", { min: 2, max: 8, step: 1 });
+        bindParam(pane, "chainClipMinArea", { min: 0.4, max: 0.9, step: 0.05 });
+        bindParam(pane, "chainMaxClipNeighbors", { min: 0, max: 8, step: 1 });
+        bindParam(pane, "mortarInset", { min: 0, max: 0.05, step: 0.002 });
+        bindParam(pane, "groutStroke", { min: 0, max: 1.5, step: 0.05 });
+        bindParam(pane, "tileScaleMin", { min: 0.85, max: 1, step: 0.01 });
+        bindParam(pane, "tileExpand", { min: 1, max: 1.08, step: 0.01 });
+        bindParam(pane, "preShrinkExpand", { min: 1, max: 1.12, step: 0.01 });
+        bindParam(pane, "gapChainSpacing", { min: 0.25, max: 1, step: 0.05 });
+        bindParam(pane, "gapFillStep", { min: 0.25, max: 1.5, step: 0.05 });
+        bindParam(pane, "gapFillPasses", { min: 1, max: 5, step: 1 });
+        bindParam(pane, "gapTileExpand", { min: 1, max: 1.08, step: 0.005 });
+        bindParam(pane, "makeConvex");
+        bindParam(pane, "gauss", { min: 0, max: 8, step: 0.5 });
+        bindParam(pane, "edgeDetails", { min: 1, max: 8, step: 1 });
+        bindParam(pane, "edgeMode", {
+          options: { DiBlasi: "diblasi", Sobel: "sobel" },
+        });
+        bindParam(pane, "withFrame");
+        bindParam(pane, "randSize", { min: 0, max: 0.8, step: 0.05 });
+        bindParam(pane, "maxAngle", { min: 30, max: 75, step: 1 });
 
-        pane
-          .addBinding(params, "colorLevels", {
-            min: 2,
-            max: 16,
-            step: 1,
-          })
-          .on("change", rebuildMaterial);
-
-        pane
-          .addBinding(params, "tileVariation", {
-            min: 0,
-            max: 1,
-          })
-          .on("change", rebuildMaterial);
-
-        pane
-          .addBinding(params, "edgeDarkness", {
-            min: 0,
-            max: 1,
-          })
-          .on("change", rebuildMaterial);
-
-        pane
-          .addBinding(params, "saturation", {
-            min: 0,
-            max: 2,
-          })
-          .on("change", rebuildMaterial);
-
-        pane
-          .addBinding(params, "antiqueTint", {
-            min: 0,
-            max: 1,
-          })
-          .on("change", rebuildMaterial);
-
-        pane
-          .addBinding(params, "displacement", {
-            min: 0,
-            max: 0.3,
-          })
-          .on("change", rebuildMaterial);
-
-        pane
-          .addBinding(params, "rotationStrength", {
-            min: 0,
-            max: 2,
-          })
-          .on("change", rebuildMaterial);
+        pane.addButton({ title: "Regenerate" }).on("click", () => {
+          if (lastSourceFile) pumpMosaic(lastSourceFile);
+        });
       }
-
-      // =====================================================
-      // LOOP
-      // =====================================================
 
       function animate() {
         requestAnimationFrame(animate);
-
         controls.update();
-
         renderer.render(scene, camera);
       }
 
-      // =====================================================
-      // RESIZE
-      // =====================================================
-
       function onResize() {
-        camera.aspect = innerWidth / innerHeight;
-
-        camera.updateProjectionMatrix();
-
-        renderer.setSize(innerWidth, innerHeight);
+        layoutRenderer();
       }
     </script>
   </body>

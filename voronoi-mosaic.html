@@ -1,0 +1,577 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width,initial-scale=1.0" />
+    <title>Voronoi Mosaic — Three.js WebGPU TSL</title>
+    <style>
+      html,
+      body {
+        margin: 0;
+        overflow: hidden;
+        background: #171412;
+        font-family: monospace;
+      }
+      #ui {
+        position: absolute;
+        top: 0;
+        left: 0;
+        width: 340px;
+        height: 100%;
+        overflow: auto;
+        background: rgba(0, 0, 0, 0.82);
+        backdrop-filter: blur(12px);
+        border-right: 1px solid #444;
+        color: #eee;
+        padding: 16px;
+        box-sizing: border-box;
+        z-index: 10;
+        pointer-events: auto;
+      }
+      canvas {
+        display: block;
+        position: fixed;
+        left: 340px;
+        top: 0;
+        width: calc(100% - 340px);
+        height: 100%;
+        z-index: 0;
+      }
+      input[type="file"] {
+        width: 100%;
+        margin-top: 12px;
+      }
+      h2 {
+        margin-top: 0;
+        font-size: 1rem;
+      }
+      #status {
+        margin-top: 12px;
+        color: #9ab;
+        font-size: 12px;
+      }
+      a {
+        color: #8cf;
+      }
+    </style>
+  </head>
+  <body>
+    <div id="ui">
+      <h2>Voronoi Mosaic</h2>
+      <p style="font-size: 12px; line-height: 1.4">
+        Procedural Roman-style tesserae via Voronoi + edge-following JFA.
+        Stylized shader mosaic (not the Di Blasi guideline port —
+        see <a href="roman-mosaic.html">roman-mosaic.html</a>).
+      </p>
+      <input type="file" id="upload" accept="image/*" />
+      <div id="pane"></div>
+      <div id="status">Ready</div>
+    </div>
+
+    <script type="importmap">
+      {
+        "imports": {
+          "three": "https://cdn.jsdelivr.net/npm/three@0.183.1/build/three.webgpu.js",
+          "three/webgpu": "https://cdn.jsdelivr.net/npm/three@0.183.1/build/three.webgpu.js",
+          "three/tsl": "https://cdn.jsdelivr.net/npm/three@0.183.1/build/three.tsl.js",
+          "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.183.1/examples/jsm/",
+          "tweakpane": "https://cdn.jsdelivr.net/npm/tweakpane@4.0.3/dist/tweakpane.min.js"
+        }
+      }
+    </script>
+
+    <script type="module">
+      import * as THREE from "three/webgpu";
+      import {
+        texture,
+        uv,
+        vec2,
+        vec3,
+        vec4,
+        float,
+        floor,
+        fract,
+        sin,
+        dot,
+        mix,
+        smoothstep,
+        length,
+        step,
+        uniform,
+        Fn,
+        If,
+        positionLocal,
+      } from "three/tsl";
+      import { OrbitControls } from "three/addons/controls/OrbitControls.js";
+      import { Pane } from "tweakpane";
+
+      const DEFAULT_IMAGE = "./textures/mosaic.avif";
+      const JFA_SIZE = 512;
+      const UI_W = 340;
+
+      let renderer, scene, camera, controls, mosaicMesh;
+      let uploadedTexture = null;
+      let jfaSobelRT, jfaRTA, jfaRTB, jfaFinalTexture;
+      let jfaOffScene, jfaOffCam, jfaQuad;
+      const jfaStepUniform = uniform(0.5);
+      const jfaEdgeThreshold = uniform(0.08);
+
+      const params = {
+        tileSize: 70,
+        groutWidth: 0.08,
+        paletteStrength: 0.7,
+        tileVariation: 0.18,
+        edgeDarkness: 0.4,
+        saturation: 1.05,
+        antiqueTint: 0.12,
+        displacement: 0.04,
+        cellJitter: 0.85,
+        edgeFollow: 0.85,
+        roughness: 0.9,
+      };
+
+      const statusEl = document.getElementById("status");
+      const setStatus = (t) => {
+        statusEl.textContent = t;
+      };
+
+      init();
+
+      async function init() {
+        renderer = new THREE.WebGPURenderer({ antialias: true });
+        document.body.appendChild(renderer.domElement);
+        await renderer.init();
+        layoutRenderer();
+
+        scene = new THREE.Scene();
+        scene.background = new THREE.Color(0x171412);
+
+        camera = new THREE.PerspectiveCamera(45, 1, 0.1, 100);
+        camera.position.set(0, 0, 4);
+
+        controls = new OrbitControls(camera, renderer.domElement);
+        controls.enableDamping = true;
+
+        scene.add(new THREE.AmbientLight(0xffffff, 2));
+        const dir = new THREE.DirectionalLight(0xffffff, 2);
+        dir.position.set(3, 5, 4);
+        scene.add(dir);
+
+        setupJFAPipeline();
+
+        const geo = new THREE.PlaneGeometry(4, 4, 300, 300);
+        mosaicMesh = new THREE.Mesh(
+          geo,
+          new THREE.MeshStandardNodeMaterial({ roughness: 1, metalness: 0 }),
+        );
+        scene.add(mosaicMesh);
+
+        buildPane();
+        rebuildMaterial();
+
+        document.getElementById("upload").addEventListener("change", onUpload);
+        window.addEventListener("resize", onResize);
+        animate();
+
+        loadDefaultImage();
+      }
+
+      function layoutRenderer() {
+        const w = Math.max(1, innerWidth - UI_W);
+        const h = innerHeight;
+        renderer.setSize(w, h);
+        renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
+        if (camera) {
+          camera.aspect = w / h;
+          camera.updateProjectionMatrix();
+        }
+      }
+
+      function hash21(p) {
+        return fract(sin(dot(p, vec2(127.1, 311.7))).mul(43758.5453123));
+      }
+
+      function hash22(p) {
+        return fract(
+          vec2(
+            sin(dot(p, vec2(127.1, 311.7))),
+            sin(dot(p, vec2(269.5, 183.3))),
+          ).mul(43758.5453123),
+        );
+      }
+
+      const ROMAN_PALETTE = [
+        [0.82, 0.34, 0.2],
+        [0.55, 0.16, 0.12],
+        [0.78, 0.62, 0.32],
+        [0.45, 0.32, 0.2],
+        [0.92, 0.86, 0.72],
+        [0.66, 0.6, 0.48],
+        [0.18, 0.16, 0.14],
+        [0.3, 0.4, 0.4],
+      ];
+
+      function quantizeToPalette(col) {
+        const best = vec3(0, 0, 0).toVar();
+        const bestDist = float(999).toVar();
+        ROMAN_PALETTE.forEach((c) => {
+          const p = vec3(c[0], c[1], c[2]);
+          const d = length(col.sub(p));
+          If(d.lessThan(bestDist), () => {
+            bestDist.assign(d);
+            best.assign(p);
+          });
+        });
+        return best;
+      }
+
+      function setupJFAPipeline() {
+        const baseOpts = {
+          type: THREE.FloatType,
+          format: THREE.RGBAFormat,
+          minFilter: THREE.NearestFilter,
+          magFilter: THREE.NearestFilter,
+          wrapS: THREE.ClampToEdgeWrapping,
+          wrapT: THREE.ClampToEdgeWrapping,
+          depthBuffer: false,
+        };
+        jfaSobelRT = new THREE.RenderTarget(JFA_SIZE, JFA_SIZE, baseOpts);
+        jfaRTA = new THREE.RenderTarget(JFA_SIZE, JFA_SIZE, baseOpts);
+        jfaRTB = new THREE.RenderTarget(JFA_SIZE, JFA_SIZE, baseOpts);
+        jfaSobelRT.texture.colorSpace = THREE.NoColorSpace;
+        jfaRTA.texture.colorSpace = THREE.NoColorSpace;
+        jfaRTB.texture.colorSpace = THREE.NoColorSpace;
+        jfaOffScene = new THREE.Scene();
+        jfaOffCam = new THREE.OrthographicCamera(-1, 1, 1, -1, 0, 1);
+        jfaQuad = new THREE.Mesh(new THREE.PlaneGeometry(2, 2), null);
+        jfaOffScene.add(jfaQuad);
+      }
+
+      function buildSobelMat() {
+        const mat = new THREE.MeshBasicNodeMaterial();
+        mat.depthTest = false;
+        mat.depthWrite = false;
+        mat.toneMapped = false;
+        mat.colorNode = Fn(() => {
+          const u = uv();
+          const eps = float(1.0 / JFA_SIZE);
+          const cR = texture(uploadedTexture, u.add(vec2(eps, 0))).rgb;
+          const cL = texture(uploadedTexture, u.add(vec2(eps.mul(-1), 0))).rgb;
+          const cU = texture(uploadedTexture, u.add(vec2(0, eps))).rgb;
+          const cD = texture(uploadedTexture, u.add(vec2(0, eps.mul(-1)))).rgb;
+          const lw = vec3(0.299, 0.587, 0.114);
+          const gx = dot(cR, lw).sub(dot(cL, lw));
+          const gy = dot(cU, lw).sub(dot(cD, lw));
+          const mag = length(vec2(gx, gy));
+          const isEdge = step(jfaEdgeThreshold, mag);
+          return vec4(isEdge, isEdge, isEdge, 1);
+        })();
+        return mat;
+      }
+
+      function buildJFAInitMat() {
+        const mat = new THREE.MeshBasicNodeMaterial();
+        mat.depthTest = false;
+        mat.depthWrite = false;
+        mat.toneMapped = false;
+        mat.colorNode = Fn(() => {
+          const u = uv();
+          const edgeVal = texture(jfaSobelRT.texture, u).r;
+          const result = vec4(0, 0, 0, 1).toVar();
+          If(edgeVal.greaterThan(0.5), () => {
+            result.assign(vec4(u.x, u.y, 1, 1));
+          });
+          return result;
+        })();
+        return mat;
+      }
+
+      function buildJFAStepMat(sourceTex) {
+        const mat = new THREE.MeshBasicNodeMaterial();
+        mat.depthTest = false;
+        mat.depthWrite = false;
+        mat.toneMapped = false;
+        mat.colorNode = Fn(() => {
+          const u = uv();
+          const bestSeed = vec2(0, 0).toVar();
+          const bestValid = float(0).toVar();
+          const bestDist = float(99999).toVar();
+          for (let dy = -1; dy <= 1; dy++) {
+            for (let dx = -1; dx <= 1; dx++) {
+              const offset = vec2(dx, dy).mul(jfaStepUniform);
+              const sampleUV = u.add(offset);
+              const seed = texture(sourceTex, sampleUV);
+              If(seed.b.greaterThan(0.5), () => {
+                const d = length(u.sub(seed.rg));
+                If(d.lessThan(bestDist), () => {
+                  bestDist.assign(d);
+                  bestSeed.assign(seed.rg);
+                  bestValid.assign(1);
+                });
+              });
+            }
+          }
+          return vec4(bestSeed.x, bestSeed.y, bestValid, 1);
+        })();
+        return mat;
+      }
+
+      async function runJFAPipeline() {
+        if (!uploadedTexture || !jfaSobelRT) return;
+        const prevTarget = renderer.getRenderTarget();
+        jfaQuad.material = buildSobelMat();
+        renderer.setRenderTarget(jfaSobelRT);
+        await renderer.renderAsync(jfaOffScene, jfaOffCam);
+        jfaQuad.material = buildJFAInitMat();
+        renderer.setRenderTarget(jfaRTA);
+        await renderer.renderAsync(jfaOffScene, jfaOffCam);
+        let source = jfaRTA;
+        let target = jfaRTB;
+        for (let k = JFA_SIZE / 2; k >= 1; k = Math.floor(k / 2)) {
+          jfaStepUniform.value = k / JFA_SIZE;
+          jfaQuad.material = buildJFAStepMat(source.texture);
+          renderer.setRenderTarget(target);
+          await renderer.renderAsync(jfaOffScene, jfaOffCam);
+          [source, target] = [target, source];
+        }
+        jfaFinalTexture = source.texture;
+        renderer.setRenderTarget(prevTarget);
+        rebuildMaterial();
+      }
+
+      function voronoi(scaledUV) {
+        const ip = floor(scaledUV);
+        const fp = fract(scaledUV);
+        let ca = float(1);
+        let sa = float(0);
+        let followAmount = float(0);
+
+        if (jfaFinalTexture) {
+          const centerUV = ip.add(0.5).div(params.tileSize);
+          const seedUV = texture(jfaFinalTexture, centerUV).rg;
+          const toEdge = centerUV.sub(seedUV);
+          const D = length(toEdge);
+          const safeD = D.max(0.0001);
+          ca = toEdge.x.div(safeD);
+          sa = toEdge.y.div(safeD);
+          const closeness = float(1).sub(smoothstep(float(0), float(0.4), D));
+          followAmount = closeness.mul(params.edgeFollow);
+        } else if (uploadedTexture) {
+          const centerUV = ip.add(0.5).div(params.tileSize);
+          const eps = 1.5 / params.tileSize;
+          const cR = texture(uploadedTexture, centerUV.add(vec2(eps, 0))).rgb;
+          const cL = texture(uploadedTexture, centerUV.add(vec2(-eps, 0))).rgb;
+          const cU = texture(uploadedTexture, centerUV.add(vec2(0, eps))).rgb;
+          const cD = texture(uploadedTexture, centerUV.add(vec2(0, -eps))).rgb;
+          const lw = vec3(0.299, 0.587, 0.114);
+          const gx = dot(cR, lw).sub(dot(cL, lw));
+          const gy = dot(cU, lw).sub(dot(cD, lw));
+          const mag = length(vec2(gx, gy));
+          const safeMag = mag.max(0.0001);
+          ca = gx.div(safeMag);
+          sa = gy.div(safeMag);
+          followAmount = smoothstep(float(0.02), float(0.2), mag).mul(
+            params.edgeFollow,
+          );
+        }
+
+        const stretchN = mix(float(1), float(0.3), followAmount);
+        const F1 = float(10).toVar();
+        const F2 = float(10).toVar();
+        const cellID = vec2(0, 0).toVar();
+
+        for (let dy = -1; dy <= 1; dy++) {
+          for (let dx = -1; dx <= 1; dx++) {
+            const offset = vec2(dx, dy);
+            const cell = ip.add(offset);
+            const j = hash22(cell).sub(0.5);
+            const jT = j.x;
+            const jN = j.y.mul(stretchN);
+            const jWX = sa.mul(-1).mul(jT).add(ca.mul(jN));
+            const jWY = ca.mul(jT).add(sa.mul(jN));
+            const jitter = vec2(jWX, jWY).mul(params.cellJitter);
+            const point = offset.add(0.5).add(jitter);
+            const diff = point.sub(fp);
+            const d = length(diff);
+            If(d.lessThan(F1), () => {
+              F2.assign(F1);
+              F1.assign(d);
+              cellID.assign(cell);
+            }).ElseIf(d.lessThan(F2), () => {
+              F2.assign(d);
+            });
+          }
+        }
+        return { F1, F2, cellID };
+      }
+
+      function rebuildMaterial() {
+        const mat = mosaicMesh.material;
+        mat.colorNode = Fn(() => {
+          const scaledUV = uv().mul(params.tileSize);
+          const { F1, F2, cellID } = voronoi(scaledUV);
+          const edgeDist = F2.sub(F1);
+          const cellJ = hash22(cellID).sub(0.5).mul(params.cellJitter);
+          const sampleUV = cellID.add(0.5).add(cellJ).div(params.tileSize);
+          const baseCol = uploadedTexture
+            ? texture(uploadedTexture, sampleUV).rgb
+            : vec3(0.82, 0.72, 0.62);
+          const palCol = quantizeToPalette(baseCol);
+          const quantized = mix(baseCol, palCol, params.paletteStrength);
+          const lum = dot(quantized, vec3(0.299, 0.587, 0.114));
+          const saturated = mix(vec3(lum, lum, lum), quantized, params.saturation);
+          const tileRand = hash21(cellID).sub(0.5);
+          const varied = saturated.add(tileRand.mul(params.tileVariation));
+          const antique = mix(varied, vec3(0.6, 0.52, 0.42), params.antiqueTint);
+          const fp = fract(scaledUV);
+          const stoneSeed = hash21(cellID).mul(20);
+          const stoneNoise = sin(fp.x.mul(30).add(stoneSeed))
+            .mul(sin(fp.y.mul(30).add(stoneSeed)))
+            .mul(0.05);
+          const stoned = antique.add(stoneNoise);
+          const edgeMask = smoothstep(
+            float(0),
+            float(params.groutWidth).add(0.04),
+            edgeDist,
+          );
+          const darkened = mix(
+            stoned.mul(1.0 - params.edgeDarkness),
+            stoned,
+            edgeMask,
+          );
+          const groutMask = smoothstep(
+            float(0),
+            float(params.groutWidth),
+            edgeDist,
+          );
+          return vec4(mix(vec3(0.1, 0.08, 0.06), darkened, groutMask), 1);
+        })();
+
+        mat.positionNode = Fn(() => {
+          const scaledUV = uv().mul(params.tileSize);
+          const { F1, F2, cellID } = voronoi(scaledUV);
+          const edgeDist = F2.sub(F1);
+          const tileShape = smoothstep(
+            float(0),
+            float(params.groutWidth).add(0.02),
+            edgeDist,
+          );
+          const tileHeight = hash21(cellID).mul(0.5).add(0.5);
+          const z = tileShape.mul(tileHeight).mul(params.displacement);
+          return positionLocal.add(vec3(0, 0, z));
+        })();
+
+        mat.roughnessNode = float(params.roughness);
+        mat.needsUpdate = true;
+      }
+
+      function loadTextureFromSource(src) {
+        return new Promise((resolve, reject) => {
+          const loader = new THREE.TextureLoader();
+          loader.load(
+            src,
+            async (tex) => {
+              tex.colorSpace = THREE.SRGBColorSpace;
+              tex.wrapS = THREE.ClampToEdgeWrapping;
+              tex.wrapT = THREE.ClampToEdgeWrapping;
+              if (uploadedTexture) uploadedTexture.dispose();
+              uploadedTexture = tex;
+              jfaFinalTexture = null;
+              rebuildMaterial();
+              setStatus("Building edge field…");
+              await runJFAPipeline();
+              setStatus("Ready");
+              resolve(tex);
+            },
+            undefined,
+            reject,
+          );
+        });
+      }
+
+      async function loadDefaultImage() {
+        try {
+          setStatus("Loading debug image…");
+          await loadTextureFromSource(DEFAULT_IMAGE);
+        } catch (err) {
+          console.error(err);
+          setStatus(`Failed to load default: ${err.message}`);
+        }
+      }
+
+      async function onUpload(e) {
+        const file = e.target.files?.[0];
+        if (!file) return;
+        const url = URL.createObjectURL(file);
+        try {
+          setStatus("Loading upload…");
+          await loadTextureFromSource(url);
+        } catch (err) {
+          console.error(err);
+          setStatus(`Upload failed: ${err.message}`);
+        } finally {
+          URL.revokeObjectURL(url);
+          e.target.value = "";
+        }
+      }
+
+      function buildPane() {
+        const pane = new Pane({
+          container: document.getElementById("pane"),
+          title: "Voronoi Mosaic",
+        });
+        const onChange = () => rebuildMaterial();
+        pane
+          .addBinding(params, "tileSize", { min: 10, max: 200, step: 1 })
+          .on("change", onChange);
+        pane
+          .addBinding(params, "groutWidth", { min: 0.01, max: 0.25 })
+          .on("change", onChange);
+        pane
+          .addBinding(params, "paletteStrength", { min: 0, max: 1 })
+          .on("change", onChange);
+        pane
+          .addBinding(params, "tileVariation", { min: 0, max: 1 })
+          .on("change", onChange);
+        pane
+          .addBinding(params, "edgeDarkness", { min: 0, max: 1 })
+          .on("change", onChange);
+        pane
+          .addBinding(params, "saturation", { min: 0, max: 2 })
+          .on("change", onChange);
+        pane
+          .addBinding(params, "antiqueTint", { min: 0, max: 1 })
+          .on("change", onChange);
+        pane
+          .addBinding(params, "displacement", { min: 0, max: 0.3 })
+          .on("change", onChange);
+        pane
+          .addBinding(params, "cellJitter", { min: 0, max: 1 })
+          .on("change", onChange);
+        pane
+          .addBinding(params, "edgeFollow", { min: 0, max: 1 })
+          .on("change", onChange);
+        const edgeProxy = { edgeThreshold: jfaEdgeThreshold.value };
+        pane
+          .addBinding(edgeProxy, "edgeThreshold", { min: 0.01, max: 0.4 })
+          .on("change", () => {
+            jfaEdgeThreshold.value = edgeProxy.edgeThreshold;
+            if (uploadedTexture) runJFAPipeline();
+          });
+        pane
+          .addBinding(params, "roughness", { min: 0, max: 1 })
+          .on("change", onChange);
+      }
+
+      function animate() {
+        requestAnimationFrame(animate);
+        controls.update();
+        renderer.render(scene, camera);
+      }
+
+      function onResize() {
+        layoutRenderer();
+      }
+    </script>
+  </body>
+</html>
