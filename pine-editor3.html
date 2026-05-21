@@ -415,8 +415,8 @@
       Pine — 9 cards / ring · 8 levels (default) · pivot on trunk
     </div>
     <div id="hint">
-      Pine: foliage + optional instanced branches (trunk-axis pivot). Toggle
-      “Branches → enable”. Single card: use position + rotation.
+      Pine: leaf cards on trunk; optional forked limbs near base (below foliage).
+      Toggle “Branches → enable”. Single card: use position + rotation.
     </div>
     <script type="module">
       import * as THREE from "three";
@@ -859,34 +859,150 @@
         return geo;
       }
 
-      /** Stylized branch: tapered cylinder along +Y, base at origin, quadratic bend in +Z (droops after card-style tilt). */
-      function createBranchGeometry(
-        length,
+      /**
+       * Tapered limb start→end; joints stay exact (bend uses 4t(1−t), zero at both caps).
+       * droop bends in local +Z after align; droopSide in local +X (gravity-ish sag).
+       */
+      function addBentCylinderBetween(
+        parts,
+        start,
+        end,
         radiusBottom,
         radiusTop,
         radialSegs,
         heightSegs,
-        bend,
+        droop = 0,
+        droopSide = 0,
       ) {
-        const L = Math.max(0.08, length);
-        const r0 = Math.max(0.004, radiusBottom);
-        const r1 = Math.max(0.004, radiusTop);
+        _v3.subVectors(end, start);
+        const len = _v3.length();
+        if (len < 1e-4) return;
+        const r0 = Math.max(0.003, radiusBottom);
+        const r1 = Math.max(0.003, radiusTop);
         const rs = Math.max(3, Math.round(radialSegs));
-        const hs = Math.max(1, Math.round(heightSegs));
-        const geo = new THREE.CylinderGeometry(r1, r0, L, rs, hs);
-        geo.translate(0, L * 0.5, 0);
-        const pos = geo.attributes.position;
-        for (let i = 0; i < pos.count; i++) {
-          const x = pos.getX(i);
-          const y = pos.getY(i);
-          let z = pos.getZ(i);
-          const t = L > 1e-6 ? THREE.MathUtils.clamp(y / L, 0, 1) : 0;
-          z += bend * t * t;
-          pos.setXYZ(i, x, y, z);
+        let hs = Math.max(1, Math.round(heightSegs));
+        const bendAmt = Math.abs(droop) + Math.abs(droopSide);
+        if (bendAmt > 1e-6) hs = Math.max(hs, 2);
+        const geo = new THREE.CylinderGeometry(r1, r0, len, rs, hs);
+        geo.translate(0, len * 0.5, 0);
+        if (bendAmt > 1e-6) {
+          const pos = geo.attributes.position;
+          const capEps = 1e-4;
+          for (let i = 0; i < pos.count; i++) {
+            const x = pos.getX(i);
+            const y = pos.getY(i);
+            let z = pos.getZ(i);
+            const t = len > 1e-6 ? THREE.MathUtils.clamp(y / len, 0, 1) : 0;
+            if (t <= capEps || t >= 1 - capEps) continue;
+            const profile = 4 * t * (1 - t);
+            z += droop * profile * len;
+            pos.setXYZ(i, x + droopSide * profile * len, y, z);
+          }
+          pos.needsUpdate = true;
         }
-        pos.needsUpdate = true;
         geo.computeVertexNormals();
-        return geo;
+        _v3.subVectors(end, start).normalize();
+        _qSeg.setFromUnitVectors(_yAxis, _v3);
+        _mSeg.compose(start, _qSeg, new THREE.Vector3(1, 1, 1));
+        geo.applyMatrix4(_mSeg);
+        parts.push(geo);
+      }
+
+      /**
+       * Branch mesh: base (0,0,0) → +Y. Single bent limb by default; optional thin fork twigs.
+       */
+      function createBranchGeometry(b) {
+        const L = Math.max(0.12, b.length);
+        const r0 = Math.max(0.004, b.radiusBottom);
+        const r1 = Math.max(0.004, b.radiusTop);
+        const rs = Math.max(3, Math.round(b.radialSegs));
+        const hs = Math.max(1, Math.round(b.heightSegs));
+        const droop = b.bend ?? 0;
+        const droopSide = b.bendSide ?? 0;
+        const origin = new THREE.Vector3(0, 0, 0);
+        const tip = new THREE.Vector3(0, L, 0);
+        const parts = [];
+
+        if (b.forkEnabled !== true) {
+          addBentCylinderBetween(
+            parts,
+            origin,
+            tip,
+            r0,
+            r1,
+            rs,
+            hs,
+            droop,
+            droopSide,
+          );
+        } else {
+          const forkT = THREE.MathUtils.clamp(b.forkStart ?? 0.68, 0.4, 0.92);
+          const forkN = THREE.MathUtils.clamp(Math.round(b.forkCount ?? 2), 1, 4);
+          const spread = (b.forkAngleDeg ?? 28) * DEG;
+          const twist = (b.forkTwistDeg ?? 0) * DEG;
+          const forkRadiusMul = THREE.MathUtils.clamp(
+            b.forkRadiusMul ?? 0.38,
+            0.15,
+            0.85,
+          );
+          const forkTipScale = THREE.MathUtils.clamp(b.forkTipScale ?? 0.5, 0.2, 1);
+          const forkLenMul = THREE.MathUtils.clamp(b.forkLengthMul ?? 0.58, 0.2, 1);
+          const mainLen = L * forkT;
+          const rFork = THREE.MathUtils.lerp(r0, r1, forkT);
+          const forkPt = new THREE.Vector3(0, mainLen, 0);
+
+          addBentCylinderBetween(
+            parts,
+            origin,
+            forkPt,
+            r0,
+            rFork,
+            rs,
+            hs,
+            droop,
+            droopSide * 0.35,
+          );
+
+          const baseChildLen = L * (1 - forkT) * forkLenMul;
+          const sinS = Math.sin(spread);
+          const cosS = Math.cos(spread);
+          const childR0 = Math.max(0.003, rFork * forkRadiusMul);
+          const childR1 = Math.max(0.003, childR0 * forkTipScale);
+
+          for (let i = 0; i < forkN; i++) {
+            const az = twist + (i / forkN) * Math.PI * 2;
+            const lenJit = 0.72 + 0.28 * ((i * 0.37) % 1);
+            const childLen = baseChildLen * lenJit;
+            const dir = new THREE.Vector3(
+              Math.cos(az) * sinS,
+              cosS,
+              Math.sin(az) * sinS,
+            ).normalize();
+            const end = forkPt.clone().addScaledVector(dir, childLen);
+            const childSign = i % 2 === 0 ? 1 : -1;
+            addBentCylinderBetween(
+              parts,
+              forkPt,
+              end,
+              childR0 * (0.92 + i * 0.02),
+              childR1,
+              Math.max(3, rs - 2),
+              Math.max(1, hs - 1),
+              droop * (0.35 + 0.08 * i),
+              droopSide * 0.45 * childSign,
+            );
+          }
+        }
+
+        if (parts.length === 0) {
+          return new THREE.CylinderGeometry(r1, r0, L, rs, hs);
+        }
+        const merged = parts.length === 1 ? parts[0] : mergeGeometries(parts);
+        for (const g of parts) {
+          if (g !== merged) g.dispose();
+        }
+        merged.computeVertexNormals();
+        return merged;
       }
 
       function instanceScaleJitter(idx, amount) {
@@ -1070,31 +1186,44 @@
           },
           branches: {
             enabled: false,
-            levels: 5,
-            perRing: 5,
-            baseY: 0.79,
-            stepY: 0.55,
-            scaleBottom: 1,
-            scaleTop: 0.72,
-            scalePower: 1.1,
-            scaleVariation: 0.14,
+            /** How many branch instances (typical 1–3 near base when using leaf cards). */
+            count: 2,
+            placementSeed: 42,
+            /** Trunk height fraction 0…1 — only place branches in [bottom, top]. */
+            bottomTrunkT: 0.04,
+            topTrunkT: 0.32,
+            /** Stop below foliage.baseY (leaves cover the rest). */
+            clampBelowFoliage: true,
+            belowFoliageMargin: 0.18,
+            scaleVariation: 0.16,
+            lengthVariation: 0.22,
             globalScale: 1,
-            radialInset: 0,
-            pivotAlongRadius: 0,
-            azimuthOffsetDeg: 18,
-            staggerDeg: 4,
+            radialInset: 0.01,
+            pivotAlongRadius: 1,
+            pitchUpDeg: 22,
+            rotXDeg: 0,
+            rotYDeg: 0,
+            rotZDeg: 0,
+            trunkEmbed: 0.02,
             offsetX: 0,
             offsetY: 0,
             offsetZ: 0,
-            length: 1.05,
-            radiusBottom: 0.038,
-            radiusTop: 0.02,
+            length: 0.82,
+            radiusBottom: 0.042,
+            radiusTop: 0.016,
             radialSegs: 6,
-            heightSegs: 5,
-            bend: 0.32,
-            rotXDeg: -28,
-            rotYDeg: 0,
-            rotZDeg: 90,
+            heightSegs: 4,
+            bend: 0.22,
+            /** Side sag in branch local X (after attach); pairs with bend for natural droop. */
+            bendSide: 0.06,
+            forkEnabled: false,
+            forkCount: 2,
+            forkStart: 0.68,
+            forkAngleDeg: 28,
+            forkTwistDeg: 0,
+            forkLengthMul: 0.58,
+            forkRadiusMul: 0.38,
+            forkTipScale: 0.5,
             color: "#4a3528",
             roughness: 0.88,
           },
@@ -1608,13 +1737,73 @@
           return _qOut.copy(_qAz).multiply(_qCard);
         }
 
-        function quaternionForBranchAzimuth(thetaRad, trunkT = 0) {
+        function branchPlacementCount(b) {
+          if (b.count !== undefined && b.count !== null && Number.isFinite(b.count)) {
+            return Math.max(0, Math.round(b.count));
+          }
+          return Math.max(
+            0,
+            Math.round(b.levels ?? 2) * Math.round(b.perRing ?? 1),
+          );
+        }
+
+        function migrateBranchParams(b) {
+          if (b.count === undefined || b.count === null || !Number.isFinite(b.count)) {
+            if (b.levels != null && b.perRing != null) {
+              b.count = Math.min(4, Math.max(1, Math.round(b.levels * 0.35)));
+            } else {
+              b.count = 2;
+            }
+          }
+          if (b.pivotAlongRadius == null || b.pivotAlongRadius < 0.5) {
+            b.pivotAlongRadius = 1;
+          }
+          if (b.trunkEmbed == null) b.trunkEmbed = 0.02;
+          if (Math.abs(b.rotZDeg ?? 0) >= 45) {
+            b.rotZDeg = 0;
+            b.rotXDeg = 0;
+          }
+          if (b.forkEnabled == null) b.forkEnabled = false;
+        }
+
+        function branchTrunkTRange(b, tr, f) {
+          let tMin = THREE.MathUtils.clamp(b.bottomTrunkT ?? 0.04, 0, 1);
+          let tMax = THREE.MathUtils.clamp(b.topTrunkT ?? 0.32, 0, 1);
+          if (b.clampBelowFoliage !== false && f.layout === "pine") {
+            const yFol = f.baseY + (f.offsetY ?? 0);
+            const tFol = trunkHeightT(yFol, tr);
+            const H = Math.max(0.15, tr.height);
+            const marginT = (b.belowFoliageMargin ?? 0.15) / H;
+            tMax = Math.min(tMax, Math.max(tMin + 0.02, tFol - marginT));
+          }
+          if (tMax < tMin) tMax = tMin;
+          return { tMin, tMax };
+        }
+
+        /** Local +Y (branch base→tip) aligns to trunk outward, pitched around trunk tangent. */
+        function quaternionForBranchAttach(trunkT, thetaRad, pitchUpDeg) {
           const b = params.branches;
-          _euler.set(b.rotXDeg * DEG, b.rotYDeg * DEG, b.rotZDeg * DEG, "XYZ");
-          _qCard.setFromEuler(_euler);
           trunkTangentAtT(trunkT, params.trunk, _trunkTan);
-          _qAz.setFromAxisAngle(_trunkTan, thetaRad);
-          return _qOut.copy(_qAz).multiply(_qCard);
+          trunkOutwardAtT(trunkT, thetaRad, params.trunk, _trunkOut);
+          _qSeg.setFromUnitVectors(_yAxis, _trunkOut);
+          const pitch = pitchUpDeg * DEG;
+          if (Math.abs(pitch) > 1e-6) {
+            _qAz.setFromAxisAngle(_trunkTan, pitch);
+            _qOut.copy(_qAz).multiply(_qSeg);
+          } else {
+            _qOut.copy(_qSeg);
+          }
+          if (b.rotXDeg || b.rotYDeg || b.rotZDeg) {
+            _euler.set(
+              b.rotXDeg * DEG,
+              b.rotYDeg * DEG,
+              b.rotZDeg * DEG,
+              "XYZ",
+            );
+            _qCard.setFromEuler(_euler);
+            _qOut.multiply(_qCard);
+          }
+          return _qOut;
         }
 
         function syncBranchMaterial() {
@@ -1628,47 +1817,55 @@
           if (!branchesObject) return;
           const b = params.branches;
           const tr = params.trunk;
-          const levels = Math.max(1, Math.round(b.levels));
-          const perRing = Math.max(1, Math.round(b.perRing));
-          const count = levels * perRing;
+          const f = params.foliage;
+          const count = branchPlacementCount(b);
           if (branchesObject.count !== count) return;
 
-          const pow = Math.max(0.05, b.scalePower);
           const gScale =
             Number.isFinite(b.globalScale) && b.globalScale > 0
               ? b.globalScale
               : 1;
-          const varAmt = Math.max(0, b.scaleVariation);
+          const scaleVar = Math.max(0, b.scaleVariation);
+          const lenVar = Math.max(0, b.lengthVariation ?? 0);
+          const seed = b.placementSeed ?? 0;
+          const { tMin, tMax } = branchTrunkTRange(b, tr, f);
+          const along = THREE.MathUtils.clamp(
+            Number.isFinite(b.pivotAlongRadius) ? b.pivotAlongRadius : 1,
+            0,
+            1,
+          );
+          const pitchBase = b.pitchUpDeg ?? 38;
 
-          let idx = 0;
-          for (let level = 0; level < levels; level++) {
-            const tLin = levels <= 1 ? 0 : level / (levels - 1);
-            const u = Math.pow(tLin, pow);
-            const sRing = (b.scaleBottom * (1 - u) + b.scaleTop * u) * gScale;
-            const yRing = b.baseY + level * b.stepY + b.offsetY;
-            const trunkT = trunkHeightT(yRing, tr);
-            const R = Math.max(0.001, trunkRadiusAtT(trunkT, tr) - b.radialInset);
-            const along = THREE.MathUtils.clamp(
-              Number.isFinite(b.pivotAlongRadius) ? b.pivotAlongRadius : 0,
-              0,
-              1,
+          for (let idx = 0; idx < count; idx++) {
+            const trunkT =
+              tMin + foliageHash01(idx, 1, seed) * Math.max(0.001, tMax - tMin);
+            const theta =
+              foliageHash01(idx, 2, seed) * Math.PI * 2 +
+              foliageRandomSignedDeg(idx, 3, seed, 12) * DEG;
+            const pitchJit = foliageRandomSignedDeg(idx, 4, seed, 14);
+            const R = Math.max(
+              0.001,
+              trunkRadiusAtT(trunkT, tr) - b.radialInset,
             );
-
-            for (let k = 0; k < perRing; k++) {
-              const thetaDeg =
-                b.azimuthOffsetDeg + (k * 360) / perRing + b.staggerDeg * level;
-              const theta = thetaDeg * DEG;
-              trunkCenterAtT(trunkT, tr, _dummy.position);
-              trunkOutwardAtT(trunkT, theta, tr, _trunkOut);
-              _dummy.position.addScaledVector(_trunkOut, along * R);
-              _dummy.position.x += b.offsetX;
-              _dummy.position.z += b.offsetZ;
-              const jitter = 1 + instanceScaleJitter(idx, varAmt);
-              _dummy.quaternion.copy(quaternionForBranchAzimuth(theta, trunkT));
-              _dummy.scale.setScalar(sRing * jitter);
-              _dummy.updateMatrix();
-              branchesObject.setMatrixAt(idx++, _dummy.matrix);
-            }
+            trunkCenterAtT(trunkT, tr, _dummy.position);
+            trunkOutwardAtT(trunkT, theta, tr, _trunkOut);
+            const embed = Math.max(0, b.trunkEmbed ?? 0.02);
+            _dummy.position.addScaledVector(
+              _trunkOut,
+              Math.max(0, along * R - embed),
+            );
+            _dummy.position.x += b.offsetX;
+            _dummy.position.y += b.offsetY;
+            _dummy.position.z += b.offsetZ;
+            const scaleJit =
+              (1 + instanceScaleJitter(idx, scaleVar)) *
+              (1 + instanceScaleJitter(idx + 17, lenVar));
+            _dummy.quaternion.copy(
+              quaternionForBranchAttach(trunkT, theta, pitchBase + pitchJit),
+            );
+            _dummy.scale.setScalar(gScale * scaleJit);
+            _dummy.updateMatrix();
+            branchesObject.setMatrixAt(idx, _dummy.matrix);
           }
           branchesObject.instanceMatrix.needsUpdate = true;
         }
@@ -1688,9 +1885,11 @@
             return;
           }
 
-          const levels = Math.max(1, Math.round(b.levels));
-          const perRing = Math.max(1, Math.round(b.perRing));
-          const needCount = levels * perRing;
+          const needCount = branchPlacementCount(b);
+          if (needCount === 0) {
+            disposeBranchesObject();
+            return;
+          }
 
           const needNew = !branchesObject || branchesObject.count !== needCount;
 
@@ -1716,14 +1915,7 @@
 
         function rebuildBranchGeometry() {
           const b = params.branches;
-          const newGeo = createBranchGeometry(
-            b.length,
-            b.radiusBottom,
-            b.radiusTop,
-            b.radialSegs,
-            b.heightSegs,
-            b.bend,
-          );
+          const newGeo = createBranchGeometry(b);
           if (branchGeo) branchGeo.dispose();
           branchGeo = newGeo;
           if (branchesObject) branchesObject.geometry = branchGeo;
@@ -2321,6 +2513,7 @@
             throw new Error("Not a pine-editor preset (pineEditor: 1)");
           }
           deepAssign(params, data.params);
+          migrateBranchParams(params.branches);
           if (data.presetName) params.presetName = data.presetName;
           presetNameInput?.refresh();
 
@@ -2561,6 +2754,7 @@
           syncLeafUniforms();
         }
 
+        migrateBranchParams(params.branches);
         rebuildTrunk();
         rebuildGeometry();
         rebuildBranchGeometry();
@@ -2580,13 +2774,14 @@
           rebuildTrunk();
           if (params.foliage.layout === "pine") updateInstanceMatrices();
           refreshLodSystem();
-          updateBranchMatrices();
+          if (params.branches.enabled) updateBranchMatrices();
           updatePivotHelper();
         };
         const onFoliage = () => {
           syncLeafBounds();
           ensureFoliageObject();
           ensureBranchesObject();
+          if (params.branches.enabled) updateBranchMatrices();
           refreshLodSystem();
         };
         const onFoliageMatrices = () => {
@@ -2883,62 +3078,65 @@
           onChange: onFoliage,
         });
 
-        const sBr = _section(uiRoot, "Branches (curved cylinders)", true);
+        const sBr = _section(uiRoot, "Branches", true);
         _toggle(sBr, b, "enabled", {
           label: "enable",
           onChange: onBranchStruct,
         });
-        _slider(sBr, b, "levels", {
-          label: "levels",
-          min: 1,
-          max: 24,
+        _slider(sBr, b, "count", {
+          label: "count",
+          min: 0,
+          max: 12,
           step: 1,
           onChange: onBranchStruct,
         });
-        _slider(sBr, b, "perRing", {
-          label: "per ring",
-          min: 1,
-          max: 24,
+        _slider(sBr, b, "placementSeed", {
+          label: "placement seed",
+          min: 0,
+          max: 999,
           step: 1,
-          onChange: onBranchStruct,
-        });
-        _slider(sBr, b, "baseY", {
-          label: "base Y",
-          min: -2,
-          max: 24,
-          step: 0.02,
           onChange: onBranchLayout,
         });
-        _slider(sBr, b, "stepY", {
-          label: "ΔY / level",
+        _slider(sBr, b, "bottomTrunkT", {
+          label: "from bottom (0–1)",
+          min: 0,
+          max: 0.5,
+          step: 0.01,
+          onChange: onBranchLayout,
+        });
+        _slider(sBr, b, "topTrunkT", {
+          label: "up to height (0–1)",
           min: 0.05,
-          max: 4,
+          max: 0.6,
+          step: 0.01,
+          onChange: onBranchLayout,
+        });
+        _toggle(sBr, b, "clampBelowFoliage", {
+          label: "stop below foliage",
+          onChange: onBranchLayout,
+        });
+        _slider(sBr, b, "belowFoliageMargin", {
+          label: "gap under foliage (m)",
+          min: 0,
+          max: 1.5,
           step: 0.02,
           onChange: onBranchLayout,
         });
-        _slider(sBr, b, "scaleBottom", {
-          label: "scale bottom",
-          min: 0.05,
-          max: 3,
-          step: 0.02,
-          onChange: onBranchLayout,
-        });
-        _slider(sBr, b, "scaleTop", {
-          label: "scale top",
-          min: 0.05,
-          max: 3,
-          step: 0.02,
-          onChange: onBranchLayout,
-        });
-        _slider(sBr, b, "scalePower", {
-          label: "scale curve",
-          min: 0.2,
-          max: 4,
-          step: 0.02,
-          onChange: onBranchLayout,
-        });
+        _info(
+          sBr,
+          "br-hint",
+          () =>
+            "Random on trunk in band above; leaf cards cover the crown — use 1–2 low branches.",
+        );
         _slider(sBr, b, "scaleVariation", {
           label: "scale jitter",
+          min: 0,
+          max: 0.5,
+          step: 0.01,
+          onChange: onBranchLayout,
+        });
+        _slider(sBr, b, "lengthVariation", {
+          label: "length jitter",
           min: 0,
           max: 0.5,
           step: 0.01,
@@ -2965,18 +3163,18 @@
           step: 0.02,
           onChange: onBranchLayout,
         });
-        _slider(sBr, b, "azimuthOffsetDeg", {
-          label: "ring rotate °",
-          min: -180,
-          max: 180,
-          step: 0.5,
+        _slider(sBr, b, "trunkEmbed", {
+          label: "embed into trunk (m)",
+          min: 0,
+          max: 0.12,
+          step: 0.005,
           onChange: onBranchLayout,
         });
-        _slider(sBr, b, "staggerDeg", {
-          label: "stagger / level °",
-          min: -45,
-          max: 45,
-          step: 0.5,
+        _slider(sBr, b, "pitchUpDeg", {
+          label: "pitch up °",
+          min: 0,
+          max: 80,
+          step: 1,
           onChange: onBranchLayout,
         });
         _slider(sBr, b, "offsetX", {
@@ -3000,6 +3198,61 @@
           step: 0.02,
           onChange: onBranchLayout,
         });
+        _separator(sBr);
+        _toggle(sBr, b, "forkEnabled", {
+          label: "fork split (twigs)",
+          onChange: onBranchGeom,
+        });
+        _slider(sBr, b, "forkCount", {
+          label: "twigs at split",
+          min: 1,
+          max: 4,
+          step: 1,
+          onChange: onBranchGeom,
+        });
+        _slider(sBr, b, "forkStart", {
+          label: "split on main (0–1)",
+          min: 0.4,
+          max: 0.92,
+          step: 0.02,
+          onChange: onBranchGeom,
+        });
+        _slider(sBr, b, "forkRadiusMul", {
+          label: "twig thickness ×",
+          min: 0.15,
+          max: 0.75,
+          step: 0.02,
+          onChange: onBranchGeom,
+        });
+        _slider(sBr, b, "forkTipScale", {
+          label: "twig tip thin ×",
+          min: 0.2,
+          max: 1,
+          step: 0.02,
+          onChange: onBranchGeom,
+        });
+        _slider(sBr, b, "forkLengthMul", {
+          label: "twig length ×",
+          min: 0.2,
+          max: 1,
+          step: 0.02,
+          onChange: onBranchGeom,
+        });
+        _slider(sBr, b, "forkAngleDeg", {
+          label: "twig spread °",
+          min: 12,
+          max: 65,
+          step: 1,
+          onChange: onBranchGeom,
+        });
+        _slider(sBr, b, "forkTwistDeg", {
+          label: "twig twist °",
+          min: 0,
+          max: 360,
+          step: 1,
+          onChange: onBranchGeom,
+        });
+        _separator(sBr);
         _slider(sBr, b, "length", {
           label: "length",
           min: 0.1,
@@ -3036,12 +3289,24 @@
           onChange: onBranchGeom,
         });
         _slider(sBr, b, "bend", {
-          label: "bend (+ droop)",
-          min: -1.5,
-          max: 1.5,
+          label: "bend / droop",
+          min: -0.8,
+          max: 0.8,
           step: 0.02,
           onChange: onBranchGeom,
         });
+        _slider(sBr, b, "bendSide", {
+          label: "side sag",
+          min: -0.4,
+          max: 0.4,
+          step: 0.01,
+          onChange: onBranchGeom,
+        });
+        _info(
+          sBr,
+          "bend-hint",
+          () => "Bend keeps joints welded; caps stay on trunk / fork point.",
+        );
         _slider(sBr, b, "rotXDeg", {
           label: "tilt X °",
           min: -180,
