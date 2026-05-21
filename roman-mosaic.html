@@ -1,0 +1,549 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width,initial-scale=1.0" />
+
+    <title>Roman Mosaic Generator — Three.js WebGPU TSL</title>
+
+    <style>
+      html,
+      body {
+        margin: 0;
+        overflow: hidden;
+        background: #171412;
+        font-family: monospace;
+      }
+
+      #ui {
+        position: absolute;
+        top: 0;
+        left: 0;
+        width: 340px;
+        height: 100%;
+        overflow: auto;
+        background: rgba(0, 0, 0, 0.82);
+        backdrop-filter: blur(12px);
+        border-right: 1px solid #444;
+        color: white;
+        padding: 16px;
+        box-sizing: border-box;
+        z-index: 10;
+      }
+
+      canvas {
+        display: block;
+      }
+
+      input[type="file"] {
+        width: 100%;
+        margin-top: 12px;
+      }
+
+      h2 {
+        margin-top: 0;
+      }
+    </style>
+  </head>
+
+  <body>
+    <div id="ui">
+      <h2>Roman Mosaic Generator</h2>
+
+      <input type="file" id="upload" accept="image/*" />
+
+      <div id="pane"></div>
+
+      <p>
+        Upload any image and transform it into:
+        <br /><br />
+        • Roman mosaic tesserae<br />
+        • Antique stone tiles<br />
+        • Procedural grout<br />
+        • Tile rotation<br />
+        • Stone displacement<br />
+        • Color quantization<br />
+      </p>
+    </div>
+
+    <script type="importmap">
+      {
+        "imports": {
+          "three": "https://cdn.jsdelivr.net/npm/three@0.183.1/build/three.webgpu.js",
+          "three/webgpu": "https://cdn.jsdelivr.net/npm/three@0.183.1/build/three.webgpu.js",
+          "three/tsl": "https://cdn.jsdelivr.net/npm/three@0.183.1/build/three.tsl.js",
+          "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.183.1/examples/jsm/",
+          "tweakpane": "https://cdn.jsdelivr.net/npm/tweakpane@4.0.3/dist/tweakpane.min.js"
+        }
+      }
+    </script>
+
+    <script type="module">
+      import * as THREE from "three/webgpu";
+
+      import {
+        texture,
+        uv,
+        vec2,
+        vec3,
+        vec4,
+        float,
+        floor,
+        fract,
+        sin,
+        cos,
+        dot,
+        mix,
+        smoothstep,
+        max,
+        Fn,
+      } from "three/tsl";
+
+      import { OrbitControls } from "three/addons/controls/OrbitControls.js";
+
+      import { Pane } from "tweakpane";
+
+      // =====================================================
+      // CORE
+      // =====================================================
+
+      let renderer;
+      let scene;
+      let camera;
+      let controls;
+
+      let mosaicMesh;
+      let uploadedTexture = null;
+
+      // =====================================================
+      // PARAMETERS
+      // =====================================================
+
+      const params = {
+        tileSize: 70,
+        groutWidth: 0.08,
+
+        colorLevels: 6,
+
+        tileVariation: 0.22,
+
+        edgeDarkness: 0.45,
+
+        saturation: 1.05,
+
+        antiqueTint: 0.12,
+
+        displacement: 0.08,
+
+        rotationStrength: 1,
+
+        roughness: 0.95,
+      };
+
+      // =====================================================
+      // INIT
+      // =====================================================
+
+      init();
+
+      async function init() {
+        renderer = new THREE.WebGPURenderer({
+          antialias: true,
+        });
+
+        renderer.setSize(innerWidth, innerHeight);
+
+        document.body.appendChild(renderer.domElement);
+
+        await renderer.init();
+
+        // =================================================
+        // SCENE
+        // =================================================
+
+        scene = new THREE.Scene();
+
+        scene.background = new THREE.Color(0x171412);
+
+        // =================================================
+        // CAMERA
+        // =================================================
+
+        camera = new THREE.PerspectiveCamera(
+          45,
+          innerWidth / innerHeight,
+          0.1,
+          100,
+        );
+
+        camera.position.set(0, 0, 4);
+
+        // =================================================
+        // CONTROLS
+        // =================================================
+
+        controls = new OrbitControls(camera, renderer.domElement);
+
+        controls.enableDamping = true;
+
+        // =================================================
+        // LIGHTS
+        // =================================================
+
+        scene.add(new THREE.AmbientLight(0xffffff, 2));
+
+        const dir = new THREE.DirectionalLight(0xffffff, 2);
+
+        dir.position.set(3, 5, 4);
+
+        scene.add(dir);
+
+        // =================================================
+        // GEOMETRY
+        // =================================================
+
+        const geo = new THREE.PlaneGeometry(4, 4, 300, 300);
+
+        const mat = new THREE.MeshStandardNodeMaterial({
+          roughness: 1,
+          metalness: 0,
+        });
+
+        mosaicMesh = new THREE.Mesh(geo, mat);
+
+        scene.add(mosaicMesh);
+
+        // =================================================
+        // UI
+        // =================================================
+
+        buildPane();
+
+        // =================================================
+        // IMAGE UPLOAD
+        // =================================================
+
+        document.getElementById("upload").addEventListener("change", onUpload);
+
+        rebuildMaterial();
+
+        animate();
+
+        window.addEventListener("resize", onResize);
+      }
+
+      // =====================================================
+      // HASH
+      // =====================================================
+
+      function hash2(v) {
+        return fract(sin(dot(v, vec2(127.1, 311.7))).mul(43758.5453123));
+      }
+
+      // =====================================================
+      // MATERIAL
+      // =====================================================
+
+      function rebuildMaterial() {
+        const mat = mosaicMesh.material;
+
+        // =================================================
+        // COLOR NODE
+        // =================================================
+
+        mat.colorNode = Fn(() => {
+          // ---------------------------------------------
+          // TILE UV
+          // ---------------------------------------------
+
+          const scaledUV = uv().mul(params.tileSize);
+
+          const tileID = floor(scaledUV);
+
+          const localUV = fract(scaledUV);
+
+          // ---------------------------------------------
+          // RANDOM
+          // ---------------------------------------------
+
+          const rnd = hash2(tileID);
+
+          // ---------------------------------------------
+          // ROTATION
+          // ---------------------------------------------
+
+          const angle = rnd.mul(6.28318).mul(params.rotationStrength);
+
+          const centered = localUV.sub(0.5);
+
+          const rotated = vec2(
+            centered.x.mul(cos(angle)).sub(centered.y.mul(sin(angle))),
+
+            centered.x.mul(sin(angle)).add(centered.y.mul(cos(angle))),
+          ).add(0.5);
+
+          // ---------------------------------------------
+          // SAMPLE UV
+          // ---------------------------------------------
+
+          const sampleUV = tileID.add(0.5).div(params.tileSize);
+
+          // ---------------------------------------------
+          // BASE COLOR
+          // ---------------------------------------------
+
+          const baseCol = uploadedTexture
+            ? texture(uploadedTexture, sampleUV)
+            : vec4(0.82, 0.72, 0.62, 1);
+
+          // ---------------------------------------------
+          // QUANTIZATION
+          // ---------------------------------------------
+
+          const quantized = floor(baseCol.rgb.mul(params.colorLevels)).div(
+            params.colorLevels,
+          );
+
+          // ---------------------------------------------
+          // SATURATION
+          // ---------------------------------------------
+
+          const lum = dot(quantized, vec3(0.299, 0.587, 0.114));
+
+          const saturated = mix(
+            vec3(lum),
+
+            quantized,
+
+            params.saturation,
+          );
+
+          // ---------------------------------------------
+          // EDGE MASK
+          // ---------------------------------------------
+
+          const edgeMask = smoothstep(
+            0.5,
+
+            0.5 - params.groutWidth,
+
+            max(
+              rotated.x.sub(0.5).abs(),
+
+              rotated.y.sub(0.5).abs(),
+            ),
+          );
+
+          // ---------------------------------------------
+          // NOISE
+          // ---------------------------------------------
+
+          const noise = sin(rotated.x.mul(30).add(rnd.mul(20))).mul(
+            sin(rotated.y.mul(30)),
+          );
+
+          // ---------------------------------------------
+          // VARIATION
+          // ---------------------------------------------
+
+          const varied = saturated.add(noise.mul(params.tileVariation));
+
+          // ---------------------------------------------
+          // ANTIQUE
+          // ---------------------------------------------
+
+          const antique = mix(
+            varied,
+
+            vec3(0.6, 0.52, 0.42),
+
+            params.antiqueTint,
+          );
+
+          // ---------------------------------------------
+          // EDGE DARKNESS
+          // ---------------------------------------------
+
+          const darkened = mix(
+            antique.mul(1.0 - params.edgeDarkness),
+
+            antique,
+
+            edgeMask,
+          );
+
+          // ---------------------------------------------
+          // GROUT
+          // ---------------------------------------------
+
+          const finalColor = mix(
+            vec3(0.12, 0.1, 0.08),
+
+            darkened,
+
+            edgeMask,
+          );
+
+          return vec4(finalColor, 1);
+        })();
+
+        // =================================================
+        // DISPLACEMENT
+        // =================================================
+
+        mat.positionNode = Fn(() => {
+          const scaledUV = uv().mul(params.tileSize);
+
+          const tileID = floor(scaledUV);
+
+          const localUV = fract(scaledUV);
+
+          const rnd = hash2(tileID);
+
+          const noise = sin(localUV.x.mul(30).add(rnd.mul(20))).mul(
+            sin(localUV.y.mul(30)),
+          );
+
+          return vec3(
+            0,
+
+            noise.mul(params.displacement),
+
+            0,
+          );
+        })();
+
+        // =================================================
+        // ROUGHNESS
+        // =================================================
+
+        mat.roughnessNode = float(params.roughness);
+      }
+
+      // =====================================================
+      // IMAGE UPLOAD
+      // =====================================================
+
+      function onUpload(e) {
+        const file = e.target.files[0];
+
+        if (!file) return;
+
+        const url = URL.createObjectURL(file);
+
+        new THREE.TextureLoader().load(url, (tex) => {
+          tex.colorSpace = THREE.SRGBColorSpace;
+
+          tex.wrapS = THREE.ClampToEdgeWrapping;
+
+          tex.wrapT = THREE.ClampToEdgeWrapping;
+
+          uploadedTexture = tex;
+
+          rebuildMaterial();
+        });
+      }
+
+      // =====================================================
+      // UI
+      // =====================================================
+
+      function buildPane() {
+        const pane = new Pane({
+          container: document.getElementById("pane"),
+
+          title: "Mosaic Controls",
+        });
+
+        pane
+          .addBinding(params, "tileSize", {
+            min: 10,
+            max: 200,
+            step: 1,
+          })
+          .on("change", rebuildMaterial);
+
+        pane
+          .addBinding(params, "groutWidth", {
+            min: 0.01,
+            max: 0.25,
+          })
+          .on("change", rebuildMaterial);
+
+        pane
+          .addBinding(params, "colorLevels", {
+            min: 2,
+            max: 16,
+            step: 1,
+          })
+          .on("change", rebuildMaterial);
+
+        pane
+          .addBinding(params, "tileVariation", {
+            min: 0,
+            max: 1,
+          })
+          .on("change", rebuildMaterial);
+
+        pane
+          .addBinding(params, "edgeDarkness", {
+            min: 0,
+            max: 1,
+          })
+          .on("change", rebuildMaterial);
+
+        pane
+          .addBinding(params, "saturation", {
+            min: 0,
+            max: 2,
+          })
+          .on("change", rebuildMaterial);
+
+        pane
+          .addBinding(params, "antiqueTint", {
+            min: 0,
+            max: 1,
+          })
+          .on("change", rebuildMaterial);
+
+        pane
+          .addBinding(params, "displacement", {
+            min: 0,
+            max: 0.3,
+          })
+          .on("change", rebuildMaterial);
+
+        pane
+          .addBinding(params, "rotationStrength", {
+            min: 0,
+            max: 2,
+          })
+          .on("change", rebuildMaterial);
+      }
+
+      // =====================================================
+      // LOOP
+      // =====================================================
+
+      function animate() {
+        requestAnimationFrame(animate);
+
+        controls.update();
+
+        renderer.render(scene, camera);
+      }
+
+      // =====================================================
+      // RESIZE
+      // =====================================================
+
+      function onResize() {
+        camera.aspect = innerWidth / innerHeight;
+
+        camera.updateProjectionMatrix();
+
+        renderer.setSize(innerWidth, innerHeight);
+      }
+    </script>
+  </body>
+</html>
