@@ -90,6 +90,8 @@ export function createManciniLensFlare({
   const renderSize = new THREE.Vector2();
   const screenPosition = params.lensPosition.clone();
   const flarePosition = new THREE.Vector3();
+  const sunViewDir = new THREE.Vector3();
+  const clipVec = new THREE.Vector4();
   const raycaster = new THREE.Raycaster();
   const mouse = new THREE.Vector2();
 
@@ -194,6 +196,45 @@ export function createManciniLensFlare({
     }
   }
 
+  /**
+   * NDC (-1..1) from sun/light direction — same view-space math as splatmap legacy lens flare.
+   * @param {THREE.Vector3} direction — normalized, world space, pointing toward the sun
+   * @returns {boolean}
+   */
+  function setLensPosFromSunDirection(direction) {
+    camera.updateMatrixWorld();
+    sunViewDir.copy(direction).transformDirection(camera.matrixWorldInverse);
+    if (sunViewDir.z >= -0.001) return false;
+    const invZ = 1 / -sunViewDir.z;
+    const fovRad = (camera.fov * Math.PI) / 180;
+    const halfH = Math.tan(fovRad * 0.5);
+    const halfW = halfH * camera.aspect;
+    flarePosition.x = (sunViewDir.x * invZ) / halfW;
+    flarePosition.y = (sunViewDir.y * invZ) / halfH;
+    flarePosition.z = sunViewDir.z;
+    uLensPos.value.set(flarePosition.x, flarePosition.y);
+    return true;
+  }
+
+  /**
+   * NDC from a world point (r183 Vector3.project skips perspective divide).
+   * @param {THREE.Vector3} worldPoint
+   * @returns {boolean}
+   */
+  function setLensPosFromWorldPoint(worldPoint) {
+    camera.updateMatrixWorld();
+    clipVec.set(worldPoint.x, worldPoint.y, worldPoint.z, 1);
+    clipVec.applyMatrix4(camera.matrixWorldInverse).applyMatrix4(camera.projectionMatrix);
+    const w = clipVec.w;
+    if (Math.abs(w) < 1e-6) return false;
+    flarePosition.x = clipVec.x / w;
+    flarePosition.y = clipVec.y / w;
+    flarePosition.z = clipVec.z / w;
+    if (flarePosition.z >= 1) return false;
+    uLensPos.value.set(flarePosition.x, flarePosition.y);
+    return true;
+  }
+
   function syncUniforms() {
     uEnabled.value = params.enabled ? 1 : 0;
     uStarPoints.value = params.starPoints;
@@ -213,9 +254,10 @@ export function createManciniLensFlare({
 
   /**
    * @param {THREE.WebGPURenderer} renderer
-   * @param {THREE.Vector3} [sunWorldPos] — when followSun, project this point
+   * @param {THREE.Vector3} [sunWorldPos] — when followSun (and no sunDirection), world point to project
+   * @param {THREE.Vector3} [sunDirection] — normalized direction toward the sun (open worlds / physical sky)
    */
-  function update(renderer, sunWorldPos) {
+  function update(renderer, sunWorldPos, sunDirection) {
     timer.update();
     const dt = timer.getDelta();
     const elapsed = timer.getElapsed();
@@ -231,18 +273,22 @@ export function createManciniLensFlare({
       uLensPos.value.set(mouse.x, mouse.y);
       targetOpacity = params.opacity;
     } else {
-      const src = params.followSun && sunWorldPos ? sunWorldPos : screenPosition;
-      const projected = src.clone().project(camera);
-      flarePosition.copy(projected);
-      if (flarePosition.z < 1) {
-        uLensPos.value.set(flarePosition.x, flarePosition.y);
+      let positioned = false;
+      if (params.followSun && sunDirection) {
+        positioned = setLensPosFromSunDirection(sunDirection);
+      } else if (params.followSun && sunWorldPos) {
+        positioned = setLensPosFromWorldPoint(sunWorldPos);
+      } else {
+        positioned = setLensPosFromWorldPoint(screenPosition);
       }
-      raycaster.setFromCamera(
-        new THREE.Vector2(flarePosition.x, flarePosition.y),
-        camera,
-      );
-      const hits = raycaster.intersectObjects(scene.children, true);
-      checkTransparency(hits);
+      if (positioned) {
+        raycaster.setFromCamera(
+          new THREE.Vector2(flarePosition.x, flarePosition.y),
+          camera,
+        );
+        const hits = raycaster.intersectObjects(scene.children, true);
+        checkTransparency(hits);
+      }
     }
 
     internalOpacity += (targetOpacity - internalOpacity) * Math.min(1, dt * 60 * 0.007);
