@@ -156,30 +156,23 @@ export function createToolState() {
     /** Car Howler layers (vehicle bus). Assets: `v2/static/sounds/vehicle/` */
     playCarAudio: {
       enabled: false,
-      /** Overall gain on the accel engine layer */
-      engineMul: 0.85,
-      /** Speed (m/s) at which accel vol + pitch reach their max while W held */
-      engineRefTopSpeed: 52,
-      /** Volume at ref top speed when W held (× engineMul) */
-      engineVolAtTop: 0.78,
-      /** Howler playback rate at low / high speed while accelerating */
-      enginePitchMin: 0.88,
-      enginePitchMax: 1.32,
-      /** Min “drive” while W from standstill so accel layer is audible immediately (0–1) */
-      engineAccelThrottleFloor: 0.24,
-      /** Volume rise speed when pressing W (smoothVolume ease-up) */
-      engineAccelEaseUp: 22,
-      /** Coast fade ease when releasing W at ~0 speed (higher = faster mute) */
+      /** Overall gain on synth engine loop (`joao_janz__synth-car-engine-loop.wav`) */
+      engineMul: 1,
+      /** 0 = auto pitch ref from car max speed (~45 m/s); else full rev at this m/s */
+      engineRefTopSpeed: 0,
+      engineVol: 1,
+      engineVolAtTop: 1,
+      enginePitchMin: 1,
+      enginePitchMax: 2.85,
+      enginePitchBoostMax: 3.55,
+      enginePitchIdleSpeedMax: 0.35,
+      enginePitchCurvePow: 1,
+      enginePitchEase: 10,
+      /** Legacy — coast gate removed; engine always on in car */
+      engineCoastSpeedMin: 0.6,
+      engineFadeEaseUp: 18,
       engineCoastFadeEaseLo: 2.6,
-      /** Coast fade ease at ref top speed (lower = longer tail while coasting fast) */
       engineCoastFadeEaseHi: 0.4,
-      /** Idle bed layer gain */
-      idleMul: 1,
-      idleVolRest: 0.32,
-      idleVolRoll: 0.38,
-      idleRefSpeed: 45,
-      idlePitchMin: 0.88,
-      idlePitchMax: 1.06,
       windMul: 0,
       nitroMul: 0.3,
       wheelsMul: 0,
@@ -188,8 +181,6 @@ export function createToolState() {
       /** Howler sprite loop window (ms). Duration 0 = loop whole file. Rebuild car audio to apply. */
       engineLoopStartMs: 0,
       engineLoopDurationMs: 0,
-      idleLoopStartMs: 0,
-      idleLoopDurationMs: 0,
       windLoopStartMs: 0,
       windLoopDurationMs: 0,
       wheelsLoopStartMs: 0,

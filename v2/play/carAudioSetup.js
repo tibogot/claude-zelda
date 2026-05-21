@@ -1,14 +1,16 @@
 /**
- * Car driving layers — accel + idle engine, wind, nitro, wheels, drift brake.
+ * Car driving layers — synth engine loop (pitch ∝ speed), wind, nitro, wheels, drift brake.
  * Assets: `./static/sounds/vehicle/*`
  */
 import * as THREE from "three";
 
 const CAR_NITRO_MIN = 0.05;
+/** Keep in sync with `playMode.js` — carVx/carVz speed used for pitch. */
+const CAR_MAX_SPEED = 45;
+const CAR_MAX_SPEED_BOOST = 72;
 
 const DEFAULT_PATHS = {
-  engine: "./static/sounds/vehicle/Acceleration_sound.ogg",
-  idle: "./static/sounds/vehicle/engine-idle.mp3",
+  engine: "./static/sounds/vehicle/joao_janz__synth-car-engine-loop.wav",
   wind: "./static/sounds/vehicle/wind-speed.mp3",
   nitro: "./static/sounds/vehicle/nitro-activation.mp3",
   wheels: "./static/sounds/vehicle/wheels-surface.mp3",
@@ -18,7 +20,7 @@ const DEFAULT_PATHS = {
 /**
  * Howler: `loop: true` = whole file, or sprite `[startMs, durationMs, true]` for a looping window.
  * @param {object} playMode
- * @param {"engine"|"idle"|"wind"|"wheels"|"driftBrake"} layer
+ * @param {"engine"|"wind"|"wheels"|"driftBrake"} layer
  */
 function howlerLoopLayerOptions(playMode, layer) {
   const s = playMode.carAudioSettings || {};
@@ -51,21 +53,20 @@ export function setupPlayModeCarAudio(playMode, audioSystem, pathOverrides = {})
     const s = playMode.carAudioSettings || {};
     return {
       enabled: s.enabled !== false,
-      engineMul: s.engineMul ?? 0.85,
-      engineRefTopSpeed: s.engineRefTopSpeed ?? 52,
-      engineVolAtTop: s.engineVolAtTop ?? 0.78,
-      enginePitchMin: s.enginePitchMin ?? 0.88,
-      enginePitchMax: s.enginePitchMax ?? 1.32,
-      engineAccelThrottleFloor: s.engineAccelThrottleFloor ?? 0.24,
-      engineAccelEaseUp: s.engineAccelEaseUp ?? 22,
-      engineCoastFadeEaseLo: s.engineCoastFadeEaseLo ?? 2.6,
-      engineCoastFadeEaseHi: s.engineCoastFadeEaseHi ?? 0.4,
-      idleMul: s.idleMul ?? 1,
-      idleVolRest: s.idleVolRest ?? 0.32,
-      idleVolRoll: s.idleVolRoll ?? 0.38,
-      idleRefSpeed: s.idleRefSpeed ?? 45,
-      idlePitchMin: s.idlePitchMin ?? 0.88,
-      idlePitchMax: s.idlePitchMax ?? 1.06,
+      engineMul: s.engineMul ?? 1,
+      /** m/s where pitch hits max; 0 = auto (car max speed × scale). */
+      engineRefTopSpeed: s.engineRefTopSpeed ?? 0,
+      engineVol: s.engineVol ?? s.engineVolAtTop ?? 1,
+      enginePitchMin: s.enginePitchMin ?? 1,
+      /** Pitch at normal top speed (Shift off, ~45 m/s). */
+      enginePitchMax: s.enginePitchMax ?? 2.85,
+      /** Extra rev above normal top speed when Shift boost is faster (~72 m/s). */
+      enginePitchBoostMax: s.enginePitchBoostMax ?? 3.55,
+      enginePitchIdleSpeedMax: s.enginePitchIdleSpeedMax ?? 0.35,
+      /** 1 = linear with speed; >1 adds more rev only near top speed. */
+      enginePitchCurvePow: s.enginePitchCurvePow ?? 1,
+      enginePitchEase: s.enginePitchEase ?? 10,
+      engineFadeEaseUp: s.engineFadeEaseUp ?? 18,
       windMul: s.windMul ?? 0,
       nitroMul: s.nitroMul ?? 0.3,
       wheelsMul: s.wheelsMul ?? 0,
@@ -105,7 +106,50 @@ export function setupPlayModeCarAudio(playMode, audioSystem, pathOverrides = {})
     return cur + (target - cur) * Math.min(1, dt * lambda);
   }
 
-  // ── Accel engine: W + speed (throttle floor so it starts immediately; coast fade ∝ speed)
+  function carSpeedPitchLimits(playMode, st) {
+    const scale = playMode.carSettings?.maxSpeedScale ?? 1;
+    const manual = Number(st.engineRefTopSpeed);
+    const normalMax =
+      manual > 0 ? manual : CAR_MAX_SPEED * scale;
+    const boostMax =
+      manual > 0
+        ? manual * (CAR_MAX_SPEED_BOOST / CAR_MAX_SPEED)
+        : CAR_MAX_SPEED_BOOST * scale;
+    const idleBand = Math.max(0, st.enginePitchIdleSpeedMax);
+    return {
+      idleBand,
+      normalMax: Math.max(idleBand + 1, normalMax),
+      boostMax: Math.max(normalMax + 1, boostMax),
+    };
+  }
+
+  /**
+   * Two-stage pitch: idle → normal max (Shift off cap), then higher rev in Shift boost range.
+   */
+  function enginePitchFromSpeed(playMode, st, curSpeed) {
+    const { idleBand, normalMax, boostMax } = carSpeedPitchLimits(playMode, st);
+    const pow = Math.max(0.25, st.enginePitchCurvePow);
+    const pitchMin = st.enginePitchMin;
+    const pitchMax = st.enginePitchMax;
+    const pitchBoostMax = Math.max(
+      pitchMax,
+      st.enginePitchBoostMax ?? pitchMax * 1.24,
+    );
+
+    if (curSpeed <= idleBand) return pitchMin;
+
+    if (curSpeed <= normalMax) {
+      const t = THREE.MathUtils.clamp((curSpeed - idleBand) / (normalMax - idleBand), 0, 1);
+      const drive = Math.pow(t, pow);
+      return THREE.MathUtils.lerp(pitchMin, pitchMax, drive);
+    }
+
+    const t = THREE.MathUtils.clamp((curSpeed - normalMax) / (boostMax - normalMax), 0, 1);
+    const drive = Math.pow(t, pow);
+    return THREE.MathUtils.lerp(pitchMax, pitchBoostMax, drive);
+  }
+
+  // ── Synth engine loop: always on in car (idle = native pitch); revs up with speed
   const engLoop = howlerLoopLayerOptions(playMode, "engine");
   registered.push(
     audioSystem.register({
@@ -117,72 +161,11 @@ export function setupPlayModeCarAudio(playMode, audioSystem, pathOverrides = {})
       volume: 0,
       onPlaying: whenCar((item, dt) => {
         const st = settings();
-        const keys = playMode.keysHeld;
-        const forward = keys.KeyW || keys.ArrowUp;
-        const drifting = playMode.carDrifting === true;
         const curSpeed = Math.sqrt(playMode.carVx * playMode.carVx + playMode.carVz * playMode.carVz);
-        const ref = Math.max(8, st.engineRefTopSpeed);
-        const speedT = THREE.MathUtils.smoothstep(curSpeed, 0, ref);
-        if (drifting) {
-          item.volume = 0;
-          item.rate = st.enginePitchMin;
-          return;
-        }
-        if (!forward) {
-          const coastEase = THREE.MathUtils.lerp(
-            st.engineCoastFadeEaseLo,
-            st.engineCoastFadeEaseHi,
-            THREE.MathUtils.smoothstep(curSpeed, 1, ref),
-          );
-          smoothVolume(item, 0, dt, 10, coastEase);
-          item.rate = smoothScalar(item.rate, st.enginePitchMin, dt, 5);
-          return;
-        }
-        const floor = THREE.MathUtils.clamp(st.engineAccelThrottleFloor, 0.04, 0.95);
-        const accelDrive = Math.max(speedT, floor);
-        const targetVol = Math.min(1.15, accelDrive * st.engineVolAtTop * st.engineMul);
-        smoothVolume(item, targetVol, dt, st.engineAccelEaseUp, 2.5);
-        const rateTarget = THREE.MathUtils.lerp(st.enginePitchMin, st.enginePitchMax, speedT);
-        item.rate = smoothScalar(item.rate, rateTarget, dt, 10);
-      }),
-    }),
-  );
-
-  // ── Idle engine: off-throttle / coast bed (ducks while accelerating)
-  const idleLoop = howlerLoopLayerOptions(playMode, "idle");
-  registered.push(
-    audioSystem.register({
-      bus: "vehicle",
-      src: paths.idle,
-      loop: idleLoop.loop,
-      ...(idleLoop.sprite ? { sprite: idleLoop.sprite, spritePlayId: idleLoop.spritePlayId } : {}),
-      autoplay: true,
-      volume: 0,
-      onPlaying: whenCar((item, dt) => {
-        const st = settings();
-        const keys = playMode.keysHeld;
-        const forward = keys.KeyW || keys.ArrowUp;
-        const drifting = playMode.carDrifting === true;
-        const curSpeed = Math.sqrt(playMode.carVx * playMode.carVx + playMode.carVz * playMode.carVz);
-        const refIdle = Math.max(6, st.idleRefSpeed);
-        const speedT = THREE.MathUtils.smoothstep(curSpeed, 0, refIdle);
-        if (drifting) {
-          item.volume = 0;
-          return;
-        }
-        const roll = st.idleVolRest + speedT * st.idleVolRoll;
-        const accelBlend = forward
-          ? THREE.MathUtils.smoothstep(
-            Math.max(speedT, st.engineAccelThrottleFloor),
-            0.08,
-            0.72,
-          )
-          : 0;
-        const duck = forward ? 1 - accelBlend * 0.78 : 1;
-        const targetVol = Math.min(1.2, roll * duck * st.idleMul);
-        smoothVolume(item, targetVol, dt, 8, 5);
-        const rateTarget = THREE.MathUtils.lerp(st.idlePitchMin, st.idlePitchMax, speedT);
-        item.rate = smoothScalar(item.rate, rateTarget, dt, 6);
+        const targetVol = Math.min(1.5, st.engineVol * st.engineMul);
+        smoothVolume(item, targetVol, dt, st.engineFadeEaseUp, 2.5);
+        const rateTarget = enginePitchFromSpeed(playMode, st, curSpeed);
+        item.rate = smoothScalar(item.rate, rateTarget, dt, st.enginePitchEase);
       }),
     }),
   );
