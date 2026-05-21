@@ -403,6 +403,7 @@
       import { createAmbientFXSystem } from "./ambientfx-painter.js";
       import { createFoliageSlot } from "./foliage-painter.js";
       import { createOctahedralImpostorForestWebgpu } from "./octahedralImpostorForestWebgpu.js";
+      import { createManciniLensFlare } from "./effects/lensflare-mancini.js";
       import {
         TreeLodChunkGpuCull,
         treeLodGpuCanUseForDefs,
@@ -483,7 +484,7 @@
         },
         /** Sun-anchored lens flare (no post-processing). Decoupled from sky. */
         lensFlare: {
-          enabled: true,
+          enabled: false,
           intensity: 3.0,
           halationSize: 3.0,
           halationColor: "#ffdca8",
@@ -493,6 +494,10 @@
           ghostOpacity: 2.0,
           ghostSpacing: 1.0,
           dirtOpacity: 0.0,
+        },
+        /** Anderson Mancini fullscreen lens flare (effects/lensflare-mancini.js). */
+        lensFlareMancini: {
+          enabled: true,
         },
         /** Blood FX: deer hit burst + ground pool + red flash. */
         bloodFX: {
@@ -1427,6 +1432,47 @@
         _lfDirt.material.userData.uInt.value =
           master * screenVis * p.dirtOpacity * 0.9;
       }
+
+      /* Mancini lens flare — fullscreen WGSL pass; legacy group above stays for A/B. */
+      const lensFlareMancini = createManciniLensFlare({
+        scene,
+        camera,
+        dirtTextureUrl: "./textures/mancinilensflare/lensDirtTexture.png",
+        params: {
+          enabled: PARAMS.lensFlareMancini.enabled,
+          followSun: true,
+          followMouse: false,
+          opacity: 0.7,
+          starBurst: true,
+        },
+      });
+
+      function updateLensFlareMancini() {
+        const p = lensFlareMancini.params;
+        if (!p.enabled) {
+          lensFlareMancini.mesh.visible = false;
+          return;
+        }
+        _lfCamQuatInv.copy(camera.quaternion).invert();
+        _lfSunLocal.copy(sunDir).applyQuaternion(_lfCamQuatInv);
+        if (_lfSunLocal.z >= -0.001) {
+          lensFlareMancini.mesh.visible = false;
+          return;
+        }
+        const horizonVis = THREE.MathUtils.smoothstep(sunDir.y, -0.02, 0.18);
+        if (horizonVis < 0.001) {
+          lensFlareMancini.mesh.visible = false;
+          return;
+        }
+        lensFlareMancini.mesh.visible = true;
+        lensFlareMancini.update(renderer, sun.position);
+      }
+
+      renderer.domElement.addEventListener("mousemove", (e) => {
+        if (lensFlareMancini.params.followMouse) {
+          lensFlareMancini.onMouseMove(e.clientX, e.clientY);
+        }
+      });
 
       /** Same CSM setup as splatmap-painter10bvh+post.html */
       let csm = null;
@@ -2577,6 +2623,7 @@
       const sky = new SkyMesh();
       sky.scale.setScalar(10000);
       sky.material.fog = false;
+      sky.userData.lensflare = "no-occlusion";
       scene.add(sky);
       sky.turbidity.value = PARAMS.sky.turbidity;
       sky.rayleigh.value = PARAMS.sky.rayleigh;
@@ -2607,6 +2654,9 @@
         sphereRadius: camera.far * 0.92,
       });
       scene.add(stylizedSky.mesh);
+      stylizedSky.mesh.traverse((o) => {
+        if (o.isMesh) o.userData.lensflare = "no-occlusion";
+      });
 
       /* ─── Billboard clouds (Genshin/Zelda-style) ──────────────────────────
        * Instanced camera-facing quads with TSL shading, manual frustum cull,
@@ -20348,6 +20398,73 @@ gemini grass patches: ${geminiGrassHasPaintedDensity ? lastGeminiPatchCount : 0}
           step: 0.05,
         });
 
+        const manciniFlareFolder = environmentFolder.addFolder({
+          title: "Lens flare (Mancini)",
+          expanded: true,
+        });
+        const mf = lensFlareMancini.params;
+        manciniFlareFolder.addBinding(mf, "enabled", { label: "Enabled" });
+        manciniFlareFolder.addBinding(mf, "followSun", { label: "Follow sun" });
+        manciniFlareFolder.addBinding(mf, "followMouse", {
+          label: "Follow mouse",
+        });
+        manciniFlareFolder.addBinding(mf, "opacity", {
+          label: "Opacity",
+          min: 0,
+          max: 1,
+          step: 0.01,
+        });
+        manciniFlareFolder.addBinding(mf, "starPoints", {
+          label: "Star points",
+          min: 0,
+          max: 9,
+          step: 1,
+        });
+        manciniFlareFolder.addBinding(mf, "glareSize", {
+          label: "Glare size",
+          min: 0,
+          max: 2,
+          step: 0.01,
+        });
+        manciniFlareFolder.addBinding(mf, "flareSize", {
+          label: "Flare size",
+          min: 0,
+          max: 0.1,
+          step: 0.001,
+        });
+        manciniFlareFolder.addBinding(mf, "flareSpeed", {
+          label: "Flare speed",
+          min: 0,
+          max: 1,
+          step: 0.01,
+        });
+        manciniFlareFolder.addBinding(mf, "haloScale", {
+          label: "Halo scale",
+          min: -0.5,
+          max: 1,
+          step: 0.01,
+        });
+        manciniFlareFolder.addBinding(mf, "ghostScale", {
+          label: "Ghost scale",
+          min: 0,
+          max: 2,
+          step: 0.01,
+        });
+        manciniFlareFolder.addBinding(mf, "animated", { label: "Animated" });
+        manciniFlareFolder.addBinding(mf, "starBurst", {
+          label: "Star burst (heavy)",
+        });
+        manciniFlareFolder.addBinding(mf, "secondaryGhosts", {
+          label: "Secondary ghosts",
+        });
+        manciniFlareFolder.addBinding(mf, "aditionalStreaks", {
+          label: "Extra streaks",
+        });
+        manciniFlareFolder.addBinding(mf, "colorGain", {
+          label: "Color gain",
+          view: "color",
+        });
+
         const skyFolder = environmentFolder.addFolder({
           title: "Sky & fog",
           expanded: false,
@@ -23653,6 +23770,7 @@ gemini grass patches: ${geminiGrassHasPaintedDensity ? lastGeminiPatchCount : 0}
         if (_cachedLakeBodies.length > 0)
           renderLakeReflection(_cachedLakeBodies);
         updateLensFlare();
+        updateLensFlareMancini();
         billboardClouds.update(dtSec, camera, sunDir, appTimeSec);
         renderer.render(scene, camera);
         updateHud(dt);
