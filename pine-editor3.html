@@ -429,6 +429,7 @@
         vec4,
         uniform,
         modelWorldMatrix,
+        modelWorldMatrixInverse,
         texture,
         uv,
         mix,
@@ -1246,6 +1247,13 @@
             color: "#4a3528",
             roughness: 0.88,
           },
+          wind: {
+            enabled: true,
+            speed: 1.1,
+            strength: 0.14,
+            micro: 0.04,
+            directionDeg: 25,
+          },
           debug: {
             wireframe: false,
             showPivot: false,
@@ -1461,6 +1469,12 @@
           rimStrength: uniform(params.material.rimStrength),
           rimPower: uniform(params.material.rimPower),
           sunDir: uniform(new THREE.Vector3(5, 12, 4).normalize()),
+          time: uniform(0),
+          windEnabled: uniform(1),
+          windSpeed: uniform(params.wind.speed),
+          windStr: uniform(params.wind.strength),
+          windMicro: uniform(params.wind.micro),
+          windDir: uniform(params.wind.directionDeg * DEG),
         };
 
         const leafMapNode = texture(checker);
@@ -1501,6 +1515,49 @@
             add(normalLocal, mul(sin(mul(uv().x, float(10))), leafU.leafWarp)),
           );
           return normalize(mix(warped, leafTrunkRadial, leafU.normalBias));
+        })();
+
+        /** World-space sway; tips move more (local Y²). Rotated into each card via instance matrix. */
+        const leafWindWorld = Fn(() => {
+          const phase = add(
+            mul(leafU.time, leafU.windSpeed),
+            mul(instanceIndex.toFloat(), float(1.31)),
+            mul(hash(instanceIndex), float(6.2832)),
+          );
+          const tip = mul(
+            max(positionLocal.y, float(0)),
+            max(positionLocal.y, float(0)),
+          );
+          const sway = mul(
+            sin(phase),
+            leafU.windStr,
+            tip,
+          );
+          const micro = mul(
+            sin(add(mul(phase, float(2.4)), mul(hash(instanceIndex), float(3.1)))),
+            leafU.windMicro,
+            tip,
+          );
+          const swayZ = mul(
+            cos(add(mul(phase, float(0.85)), mul(instanceIndex.toFloat(), float(0.7)))),
+            leafU.windStr,
+            float(0.45),
+            tip,
+          );
+          const amount = add(sway, micro);
+          return vec3(
+            mul(cos(leafU.windDir), amount),
+            float(0),
+            add(mul(sin(leafU.windDir), amount), swayZ),
+          );
+        });
+
+        const leafPositionNode = Fn(() => {
+          const wo = leafWindWorld();
+          const wl = modelWorldMatrixInverse
+            .mul(vec4(wo.x, wo.y, wo.z, float(0)))
+            .xyz;
+          return add(positionLocal, mul(wl, leafU.windEnabled));
         })();
 
         /** Mask alpha for opacityNode; alphaTest cutout in opaque pass (stable depth, no sort bugs). */
@@ -1580,6 +1637,7 @@
         });
         mat.colorNode = leafColorNode;
         mat.normalNode = leafNormalNode;
+        mat.positionNode = leafPositionNode;
         mat.envMapIntensity = 0;
         mat.castShadowNode = Fn(() => {
           const s = leafMapNode.sample(leafMaskUv());
@@ -1816,7 +1874,17 @@
           leafU.texFlip.value.set(m.texFlipH ? 1 : 0, m.texFlipV ? 1 : 0);
           const sc = params.scene;
           leafU.sunDir.value.set(sc.sunX, sc.sunY, sc.sunZ).normalize();
+          syncWindUniforms();
           syncLeafBounds();
+        }
+
+        function syncWindUniforms() {
+          const w = params.wind;
+          leafU.windEnabled.value = w.enabled !== false ? 1 : 0;
+          leafU.windSpeed.value = w.speed ?? 1;
+          leafU.windStr.value = w.strength ?? 0;
+          leafU.windMicro.value = w.micro ?? 0;
+          leafU.windDir.value = (w.directionDeg ?? 0) * DEG;
         }
 
         function syncMaterial() {
@@ -1856,6 +1924,7 @@
 
           leafU.useImageColor.value =
             m.colorSource === "texture" && hasMask ? 1 : 0;
+          syncWindUniforms();
           mat.needsUpdate = true;
         }
 
@@ -2914,6 +2983,7 @@
         syncMaterial();
         syncTrunkMaterial();
         syncBranchMaterial();
+        syncWindUniforms();
         syncScene();
 
         let refreshUploadName = () => {};
@@ -2999,6 +3069,7 @@
         const xf = params.transform;
         const m = params.material;
         const sc = params.scene;
+        const wnd = params.wind;
         const dbg = params.debug;
 
         const sTrunk = _section(uiRoot, "Trunk", true);
@@ -4008,6 +4079,45 @@
             "Blurry ground shadows: huge shadow frustum + dozens of leaf cards. Tighten focus, raise map size, or disable foliage shadow.",
         );
 
+        const sWind = _section(uiRoot, "Wind", true);
+        _toggle(sWind, wnd, "enabled", {
+          label: "enable wind",
+          onChange: onMaterial,
+        });
+        _slider(sWind, wnd, "speed", {
+          label: "speed",
+          min: 0,
+          max: 4,
+          step: 0.05,
+          onChange: onMaterial,
+        });
+        _slider(sWind, wnd, "strength", {
+          label: "sway",
+          min: 0,
+          max: 0.45,
+          step: 0.01,
+          onChange: onMaterial,
+        });
+        _slider(sWind, wnd, "micro", {
+          label: "flutter",
+          min: 0,
+          max: 0.15,
+          step: 0.005,
+          onChange: onMaterial,
+        });
+        _slider(sWind, wnd, "directionDeg", {
+          label: "direction °",
+          min: 0,
+          max: 360,
+          step: 1,
+          onChange: onMaterial,
+        });
+        _info(
+          sWind,
+          "wind-hint",
+          () => "Vertex sway in world XZ; hook (low Y) moves less than tips.",
+        );
+
         const sDbg = _section(uiRoot, "Debug", false);
         _toggle(sDbg, dbg, "wireframe", {
           label: "wireframe",
@@ -4108,8 +4218,13 @@
           renderer.setSize(innerWidth, innerHeight);
         });
 
+        let windClock0 = performance.now();
+
         function tick() {
           requestAnimationFrame(tick);
+          if (params.wind.enabled !== false) {
+            leafU.time.value = (performance.now() - windClock0) * 0.001;
+          }
           controls.update();
           renderer.render(scene, camera);
         }
