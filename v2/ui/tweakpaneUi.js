@@ -64,6 +64,7 @@ export function createTweakpaneUi({
   onLoadFoliageTexture,
   onFoliageSlotStructureChanged,
   onFoliageSlotMaterialChanged,
+  onMassPlaceFoliage,
   onClearAllFoliage,
   onGrassChanged,
   onGrassRebuildGeos,
@@ -385,6 +386,7 @@ export function createTweakpaneUi({
     onLoadTexture: onLoadFoliageTexture,
     onSlotStructureChanged: onFoliageSlotStructureChanged,
     onSlotMaterialChanged: onFoliageSlotMaterialChanged,
+    onMassPlaceFoliage,
     onClearAllFoliage,
     onFoliageLodChanged,
   });

@@ -1365,6 +1365,9 @@ export async function startV2App(opts = {}) {
       const count = toolState.treePaint.massPlaceCount;
       treeSystem.massPlace(count);
     },
+    onMassPlaceFoliage: () => {
+      foliagePaintSystem.massPlace(toolState.foliagePaint.massPlaceCount);
+    },
     onClearAllTrees: (_clearAllTrees = () => {
       treeSystem.clearAll();
     }),
@@ -3672,6 +3675,7 @@ export async function startV2App(opts = {}) {
     removeTreeSlot(slotIdx) { _removeTreeSlot(slotIdx); },
     clearAllTrees() { _clearAllTrees(); },
     massPlaceTrees() { treeSystem.massPlace(toolState.treePaint.massPlaceCount); },
+    massPlaceFoliage() { foliagePaintSystem.massPlace(toolState.foliagePaint.massPlaceCount); },
     treeCastShadowChanged() { _treeCastShadowChanged(); },
     foliageParamChanged(slotIdx) { _foliageParamChanged(slotIdx); },
     importPropGlb() { _importPropGlb(); },

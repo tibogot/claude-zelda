@@ -248,6 +248,11 @@ export function createToolState() {
       scaleMin: 0.7,
       scaleMax: 1.3,
       randomRotation: true,
+      /** Skip scatter on steep terrain (same test as tree paint). */
+      slopeEnabled: true,
+      slopeMax: 0.7,
+      massPlaceCount: 1000,
+      massPlaceKeepExisting: true,
       /** LMB erases instead of paints (Alt/Shift also erase). */
       erase: false,
       /** When erasing: remove all slots in brush; default = active slot only. */

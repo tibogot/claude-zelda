@@ -87,8 +87,9 @@ export class TreeSystem {
     const slotIdx = tp.activeSlot;
     const baseScale = this.toolState.treeSlots[slotIdx]?.baseScale ?? 1.0;
     const spacing = tp.minSpacing * Math.max(baseScale, 0.1);
+    const strength = THREE.MathUtils.clamp(this.toolState.brush.strength, 0, 1);
     const area = Math.PI * radius * radius;
-    const attempts = Math.ceil(area * tp.density * SCATTER_DENSITY_SCALE);
+    const attempts = Math.ceil(area * tp.density * SCATTER_DENSITY_SCALE * strength);
 
     for (let i = 0; i < attempts; i++) {
       const angle = Math.random() * Math.PI * 2;

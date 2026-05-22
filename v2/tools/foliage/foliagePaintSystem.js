@@ -15,6 +15,7 @@ export class FoliagePaintSystem {
     this.foliageStore = foliageStore;
     this.terrainStore = terrainStore;
     this.config = config;
+    this._slopeEps = 0.5;
     this.isPlacing = false;
     this.lastStrokePoint = null;
     /** @type {Map<string, Array>} */
@@ -66,6 +67,24 @@ export class FoliagePaintSystem {
     }
   }
 
+  _terrainNormalY(x, z) {
+    const e = this._slopeEps;
+    const hL = this.terrainStore.getWorldHeight(x - e, z);
+    const hR = this.terrainStore.getWorldHeight(x + e, z);
+    const hD = this.terrainStore.getWorldHeight(x, z - e);
+    const hU = this.terrainStore.getWorldHeight(x, z + e);
+    const dx = hL - hR;
+    const dz = hD - hU;
+    const e2 = e * 2;
+    return e2 / Math.sqrt(dx * dx + e2 * e2 + dz * dz);
+  }
+
+  _isTooSteep(x, z) {
+    const fp = this.toolState.foliagePaint;
+    if (!fp.slopeEnabled) return false;
+    return this._terrainNormalY(x, z) < fp.slopeMax;
+  }
+
   _scatter(wx, wz, radius) {
     const fp = this.toolState.foliagePaint;
     const slotIdx = fp.activeSlot;
@@ -88,6 +107,7 @@ export class FoliagePaintSystem {
       if (tx < -halfW || tx > halfW || tz < -halfW || tz > halfW) continue;
 
       if (this.foliageStore.hasFoliageNearby(tx, tz, spacing)) continue;
+      if (this._isTooSteep(tx, tz)) continue;
 
       const rotY = fp.randomRotation ? Math.random() * Math.PI * 2 : 0;
       const scale =
@@ -127,6 +147,65 @@ export class FoliagePaintSystem {
     if (!cmd) return;
     this.foliageStore.restoreFromSnapshot(cmd.after);
     this.undoStack.push(cmd);
+  }
+
+  massPlace(count) {
+    const fp = this.toolState.foliagePaint;
+    const slotIdx = fp.activeSlot;
+    const slot = this.toolState.foliageSlots[slotIdx];
+    if (!slot || !slot.enabled) return 0;
+
+    const baseScale = slot.baseScale ?? 1.0;
+    const spacing = fp.minSpacing * Math.max(baseScale, 0.1);
+    const halfW = this.config.world.size * 0.5;
+
+    const beforeKeys = new Set();
+    for (const key of this.foliageStore.chunks.keys()) beforeKeys.add(key);
+    const before = new Map();
+    for (const key of beforeKeys) {
+      const items = this.foliageStore.chunks.get(key);
+      before.set(key, items ? items.map((f) => ({ ...f })) : []);
+    }
+
+    if (!fp.massPlaceKeepExisting) {
+      this.foliageStore.clear();
+    }
+
+    let placed = 0;
+    let maxAttempts = count * 20;
+    while (placed < count && maxAttempts-- > 0) {
+      const tx = (Math.random() - 0.5) * this.config.world.size;
+      const tz = (Math.random() - 0.5) * this.config.world.size;
+
+      if (tx < -halfW || tx > halfW || tz < -halfW || tz > halfW) continue;
+      if (this.foliageStore.hasFoliageNearby(tx, tz, spacing)) continue;
+      if (this._isTooSteep(tx, tz)) continue;
+
+      const rotY = fp.randomRotation ? Math.random() * Math.PI * 2 : 0;
+      const scale =
+        (fp.scaleMin + Math.random() * (fp.scaleMax - fp.scaleMin)) * baseScale;
+      const y = this.terrainStore.getWorldHeight(tx, tz);
+      this.foliageStore.addFoliage(tx, tz, y, rotY, scale, slotIdx);
+      placed++;
+    }
+
+    const afterKeys = new Set(beforeKeys);
+    for (const key of this.foliageStore.chunks.keys()) afterKeys.add(key);
+    for (const key of afterKeys) {
+      if (!before.has(key)) before.set(key, []);
+    }
+    const after = new Map();
+    for (const key of afterKeys) {
+      const items = this.foliageStore.chunks.get(key);
+      after.set(key, items ? items.map((f) => ({ ...f })) : []);
+    }
+
+    this.undoStack.push({ before, after });
+    this.redoStack.length = 0;
+    if (this.undoStack.length > 64) this.undoStack.shift();
+
+    console.log(`[FoliagePaintSystem] Mass-placed ${placed} instances (requested ${count})`);
+    return placed;
   }
 
   clearAll() {

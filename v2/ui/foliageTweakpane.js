@@ -9,6 +9,7 @@
  * @param {(slotIdx: number) => void} opts.onLoadTexture
  * @param {(slotIdx: number) => void} opts.onSlotStructureChanged
  * @param {(slotIdx: number) => void} opts.onSlotMaterialChanged
+ * @param {() => void} [opts.onMassPlaceFoliage]
  * @param {() => void} opts.onClearAllFoliage
  * @param {() => void} opts.onFoliageLodChanged
  */
@@ -17,6 +18,7 @@ export function addFoliageFolder(pane, toolState, opts) {
     onLoadTexture,
     onSlotStructureChanged,
     onSlotMaterialChanged,
+    onMassPlaceFoliage,
     onClearAllFoliage,
     onFoliageLodChanged,
   } = opts;
@@ -64,6 +66,29 @@ export function addFoliageFolder(pane, toolState, opts) {
   brushFolder.addBinding(toolState.foliagePaint, "randomRotation", {
     label: "Random rotation",
   });
+  brushFolder.addBinding(toolState.foliagePaint, "slopeEnabled", {
+    label: "Skip steep slopes",
+  });
+  brushFolder.addBinding(toolState.foliagePaint, "slopeMax", {
+    label: "Slope threshold",
+    min: 0,
+    max: 1,
+    step: 0.01,
+  });
+
+  const massFolder = folder.addFolder({ title: "Mass Place Foliage", expanded: true });
+  massFolder.addBinding(toolState.foliagePaint, "massPlaceCount", {
+    label: "Count",
+    min: 1,
+    max: 50000,
+    step: 1,
+  });
+  massFolder.addBinding(toolState.foliagePaint, "massPlaceKeepExisting", {
+    label: "Keep existing",
+  });
+  massFolder
+    .addButton({ title: "Place" })
+    .on("click", () => opts.onMassPlaceFoliage?.());
 
   const slotsFolder = folder.addFolder({ title: "Foliage Slots", expanded: true });
 
