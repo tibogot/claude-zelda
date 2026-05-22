@@ -2,7 +2,8 @@
  * FoliagePaintSystem — brush-based billboard foliage scattering and erasing with undo/redo.
  *
  * LMB: scatter foliage of the active slot within the brush radius.
- * Alt+LMB: erase foliage within the brush radius.
+ * Alt/Shift+LMB (or Erase toggle): remove foliage in brush — active slot only by default.
+ * Enable eraseAllSlots to remove every type in the brush (old behavior).
  * Follows the same beginStroke → applyAt → endStroke pattern as TreeSystem.
  */
 import * as THREE from "three";
@@ -54,10 +55,12 @@ export class FoliagePaintSystem {
     const radius = brush.radius;
     this._snapshotAffected(hitPoint.x, hitPoint.z, radius);
 
-    const isErase = event.altKey || this.toolState.foliagePaint.activeSlot < 0;
+    const fp = this.toolState.foliagePaint;
+    const isErase = event.altKey || event.shiftKey || fp.erase;
 
     if (isErase) {
-      this.foliageStore.removeFoliageInRadius(hitPoint.x, hitPoint.z, radius);
+      const slotFilter = fp.eraseAllSlots ? -1 : fp.activeSlot;
+      this.foliageStore.removeFoliageInRadius(hitPoint.x, hitPoint.z, radius, slotFilter);
     } else {
       this._scatter(hitPoint.x, hitPoint.z, radius);
     }

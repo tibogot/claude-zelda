@@ -229,9 +229,14 @@ export function createToolState() {
       fadeOutDistance: 600,
       castShadow: true,
     },
+    /** 3-tier LOD for tree leaf cards (FoliageLodRenderer + treeStore). */
     foliageLod: {
       lod0Distance: 80,
       lod1Distance: 200,
+      fadeOutDistance: 600,
+    },
+    /** Distance cull for painted billboard foliage (BillboardRenderer + foliageStore). */
+    billboardFoliageLod: {
       fadeOutDistance: 600,
     },
     foliagePaint: {
@@ -241,6 +246,10 @@ export function createToolState() {
       scaleMin: 0.7,
       scaleMax: 1.3,
       randomRotation: true,
+      /** LMB erases instead of paints (Alt/Shift also erase). */
+      erase: false,
+      /** When erasing: remove all slots in brush; default = active slot only. */
+      eraseAllSlots: false,
     },
     foliageSlots: [0, 1, 2, 3, 4, 5, 6, 7].map((i) => ({
       name: `Slot ${i + 1}`,

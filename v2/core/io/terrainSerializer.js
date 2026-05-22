@@ -455,6 +455,7 @@ function extractSerializableSettings(toolState) {
     treeLod: { ...toolState.treeLod },
     foliagePaint: { ...toolState.foliagePaint },
     foliageLod: { ...toolState.foliageLod },
+    billboardFoliageLod: { ...toolState.billboardFoliageLod },
     foliageSlots: toolState.foliageSlots.map((s) => {
       const out = { ...s };
       if (out.textureUrl?.startsWith("data:") || out.textureUrl?.startsWith("blob:")) {
@@ -565,6 +566,11 @@ export function applySettings(toolState, settings) {
   if (settings.treeLod) Object.assign(toolState.treeLod, settings.treeLod);
   if (settings.foliagePaint) Object.assign(toolState.foliagePaint, settings.foliagePaint);
   if (settings.foliageLod) Object.assign(toolState.foliageLod, settings.foliageLod);
+  if (settings.billboardFoliageLod) {
+    Object.assign(toolState.billboardFoliageLod, settings.billboardFoliageLod);
+  } else if (settings.foliageLod?.fadeOutDistance != null) {
+    toolState.billboardFoliageLod.fadeOutDistance = settings.foliageLod.fadeOutDistance;
+  }
   if (settings.foliageSlots) {
     for (let i = 0; i < settings.foliageSlots.length && i < toolState.foliageSlots.length; i++) {
       Object.assign(toolState.foliageSlots[i], settings.foliageSlots[i]);

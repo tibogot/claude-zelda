@@ -3494,7 +3494,7 @@ export async function startV2App(opts = {}) {
     treeLodRenderer.update(treeStore, camera, toolState.treeLod);
     foliageLodRenderer.update(treeStore, camera, toolState.foliageLod);
     foliageLodRenderer.updateTime(now * 0.001);
-    billboardRenderer.update(foliageStore, camera, toolState.foliageLod);
+    billboardRenderer.update(foliageStore, camera, toolState.billboardFoliageLod);
     billboardRenderer.updateTime(now * 0.001);
     if (grassManager.uniforms) {
       grassManager.uniforms.uPlayerPos.value.copy(focusPos);
@@ -3698,6 +3698,7 @@ export async function startV2App(opts = {}) {
     foliageSlotMaterialChanged(slotIdx) { _foliageSlotMaterialChanged(slotIdx); },
     clearAllFoliage() { _clearAllFoliage(); },
     foliageLodChanged() { _foliageLodChanged(); },
+    billboardFoliageLodChanged() {},
     playSpawnChanged() { _playSpawnChanged(); },
     barrierOverlayChanged() { _barrierOverlayChanged(); },
     barrierClear() { _barrierClear(); },

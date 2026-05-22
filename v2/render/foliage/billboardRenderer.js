@@ -252,6 +252,7 @@ export class BillboardRenderer {
     }
   }
 
+  /** @param {{ fadeOutDistance?: number }} lodCfg — billboard cull distance (no LOD tiers). */
   update(foliageStore, camera, lodCfg) {
     for (const sr of this.slotRender) {
       if (sr?.instancedMesh) sr.instancedMesh.count = 0;

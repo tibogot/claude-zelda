@@ -33,6 +33,10 @@ export function addFoliageFolder(pane, toolState, opts) {
   });
 
   const brushFolder = folder.addFolder({ title: "Foliage Brush", expanded: true });
+  brushFolder.addBinding(toolState.foliagePaint, "erase", { label: "Erase mode" });
+  brushFolder.addBinding(toolState.foliagePaint, "eraseAllSlots", {
+    label: "Erase all slots",
+  });
   brushFolder.addBinding(toolState.foliagePaint, "density", {
     label: "Density",
     min: 0.1,
@@ -139,20 +143,12 @@ export function addFoliageFolder(pane, toolState, opts) {
       .on("change", () => onSlotMaterialChanged?.(i));
   }
 
-  const lodFolder = folder.addFolder({ title: "LOD Distances", expanded: false });
-  lodFolder
-    .addBinding(toolState.foliageLod, "lod0Distance", {
-      label: "LOD0 dist",
-      min: 20,
-      max: 300,
-      step: 5,
-    })
-    .on("change", () => onFoliageLodChanged?.());
-  lodFolder
-    .addBinding(toolState.foliageLod, "fadeOutDistance", {
-      label: "Fade out",
+  const visFolder = folder.addFolder({ title: "Billboard visibility", expanded: false });
+  visFolder
+    .addBinding(toolState.billboardFoliageLod, "fadeOutDistance", {
+      label: "Hide distance",
       min: 50,
-      max: 600,
+      max: 2000,
       step: 10,
     })
     .on("change", () => onFoliageLodChanged?.());

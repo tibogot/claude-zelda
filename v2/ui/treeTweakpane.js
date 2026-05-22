@@ -177,7 +177,7 @@ export function addTreeFolder(pane, toolState, opts) {
     .on("change", () => onCastShadowChanged?.());
 
   // Foliage LOD distances
-  const fLodFolder = folder.addFolder({ title: "Foliage LOD Distances", expanded: false });
+  const fLodFolder = folder.addFolder({ title: "Tree leaf LOD", expanded: false });
   fLodFolder
     .addBinding(toolState.foliageLod, "lod0Distance", {
       label: "LOD0 → LOD1",
