@@ -39,6 +39,7 @@
 
 import { parseChunkKey, worldHalf } from "../terrain/chunkMath.js";
 import { normalizeFoliageTextureRef } from "../foliage/foliageTexturePaths.js";
+import { normalizeBillboardGrassTextureRef } from "../billboardGrass/billboardGrassTexturePaths.js";
 import { getChunkCountPerAxis } from "../../app/config.js";
 
 const MAGIC = "V2TR";
@@ -456,6 +457,19 @@ function extractSerializableSettings(toolState) {
     foliagePaint: { ...toolState.foliagePaint },
     foliageLod: { ...toolState.foliageLod },
     billboardFoliageLod: { ...toolState.billboardFoliageLod },
+    billboardGrassPaint: { ...toolState.billboardGrassPaint },
+    billboardGrassLod: { ...toolState.billboardGrassLod },
+    billboardGrassSlots: toolState.billboardGrassSlots.map((s) => {
+      const out = { ...s };
+      delete out.texturePreviewName;
+      if (out.textureUrl?.startsWith("data:") || out.textureUrl?.startsWith("blob:")) {
+        out.textureUrl = null;
+      } else if (out.textureUrl) {
+        out.textureUrl = normalizeBillboardGrassTextureRef(out.textureUrl);
+      }
+      return out;
+    }),
+    billboardGrassChunks: toolState._billboardGrassExportData?.() ?? null,
     foliageSlots: toolState.foliageSlots.map((s) => {
       const out = { ...s };
       delete out.texturePreviewName;
@@ -565,6 +579,13 @@ export function applySettings(toolState, settings) {
   if (settings.tslGroundUi) Object.assign(toolState.tslGroundUi, settings.tslGroundUi);
   if (settings.treePaint) Object.assign(toolState.treePaint, settings.treePaint);
   if (settings.treeLod) Object.assign(toolState.treeLod, settings.treeLod);
+  if (settings.billboardGrassPaint) Object.assign(toolState.billboardGrassPaint, settings.billboardGrassPaint);
+  if (settings.billboardGrassLod) Object.assign(toolState.billboardGrassLod, settings.billboardGrassLod);
+  if (settings.billboardGrassSlots) {
+    for (let i = 0; i < settings.billboardGrassSlots.length && i < toolState.billboardGrassSlots.length; i++) {
+      Object.assign(toolState.billboardGrassSlots[i], settings.billboardGrassSlots[i]);
+    }
+  }
   if (settings.foliagePaint) Object.assign(toolState.foliagePaint, settings.foliagePaint);
   if (settings.foliageLod) Object.assign(toolState.foliageLod, settings.foliageLod);
   if (settings.billboardFoliageLod) {

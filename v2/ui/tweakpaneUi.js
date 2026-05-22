@@ -5,6 +5,7 @@ import { addTextureLibraryFolder } from "./textureLibraryTweakpane.js";
 import { addPaintFolder } from "./paintTweakpane.js";
 import { addTreeFolder } from "./treeTweakpane.js";
 import { addFoliageFolder } from "./foliageTweakpane.js";
+import { addBillboardGrassFolder } from "./billboardGrassTweakpane.js";
 import { addGrassFolder } from "./grassTweakpane.js";
 import { addCliffFolder } from "./cliffTweakpane.js";
 import { addPropFolder } from "./propTweakpane.js";
@@ -66,6 +67,10 @@ export function createTweakpaneUi({
   onFoliageSlotMaterialChanged,
   onMassPlaceFoliage,
   onClearAllFoliage,
+  onBillboardGrassSlotStructureChanged,
+  onBillboardGrassSlotMaterialChanged,
+  onMassPlaceBillboardGrass,
+  onClearAllBillboardGrass,
   onGrassChanged,
   onGrassRebuildGeos,
   onGrassFill,
@@ -389,6 +394,13 @@ export function createTweakpaneUi({
     onMassPlaceFoliage,
     onClearAllFoliage,
     onFoliageLodChanged,
+  });
+
+  addBillboardGrassFolder(pane, toolState, {
+    onSlotStructureChanged: onBillboardGrassSlotStructureChanged,
+    onSlotMaterialChanged: onBillboardGrassSlotMaterialChanged,
+    onMassPlaceBillboardGrass,
+    onClearAllBillboardGrass,
   });
 
   addGrassFolder(pane, toolState, {

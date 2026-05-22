@@ -60,8 +60,18 @@ import {
   applyFoliageSlotTextures,
   loadFoliageTextureFromFile,
 } from "../core/foliage/foliageTexturePaths.js";
+import {
+  BILLBOARD_GRASS_TEXTURE_DIR,
+  normalizeBillboardGrassTextureRef,
+  probeBillboardGrassTextureFile,
+  applyBillboardGrassSlotTextures,
+  loadBillboardGrassTextureFromFile,
+} from "../core/billboardGrass/billboardGrassTexturePaths.js";
 import { FoliagePaintSystem } from "../tools/foliage/foliagePaintSystem.js";
 import { BillboardRenderer } from "../render/foliage/billboardRenderer.js";
+import { BillboardGrassStore } from "../core/billboardGrass/billboardGrassStore.js";
+import { BillboardGrassPaintSystem } from "../tools/billboardGrass/billboardGrassPaintSystem.js";
+import { BillboardGrassRenderer } from "../render/billboardGrass/billboardGrassRenderer.js";
 import { loadFullPresetFromFile, loadFullPresetFromUrl } from "../core/foliage/presetLoader.js";
 import { GrassManager } from "../render/foliage/grassManager.js";
 import { GrassPaintSystem } from "../tools/foliage/grassPaintSystem.js";
@@ -421,6 +431,9 @@ export async function startV2App(opts = {}) {
 
   const cliffU = createAutoCliffUniforms();
 
+  /** Declared before async texture load so early callbacks do not hit TDZ. */
+  let cliffBlendPack = null;
+
   const textureLibrary = createTextureLibrary();
   const propTextureLibrary = createPropTextureLibrary();
   let textureLibraryReady = false;
@@ -666,6 +679,7 @@ export async function startV2App(opts = {}) {
   function markHeightTexDirty() {
     heightTexDirty = true;
   }
+  const billboardGrassStore = new BillboardGrassStore(config);
   const sculptBrushMask = new BrushMask();
   const sculptSystem = new SculptSystem({
     toolState,
@@ -676,6 +690,7 @@ export async function startV2App(opts = {}) {
       markHeightTexDirty();
       treeStore.syncAllHeights(terrainStore);
       foliageStore.syncAllHeights(terrainStore);
+      billboardGrassStore.syncAllHeights(terrainStore);
       fleurSystem.syncHeights();
       ambientFxStore.syncHeights();
       leafFxStore.syncHeights();
@@ -730,6 +745,22 @@ export async function startV2App(opts = {}) {
   for (let i = 0; i < toolState.foliageSlots.length; i++) {
     billboardRenderer.rebuildSlot(i, toolState.foliageSlots[i]);
   }
+
+  const billboardGrassRenderer = new BillboardGrassRenderer(scene, config);
+  const billboardGrassPaintSystem = new BillboardGrassPaintSystem({
+    toolState,
+    grassStore: billboardGrassStore,
+    terrainStore,
+    config,
+  });
+  for (let i = 0; i < toolState.billboardGrassSlots.length; i++) {
+    const slot = toolState.billboardGrassSlots[i];
+    if (slot.textureUrl) {
+      slot.textureUrl = normalizeBillboardGrassTextureRef(slot.textureUrl);
+    }
+    billboardGrassRenderer.rebuildSlot(i, slot);
+  }
+  applyBillboardGrassSlotTextures(billboardGrassRenderer, toolState.billboardGrassSlots).catch(() => {});
 
   const grassManager = new GrassManager({ scene, camera, config });
   const grassPaintSystem = new GrassPaintSystem({ toolState, grassManager, config });
@@ -810,7 +841,6 @@ export async function startV2App(opts = {}) {
     t.needsUpdate = true;
     return t;
   })();
-  let cliffBlendPack = null;
 
   function tryBuildCliffBlendMaterial() {
     if (cliffBlendPack) return;
@@ -1175,6 +1205,10 @@ export async function startV2App(opts = {}) {
   let _importTreeGlb, _loadTreePreset, _removeTreeSlot, _clearAllTrees, _treeCastShadowChanged, _foliageParamChanged;
   let _importPropGlb, _addPrimitive, _addLiveProp, _removePropSlot, _importPropLod, _propCastShadowChanged, _deleteSelectedProp, _duplicateSelectedProp, _clearAllProps, _propTransformModeChanged, _rebakeBvh;
   let _loadFoliageTexture, _foliageSlotStructureChanged, _foliageSlotMaterialChanged, _clearAllFoliage, _foliageLodChanged;
+  let _loadBillboardGrassMask,
+    _billboardGrassSlotStructureChanged,
+    _billboardGrassSlotMaterialChanged,
+    _clearAllBillboardGrass;
   let _playSpawnChanged, _barrierOverlayChanged, _barrierClear, _barrierFill, _holeOverlayChanged, _holeClear, _caveUndo, _caveRedo, _caveClear;
   let _ambientFxFlapChanged, _ambientFxRingsChanged, _ambientFxClear, _ambientFxLeafChanged, _ambientFxClearLeaves, _ambientFxLeafRespawn;
   let _fleurChanged, _fleurColorChanged, _fleurStemChanged, _fleurStemCurveChanged, _fleurInteractionChanged, _fleurClear;
@@ -1368,6 +1402,9 @@ export async function startV2App(opts = {}) {
     onMassPlaceFoliage: () => {
       foliagePaintSystem.massPlace(toolState.foliagePaint.massPlaceCount);
     },
+    onMassPlaceBillboardGrass: () => {
+      billboardGrassPaintSystem.massPlace(toolState.billboardGrassPaint.massPlaceCount);
+    },
     onClearAllTrees: (_clearAllTrees = () => {
       treeSystem.clearAll();
     }),
@@ -1430,6 +1467,64 @@ export async function startV2App(opts = {}) {
     }),
     onClearAllFoliage: (_clearAllFoliage = () => {
       foliagePaintSystem.clearAll();
+    }),
+    onLoadBillboardGrassMask: (_loadBillboardGrassMask = async (slotIdx) => {
+      const input = document.createElement("input");
+      input.type = "file";
+      input.accept = "image/*";
+      input.onchange = async () => {
+        const file = input.files?.[0];
+        if (!file) return;
+        const filename = file.name.split(/[/\\]/).pop();
+        const slot = toolState.billboardGrassSlots[slotIdx];
+        const projectUrl = await probeBillboardGrassTextureFile(filename);
+
+        const applyTex = (tex, persist) => {
+          if (persist) {
+            delete slot.texturePreviewName;
+            slot.textureUrl = normalizeBillboardGrassTextureRef(filename);
+            console.log(`[V2] Billboard grass slot ${slotIdx} ← ${slot.textureUrl}`);
+          } else {
+            slot.texturePreviewName = filename;
+            console.log(
+              `[V2] Billboard grass slot ${slotIdx} preview: ${filename} (copy to ${BILLBOARD_GRASS_TEXTURE_DIR} or textures/foliage/ to keep after save)`,
+            );
+          }
+          billboardGrassRenderer.setSlotTexture(slotIdx, tex, slot);
+          document.getElementById("billboard-grass-panel")?._updateBillboardGrassMaskLabel?.(slotIdx);
+        };
+
+        if (projectUrl) {
+          new THREE.TextureLoader().load(projectUrl, (tex) => {
+            tex.colorSpace = THREE.SRGBColorSpace;
+            applyTex(tex, true);
+          });
+          return;
+        }
+
+        try {
+          const tex = await loadBillboardGrassTextureFromFile(file);
+          applyTex(tex, false);
+        } catch (err) {
+          console.warn(`[V2] Billboard grass slot ${slotIdx}: could not load ${filename}`, err);
+        }
+      };
+      input.click();
+    }),
+    onBillboardGrassSlotStructureChanged: (_billboardGrassSlotStructureChanged = (slotIdx) => {
+      billboardGrassRenderer.rebuildSlot(slotIdx, toolState.billboardGrassSlots[slotIdx]);
+    }),
+    onBillboardGrassSlotMaterialChanged: (_billboardGrassSlotMaterialChanged = (slotIdx) => {
+      const slot = toolState.billboardGrassSlots[slotIdx];
+      const sr = billboardGrassRenderer.slotRender[slotIdx];
+      if (sr?.textureObj) {
+        billboardGrassRenderer.setSlotTexture(slotIdx, sr.textureObj, slot);
+      } else {
+        billboardGrassRenderer.updateSlotUniforms(slotIdx, slot);
+      }
+    }),
+    onClearAllBillboardGrass: (_clearAllBillboardGrass = () => {
+      billboardGrassPaintSystem.clearAll();
     }),
     onGrassChanged: (_grassChanged = () => {
       grassManager.syncUniforms(toolState.grass, sunDir);
@@ -1536,6 +1631,7 @@ export async function startV2App(opts = {}) {
       markHeightTexDirty();
       treeStore.syncAllHeights(terrainStore);
       foliageStore.syncAllHeights(terrainStore);
+      billboardGrassStore.syncAllHeights(terrainStore);
       splineSystem.syncGuardrailsToGround();
       splineSystem.syncKerbsToGround();
       splineSystem.syncLinearFeaturesToGround();
@@ -1589,6 +1685,7 @@ export async function startV2App(opts = {}) {
       markHeightTexDirty();
       treeStore.syncAllHeights(terrainStore);
       foliageStore.syncAllHeights(terrainStore);
+      billboardGrassStore.syncAllHeights(terrainStore);
       splineSystem.syncGuardrailsToGround();
       splineSystem.syncKerbsToGround();
       splineSystem.syncLinearFeaturesToGround();
@@ -1695,6 +1792,7 @@ export async function startV2App(opts = {}) {
       markHeightTexDirty();
       treeStore.syncAllHeights(terrainStore);
       foliageStore.syncAllHeights(terrainStore);
+      billboardGrassStore.syncAllHeights(terrainStore);
       splineSystem.syncGuardrailsToGround();
       splineSystem.syncKerbsToGround();
       splineSystem.syncLinearFeaturesToGround();
@@ -1740,6 +1838,7 @@ export async function startV2App(opts = {}) {
       markHeightTexDirty();
       treeStore.syncAllHeights(terrainStore);
       foliageStore.syncAllHeights(terrainStore);
+      billboardGrassStore.syncAllHeights(terrainStore);
       splineSystem.syncGuardrailsToGround();
       splineSystem.syncKerbsToGround();
       splineSystem.syncLinearFeaturesToGround();
@@ -2103,6 +2202,7 @@ export async function startV2App(opts = {}) {
       toolState._riverExportData = () => riverSystem.exportData();
       toolState._splineExportData = () => splineSystem.exportData();
       toolState._decalExportData = () => decalSystem.exportData();
+      toolState._billboardGrassExportData = () => billboardGrassStore.toJSON();
       const buf = serializeProject({
         terrainStore,
         splatStore,
@@ -2127,6 +2227,7 @@ export async function startV2App(opts = {}) {
       delete toolState._riverExportData;
       delete toolState._splineExportData;
       delete toolState._decalExportData;
+      delete toolState._billboardGrassExportData;
       const blob = new Blob([buf], { type: "application/octet-stream" });
       const ts = new Date().toISOString().replace(/[:.]/g, "-").slice(0, 19);
       downloadBlob(blob, `terrain-${ts}.v2terrain`);
@@ -2153,6 +2254,11 @@ export async function startV2App(opts = {}) {
         if (project.foliageChunks?.size > 0) {
           foliageStore.restoreFromSnapshot(project.foliageChunks);
           foliageStore.syncAllHeights(terrainStore);
+        }
+        billboardGrassStore.clear();
+        if (Array.isArray(project.settings?.billboardGrassChunks) && project.settings.billboardGrassChunks.length > 0) {
+          billboardGrassStore.fromJSON(project.settings.billboardGrassChunks);
+          billboardGrassStore.syncAllHeights(terrainStore);
         }
         // Restore settings
         applySettings(toolState, project.settings);
@@ -2305,6 +2411,15 @@ export async function startV2App(opts = {}) {
         }
         await applyFoliageSlotTextures(billboardRenderer, toolState.foliageSlots);
 
+        for (let gi = 0; gi < toolState.billboardGrassSlots.length; gi++) {
+          const slot = toolState.billboardGrassSlots[gi];
+          if (slot.textureUrl) {
+            slot.textureUrl = normalizeBillboardGrassTextureRef(slot.textureUrl);
+          }
+          billboardGrassRenderer.rebuildSlot(gi, slot);
+        }
+        await applyBillboardGrassSlotTextures(billboardGrassRenderer, toolState.billboardGrassSlots);
+
         // Auto-reload tree presets (trunk GLBs + foliage) for slots that had them.
         // Also handles slots imported as raw GLBs from /models (slot.glbFile.lod0/lod1).
         const presetLoads = [];
@@ -2371,8 +2486,9 @@ export async function startV2App(opts = {}) {
         ui?.pane.refresh();
         const treeCount = treeStore.totalCount;
         const foliageCount = foliageStore.getTotalCount();
+        const bbGrassCount = billboardGrassStore.getTotalCount();
         console.log(
-          `[V2] Loaded project: ${project.terrainChunks.size} terrain chunks, ${project.splatChunks.size} splat chunks, ${treeCount} trees, ${foliageCount} billboard foliage`,
+          `[V2] Loaded project: ${project.terrainChunks.size} terrain chunks, ${project.splatChunks.size} splat chunks, ${treeCount} trees, ${foliageCount} billboard foliage, ${bbGrassCount} billboard grass`,
         );
       } catch (err) {
         console.error("[V2] Failed to load project:", err);
@@ -2672,7 +2788,7 @@ export async function startV2App(opts = {}) {
   }
 
   function isBrushMode() {
-    return toolState.mode === "sculpt" || toolState.mode === "paint" || toolState.mode === "treePaint" || toolState.mode === "foliagePaint" || toolState.mode === "grass" || toolState.mode === "cliffGrass" || toolState.mode === "barrier" || toolState.mode === "hole" || toolState.mode === "cave" || toolState.mode === "fleurs" || toolState.mode === "ambientfx" || (toolState.mode === "props" && toolState.props.placementMode === "paint");
+    return toolState.mode === "sculpt" || toolState.mode === "paint" || toolState.mode === "treePaint" || toolState.mode === "foliagePaint" || toolState.mode === "billboardGrassPaint" || toolState.mode === "grass" || toolState.mode === "cliffGrass" || toolState.mode === "barrier" || toolState.mode === "hole" || toolState.mode === "cave" || toolState.mode === "fleurs" || toolState.mode === "ambientfx" || (toolState.mode === "props" && toolState.props.placementMode === "paint");
   }
 
   function updateBrushPreviewFromPick(hit) {
@@ -2985,6 +3101,8 @@ export async function startV2App(opts = {}) {
       treeSystem.beginStroke(hit.point, event);
     } else if (toolState.mode === "foliagePaint") {
       foliagePaintSystem.beginStroke(hit.point, event);
+    } else if (toolState.mode === "billboardGrassPaint") {
+      billboardGrassPaintSystem.beginStroke(hit.point, event);
     } else if (toolState.mode === "grass") {
       grassPaintSystem.beginStroke(hit.point, event);
     } else if (toolState.mode === "cliffGrass") {
@@ -3050,6 +3168,8 @@ export async function startV2App(opts = {}) {
       treeSystem.applyAt(hit.point, event);
     } else if (toolState.mode === "foliagePaint") {
       foliagePaintSystem.applyAt(hit.point, event);
+    } else if (toolState.mode === "billboardGrassPaint") {
+      billboardGrassPaintSystem.applyAt(hit.point, event);
     } else if (toolState.mode === "grass") {
       grassPaintSystem.applyAt(hit.point, event);
     } else if (toolState.mode === "cliffGrass") {
@@ -3166,6 +3286,8 @@ export async function startV2App(opts = {}) {
       treeSystem.endStroke();
     } else if (toolState.mode === "foliagePaint") {
       foliagePaintSystem.endStroke();
+    } else if (toolState.mode === "billboardGrassPaint") {
+      billboardGrassPaintSystem.endStroke();
     } else if (toolState.mode === "grass") {
       grassPaintSystem.endStroke();
     } else if (toolState.mode === "cliffGrass") {
@@ -3183,6 +3305,7 @@ export async function startV2App(opts = {}) {
     if (toolState.mode === "paint") return paintSystem;
     if (toolState.mode === "treePaint") return treeSystem;
     if (toolState.mode === "foliagePaint") return foliagePaintSystem;
+    if (toolState.mode === "billboardGrassPaint") return billboardGrassPaintSystem;
     if (toolState.mode === "grass") return grassPaintSystem;
     if (toolState.mode === "cliffGrass") return cliffGrassPaintSystem;
     if (toolState.mode === "road") return roadSystem;
@@ -3417,6 +3540,10 @@ export async function startV2App(opts = {}) {
       event.preventDefault();
       toolState.mode = toolState.mode === "foliagePaint" ? "view" : "foliagePaint";
       applyModeChangedEffects();
+    } else if (event.code === "KeyU" && !ctrl && !playMode.active) {
+      event.preventDefault();
+      toolState.mode = toolState.mode === "billboardGrassPaint" ? "view" : "billboardGrassPaint";
+      applyModeChangedEffects();
     } else if (event.code === "KeyB" && !ctrl && !playMode.active) {
       event.preventDefault();
       toolState.mode = toolState.mode === "barrier" ? "view" : "barrier";
@@ -3473,6 +3600,7 @@ export async function startV2App(opts = {}) {
       if (grassManager.uniforms) grassManager.uniforms.uSunDir.value.copy(sunDir);
       foliageLodRenderer.updateSunDirection(sunDir);
       billboardRenderer.updateSunDirection(sunDir);
+      billboardGrassRenderer.updateSunDirection(sunDir);
     }
     lensFlare.update();
 
@@ -3528,6 +3656,14 @@ export async function startV2App(opts = {}) {
       toolState.foliageSlots,
     );
     billboardRenderer.updateTime(now * 0.001);
+    billboardGrassRenderer.update(
+      billboardGrassStore,
+      camera,
+      toolState.billboardGrassLod,
+      toolState.billboardGrassSlots,
+      { aerialStrict: playMode.active },
+    );
+    billboardGrassRenderer.updateTime(now * 0.001);
     if (grassManager.uniforms) {
       grassManager.uniforms.uPlayerPos.value.copy(focusPos);
     }
@@ -3676,6 +3812,21 @@ export async function startV2App(opts = {}) {
     clearAllTrees() { _clearAllTrees(); },
     massPlaceTrees() { treeSystem.massPlace(toolState.treePaint.massPlaceCount); },
     massPlaceFoliage() { foliagePaintSystem.massPlace(toolState.foliagePaint.massPlaceCount); },
+    massPlaceBillboardGrass() {
+      billboardGrassPaintSystem.massPlace(toolState.billboardGrassPaint.massPlaceCount);
+    },
+    billboardGrassSlotStructureChanged(slotIdx) {
+      _billboardGrassSlotStructureChanged(slotIdx);
+    },
+    billboardGrassSlotMaterialChanged(slotIdx) {
+      _billboardGrassSlotMaterialChanged(slotIdx);
+    },
+    clearAllBillboardGrass() {
+      _clearAllBillboardGrass();
+    },
+    loadBillboardGrassMask(slotIdx) {
+      _loadBillboardGrassMask(slotIdx);
+    },
     treeCastShadowChanged() { _treeCastShadowChanged(); },
     foliageParamChanged(slotIdx) { _foliageParamChanged(slotIdx); },
     importPropGlb() { _importPropGlb(); },
@@ -3821,6 +3972,7 @@ export async function startV2App(opts = {}) {
       markHeightTexDirty();
       treeStore.syncAllHeights(terrainStore);
       foliageStore.syncAllHeights(terrainStore);
+      billboardGrassStore.syncAllHeights(terrainStore);
       splineSystem.syncGuardrailsToGround();
       splineSystem.syncKerbsToGround();
       splineSystem.syncLinearFeaturesToGround();

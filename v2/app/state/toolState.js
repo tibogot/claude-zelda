@@ -258,6 +258,66 @@ export function createToolState() {
       /** When erasing: remove all slots in brush; default = active slot only. */
       eraseAllSlots: false,
     },
+    /** Procedural billboard ground cover (separate from foliage paint + GPU grass). */
+    billboardGrassPaint: {
+      activeSlot: 0,
+      density: 0.8,
+      minSpacing: 1.5,
+      scaleMin: 0.7,
+      scaleMax: 1.3,
+      randomRotation: true,
+      slopeEnabled: true,
+      slopeMax: 0.7,
+      massPlaceCount: 8000,
+      massPlaceKeepExisting: true,
+      erase: false,
+      eraseAllSlots: false,
+    },
+    billboardGrassLod: {
+      lod0Distance: 50,
+      lod1Distance: 120,
+      fadeOutDistance: 280,
+      /** Shrinks draw distance when camera is high (orbit / flight). */
+      aerialFadeStrength: 1.4,
+    },
+    billboardGrassSlots: ["meadow", "dry", "moss", "wheat"].map((preset, i) => {
+      const palettes = {
+        meadow: { colorBottom: "#1a4d12", colorMid: "#3d8f2a", colorTop: "#6bc44a", name: "Meadow" },
+        dry: { colorBottom: "#4a3d1a", colorMid: "#8f7a3d", colorTop: "#c4a85a", name: "Dry field" },
+        moss: { colorBottom: "#142e18", colorMid: "#2a5234", colorTop: "#4a8f55", name: "Moss" },
+        wheat: { colorBottom: "#5a4a18", colorMid: "#9a7a28", colorTop: "#d4b850", name: "Wheat" },
+      };
+      const p = palettes[preset];
+      return {
+        name: p.name,
+        enabled: true,
+        preset,
+        baseScale: 1.0,
+        planeCount: 3,
+        planeSpread: "full",
+        tilt: 0.28,
+        tiltMode: "stable",
+        structureSeed: 42069 + i * 1000,
+        width: 1.8,
+        height: 2.0,
+        colorBottom: p.colorBottom,
+        colorMid: p.colorMid,
+        colorTop: p.colorTop,
+        noiseScale: 4,
+        noiseStrength: 0.35,
+        windScrollSpeed: 0.08,
+        windScrollScale: 2,
+        windShadeStrength: 0.42,
+        swaySpeed: 1.6,
+        swayStrength: 0.07,
+        groundOcclusion: 0.78,
+        normalUpBias: 0.94,
+        textureUrl: "textures/billboardGrass/grassmask1.jpg",
+        maskInAlpha: 0,
+        alphaTest: 0.32,
+        roughness: 0.92,
+      };
+    }),
     foliageSlots: [0, 1, 2, 3, 4, 5, 6, 7].map((i) => ({
       name: `Slot ${i + 1}`,
       enabled: true,

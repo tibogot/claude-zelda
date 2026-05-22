@@ -744,6 +744,7 @@
           <option value="paint">Paint (P)</option>
           <option value="treePaint">Tree Paint (T)</option>
           <option value="foliagePaint">Foliage Paint (L)</option>
+          <option value="billboardGrassPaint">Billboard Grass (U)</option>
           <option value="grass">Grass (G)</option>
           <option value="cliffGrass">Cliff Grass</option>
           <option value="road">Road</option>
@@ -1206,6 +1207,7 @@ const MODE_FOLDERS = {
   paint: ['Brush', 'Paint', 'Terrain appearance', 'Texture library'],
   treePaint: ['Brush', 'Tree LOD'],
   foliagePaint: ['Brush', 'Billboard Foliage'],
+  billboardGrassPaint: ['Brush', 'Billboard Grass'],
   grass: ['Brush', 'Grass'],
   cliffGrass: ['Brush', 'Cliff Grass'],
   road: ['Road'],
@@ -1233,7 +1235,7 @@ const ALWAYS_HIDDEN = new Set([
 ]);
 const ALWAYS_VISIBLE = new Set();
 
-const CUSTOM_MODES = new Set(['sculpt', 'paint', 'treePaint', 'props', 'foliagePaint', 'playSpawn', 'hole', 'barrier', 'ambientfx', 'fleurs', 'cliffGrass', 'cliffs', 'water', 'waterfall', 'decals', 'river', 'spline', 'grass', 'smartRoad']);
+const CUSTOM_MODES = new Set(['sculpt', 'paint', 'treePaint', 'props', 'foliagePaint', 'billboardGrassPaint', 'playSpawn', 'hole', 'barrier', 'ambientfx', 'fleurs', 'cliffGrass', 'cliffs', 'water', 'waterfall', 'decals', 'river', 'spline', 'grass', 'smartRoad']);
 
 function syncToolsTab(pane, mode) {
   if (!pane) return;
@@ -1248,6 +1250,8 @@ function syncToolsTab(pane, mode) {
   if (propsPanel) propsPanel.style.display = mode === 'props' ? '' : 'none';
   const foliagePanel = document.getElementById('foliage-panel');
   if (foliagePanel) foliagePanel.style.display = mode === 'foliagePaint' ? '' : 'none';
+  const billboardGrassPanel = document.getElementById('billboard-grass-panel');
+  if (billboardGrassPanel) billboardGrassPanel.style.display = mode === 'billboardGrassPaint' ? '' : 'none';
   const playspawnPanel = document.getElementById('playspawn-panel');
   if (playspawnPanel) playspawnPanel.style.display = mode === 'playSpawn' ? '' : 'none';
   const holePanel = document.getElementById('hole-panel');
@@ -2339,6 +2343,127 @@ function buildPropsPanel(app) {
 
   panel._rebuildPropUi = rebuildAll;
 
+  return panel;
+}
+
+// === Build custom Billboard Grass panel (procedural cards — not GPU grass / foliage paint) ===
+const BILLBOARD_GRASS_PRESET_COLORS = {
+  meadow: { colorBottom: '#1a4d12', colorMid: '#3d8f2a', colorTop: '#6bc44a' },
+  dry: { colorBottom: '#4a3d1a', colorMid: '#8f7a3d', colorTop: '#c4a85a' },
+  moss: { colorBottom: '#142e18', colorMid: '#2a5234', colorTop: '#4a8f55' },
+  wheat: { colorBottom: '#5a4a18', colorMid: '#9a7a28', colorTop: '#d4b850' },
+};
+
+function applyBillboardGrassPresetColors(slot) {
+  const p = BILLBOARD_GRASS_PRESET_COLORS[slot.preset] || BILLBOARD_GRASS_PRESET_COLORS.meadow;
+  slot.colorBottom = p.colorBottom;
+  slot.colorMid = p.colorMid;
+  slot.colorTop = p.colorTop;
+}
+
+function buildBillboardGrassPanel(app) {
+  const panel = document.createElement('div');
+  panel.id = 'billboard-grass-panel';
+  const ts = app.toolState;
+  const cfg = app.config;
+  const presetOpts = { Meadow: 'meadow', 'Dry field': 'dry', Moss: 'moss', Wheat: 'wheat' };
+
+  const brushBody = _section(panel, 'Brush');
+  _slider(brushBody, ts.brush, 'radius', { label: 'Radius', min: cfg.sculpt.brushMin, max: cfg.sculpt.brushMax, step: 0.5 });
+  _slider(brushBody, ts.brush, 'strength', { label: 'Strength', min: cfg.sculpt.strengthMin, max: cfg.sculpt.strengthMax, step: 0.01 });
+
+  const slotBody = _section(panel, 'Grass preset slot');
+  function rebuildSlotPicker() {
+    slotBody.innerHTML = '';
+    const slotOpts = {};
+    for (let i = 0; i < ts.billboardGrassSlots.length; i++) slotOpts[ts.billboardGrassSlots[i].name] = i;
+    _toggle(slotBody, ts.billboardGrassPaint, 'erase', { label: 'Erase (or Alt / Shift)' });
+    _toggle(slotBody, ts.billboardGrassPaint, 'eraseAllSlots', { label: 'Erase all slots in brush' });
+    _dropdown(slotBody, ts.billboardGrassPaint, 'activeSlot', { label: 'Active slot', options: slotOpts });
+    _slider(slotBody, ts.billboardGrassPaint, 'density', { label: 'Density', min: 0.1, max: 8, step: 0.1 });
+    _slider(slotBody, ts.billboardGrassPaint, 'minSpacing', { label: 'Min spacing', min: 0.2, max: 6, step: 0.05 });
+    _slider(slotBody, ts.billboardGrassPaint, 'scaleMin', { label: 'Scale min', min: 0.1, max: 2, step: 0.05 });
+    _slider(slotBody, ts.billboardGrassPaint, 'scaleMax', { label: 'Scale max', min: 0.1, max: 2, step: 0.05 });
+    _toggle(slotBody, ts.billboardGrassPaint, 'randomRotation', { label: 'Random rot.' });
+    _toggle(slotBody, ts.billboardGrassPaint, 'slopeEnabled', { label: 'Skip steep slopes' });
+    _slider(slotBody, ts.billboardGrassPaint, 'slopeMax', { label: 'Slope threshold', min: 0.0, max: 1.0, step: 0.01 });
+  }
+  rebuildSlotPicker();
+
+  const massBody = _section(panel, 'Mass place');
+  _slider(massBody, ts.billboardGrassPaint, 'massPlaceCount', { label: 'Instances', min: 1, max: 50000, step: 1 });
+  _toggle(massBody, ts.billboardGrassPaint, 'massPlaceKeepExisting', { label: 'Keep existing' });
+  _button(massBody, { title: 'Place', onClick: () => app.massPlaceBillboardGrass() });
+
+  function billboardGrassMaskLabel(slot) {
+    if (slot.texturePreviewName) return `${slot.texturePreviewName} (preview)`;
+    if (slot.textureUrl) return slot.textureUrl.split(/[/\\]/).pop() || slot.textureUrl;
+    return '(none — load B/W mask)';
+  }
+
+  panel._billboardGrassMaskInfo = [];
+
+  for (let i = 0; i < ts.billboardGrassSlots.length; i++) {
+    const slot = ts.billboardGrassSlots[i];
+    const sBody = _section(panel, slot.name, false);
+    const structCb = () => app.billboardGrassSlotStructureChanged(i);
+    const matCb = () => app.billboardGrassSlotMaterialChanged(i);
+    const presetCb = () => {
+      applyBillboardGrassPresetColors(slot);
+      matCb();
+    };
+
+    _toggle(sBody, slot, 'enabled', { label: 'Enabled', onChange: structCb });
+    panel._billboardGrassMaskInfo[i] = _info(sBody, 'Alpha mask', billboardGrassMaskLabel(slot));
+    _button(sBody, { title: 'Load mask', onClick: () => app.loadBillboardGrassMask(i) });
+    _dropdown(sBody, slot, 'preset', { label: 'Palette', options: presetOpts, onChange: presetCb });
+    _slider(sBody, slot, 'baseScale', { label: 'Base scale', min: 0.1, max: 3, step: 0.05, onChange: structCb });
+
+    const cardBody = _section(sBody, 'Card structure', false);
+    _slider(cardBody, slot, 'planeCount', { label: 'Plane count', min: 1, max: 6, step: 1, onChange: structCb });
+    _dropdown(cardBody, slot, 'planeSpread', { label: 'Spread', options: { '360° radial': 'full', '180° fan': 'half' }, onChange: structCb });
+    _dropdown(cardBody, slot, 'tiltMode', { label: 'Tilt mode', options: { 'Stable random': 'stable', 'Symmetric': 'symmetric' }, onChange: structCb });
+    _slider(cardBody, slot, 'tilt', { label: 'Tilt amount', min: 0, max: 1.5, step: 0.01, onChange: structCb });
+    _slider(cardBody, slot, 'structureSeed', { label: 'Seed', min: 0, max: 999999, step: 1, onChange: structCb });
+    _slider(cardBody, slot, 'width', { label: 'Width', min: 0.1, max: 10, step: 0.1, onChange: structCb });
+    _slider(cardBody, slot, 'height', { label: 'Height', min: 0.1, max: 10, step: 0.1, onChange: structCb });
+
+    const colBody = _section(sBody, 'Colors & noise', false);
+    _color(colBody, slot, 'colorBottom', { label: 'Bottom', onChange: matCb });
+    _color(colBody, slot, 'colorMid', { label: 'Mid', onChange: matCb });
+    _color(colBody, slot, 'colorTop', { label: 'Top', onChange: matCb });
+    _slider(colBody, slot, 'noiseScale', { label: 'Noise scale', min: 0.5, max: 16, step: 0.1, onChange: matCb });
+    _slider(colBody, slot, 'noiseStrength', { label: 'Noise strength', min: 0, max: 1, step: 0.01, onChange: matCb });
+
+    const windBody = _section(sBody, 'Wind illusion', false);
+    _slider(windBody, slot, 'windScrollSpeed', { label: 'Scroll speed', min: 0, max: 0.5, step: 0.005, onChange: matCb });
+    _slider(windBody, slot, 'windScrollScale', { label: 'Scroll scale', min: 0.25, max: 8, step: 0.1, onChange: matCb });
+    _slider(windBody, slot, 'windShadeStrength', { label: 'Shade strength', min: 0, max: 1, step: 0.01, onChange: matCb });
+    _slider(windBody, slot, 'swaySpeed', { label: 'Sway speed', min: 0, max: 5, step: 0.1, onChange: matCb });
+    _slider(windBody, slot, 'swayStrength', { label: 'Sway amount', min: 0, max: 0.25, step: 0.005, onChange: matCb });
+
+    const matBody = _section(sBody, 'Shading', false);
+    _slider(matBody, slot, 'normalUpBias', { label: 'Normals up', min: 0, max: 1, step: 0.01, onChange: matCb });
+    _slider(matBody, slot, 'groundOcclusion', { label: 'Ground AO', min: 0, max: 2, step: 0.01, onChange: matCb });
+    _slider(matBody, slot, 'alphaTest', { label: 'Alpha test', min: 0.05, max: 0.9, step: 0.01, onChange: matCb });
+    _slider(matBody, slot, 'roughness', { label: 'Roughness', min: 0, max: 1, step: 0.01, onChange: matCb });
+  }
+
+  const lodBody = _section(panel, 'LOD', false);
+  _slider(lodBody, ts.billboardGrassLod, 'lod0Distance', { label: 'Full → reduced', min: 20, max: 300, step: 5 });
+  _slider(lodBody, ts.billboardGrassLod, 'lod1Distance', { label: 'Reduced → single', min: 40, max: 600, step: 10 });
+  _slider(lodBody, ts.billboardGrassLod, 'fadeOutDistance', { label: 'Hide distance', min: 40, max: 1200, step: 10 });
+  _slider(lodBody, ts.billboardGrassLod, 'aerialFadeStrength', { label: 'Aerial fade (orbit)', min: 0, max: 3, step: 0.05 });
+  _info(lodBody, 'Perf', 'One mesh per chunk (active LOD). Draw range shrinks when camera is high.');
+
+  _separator(panel);
+  _button(panel, { title: 'Clear all billboard grass', onClick: () => { if (confirm('Clear ALL billboard grass?')) app.clearAllBillboardGrass(); } });
+
+  panel._rebuildBillboardGrassSlotPicker = rebuildSlotPicker;
+  panel._updateBillboardGrassMaskLabel = (slotIdx) => {
+    const slot = ts.billboardGrassSlots[slotIdx];
+    panel._billboardGrassMaskInfo[slotIdx]?.update(billboardGrassMaskLabel(slot));
+  };
   return panel;
 }
 
@@ -4407,6 +4532,7 @@ async function bootEditor(opts = {}) {
     const propsPanel = buildPropsPanel(app);
     toolsTab.appendChild(propsPanel);
     toolsTab.appendChild(buildFoliagePanel(app));
+    toolsTab.appendChild(buildBillboardGrassPanel(app));
     toolsTab.appendChild(buildPlaySpawnPanel(app));
     toolsTab.appendChild(buildHolePanel(app));
     toolsTab.appendChild(buildCavePanel(app));
