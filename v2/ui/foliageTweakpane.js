@@ -113,10 +113,10 @@ export function addFoliageFolder(pane, toolState, opts) {
     const matFolder = slotFolder.addFolder({ title: "Material", expanded: false });
     matFolder
       .addBinding(slot, "alphaTest", { label: "Alpha test", min: 0.1, max: 0.95, step: 0.01 })
-      .on("change", () => onSlotStructureChanged?.(i));
+      .on("change", () => onSlotMaterialChanged?.(i));
     matFolder
       .addBinding(slot, "roughness", { label: "Roughness", min: 0, max: 1, step: 0.01 })
-      .on("change", () => onSlotStructureChanged?.(i));
+      .on("change", () => onSlotMaterialChanged?.(i));
     matFolder
       .addBinding(slot, "colorTint", { label: "Color tint" })
       .on("change", () => onSlotMaterialChanged?.(i));

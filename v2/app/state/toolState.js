@@ -243,7 +243,7 @@ export function createToolState() {
       randomRotation: true,
     },
     foliageSlots: [0, 1, 2, 3, 4, 5, 6, 7].map((i) => ({
-      name: `Foliage ${i + 1}`,
+      name: `Slot ${i + 1}`,
       enabled: true,
       textureUrl: null,
       baseScale: 1.0,

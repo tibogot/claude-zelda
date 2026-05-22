@@ -155,12 +155,17 @@ export class BillboardRenderer {
   }
 
   rebuildSlot(slotIdx, slot) {
+    const prevTex = this.slotRender[slotIdx]?.textureObj ?? null;
     this._disposeSlot(slotIdx);
 
     if (!slot || !slot.enabled) return;
 
     const geometry = this._buildGeometry(slot);
-    const { material, uniforms } = this._createMaterial(slot);
+    const slotForMat =
+      prevTex != null
+        ? { ...slot, _textureNode: texture(prevTex, uv()) }
+        : slot;
+    const { material, uniforms } = this._createMaterial(slotForMat);
 
     const im = new THREE.InstancedMesh(geometry, material, MAX_INSTANCES);
     im.count = 0;
@@ -175,7 +180,7 @@ export class BillboardRenderer {
       material,
       instancedMesh: im,
       uniforms,
-      textureObj: null,
+      textureObj: prevTex,
     };
   }
 

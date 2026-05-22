@@ -53,6 +53,12 @@ import { TreeSystem } from "../tools/foliage/treeSystem.js";
 import { loadTreeGlbFromFile, loadTreeGlbFromUrl, openGlbPicker, initGlbLoaderRenderer } from "../core/foliage/glbLoader.js";
 import { FoliageLodRenderer } from "../render/foliage/foliageLodRenderer.js";
 import { FoliageStore } from "../core/foliage/foliageStore.js";
+import {
+  FOLIAGE_TEXTURE_DIR,
+  normalizeFoliageTextureRef,
+  probeFoliageTextureFile,
+  applyFoliageSlotTextures,
+} from "../core/foliage/foliageTexturePaths.js";
 import { FoliagePaintSystem } from "../tools/foliage/foliagePaintSystem.js";
 import { BillboardRenderer } from "../render/foliage/billboardRenderer.js";
 import { loadFullPresetFromFile, loadFullPresetFromUrl } from "../core/foliage/presetLoader.js";
@@ -1369,13 +1375,21 @@ export async function startV2App(opts = {}) {
       input.onchange = async () => {
         const file = input.files?.[0];
         if (!file) return;
-        const url = URL.createObjectURL(file);
+        const filename = file.name.split(/[/\\]/).pop();
+        const loadUrl = await probeFoliageTextureFile(filename);
+        if (!loadUrl) {
+          window.alert(
+            `Copy "${filename}" into the project folder:\n${FOLIAGE_TEXTURE_DIR}\n\nThen import again.`,
+          );
+          return;
+        }
+        const stored = normalizeFoliageTextureRef(filename);
         const loader = new THREE.TextureLoader();
-        loader.load(url, (tex) => {
+        loader.load(loadUrl, (tex) => {
           tex.colorSpace = THREE.SRGBColorSpace;
-          toolState.foliageSlots[slotIdx].textureUrl = url;
+          toolState.foliageSlots[slotIdx].textureUrl = stored;
           billboardRenderer.setSlotTexture(slotIdx, tex, toolState.foliageSlots[slotIdx]);
-          console.log(`[V2] Foliage slot ${slotIdx} texture loaded`);
+          console.log(`[V2] Foliage slot ${slotIdx} ← ${stored}`);
         });
       };
       input.click();
@@ -1384,7 +1398,13 @@ export async function startV2App(opts = {}) {
       billboardRenderer.rebuildSlot(slotIdx, toolState.foliageSlots[slotIdx]);
     }),
     onFoliageSlotMaterialChanged: (_foliageSlotMaterialChanged = (slotIdx) => {
-      billboardRenderer.updateSlotUniforms(slotIdx, toolState.foliageSlots[slotIdx]);
+      const slot = toolState.foliageSlots[slotIdx];
+      const sr = billboardRenderer.slotRender[slotIdx];
+      if (sr?.textureObj) {
+        billboardRenderer.setSlotTexture(slotIdx, sr.textureObj, slot);
+      } else {
+        billboardRenderer.updateSlotUniforms(slotIdx, slot);
+      }
     }),
     onClearAllFoliage: (_clearAllFoliage = () => {
       foliagePaintSystem.clearAll();
@@ -2057,7 +2077,14 @@ export async function startV2App(opts = {}) {
       toolState._riverExportData = () => riverSystem.exportData();
       toolState._splineExportData = () => splineSystem.exportData();
       toolState._decalExportData = () => decalSystem.exportData();
-      const buf = serializeProject({ terrainStore, splatStore, treeStore, config, toolState });
+      const buf = serializeProject({
+        terrainStore,
+        splatStore,
+        treeStore,
+        foliageStore,
+        config,
+        toolState,
+      });
       delete toolState._cliffExportData;
       delete toolState._propExportData;
       delete toolState._waterExportData;
@@ -2095,6 +2122,10 @@ export async function startV2App(opts = {}) {
           treeStore.clear();
           treeStore.restoreFromSnapshot(project.treeChunks);
           treeStore.syncAllHeights(terrainStore);
+        }
+        foliageStore.clear();
+        if (project.foliageChunks?.size > 0) {
+          foliageStore.restoreFromSnapshot(project.foliageChunks);
         }
         // Restore settings
         applySettings(toolState, project.settings);
@@ -2237,6 +2268,16 @@ export async function startV2App(opts = {}) {
         }
         syncLeafFxParams();
 
+        // Billboard foliage slots: rebuild meshes, reload textures/foliage/*.png paths.
+        for (let si = 0; si < toolState.foliageSlots.length; si++) {
+          const slot = toolState.foliageSlots[si];
+          if (slot.textureUrl) {
+            slot.textureUrl = normalizeFoliageTextureRef(slot.textureUrl);
+          }
+          billboardRenderer.rebuildSlot(si, slot);
+        }
+        await applyFoliageSlotTextures(billboardRenderer, toolState.foliageSlots);
+
         // Auto-reload tree presets (trunk GLBs + foliage) for slots that had them.
         // Also handles slots imported as raw GLBs from /models (slot.glbFile.lod0/lod1).
         const presetLoads = [];
@@ -2302,7 +2343,10 @@ export async function startV2App(opts = {}) {
         syncPlaySpawnMarker();
         ui?.pane.refresh();
         const treeCount = treeStore.totalCount;
-        console.log(`[V2] Loaded project: ${project.terrainChunks.size} terrain chunks, ${project.splatChunks.size} splat chunks, ${treeCount} trees`);
+        const foliageCount = foliageStore.getTotalCount();
+        console.log(
+          `[V2] Loaded project: ${project.terrainChunks.size} terrain chunks, ${project.splatChunks.size} splat chunks, ${treeCount} trees, ${foliageCount} billboard foliage`,
+        );
       } catch (err) {
         console.error("[V2] Failed to load project:", err);
       }

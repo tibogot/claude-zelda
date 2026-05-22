@@ -427,6 +427,16 @@
   .section-header.collapsed .section-arrow { transform: rotate(-90deg); }
   .section-body { padding: 6px 12px 10px; }
   .section-body.hidden { display: none; }
+  /* Nested groups inside a slot (e.g. Card structure under Slot 1) */
+  .section-body > .inspector-section {
+    margin-top: 4px;
+    margin-left: 6px;
+    border-left: 1px solid var(--border);
+  }
+  .section-body > .inspector-section > .section-header {
+    font-size: 11px;
+    padding-left: 8px;
+  }
   .prop-row { display: flex; align-items: center; gap: 8px; padding: 3px 0; min-height: 26px; }
   .prop-label { width: 90px; min-width: 90px; font-size: 11px; color: var(--text-dim); text-align: right; padding-right: 4px; }
   .prop-value { flex: 1; display: flex; gap: 4px; align-items: center; }
@@ -2038,19 +2048,19 @@ function buildTreePanel(app) {
     // Foliage material
     const fi = slot.foliage;
     const fChange = () => app.foliageParamChanged(i);
-    const colBody = _section(slBody.parentElement, `  ${slot.name} · Colors`, false);
+    const colBody = _section(slBody, 'Colors', false);
     _color(colBody, fi, 'bottomColor', { label: 'Base color', onChange: fChange });
     _color(colBody, fi, 'topColor', { label: 'Top color', onChange: fChange });
     _slider(colBody, fi, 'colorVar', { label: 'Leaf variation', min: 0, max: 0.5, step: 0.01, onChange: fChange });
     _slider(colBody, fi, 'treeColorVar', { label: 'Tree variation', min: 0, max: 0.5, step: 0.01, onChange: fChange });
     _slider(colBody, fi, 'alphaCutoff', { label: 'Alpha cutoff', min: 0.1, max: 0.9, step: 0.01, onChange: fChange });
 
-    const litBody = _section(slBody.parentElement, `  ${slot.name} · Lighting`, false);
+    const litBody = _section(slBody, 'Lighting', false);
     _slider(litBody, fi, 'normalBias', { label: 'Sphere normals', min: 0, max: 1, step: 0.01, onChange: fChange });
     _slider(litBody, fi, 'leafWarp', { label: 'Leaf warp', min: 0, max: 1, step: 0.01, onChange: fChange });
     _slider(litBody, fi, 'aoStr', { label: 'AO strength', min: 0, max: 1, step: 0.01, onChange: fChange });
 
-    const sssBody = _section(slBody.parentElement, `  ${slot.name} · SSS & Rim`, false);
+    const sssBody = _section(slBody, 'SSS & Rim', false);
     _slider(sssBody, fi, 'sssStr', { label: 'SSS strength', min: 0, max: 2, step: 0.01, onChange: fChange });
     _slider(sssBody, fi, 'sssPow', { label: 'SSS power', min: 0.5, max: 8, step: 0.1, onChange: fChange });
     _color(sssBody, fi, 'sssColor', { label: 'SSS color', onChange: fChange });
@@ -2058,7 +2068,7 @@ function buildTreePanel(app) {
     _slider(sssBody, fi, 'rimPow', { label: 'Rim power', min: 0.5, max: 8, step: 0.1, onChange: fChange });
     _color(sssBody, fi, 'rimColor', { label: 'Rim color', onChange: fChange });
 
-    const windBody = _section(slBody.parentElement, `  ${slot.name} · Wind`, false);
+    const windBody = _section(slBody, 'Wind', false);
     _slider(windBody, fi, 'windSpeed', { label: 'Speed', min: 0, max: 5, step: 0.05, onChange: fChange });
     _slider(windBody, fi, 'windStr', { label: 'Strength', min: 0, max: 0.5, step: 0.005, onChange: fChange });
     _slider(windBody, fi, 'windMicro', { label: 'Micro sway', min: 0, max: 0.3, step: 0.005, onChange: fChange });
@@ -2344,33 +2354,37 @@ function buildFoliagePanel(app) {
   _slider(brushBody, ts.brush, 'radius', { label: 'Radius', min: cfg.sculpt.brushMin, max: cfg.sculpt.brushMax, step: 0.5 });
   _slider(brushBody, ts.brush, 'strength', { label: 'Strength', min: cfg.sculpt.strengthMin, max: cfg.sculpt.strengthMax, step: 0.01 });
 
-  // --- Active slot ---
-  const slotBody = _section(panel, 'Active Slot');
-  const slotOpts = {};
-  for (let i = 0; i < ts.foliageSlots.length; i++) slotOpts[ts.foliageSlots[i].name] = i;
-  _dropdown(slotBody, ts.foliagePaint, 'activeSlot', { label: 'Active slot', options: slotOpts });
-
-  // --- Foliage Brush ---
-  const fbBody = _section(panel, 'Foliage Brush');
-  _slider(fbBody, ts.foliagePaint, 'density', { label: 'Density', min: 0.1, max: 5, step: 0.1 });
-  _slider(fbBody, ts.foliagePaint, 'minSpacing', { label: 'Min spacing', min: 0.3, max: 10, step: 0.1 });
-  _slider(fbBody, ts.foliagePaint, 'scaleMin', { label: 'Scale min', min: 0.1, max: 3, step: 0.05 });
-  _slider(fbBody, ts.foliagePaint, 'scaleMax', { label: 'Scale max', min: 0.1, max: 3, step: 0.05 });
-  _toggle(fbBody, ts.foliagePaint, 'randomRotation', { label: 'Random rotation' });
+  // --- Active slot + brush (same layout as Tree Slot) ---
+  const slotBody = _section(panel, 'Foliage Slot');
+  function rebuildSlotPicker() {
+    slotBody.innerHTML = '';
+    const slotOpts = {};
+    for (let i = 0; i < ts.foliageSlots.length; i++) slotOpts[ts.foliageSlots[i].name] = i;
+    _dropdown(slotBody, ts.foliagePaint, 'activeSlot', { label: 'Active slot', options: slotOpts });
+    _slider(slotBody, ts.foliagePaint, 'density', { label: 'Density', min: 0.1, max: 5, step: 0.1 });
+    _slider(slotBody, ts.foliagePaint, 'minSpacing', { label: 'Min spacing', min: 0.3, max: 10, step: 0.1 });
+    _slider(slotBody, ts.foliagePaint, 'scaleMin', { label: 'Scale min', min: 0.1, max: 3, step: 0.05 });
+    _slider(slotBody, ts.foliagePaint, 'scaleMax', { label: 'Scale max', min: 0.1, max: 3, step: 0.05 });
+    _toggle(slotBody, ts.foliagePaint, 'randomRotation', { label: 'Random rot.' });
+  }
+  rebuildSlotPicker();
 
   // --- Per-slot settings ---
   for (let i = 0; i < ts.foliageSlots.length; i++) {
     const slot = ts.foliageSlots[i];
-    const sBody = _section(panel, `Slot ${i}: ${slot.name}`, i === 0);
+    const sBody = _section(panel, slot.name, false);
     const structCb = () => app.foliageSlotStructureChanged(i);
     const matCb = () => app.foliageSlotMaterialChanged(i);
 
     _toggle(sBody, slot, 'enabled', { label: 'Enabled', onChange: structCb });
+    const texLabel = slot.textureUrl
+      ? (slot.textureUrl.split(/[/\\]/).pop() || slot.textureUrl)
+      : '(none)';
+    _info(sBody, 'Texture', texLabel);
     _button(sBody, { title: 'Load texture', onClick: () => app.loadFoliageTexture(i) });
     _slider(sBody, slot, 'baseScale', { label: 'Base scale', min: 0.1, max: 5, step: 0.05, onChange: structCb });
 
-    // Card Structure
-    const csBody = _section(sBody.parentElement, `  Slot ${i} · Card Structure`, false);
+    const csBody = _section(sBody, 'Card structure', false);
     _slider(csBody, slot, 'planeCount', { label: 'Plane count', min: 1, max: 6, step: 1, onChange: structCb });
     _dropdown(csBody, slot, 'planeSpread', { label: 'Spread', options: { '360° radial': 'full', '180° fan': 'half' }, onChange: structCb });
     _dropdown(csBody, slot, 'tiltMode', { label: 'Tilt mode', options: { 'Stable random': 'stable', 'Symmetric': 'symmetric' }, onChange: structCb });
@@ -2379,17 +2393,15 @@ function buildFoliagePanel(app) {
     _slider(csBody, slot, 'width', { label: 'Width', min: 0.1, max: 10, step: 0.1, onChange: structCb });
     _slider(csBody, slot, 'height', { label: 'Height', min: 0.1, max: 10, step: 0.1, onChange: structCb });
 
-    // Material
-    const mBody = _section(sBody.parentElement, `  Slot ${i} · Material`, false);
-    _slider(mBody, slot, 'alphaTest', { label: 'Alpha test', min: 0.1, max: 0.95, step: 0.01, onChange: structCb });
-    _slider(mBody, slot, 'roughness', { label: 'Roughness', min: 0, max: 1, step: 0.01, onChange: structCb });
+    const mBody = _section(sBody, 'Material', false);
+    _slider(mBody, slot, 'alphaTest', { label: 'Alpha test', min: 0.1, max: 0.95, step: 0.01, onChange: matCb });
+    _slider(mBody, slot, 'roughness', { label: 'Roughness', min: 0, max: 1, step: 0.01, onChange: matCb });
     _color(mBody, slot, 'colorTint', { label: 'Color tint', onChange: matCb });
     _slider(mBody, slot, 'groundOcclusion', { label: 'Ground AO', min: 0, max: 2, step: 0.01, onChange: matCb });
     _slider(mBody, slot, 'normalBending', { label: 'Normal bend', min: 0, max: 1, step: 0.01, onChange: matCb });
     _slider(mBody, slot, 'sssIntensity', { label: 'SSS intensity', min: 0, max: 5, step: 0.1, onChange: matCb });
 
-    // Wind
-    const wBody = _section(sBody.parentElement, `  Slot ${i} · Wind`, false);
+    const wBody = _section(sBody, 'Wind', false);
     _slider(wBody, slot, 'swaySpeed', { label: 'Speed', min: 0, max: 5, step: 0.1, onChange: matCb });
     _slider(wBody, slot, 'swayStrength', { label: 'Strength', min: 0, max: 0.5, step: 0.01, onChange: matCb });
   }
@@ -2402,6 +2414,7 @@ function buildFoliagePanel(app) {
   _separator(panel);
   _button(panel, { title: 'Clear all foliage', onClick: () => { if (confirm('Clear ALL placed foliage?')) app.clearAllFoliage(); } });
 
+  panel._rebuildFoliageSlotPicker = rebuildSlotPicker;
   return panel;
 }
 

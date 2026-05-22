@@ -3,7 +3,7 @@
  *
  * File format (.v2terrain):
  *
- *   HEADER (28 bytes — version 2):
+ *   HEADER (28 bytes v2–v3, 30 bytes v4+):
  *     [0..3]   magic              "V2TR" (4 bytes ASCII)
  *     [4..5]   version            uint16 LE (2)
  *     [6..9]   worldSize          float32 LE
@@ -14,6 +14,7 @@
  *     [20..21] splatChunkCount    uint16 LE
  *     [22..25] settingsLength     uint32 LE (bytes of JSON UTF-8)
  *     [26..27] treeChunkCount     uint16 LE (version ≥ 2)
+ *     [28..29] foliageChunkCount  uint16 LE (version ≥ 4)
  *
  *   SETTINGS, TERRAIN CHUNKS, SPLAT CHUNKS — same as v1
  *
@@ -25,16 +26,28 @@
  *         x: float32 LE, z: float32 LE,
  *         rotY: float32 LE, scale: float32 LE,
  *         slotIdx: uint16 LE
+ *
+ *   FOLIAGE CHUNKS (foliageChunkCount entries, version ≥ 4):
+ *     Per entry:
+ *       cx: int16 LE, cz: int16 LE
+ *       instanceCount: uint16 LE
+ *       Per instance (22 bytes):
+ *         x, z, y: float32 LE,
+ *         rotY, scale: float32 LE,
+ *         slotIdx: uint16 LE
  */
 
 import { parseChunkKey, worldHalf } from "../terrain/chunkMath.js";
+import { normalizeFoliageTextureRef } from "../foliage/foliageTexturePaths.js";
 import { getChunkCountPerAxis } from "../../app/config.js";
 
 const MAGIC = "V2TR";
-const VERSION = 3;
+const VERSION = 4;
 const HEADER_V1 = 26;
 const HEADER_V2 = 28;
+const HEADER_V4 = 30;
 const TREE_INSTANCE_BYTES = 18;
+const FOLIAGE_INSTANCE_BYTES = 22;
 
 /**
  * Serialize terrain project to an ArrayBuffer.
@@ -43,11 +56,12 @@ const TREE_INSTANCE_BYTES = 18;
  * @param {import("../terrain/terrainStore.js").TerrainStore} opts.terrainStore
  * @param {import("../paint/splatStore.js").SplatStore} opts.splatStore
  * @param {import("../foliage/treeStore.js").TreeStore} [opts.treeStore]
+ * @param {import("../foliage/foliageStore.js").FoliageStore} [opts.foliageStore]
  * @param {object} opts.config
  * @param {object} opts.toolState — serializable subset
  * @returns {ArrayBuffer}
  */
-export function serializeProject({ terrainStore, splatStore, treeStore, config, toolState }) {
+export function serializeProject({ terrainStore, splatStore, treeStore, foliageStore, config, toolState }) {
   const settingsJson = JSON.stringify(extractSerializableSettings(toolState));
   const settingsBytes = new TextEncoder().encode(settingsJson);
 
@@ -63,18 +77,27 @@ export function serializeProject({ terrainStore, splatStore, treeStore, config, 
   const terrainEntries = [...terrainStore.chunkDataMap.entries()];
   const splatEntries = [...splatStore.chunks.entries()];
   const treeEntries = treeStore ? [...treeStore.chunks.entries()].filter(([, t]) => t.length > 0) : [];
+  const foliageEntries = foliageStore
+    ? [...foliageStore.chunks.entries()].filter(([, f]) => f.length > 0)
+    : [];
 
   let treeTotalBytes = 0;
   for (const [, trees] of treeEntries) {
     treeTotalBytes += 4 + 2 + trees.length * TREE_INSTANCE_BYTES;
   }
 
+  let foliageTotalBytes = 0;
+  for (const [, items] of foliageEntries) {
+    foliageTotalBytes += 4 + 2 + items.length * FOLIAGE_INSTANCE_BYTES;
+  }
+
   const totalSize =
-    HEADER_V2 +
+    HEADER_V4 +
     settingsBytes.byteLength +
     terrainEntries.length * (4 + heightsBytesPerChunk) +
     splatEntries.length * (4 + splatBytesPerChunk) +
-    treeTotalBytes;
+    treeTotalBytes +
+    foliageTotalBytes;
 
   const buffer = new ArrayBuffer(totalSize);
   const view = new DataView(buffer);
@@ -92,6 +115,7 @@ export function serializeProject({ terrainStore, splatStore, treeStore, config, 
   view.setUint16(offset, splatEntries.length, true); offset += 2;
   view.setUint32(offset, settingsBytes.byteLength, true); offset += 4;
   view.setUint16(offset, treeEntries.length, true); offset += 2;
+  view.setUint16(offset, foliageEntries.length, true); offset += 2;
 
   // Settings JSON
   u8.set(settingsBytes, offset);
@@ -132,6 +156,22 @@ export function serializeProject({ terrainStore, splatStore, treeStore, config, 
     }
   }
 
+  // Billboard foliage chunks (version 4)
+  for (const [key, items] of foliageEntries) {
+    const { cx, cz } = parseChunkKey(key);
+    view.setInt16(offset, cx, true); offset += 2;
+    view.setInt16(offset, cz, true); offset += 2;
+    view.setUint16(offset, items.length, true); offset += 2;
+    for (const f of items) {
+      view.setFloat32(offset, f.x, true); offset += 4;
+      view.setFloat32(offset, f.z, true); offset += 4;
+      view.setFloat32(offset, f.y ?? 0, true); offset += 4;
+      view.setFloat32(offset, f.rotY, true); offset += 4;
+      view.setFloat32(offset, f.scale, true); offset += 4;
+      view.setUint16(offset, f.slotIdx, true); offset += 2;
+    }
+  }
+
   return buffer;
 }
 
@@ -167,6 +207,8 @@ export function deserializeProject(buffer) {
   const settingsLength = view.getUint32(offset, true); offset += 4;
   const treeChunkCount = version >= 2 ? view.getUint16(offset, true) : 0;
   if (version >= 2) offset += 2;
+  const foliageChunkCount = version >= 4 ? view.getUint16(offset, true) : 0;
+  if (version >= 4) offset += 2;
 
   // Settings JSON
   const settingsJson = new TextDecoder().decode(u8.slice(offset, offset + settingsLength));
@@ -225,7 +267,36 @@ export function deserializeProject(buffer) {
     treeChunks.set(`${cx},${cz}`, trees);
   }
 
-  return { settings, terrainChunks, splatChunks, treeChunks, worldSize, chunkSize, dataResolution, splatResolution };
+  // Billboard foliage chunks (version ≥ 4)
+  const foliageChunks = new Map();
+  for (let i = 0; i < foliageChunkCount; i++) {
+    const cx = view.getInt16(offset, true); offset += 2;
+    const cz = view.getInt16(offset, true); offset += 2;
+    const instanceCount = view.getUint16(offset, true); offset += 2;
+    const items = [];
+    for (let j = 0; j < instanceCount; j++) {
+      const x = view.getFloat32(offset, true); offset += 4;
+      const z = view.getFloat32(offset, true); offset += 4;
+      const y = view.getFloat32(offset, true); offset += 4;
+      const rotY = view.getFloat32(offset, true); offset += 4;
+      const scale = view.getFloat32(offset, true); offset += 4;
+      const slotIdx = view.getUint16(offset, true); offset += 2;
+      items.push({ x, z, y, rotY, scale, slotIdx });
+    }
+    foliageChunks.set(`${cx},${cz}`, items);
+  }
+
+  return {
+    settings,
+    terrainChunks,
+    splatChunks,
+    treeChunks,
+    foliageChunks,
+    worldSize,
+    chunkSize,
+    dataResolution,
+    splatResolution,
+  };
 }
 
 /** Download a Blob as a file via invisible anchor click. */
@@ -382,7 +453,17 @@ function extractSerializableSettings(toolState) {
     tslGroundUi: { ...toolState.tslGroundUi },
     treePaint: { ...toolState.treePaint },
     treeLod: { ...toolState.treeLod },
+    foliagePaint: { ...toolState.foliagePaint },
     foliageLod: { ...toolState.foliageLod },
+    foliageSlots: toolState.foliageSlots.map((s) => {
+      const out = { ...s };
+      if (out.textureUrl?.startsWith("data:") || out.textureUrl?.startsWith("blob:")) {
+        out.textureUrl = null;
+      } else if (out.textureUrl) {
+        out.textureUrl = normalizeFoliageTextureRef(out.textureUrl);
+      }
+      return out;
+    }),
     treeSlots: toolState.treeSlots.map((s) => ({ ...s, foliage: { ...s.foliage } })),
     grass: { ...toolState.grass },
     cliffs: { ...toolState.cliffs },
@@ -482,7 +563,17 @@ export function applySettings(toolState, settings) {
   if (settings.tslGroundUi) Object.assign(toolState.tslGroundUi, settings.tslGroundUi);
   if (settings.treePaint) Object.assign(toolState.treePaint, settings.treePaint);
   if (settings.treeLod) Object.assign(toolState.treeLod, settings.treeLod);
+  if (settings.foliagePaint) Object.assign(toolState.foliagePaint, settings.foliagePaint);
   if (settings.foliageLod) Object.assign(toolState.foliageLod, settings.foliageLod);
+  if (settings.foliageSlots) {
+    for (let i = 0; i < settings.foliageSlots.length && i < toolState.foliageSlots.length; i++) {
+      Object.assign(toolState.foliageSlots[i], settings.foliageSlots[i]);
+      const n = toolState.foliageSlots[i].name;
+      if (typeof n === "string" && /^Foliage \d+$/.test(n)) {
+        toolState.foliageSlots[i].name = `Slot ${i + 1}`;
+      }
+    }
+  }
   if (settings.treeSlots) {
     for (let i = 0; i < settings.treeSlots.length && i < toolState.treeSlots.length; i++) {
       Object.assign(toolState.treeSlots[i], settings.treeSlots[i]);
