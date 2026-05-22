@@ -97,8 +97,9 @@ const DEFAULT_MATERIALS = [
   },
 ];
 
-function createDefaultMaterial({ id, name, uvScale = 1.0, paths }) {
+function createDefaultPbrMaterial({ id, name, uvScale = 1.0, paths }) {
   return {
+    type: "pbr",
     id,
     name,
     uvScale,
@@ -117,10 +118,35 @@ function createDefaultMaterial({ id, name, uvScale = 1.0, paths }) {
   };
 }
 
+/** Built-in non-PBR entries that live at the top of the library list. */
+const BUILTIN_NONE = { type: "none", id: "__none__", name: "None" };
+const BUILTIN_TILE = {
+  type: "tile",
+  id: "__tile__",
+  name: "Tile (grid)",
+  config: {
+    // Tuned for unit-sized primitives. `tileMaterial` internally multiplies by 0.00125,
+    // so this gives worldScale ≈ 2 → a few grid lines visible per face on a 1m cube.
+    // For much larger meshes, dial this down (or expose a slider later).
+    textureScale: 1600,
+    tileColor: 0xe6e3e3,
+    gridColor: 0x444444,
+    gridLineColor: 0x111111,
+    roughness: 0.95,
+    metalness: 0.0,
+    objectSpace: true,
+  },
+};
+
 export function createPropTextureLibrary() {
-  const materials = DEFAULT_MATERIALS.map(createDefaultMaterial);
+  const materials = [
+    BUILTIN_NONE,
+    BUILTIN_TILE,
+    ...DEFAULT_MATERIALS.map(createDefaultPbrMaterial),
+  ];
 
   function syncUniforms(mat) {
+    if (mat.type !== "pbr") return;
     mat.uUVScale.value = mat.uvScale;
     mat.uNormalStr.value = mat.normalStrength;
     mat.uAOStr.value = mat.aoStrength;
@@ -156,6 +182,7 @@ export function createPropTextureLibrary() {
     const uvScale = 2.0;
 
     const mat = {
+      type: "pbr",
       id,
       name,
       uvScale,
@@ -197,5 +224,34 @@ export function createPropTextureLibrary() {
       return opts;
     },
     addMaterialFromFiles,
+    /**
+     * Capture user-tweakable per-PBR-material values (uvScale, *Strength) as a plain object
+     * keyed by material id — for serialization. Non-PBR entries are skipped.
+     */
+    snapshotOverrides() {
+      const out = {};
+      for (const m of materials) {
+        if (m.type !== "pbr") continue;
+        out[m.id] = {
+          uvScale: m.uvScale,
+          normalStrength: m.normalStrength,
+          aoStrength: m.aoStrength,
+          roughStrength: m.roughStrength,
+        };
+      }
+      return out;
+    },
+    /** Apply an overrides snapshot back onto matching PBR entries. Unknown ids are skipped. */
+    applyOverrides(overrides) {
+      if (!overrides) return;
+      for (const [id, s] of Object.entries(overrides)) {
+        const m = materials.find((mm) => mm.id === id);
+        if (!m || m.type !== "pbr") continue;
+        if (s.uvScale != null) { m.uvScale = s.uvScale; m.uUVScale.value = s.uvScale; }
+        if (s.normalStrength != null) { m.normalStrength = s.normalStrength; m.uNormalStr.value = s.normalStrength; }
+        if (s.aoStrength != null) { m.aoStrength = s.aoStrength; m.uAOStr.value = s.aoStrength; }
+        if (s.roughStrength != null) { m.roughStrength = s.roughStrength; m.uRoughStr.value = s.roughStrength; }
+      }
+    },
   };
 }

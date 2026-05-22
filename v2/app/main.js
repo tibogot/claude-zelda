@@ -32,7 +32,7 @@ import { createLensFlareSystem } from "../effects/lensFlare.js";
 import { createAutoCliffUniforms } from "../../chunkTerrainAutoCliff.js";
 import { createTextureLibrary } from "../core/textures/textureLibrary.js";
 import { createPropTextureLibrary } from "../core/textures/propTextureLibrary.js";
-import { createPropPbrNodeMaterial } from "../render/props/propPbrNodeMaterial.js";
+import { createMaterialForLibrary } from "../render/props/propMaterialFactory.js";
 import { createV2ImageTexGroundMaterial } from "../render/terrain/sharedImgTexMaterial.js";
 import { createSplatOverlay } from "../render/terrain/splatOverlayTsl.js";
 import { SplatStore } from "../core/paint/splatStore.js";
@@ -815,6 +815,22 @@ export async function startV2App(opts = {}) {
   const propStore = new PropStore();
   const propInstancer = new PropInstancer(scene, propStore);
   const propSystem = new PropSystem({ toolState, propStore, propInstancer, cliffBvh, terrainStore, config });
+
+  /**
+   * Rebuild the material on a primitive slot from its current `materialId` + `triplanar` fields.
+   * Used by `setPrimitiveMaterial`, `setPrimitiveTriplanar`, and the project load path.
+   */
+  function _rebuildPrimitiveMaterial(slotIdx) {
+    const slot = toolState.propSlots[slotIdx];
+    if (!slot || !slot.builtin) return false;
+    const propMat = propTextureLibrary.getById(slot.materialId);
+    if (!propMat) return false;
+    const newMat = createMaterialForLibrary(propMat, { triplanar: !!slot.triplanar });
+    propInstancer.setTypeMaterial(slot.typeIdx, newMat);
+    const type = propStore.types[slot.typeIdx];
+    if (type) for (const e of type.entries) e.material = newMat;
+    return true;
+  }
 
   const livePropManager = new LivePropManager(scene, propStore);
   livePropManager.registerFactory("flag", (params) => createFlagProp(params));
@@ -1945,10 +1961,8 @@ export async function startV2App(opts = {}) {
       const factory = defs[primitiveName];
       if (!factory) return;
       const geometry = factory();
-      const defaultPropMat = propTextureLibrary.getByIndex(0);
-      const material = defaultPropMat
-        ? createPropPbrNodeMaterial(defaultPropMat, { triplanar: false })
-        : new THREE.MeshStandardMaterial({ color: 0xcccccc, roughness: 0.6, metalness: 0.1 });
+      const defaultPropMat = propTextureLibrary.getById("__none__") ?? propTextureLibrary.getByIndex(0);
+      const material = createMaterialForLibrary(defaultPropMat, { triplanar: false });
       const typeIdx = propStore.registerPrimitive(primitiveName, geometry, material);
       if (typeIdx >= 0) {
         propInstancer.onTypeRegistered(typeIdx);
@@ -1958,7 +1972,7 @@ export async function startV2App(opts = {}) {
           loaded: true,
           typeIdx,
           builtin: true,
-          materialId: defaultPropMat?.id ?? null,
+          materialId: defaultPropMat?.id ?? "__none__",
           triplanar: false,
         });
         toolState.props.activeSlot = slotIdx;
@@ -2203,6 +2217,7 @@ export async function startV2App(opts = {}) {
       toolState._splineExportData = () => splineSystem.exportData();
       toolState._decalExportData = () => decalSystem.exportData();
       toolState._billboardGrassExportData = () => billboardGrassStore.toJSON();
+      toolState.propMaterialOverrides = propTextureLibrary.snapshotOverrides();
       const buf = serializeProject({
         terrainStore,
         splatStore,
@@ -2262,6 +2277,7 @@ export async function startV2App(opts = {}) {
         }
         // Restore settings
         applySettings(toolState, project.settings);
+        propTextureLibrary.applyOverrides(toolState.propMaterialOverrides);
         riverSystem.syncMaterial();
         fullRoadSystem.syncMaterial();
         smartRoadSystem.syncMaterial();
@@ -2291,6 +2307,13 @@ export async function startV2App(opts = {}) {
           for (const slot of project.settings.propSlots) {
             if (slot.builtin) {
               propUiCallbacks.onAddPrimitive?.(slot.name);
+              const slotIdx = toolState.props.activeSlot;
+              const live = toolState.propSlots[slotIdx];
+              if (live && (slot.materialId || slot.triplanar)) {
+                if (slot.materialId) live.materialId = slot.materialId;
+                if (slot.triplanar) live.triplanar = true;
+                _rebuildPrimitiveMaterial(slotIdx);
+              }
             } else if (slot.live) {
               _addLiveProp?.(slot.name);
             } else if (slot.glbFile) {
@@ -3833,30 +3856,21 @@ export async function startV2App(opts = {}) {
     addPrimitive(name) { _addPrimitive(name); },
     addLiveProp(name) { _addLiveProp(name); },
     propTextureLibrary,
-    /** Swap the PBR material on a primitive slot. All instances of that slot use the new material. */
+    /** Swap the material on a primitive slot. All instances of that slot use the new material. */
     setPrimitiveMaterial(slotIdx, materialId) {
       const slot = toolState.propSlots[slotIdx];
       if (!slot || !slot.builtin) return;
-      const propMat = propTextureLibrary.getById(materialId);
-      if (!propMat) return;
-      const newMat = createPropPbrNodeMaterial(propMat, { triplanar: !!slot.triplanar });
-      propInstancer.setTypeMaterial(slot.typeIdx, newMat);
-      const type = propStore.types[slot.typeIdx];
-      if (type) for (const e of type.entries) e.material = newMat;
       slot.materialId = materialId;
-      console.log(`[V2] Slot "${slot.name}" material → "${propMat.name}"`);
+      _rebuildPrimitiveMaterial(slotIdx);
+      const propMat = propTextureLibrary.getById(materialId);
+      console.log(`[V2] Slot "${slot.name}" material → "${propMat?.name ?? materialId}"`);
     },
     /** Toggle triplanar (world-axis) projection on a primitive slot. Rebuilds its material. */
     setPrimitiveTriplanar(slotIdx, enabled) {
       const slot = toolState.propSlots[slotIdx];
       if (!slot || !slot.builtin || !slot.materialId) return;
       slot.triplanar = !!enabled;
-      const propMat = propTextureLibrary.getById(slot.materialId);
-      if (!propMat) return;
-      const newMat = createPropPbrNodeMaterial(propMat, { triplanar: slot.triplanar });
-      propInstancer.setTypeMaterial(slot.typeIdx, newMat);
-      const type = propStore.types[slot.typeIdx];
-      if (type) for (const e of type.entries) e.material = newMat;
+      _rebuildPrimitiveMaterial(slotIdx);
       console.log(`[V2] Slot "${slot.name}" triplanar → ${slot.triplanar}`);
     },
     livePropManager,

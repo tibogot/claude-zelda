@@ -485,7 +485,15 @@ function extractSerializableSettings(toolState) {
     cliffs: { ...toolState.cliffs },
     cliffInstances: toolState._cliffExportData?.() ?? null,
     props: { ...toolState.props },
-    propSlots: toolState.propSlots.map((s) => ({ name: s.name, ...(s.builtin ? { builtin: true } : {}), ...(s.live ? { live: true, factoryId: s.factoryId } : {}), ...(s.glbFile ? { glbFile: s.glbFile } : {}) })),
+    propSlots: toolState.propSlots.map((s) => ({
+      name: s.name,
+      ...(s.builtin ? { builtin: true } : {}),
+      ...(s.live ? { live: true, factoryId: s.factoryId } : {}),
+      ...(s.glbFile ? { glbFile: s.glbFile } : {}),
+      ...(s.materialId ? { materialId: s.materialId } : {}),
+      ...(s.triplanar ? { triplanar: true } : {}),
+    })),
+    propMaterialOverrides: toolState.propMaterialOverrides ?? null,
     propInstances: toolState._propExportData?.() ?? null,
     road: { ...toolState.road },
     roads: toolState._roadExportData?.() ?? null,
@@ -613,6 +621,7 @@ export function applySettings(toolState, settings) {
   if (settings.grass) Object.assign(toolState.grass, settings.grass);
   if (settings.cliffs) Object.assign(toolState.cliffs, settings.cliffs);
   if (settings.props) Object.assign(toolState.props, settings.props);
+  if (settings.propMaterialOverrides) toolState.propMaterialOverrides = settings.propMaterialOverrides;
   if (settings.road) Object.assign(toolState.road, settings.road);
   if (settings.fullRoad) Object.assign(toolState.fullRoad, settings.fullRoad);
   if (settings.smartRoad) Object.assign(toolState.smartRoad, settings.smartRoad);
