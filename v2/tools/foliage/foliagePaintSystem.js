@@ -7,7 +7,7 @@
  * Follows the same beginStroke → applyAt → endStroke pattern as TreeSystem.
  */
 import * as THREE from "three";
-import { shouldApplyStroke } from "../sculpt/brushModel.js";
+import { shouldApplyStroke, SCATTER_DENSITY_SCALE } from "../sculpt/brushModel.js";
 
 export class FoliagePaintSystem {
   constructor({ toolState, foliageStore, terrainStore, config }) {
@@ -74,8 +74,9 @@ export class FoliagePaintSystem {
 
     const baseScale = slot.baseScale ?? 1.0;
     const spacing = fp.minSpacing * Math.max(baseScale, 0.1);
+    const strength = THREE.MathUtils.clamp(this.toolState.brush.strength, 0, 1);
     const area = Math.PI * radius * radius;
-    const attempts = Math.ceil(area * fp.density * 0.15);
+    const attempts = Math.ceil(area * fp.density * SCATTER_DENSITY_SCALE * strength);
 
     for (let i = 0; i < attempts; i++) {
       const angle = Math.random() * Math.PI * 2;

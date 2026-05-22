@@ -235,8 +235,10 @@ export function createToolState() {
       lod1Distance: 200,
       fadeOutDistance: 600,
     },
-    /** Distance cull for painted billboard foliage (BillboardRenderer + foliageStore). */
+    /** Geometry LOD + hide distance for painted billboards (BillboardRenderer). */
     billboardFoliageLod: {
+      lod0Distance: 80,
+      lod1Distance: 200,
       fadeOutDistance: 600,
     },
     foliagePaint: {

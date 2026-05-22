@@ -82,6 +82,7 @@ export class SculptSystem {
     if (this.undoStack.length > 64) this.undoStack.shift();
     this.chunkStream.markDirtyFull(touched);
     this.rampPointA = null;
+    this.onHeightsChanged();
   }
 
   /**

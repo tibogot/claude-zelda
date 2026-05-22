@@ -127,6 +127,27 @@ export class FoliageStore {
     }
   }
 
+  /** Re-sample terrain under each instance (after sculpt / flatten / load). */
+  syncAllHeights(terrainStore) {
+    for (const [key, items] of this.chunks) {
+      for (const f of items) {
+        f.y = terrainStore.getWorldHeight(f.x, f.z);
+      }
+      this._bumpGen(key);
+    }
+  }
+
+  syncHeightsForChunks(keys, terrainStore) {
+    for (const key of keys) {
+      const items = this.chunks.get(key);
+      if (!items) continue;
+      for (const f of items) {
+        f.y = terrainStore.getWorldHeight(f.x, f.z);
+      }
+      this._bumpGen(key);
+    }
+  }
+
   clear() {
     for (const key of this.chunks.keys()) {
       this._bumpGen(key);

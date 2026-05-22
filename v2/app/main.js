@@ -58,6 +58,7 @@ import {
   normalizeFoliageTextureRef,
   probeFoliageTextureFile,
   applyFoliageSlotTextures,
+  loadFoliageTextureFromFile,
 } from "../core/foliage/foliageTexturePaths.js";
 import { FoliagePaintSystem } from "../tools/foliage/foliagePaintSystem.js";
 import { BillboardRenderer } from "../render/foliage/billboardRenderer.js";
@@ -674,6 +675,7 @@ export async function startV2App(opts = {}) {
     onHeightsChanged: () => {
       markHeightTexDirty();
       treeStore.syncAllHeights(terrainStore);
+      foliageStore.syncAllHeights(terrainStore);
       fleurSystem.syncHeights();
       ambientFxStore.syncHeights();
       leafFxStore.syncHeights();
@@ -1376,21 +1378,38 @@ export async function startV2App(opts = {}) {
         const file = input.files?.[0];
         if (!file) return;
         const filename = file.name.split(/[/\\]/).pop();
-        const loadUrl = await probeFoliageTextureFile(filename);
-        if (!loadUrl) {
-          window.alert(
-            `Copy "${filename}" into the project folder:\n${FOLIAGE_TEXTURE_DIR}\n\nThen import again.`,
-          );
+        const slot = toolState.foliageSlots[slotIdx];
+        const projectUrl = await probeFoliageTextureFile(filename);
+
+        const applyTex = (tex, persist) => {
+          if (persist) {
+            delete slot.texturePreviewName;
+            slot.textureUrl = normalizeFoliageTextureRef(filename);
+            console.log(`[V2] Foliage slot ${slotIdx} ← ${slot.textureUrl}`);
+          } else {
+            slot.texturePreviewName = filename;
+            console.log(
+              `[V2] Foliage slot ${slotIdx} preview: ${filename} (copy to ${FOLIAGE_TEXTURE_DIR} to keep after save)`,
+            );
+          }
+          billboardRenderer.setSlotTexture(slotIdx, tex, slot);
+          document.getElementById("foliage-panel")?._updateFoliageTextureLabel?.(slotIdx);
+        };
+
+        if (projectUrl) {
+          new THREE.TextureLoader().load(projectUrl, (tex) => {
+            tex.colorSpace = THREE.SRGBColorSpace;
+            applyTex(tex, true);
+          });
           return;
         }
-        const stored = normalizeFoliageTextureRef(filename);
-        const loader = new THREE.TextureLoader();
-        loader.load(loadUrl, (tex) => {
-          tex.colorSpace = THREE.SRGBColorSpace;
-          toolState.foliageSlots[slotIdx].textureUrl = stored;
-          billboardRenderer.setSlotTexture(slotIdx, tex, toolState.foliageSlots[slotIdx]);
-          console.log(`[V2] Foliage slot ${slotIdx} ← ${stored}`);
-        });
+
+        try {
+          const tex = await loadFoliageTextureFromFile(file);
+          applyTex(tex, false);
+        } catch (err) {
+          console.warn(`[V2] Foliage slot ${slotIdx}: could not load ${filename}`, err);
+        }
       };
       input.click();
     }),
@@ -1513,6 +1532,7 @@ export async function startV2App(opts = {}) {
       roadSystem.rebuildAllMeshes();
       markHeightTexDirty();
       treeStore.syncAllHeights(terrainStore);
+      foliageStore.syncAllHeights(terrainStore);
       splineSystem.syncGuardrailsToGround();
       splineSystem.syncKerbsToGround();
       splineSystem.syncLinearFeaturesToGround();
@@ -1565,6 +1585,7 @@ export async function startV2App(opts = {}) {
       sys.rebuildAllMeshes();
       markHeightTexDirty();
       treeStore.syncAllHeights(terrainStore);
+      foliageStore.syncAllHeights(terrainStore);
       splineSystem.syncGuardrailsToGround();
       splineSystem.syncKerbsToGround();
       splineSystem.syncLinearFeaturesToGround();
@@ -1670,6 +1691,7 @@ export async function startV2App(opts = {}) {
       roadSystem.rebuildAllMeshes();
       markHeightTexDirty();
       treeStore.syncAllHeights(terrainStore);
+      foliageStore.syncAllHeights(terrainStore);
       splineSystem.syncGuardrailsToGround();
       splineSystem.syncKerbsToGround();
       splineSystem.syncLinearFeaturesToGround();
@@ -1714,6 +1736,7 @@ export async function startV2App(opts = {}) {
       if (!changed) return;
       markHeightTexDirty();
       treeStore.syncAllHeights(terrainStore);
+      foliageStore.syncAllHeights(terrainStore);
       splineSystem.syncGuardrailsToGround();
       splineSystem.syncKerbsToGround();
       splineSystem.syncLinearFeaturesToGround();
@@ -2126,6 +2149,7 @@ export async function startV2App(opts = {}) {
         foliageStore.clear();
         if (project.foliageChunks?.size > 0) {
           foliageStore.restoreFromSnapshot(project.foliageChunks);
+          foliageStore.syncAllHeights(terrainStore);
         }
         // Restore settings
         applySettings(toolState, project.settings);
@@ -3792,6 +3816,7 @@ export async function startV2App(opts = {}) {
       smartRoadSystem.rebuildAllMeshes();
       markHeightTexDirty();
       treeStore.syncAllHeights(terrainStore);
+      foliageStore.syncAllHeights(terrainStore);
       splineSystem.syncGuardrailsToGround();
       splineSystem.syncKerbsToGround();
       splineSystem.syncLinearFeaturesToGround();

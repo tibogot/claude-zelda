@@ -1,8 +1,8 @@
 /**
- * BillboardRenderer — per-chunk instanced billboard foliage (cross/Y cards).
+ * BillboardRenderer — per-chunk instanced billboard foliage with 3-tier geometry LOD.
  *
- * Each terrain chunk gets its own InstancedMesh per active slot (shared geometry +
- * material per slot). Matrices upload only when FoliageStore bumps chunk generation.
+ * Each chunk × slot gets lod0/lod1/lod2 InstancedMeshes (fewer cross planes at distance).
+ * Shared geometry + material per slot; matrices upload on FoliageStore chunk gen bump.
  */
 import * as THREE from "three";
 import * as BufferGeometryUtils from "three/addons/utils/BufferGeometryUtils.js";
@@ -17,13 +17,16 @@ import {
   texture,
   positionLocal,
   color,
-  normalWorld,
   normalize,
   dot,
   cameraPosition,
   positionWorld,
   max,
+  mix,
 } from "three/tsl";
+import { detectAlphaChannel } from "./foliageMaterial.js";
+
+const LOD_KEYS = ["lod0", "lod1", "lod2"];
 
 function stableHash01(i, seed) {
   const x = Math.sin(i * 12.9898 + seed * 78.233) * 43758.5453123;
@@ -45,19 +48,27 @@ function planeTiltRadians(i, count, tilt, tiltMode, seed) {
   return (stableHash01(i, seed) - 0.5) * 2 * tilt;
 }
 
+/** Near = full planes; mid = 2 (or 1 if slot only has 1); far = single card. */
+function planeCountForLodTier(fullCount, tier) {
+  const n = Math.max(1, Math.floor(fullCount));
+  if (tier === 0) return n;
+  if (tier === 1) return n >= 3 ? 2 : n;
+  return 1;
+}
+
 export class BillboardRenderer {
   constructor(scene, config) {
     this.scene = scene;
     this.config = config;
     /**
-     * Shared assets per paint slot (geometry + material reused by chunk meshes).
-     * slotRender[slotIdx] = { geometry, material, uniforms, textureObj } | null
+     * slotRender[slotIdx] = {
+     *   geometries: { lod0, lod1, lod2 },
+     *   material, uniforms, textureObj
+     * } | null
      */
     this.slotRender = [];
 
-    /**
-     * chunkMeshes: Map<chunkKey, { gen, slots: Map<slotIdx, InstancedMesh> }>
-     */
+    /** chunkMeshes: Map<key, { gen, slots: Map<slotIdx, { lod0, lod1, lod2 }> }> */
     this._chunkMeshes = new Map();
 
     this._frustum = new THREE.Frustum();
@@ -86,6 +97,20 @@ export class BillboardRenderer {
     return merged;
   }
 
+  _buildLodGeometries(slot) {
+    const full = Math.max(1, Math.floor(slot.planeCount));
+    return {
+      lod0: this._buildGeometry({ ...slot, planeCount: planeCountForLodTier(full, 0) }),
+      lod1: this._buildGeometry({ ...slot, planeCount: planeCountForLodTier(full, 1) }),
+      lod2: this._buildGeometry({ ...slot, planeCount: planeCountForLodTier(full, 2) }),
+    };
+  }
+
+  _disposeLodGeometries(geometries) {
+    if (!geometries) return;
+    for (const k of LOD_KEYS) geometries[k]?.dispose();
+  }
+
   _createMaterial(slot) {
     const u = {
       time: uniform(0),
@@ -97,6 +122,8 @@ export class BillboardRenderer {
       colorTint: uniform(color(slot.colorTint ?? "#ffffff")),
       sunDir: uniform(this._sunDir.clone()),
       height: uniform(slot.height ?? 2.0),
+      // 0 = cutout from .r (grayscale / RGB masks), 1 = .a (RGBA foliage).
+      maskInAlpha: uniform(slot.maskInAlpha ?? 0.0),
     };
 
     const material = new THREE.MeshStandardNodeMaterial({
@@ -118,23 +145,25 @@ export class BillboardRenderer {
 
     material.colorNode = Fn(() => {
       const tex = slot._textureNode ? slot._textureNode : defaultColor;
+      const mask = mix(tex.r, tex.a, u.maskInAlpha);
       const ao = uv().y.smoothstep(0.0, u.groundOcclusion).add(0.15);
       const lightDir = normalize(u.sunDir);
       const viewDir = normalize(cameraPosition.sub(positionWorld));
       const backlit = max(0.0, dot(viewDir, lightDir.negate()));
       const backlitBoost = backlit.pow(1.5).mul(0.3).add(1.0);
-      return vec4(tex.rgb.mul(u.colorTint).mul(ao).mul(backlitBoost), tex.a);
+      return vec4(tex.rgb.mul(u.colorTint).mul(ao).mul(backlitBoost), mask);
     })();
 
     material.emissiveNode = Fn(() => {
       const tex = slot._textureNode ? slot._textureNode : defaultColor;
+      const mask = mix(tex.r, tex.a, u.maskInAlpha);
       const lightDir = normalize(u.sunDir);
       const viewDir = normalize(cameraPosition.sub(positionWorld));
       const translucency = max(0.0, dot(viewDir, lightDir.negate()));
       const translucentGlow = translucency.pow(1.2);
       const heightFade = uv().y.smoothstep(0.05, 0.6);
       const sssGlow = tex.rgb.mul(translucentGlow).mul(u.sssIntensity).mul(heightFade);
-      return sssGlow;
+      return sssGlow.mul(mask);
     })();
 
     material.positionNode = Fn(() => {
@@ -151,6 +180,11 @@ export class BillboardRenderer {
     return { material, uniforms: u };
   }
 
+  _applyMaskChannel(uniforms, tex) {
+    if (!uniforms?.maskInAlpha || !tex?.image) return;
+    uniforms.maskInAlpha.value = detectAlphaChannel(tex.image) ? 1.0 : 0.0;
+  }
+
   _removeChunkMesh(im) {
     if (!im) return;
     this.scene.remove(im);
@@ -158,20 +192,25 @@ export class BillboardRenderer {
     im.material = null;
   }
 
+  _disposeSlotMeshes(slotMeshes) {
+    if (!slotMeshes) return;
+    for (const k of LOD_KEYS) this._removeChunkMesh(slotMeshes[k]);
+  }
+
   _disposeChunkEntry(key) {
     const entry = this._chunkMeshes.get(key);
     if (!entry) return;
-    for (const im of entry.slots.values()) {
-      this._removeChunkMesh(im);
+    for (const sm of entry.slots.values()) {
+      this._disposeSlotMeshes(sm);
     }
     this._chunkMeshes.delete(key);
   }
 
   _disposeChunkMeshesForSlot(slotIdx) {
     for (const [, entry] of this._chunkMeshes) {
-      const im = entry.slots.get(slotIdx);
-      if (im) {
-        this._removeChunkMesh(im);
+      const sm = entry.slots.get(slotIdx);
+      if (sm) {
+        this._disposeSlotMeshes(sm);
         entry.slots.delete(slotIdx);
       }
     }
@@ -183,13 +222,28 @@ export class BillboardRenderer {
     }
   }
 
+  _uploadInstances(im, list) {
+    const n = list.length;
+    for (let i = 0; i < n; i++) {
+      const f = list[i];
+      this._pos.set(f.x, f.y ?? 0, f.z);
+      this._quat.setFromAxisAngle(this._yAxis, f.rotY);
+      this._scl.setScalar(f.scale);
+      this._worldMat.compose(this._pos, this._quat, this._scl);
+      im.setMatrixAt(i, this._worldMat);
+    }
+    im.count = n;
+    im.instanceMatrix.needsUpdate = true;
+    im.computeBoundingSphere();
+  }
+
   rebuildSlot(slotIdx, slot) {
     const prevTex = this.slotRender[slotIdx]?.textureObj ?? null;
     this._disposeChunkMeshesForSlot(slotIdx);
 
     const prev = this.slotRender[slotIdx];
     if (prev) {
-      prev.geometry.dispose();
+      this._disposeLodGeometries(prev.geometries);
       prev.material.dispose();
     }
     while (this.slotRender.length <= slotIdx) this.slotRender.push(null);
@@ -200,13 +254,14 @@ export class BillboardRenderer {
       return;
     }
 
-    const geometry = this._buildGeometry(slot);
+    const geometries = this._buildLodGeometries(slot);
     const slotForMat =
       prevTex != null ? { ...slot, _textureNode: texture(prevTex, uv()) } : slot;
     const { material, uniforms } = this._createMaterial(slotForMat);
+    this._applyMaskChannel(uniforms, prevTex);
 
     this.slotRender[slotIdx] = {
-      geometry,
+      geometries,
       material,
       uniforms,
       textureObj: prevTex,
@@ -220,12 +275,16 @@ export class BillboardRenderer {
     sr.textureObj = tex;
     const slot = { ...(slotConfig || {}), _textureNode: tex ? texture(tex, uv()) : null };
     const { material, uniforms } = this._createMaterial(slot);
+    this._applyMaskChannel(uniforms, tex);
     sr.material.dispose();
     sr.material = material;
     sr.uniforms = uniforms;
     for (const [, entry] of this._chunkMeshes) {
-      const im = entry.slots.get(slotIdx);
-      if (im) im.material = material;
+      const sm = entry.slots.get(slotIdx);
+      if (!sm) continue;
+      for (const k of LOD_KEYS) {
+        if (sm[k]) sm[k].material = material;
+      }
     }
   }
 
@@ -245,22 +304,16 @@ export class BillboardRenderer {
     this._disposeChunkMeshesForSlot(slotIdx);
     const sr = this.slotRender[slotIdx];
     if (!sr) return;
-    sr.geometry.dispose();
+    this._disposeLodGeometries(sr.geometries);
     sr.material.dispose();
     this.slotRender[slotIdx] = null;
   }
 
-  /**
-   * Rebuild all InstancedMeshes for one chunk (grouped by slotIdx).
-   * @param {string} key
-   * @param {Array} items
-   * @param {object[]} foliageSlots
-   */
   _rebuildChunkMeshes(key, items, foliageSlots) {
     let entry = this._chunkMeshes.get(key);
     if (entry) {
-      for (const im of entry.slots.values()) {
-        this._removeChunkMesh(im);
+      for (const sm of entry.slots.values()) {
+        this._disposeSlotMeshes(sm);
       }
       entry.slots.clear();
     } else {
@@ -281,42 +334,51 @@ export class BillboardRenderer {
       if (!sr || !slotCfg?.enabled) continue;
 
       const n = list.length;
-      const im = new THREE.InstancedMesh(sr.geometry, sr.material, n);
-      im.count = n;
-      im.castShadow = false;
-      im.receiveShadow = true;
-      im.frustumCulled = true;
+      const slotMeshes = { lod0: null, lod1: null, lod2: null };
 
-      for (let i = 0; i < n; i++) {
-        const f = list[i];
-        this._pos.set(f.x, f.y ?? 0, f.z);
-        this._quat.setFromAxisAngle(this._yAxis, f.rotY);
-        this._scl.setScalar(f.scale);
-        this._worldMat.compose(this._pos, this._quat, this._scl);
-        im.setMatrixAt(i, this._worldMat);
+      for (const k of LOD_KEYS) {
+        const im = new THREE.InstancedMesh(sr.geometries[k], sr.material, n);
+        im.castShadow = false;
+        im.receiveShadow = true;
+        im.frustumCulled = true;
+        this._uploadInstances(im, list);
+        this.scene.add(im);
+        slotMeshes[k] = im;
       }
-      im.instanceMatrix.needsUpdate = true;
-      im.computeBoundingSphere();
 
-      this.scene.add(im);
-      entry.slots.set(slotIdx, im);
+      entry.slots.set(slotIdx, slotMeshes);
+    }
+  }
+
+  _applyChunkLodVisibility(slotMeshes, dist, lodCfg, showChunk) {
+    const lod0D = lodCfg.lod0Distance ?? 80;
+    const lod1D = lodCfg.lod1Distance ?? 200;
+    const fadeD = lodCfg.fadeOutDistance ?? 600;
+
+    let activeLod = null;
+    if (showChunk && dist <= fadeD) {
+      if (dist > lod1D) activeLod = "lod2";
+      else if (dist > lod0D) activeLod = "lod1";
+      else activeLod = "lod0";
+    }
+
+    for (const k of LOD_KEYS) {
+      const im = slotMeshes[k];
+      if (im) im.visible = activeLod === k;
     }
   }
 
   /**
    * @param {import("../../core/foliage/foliageStore.js").FoliageStore} foliageStore
    * @param {THREE.Camera} camera
-   * @param {{ fadeOutDistance?: number }} lodCfg
+   * @param {{ lod0Distance?: number, lod1Distance?: number, fadeOutDistance?: number }} lodCfg
    * @param {object[]} foliageSlots
    */
   update(foliageStore, camera, lodCfg, foliageSlots) {
     this._projScreen.multiplyMatrices(camera.projectionMatrix, camera.matrixWorldInverse);
     this._frustum.setFromProjectionMatrix(this._projScreen);
 
-    const fadeD = lodCfg.fadeOutDistance ?? 200;
-    const chunkFarD2 = fadeD * fadeD * 2.25;
     const chunkSize = this.config.world.chunkSize;
-
     const camX = camera.position.x;
     const camZ = camera.position.z;
     const activeKeys = new Set();
@@ -333,7 +395,7 @@ export class BillboardRenderer {
 
       const dcx = chunkCX - camX;
       const dcz = chunkCZ - camZ;
-      const chunkDist2 = dcx * dcx + dcz * dcz;
+      const chunkDist = Math.sqrt(dcx * dcx + dcz * dcz);
 
       const gen = foliageStore.getGen(key);
       let entry = this._chunkMeshes.get(key);
@@ -345,14 +407,13 @@ export class BillboardRenderer {
 
       if (!entry) continue;
 
-      const inRange = chunkDist2 <= chunkFarD2;
       this._box.min.set(minX, -100, minZ);
       this._box.max.set(minX + chunkSize, 600, minZ + chunkSize);
       const inFrustum = this._frustum.intersectsBox(this._box);
-      const show = inRange && inFrustum;
+      const showChunk = inFrustum;
 
-      for (const im of entry.slots.values()) {
-        im.visible = show;
+      for (const sm of entry.slots.values()) {
+        this._applyChunkLodVisibility(sm, chunkDist, lodCfg, showChunk);
       }
     }
 

@@ -458,6 +458,7 @@ function extractSerializableSettings(toolState) {
     billboardFoliageLod: { ...toolState.billboardFoliageLod },
     foliageSlots: toolState.foliageSlots.map((s) => {
       const out = { ...s };
+      delete out.texturePreviewName;
       if (out.textureUrl?.startsWith("data:") || out.textureUrl?.startsWith("blob:")) {
         out.textureUrl = null;
       } else if (out.textureUrl) {
@@ -568,8 +569,11 @@ export function applySettings(toolState, settings) {
   if (settings.foliageLod) Object.assign(toolState.foliageLod, settings.foliageLod);
   if (settings.billboardFoliageLod) {
     Object.assign(toolState.billboardFoliageLod, settings.billboardFoliageLod);
-  } else if (settings.foliageLod?.fadeOutDistance != null) {
-    toolState.billboardFoliageLod.fadeOutDistance = settings.foliageLod.fadeOutDistance;
+  } else if (settings.foliageLod) {
+    const src = settings.foliageLod;
+    if (src.lod0Distance != null) toolState.billboardFoliageLod.lod0Distance = src.lod0Distance;
+    if (src.lod1Distance != null) toolState.billboardFoliageLod.lod1Distance = src.lod1Distance;
+    if (src.fadeOutDistance != null) toolState.billboardFoliageLod.fadeOutDistance = src.fadeOutDistance;
   }
   if (settings.foliageSlots) {
     for (let i = 0; i < settings.foliageSlots.length && i < toolState.foliageSlots.length; i++) {

@@ -231,7 +231,7 @@ export function createFoliageMaterial(opts = {}) {
 // Detects whether an image's alpha channel carries meaningful (<255) data.
 // PNGs with the mask in the alpha channel (e.g. RGBA leaves) return true;
 // grayscale or RGB-only PNGs return false.
-function detectAlphaChannel(image) {
+export function detectAlphaChannel(image) {
   try {
     const w = image.width || image.naturalWidth;
     const h = image.height || image.naturalHeight;

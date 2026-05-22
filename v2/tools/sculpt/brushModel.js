@@ -107,3 +107,6 @@ export function worldBrushBounds(center, radius) {
   };
 }
 
+/** Tree / billboard foliage: placement attempts = πr² × density × scale × brush strength. */
+export const SCATTER_DENSITY_SCALE = 0.01;
+

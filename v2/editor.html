@@ -2371,6 +2371,14 @@ function buildFoliagePanel(app) {
   }
   rebuildSlotPicker();
 
+  function foliageTextureLabel(slot) {
+    if (slot.texturePreviewName) return `${slot.texturePreviewName} (preview)`;
+    if (slot.textureUrl) return slot.textureUrl.split(/[/\\]/).pop() || slot.textureUrl;
+    return '(none)';
+  }
+
+  panel._foliageTexInfo = [];
+
   // --- Per-slot settings ---
   for (let i = 0; i < ts.foliageSlots.length; i++) {
     const slot = ts.foliageSlots[i];
@@ -2379,10 +2387,7 @@ function buildFoliagePanel(app) {
     const matCb = () => app.foliageSlotMaterialChanged(i);
 
     _toggle(sBody, slot, 'enabled', { label: 'Enabled', onChange: structCb });
-    const texLabel = slot.textureUrl
-      ? (slot.textureUrl.split(/[/\\]/).pop() || slot.textureUrl)
-      : '(none)';
-    _info(sBody, 'Texture', texLabel);
+    panel._foliageTexInfo[i] = _info(sBody, 'Texture', foliageTextureLabel(slot));
     _button(sBody, { title: 'Load texture', onClick: () => app.loadFoliageTexture(i) });
     _slider(sBody, slot, 'baseScale', { label: 'Base scale', min: 0.1, max: 5, step: 0.05, onChange: structCb });
 
@@ -2408,20 +2413,36 @@ function buildFoliagePanel(app) {
     _slider(wBody, slot, 'swayStrength', { label: 'Strength', min: 0, max: 0.5, step: 0.01, onChange: matCb });
   }
 
-  // --- Billboard visibility (no mesh LOD tiers — distance cull only) ---
-  const visBody = _section(panel, 'Billboard visibility', false);
+  // --- Billboard LOD (geometry tiers + hide) ---
+  const visBody = _section(panel, 'Billboard LOD', false);
+  _slider(visBody, ts.billboardFoliageLod, 'lod0Distance', {
+    label: 'Full cards → reduced',
+    min: 20,
+    max: 400,
+    step: 5,
+  });
+  _slider(visBody, ts.billboardFoliageLod, 'lod1Distance', {
+    label: 'Reduced → single card',
+    min: 50,
+    max: 800,
+    step: 10,
+  });
   _slider(visBody, ts.billboardFoliageLod, 'fadeOutDistance', {
     label: 'Hide distance',
     min: 50,
     max: 2000,
     step: 10,
   });
-  _info(visBody, 'Note', 'Painted cards vanish past this distance. Tree leaf LOD is in Tree Paint.');
+  _info(visBody, 'LOD', 'Near: all planes · Mid: 2 planes · Far: 1 plane · Then hidden.');
 
   _separator(panel);
   _button(panel, { title: 'Clear all foliage', onClick: () => { if (confirm('Clear ALL placed foliage?')) app.clearAllFoliage(); } });
 
   panel._rebuildFoliageSlotPicker = rebuildSlotPicker;
+  panel._updateFoliageTextureLabel = (slotIdx) => {
+    const slot = ts.foliageSlots[slotIdx];
+    panel._foliageTexInfo[slotIdx]?.update(foliageTextureLabel(slot));
+  };
   return panel;
 }
 

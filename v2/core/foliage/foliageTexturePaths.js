@@ -107,3 +107,29 @@ export async function applyFoliageSlotTextures(billboardRenderer, foliageSlots) 
 
   if (loads.length > 0) await Promise.all(loads);
 }
+
+/**
+ * Load a user-picked image for in-editor preview (any path on disk).
+ * Does not update slot.textureUrl — use only for try-before-copying into FOLIAGE_TEXTURE_DIR.
+ * @param {File} file
+ * @returns {Promise<THREE.Texture>}
+ */
+export function loadFoliageTextureFromFile(file) {
+  return new Promise((resolve, reject) => {
+    const url = URL.createObjectURL(file);
+    const loader = new THREE.TextureLoader();
+    loader.load(
+      url,
+      (tex) => {
+        URL.revokeObjectURL(url);
+        tex.colorSpace = THREE.SRGBColorSpace;
+        resolve(tex);
+      },
+      undefined,
+      (err) => {
+        URL.revokeObjectURL(url);
+        reject(err);
+      },
+    );
+  });
+}

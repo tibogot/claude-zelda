@@ -143,7 +143,23 @@ export function addFoliageFolder(pane, toolState, opts) {
       .on("change", () => onSlotMaterialChanged?.(i));
   }
 
-  const visFolder = folder.addFolder({ title: "Billboard visibility", expanded: false });
+  const visFolder = folder.addFolder({ title: "Billboard LOD", expanded: false });
+  visFolder
+    .addBinding(toolState.billboardFoliageLod, "lod0Distance", {
+      label: "Full → reduced",
+      min: 20,
+      max: 400,
+      step: 5,
+    })
+    .on("change", () => onFoliageLodChanged?.());
+  visFolder
+    .addBinding(toolState.billboardFoliageLod, "lod1Distance", {
+      label: "Reduced → single",
+      min: 50,
+      max: 800,
+      step: 10,
+    })
+    .on("change", () => onFoliageLodChanged?.());
   visFolder
     .addBinding(toolState.billboardFoliageLod, "fadeOutDistance", {
       label: "Hide distance",

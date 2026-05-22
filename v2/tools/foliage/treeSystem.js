@@ -6,7 +6,7 @@
  * Follows the same beginStroke → applyAt → endStroke pattern as SculptSystem/PaintSystem.
  */
 import * as THREE from "three";
-import { shouldApplyStroke } from "../sculpt/brushModel.js";
+import { shouldApplyStroke, SCATTER_DENSITY_SCALE } from "../sculpt/brushModel.js";
 
 export class TreeSystem {
   constructor({ toolState, treeStore, terrainStore, config }) {
@@ -88,7 +88,7 @@ export class TreeSystem {
     const baseScale = this.toolState.treeSlots[slotIdx]?.baseScale ?? 1.0;
     const spacing = tp.minSpacing * Math.max(baseScale, 0.1);
     const area = Math.PI * radius * radius;
-    const attempts = Math.ceil(area * tp.density * 0.01);
+    const attempts = Math.ceil(area * tp.density * SCATTER_DENSITY_SCALE);
 
     for (let i = 0; i < attempts; i++) {
       const angle = Math.random() * Math.PI * 2;
