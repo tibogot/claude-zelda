@@ -19,7 +19,11 @@ import { OrbitControls } from "three/addons/controls/OrbitControls.js";
 import { SkyMesh } from "three/addons/objects/SkyMesh.js";
 import { HDRLoader } from "three/addons/loaders/HDRLoader.js";
 import { V2_CONFIG } from "./config.js";
-import { createPerfState, createToolState, tickPerf } from "./state/toolState.js";
+import {
+  createPerfState,
+  createToolState,
+  tickPerf,
+} from "./state/toolState.js";
 import { TerrainStore } from "../core/terrain/terrainStore.js";
 import { TerrainMesher } from "../render/terrain/terrainMesher.js";
 import { createSharedTileMaterial } from "../render/terrain/sharedTileMaterial.js";
@@ -50,7 +54,12 @@ import {
 import { TreeStore } from "../core/foliage/treeStore.js";
 import { TreeLodRenderer } from "../render/foliage/treeLodRenderer.js";
 import { TreeSystem } from "../tools/foliage/treeSystem.js";
-import { loadTreeGlbFromFile, loadTreeGlbFromUrl, openGlbPicker, initGlbLoaderRenderer } from "../core/foliage/glbLoader.js";
+import {
+  loadTreeGlbFromFile,
+  loadTreeGlbFromUrl,
+  openGlbPicker,
+  initGlbLoaderRenderer,
+} from "../core/foliage/glbLoader.js";
 import { FoliageLodRenderer } from "../render/foliage/foliageLodRenderer.js";
 import { FoliageStore } from "../core/foliage/foliageStore.js";
 import {
@@ -72,7 +81,10 @@ import { BillboardRenderer } from "../render/foliage/billboardRenderer.js";
 import { BillboardGrassStore } from "../core/billboardGrass/billboardGrassStore.js";
 import { BillboardGrassPaintSystem } from "../tools/billboardGrass/billboardGrassPaintSystem.js";
 import { BillboardGrassRenderer } from "../render/billboardGrass/billboardGrassRenderer.js";
-import { loadFullPresetFromFile, loadFullPresetFromUrl } from "../core/foliage/presetLoader.js";
+import {
+  loadFullPresetFromFile,
+  loadFullPresetFromUrl,
+} from "../core/foliage/presetLoader.js";
 import { GrassManager } from "../render/foliage/grassManager.js";
 import { RevoGrassSystem } from "../render/revoGrass/revoGrassSystem.js";
 import { GrassPaintSystem } from "../tools/foliage/grassPaintSystem.js";
@@ -95,11 +107,21 @@ import { PropStore } from "../core/props/propStore.js";
 import { PropInstancer } from "../core/props/propInstancer.js";
 import { PropSystem } from "../tools/props/propSystem.js";
 import { LivePropManager } from "../core/props/livePropManager.js";
-import { createFlagProp, flagBoundingBox, FLAG_DEFAULTS } from "../core/props/flagFactory.js";
 import {
-  createCoinProp, coinBoundingBox, COIN_DEFAULTS,
-  createHeartProp, heartBoundingBox, HEART_DEFAULTS,
-  createKeyProp, keyBoundingBox, KEY_DEFAULTS,
+  createFlagProp,
+  flagBoundingBox,
+  FLAG_DEFAULTS,
+} from "../core/props/flagFactory.js";
+import {
+  createCoinProp,
+  coinBoundingBox,
+  COIN_DEFAULTS,
+  createHeartProp,
+  heartBoundingBox,
+  HEART_DEFAULTS,
+  createKeyProp,
+  keyBoundingBox,
+  KEY_DEFAULTS,
 } from "../core/props/collectibleFactory.js";
 import { createCollectibleBurst } from "../effects/collectibleBurst.js";
 import { createCollectibleRuntime } from "../play/collectibleRuntime.js";
@@ -118,7 +140,11 @@ import { HoleSystem } from "../tools/hole/holeSystem.js";
 import { HoleOverlay } from "../render/hole/holeOverlay.js";
 import { CaveStore } from "../core/cave/caveStore.js";
 import { CaveSystem } from "../tools/cave/caveSystem.js";
-import { createFleurSystem, FLEUR_PRESETS, FLEUR_ALPHA_URLS } from "../../fleur-painter.js";
+import {
+  createFleurSystem,
+  FLEUR_PRESETS,
+  FLEUR_ALPHA_URLS,
+} from "../../fleur-painter.js";
 import { createAmbientFxStore } from "../core/ambientfx/ambientFxStore.js";
 import { createLeafFxStore } from "../core/ambientfx/leafFxStore.js";
 import { BorderMountains } from "../render/terrain/borderMountains.js";
@@ -141,7 +167,9 @@ async function probeModelsForFile(filename) {
     try {
       const resp = await fetch(url, { method: "HEAD" });
       if (resp.ok) return url;
-    } catch (_) { /* try next */ }
+    } catch (_) {
+      /* try next */
+    }
   }
   return null;
 }
@@ -168,7 +196,9 @@ export async function startV2App(opts = {}) {
   camera.position.set(160, 140, 180);
 
   const renderer = new THREE.WebGPURenderer({ antialias: true });
-  renderer.setPixelRatio(Math.min(window.devicePixelRatio, config.render.maxPixelRatio));
+  renderer.setPixelRatio(
+    Math.min(window.devicePixelRatio, config.render.maxPixelRatio),
+  );
   renderer.setSize(_initW, _initH);
   renderer.outputColorSpace = THREE.SRGBColorSpace;
   renderer.toneMapping = THREE.ACESFilmicToneMapping;
@@ -184,7 +214,11 @@ export async function startV2App(opts = {}) {
     const az = THREE.MathUtils.degToRad(azDeg);
     const el = THREE.MathUtils.degToRad(elDeg);
     return target
-      .set(Math.cos(el) * Math.cos(az), Math.sin(el), Math.cos(el) * Math.sin(az))
+      .set(
+        Math.cos(el) * Math.cos(az),
+        Math.sin(el),
+        Math.cos(el) * Math.sin(az),
+      )
       .normalize();
   }
 
@@ -201,7 +235,11 @@ export async function startV2App(opts = {}) {
   };
 
   const L = toolState.light;
-  const hemi = new THREE.HemisphereLight(L.hemiSkyColor, L.hemiGroundColor, L.hemiIntensity);
+  const hemi = new THREE.HemisphereLight(
+    L.hemiSkyColor,
+    L.hemiGroundColor,
+    L.hemiIntensity,
+  );
   scene.add(hemi);
 
   const sun = new THREE.DirectionalLight(L.dirColor, L.dirIntensity);
@@ -246,7 +284,10 @@ export async function startV2App(opts = {}) {
       }
     }
   } catch (err) {
-    console.warn("[V2] CSMShadowNode init failed; using non-CSM directional shadow.", err);
+    console.warn(
+      "[V2] CSMShadowNode init failed; using non-CSM directional shadow.",
+      err,
+    );
     csm = null;
   }
 
@@ -257,13 +298,19 @@ export async function startV2App(opts = {}) {
 
   const F = toolState.fog;
   const uHFogEnabled = uniform(F.height.enabled ? 1 : 0);
-  const uHFogColor = uniform(new THREE.Color(F.height.color).convertSRGBToLinear());
+  const uHFogColor = uniform(
+    new THREE.Color(F.height.color).convertSRGBToLinear(),
+  );
   const uHFogDensity = uniform(F.height.density);
   const uHFogHeight = uniform(F.height.height);
   const uDFogEnabled = uniform(F.distance.enabled ? 1 : 0);
-  const uDFogColor = uniform(new THREE.Color(F.distance.color).convertSRGBToLinear());
+  const uDFogColor = uniform(
+    new THREE.Color(F.distance.color).convertSRGBToLinear(),
+  );
   const uDFogDensity = uniform(F.distance.density);
-  const _hFactor = exponentialHeightFogFactor(uHFogDensity, uHFogHeight).mul(uHFogEnabled);
+  const _hFactor = exponentialHeightFogFactor(uHFogDensity, uHFogHeight).mul(
+    uHFogEnabled,
+  );
   const _dFactor = densityFogFactor(uDFogDensity).mul(uDFogEnabled);
   const _combinedFactor = clamp(_hFactor.add(_dFactor), 0, 1);
   const _totalW = _hFactor.add(_dFactor).add(0.0001);
@@ -515,17 +562,26 @@ export async function startV2App(opts = {}) {
 
   function buildSplatOverlay() {
     if (!textureLibraryReady) return null;
-    const slots = toolState.paint.layerSlotIds.map((id) => textureLibrary.getSlot(id));
+    const slots = toolState.paint.layerSlotIds.map((id) =>
+      textureLibrary.getSlot(id),
+    );
     if (slots.some((s) => !s)) return null;
     // Dispose previous array textures
     _layerArrayAlbedo?.dispose();
     _layerArrayOrm?.dispose();
     const { albedoArrayTex, ormArrayTex } = buildLayerArrayTextures(
-      textureLibrary, toolState.paint.layerSlotIds,
+      textureLibrary,
+      toolState.paint.layerSlotIds,
     );
     _layerArrayAlbedo = albedoArrayTex;
     _layerArrayOrm = ormArrayTex;
-    return createSplatOverlay(slots, config.world.chunkSize, config.world.size, albedoArrayTex, ormArrayTex);
+    return createSplatOverlay(
+      slots,
+      config.world.chunkSize,
+      config.world.size,
+      albedoArrayTex,
+      ormArrayTex,
+    );
   }
 
   /** Returns both splatmap texture nodes from whichever surface material is active. */
@@ -547,8 +603,10 @@ export async function startV2App(opts = {}) {
 
   function syncSoloLayer() {
     const v = toolState.paint.soloLayer;
-    if (proceduralTerrainBundle?.uSoloLayer) proceduralTerrainBundle.uSoloLayer.value = v;
-    if (imageTexTerrainBundle?.uSoloLayer) imageTexTerrainBundle.uSoloLayer.value = v;
+    if (proceduralTerrainBundle?.uSoloLayer)
+      proceduralTerrainBundle.uSoloLayer.value = v;
+    if (imageTexTerrainBundle?.uSoloLayer)
+      imageTexTerrainBundle.uSoloLayer.value = v;
   }
 
   function syncHeightBlend() {
@@ -566,7 +624,14 @@ export async function startV2App(opts = {}) {
 
   function setupSplatSwapFromStore(mesh) {
     const prev = mesh.onBeforeRender;
-    mesh.onBeforeRender = (renderer, scene, camera, geometry, material, group) => {
+    mesh.onBeforeRender = (
+      renderer,
+      scene,
+      camera,
+      geometry,
+      material,
+      group,
+    ) => {
       if (prev) prev(renderer, scene, camera, geometry, material, group);
       const nodes = getActiveSplatNodes();
       const key = mesh.userData.chunkKey;
@@ -579,7 +644,8 @@ export async function startV2App(opts = {}) {
         if (nodes.node0) nodes.node0.value = tex;
         if (nodes.node1) nodes.node1.value = tex;
         if (nodes.holeNode) nodes.holeNode.value = holeTex;
-        if (nodes.chunkHasHoleUniform) nodes.chunkHasHoleUniform.value = chunkHasHole;
+        if (nodes.chunkHasHoleUniform)
+          nodes.chunkHasHoleUniform.value = chunkHasHole;
       }
       if (tileHoleTexNode) tileHoleTexNode.value = holeTex;
       if (tileChunkHasHoleUniform) tileChunkHasHoleUniform.value = chunkHasHole;
@@ -644,7 +710,9 @@ export async function startV2App(opts = {}) {
   function getImageTexTerrainBundle() {
     if (!imageTexTerrainBundle) {
       syncCliffUniformsFromParams();
-      const groundSlot = textureLibrary.getSlot(toolState.textureSlots.groundSlotId);
+      const groundSlot = textureLibrary.getSlot(
+        toolState.textureSlots.groundSlotId,
+      );
       imageTexTerrainBundle = createV2ImageTexGroundMaterial(
         groundSlot,
         config.world.size,
@@ -702,7 +770,12 @@ export async function startV2App(opts = {}) {
     },
   });
   const brushMask = new BrushMask();
-  const paintSystem = new PaintSystem({ toolState, splatStore, config, brushMask });
+  const paintSystem = new PaintSystem({
+    toolState,
+    splatStore,
+    config,
+    brushMask,
+  });
   const holeStore = new HoleStore(config);
   const holeSystem = new HoleSystem({ toolState, holeStore, chunkStream });
   const holeOverlay = new HoleOverlay(scene, config);
@@ -737,12 +810,22 @@ export async function startV2App(opts = {}) {
 
   const treeStore = new TreeStore(config);
   const treeLodRenderer = new TreeLodRenderer(scene, config);
-  const treeSystem = new TreeSystem({ toolState, treeStore, terrainStore, config });
+  const treeSystem = new TreeSystem({
+    toolState,
+    treeStore,
+    terrainStore,
+    config,
+  });
   const foliageLodRenderer = new FoliageLodRenderer(scene, config);
 
   const foliageStore = new FoliageStore(config);
   const billboardRenderer = new BillboardRenderer(scene, config);
-  const foliagePaintSystem = new FoliagePaintSystem({ toolState, foliageStore, terrainStore, config });
+  const foliagePaintSystem = new FoliagePaintSystem({
+    toolState,
+    foliageStore,
+    terrainStore,
+    config,
+  });
 
   for (let i = 0; i < toolState.foliageSlots.length; i++) {
     billboardRenderer.rebuildSlot(i, toolState.foliageSlots[i]);
@@ -762,22 +845,38 @@ export async function startV2App(opts = {}) {
     }
     billboardGrassRenderer.rebuildSlot(i, slot);
   }
-  applyBillboardGrassSlotTextures(billboardGrassRenderer, toolState.billboardGrassSlots).catch(() => {});
+  applyBillboardGrassSlotTextures(
+    billboardGrassRenderer,
+    toolState.billboardGrassSlots,
+  ).catch(() => {});
 
   const grassManager = new GrassManager({ scene, camera, config });
   const revoGrassSystem = new RevoGrassSystem({ scene, config });
-  const grassPaintSystem = new GrassPaintSystem({ toolState, grassManager, config });
+  const grassPaintSystem = new GrassPaintSystem({
+    toolState,
+    grassManager,
+    config,
+  });
   const revoGrassMaskPaintSystem = new RevoGrassMaskPaintSystem({
     toolState,
     mask: revoGrassSystem.mask,
     config,
   });
-  const cliffGrassPaintSystem = new CliffGrassPaintSystem({ toolState, grassManager, config });
+  const cliffGrassPaintSystem = new CliffGrassPaintSystem({
+    toolState,
+    grassManager,
+    config,
+  });
   const roadReflection = new RoadPlanarReflection({
-    renderer, scene, camera, resScale: 0.75,
+    renderer,
+    scene,
+    camera,
+    resScale: 0.75,
   });
   const roadSystem = new RoadSystem({
-    scene, camera, toolState,
+    scene,
+    camera,
+    toolState,
     getWorldHeight: (x, z) => terrainStore.getWorldHeight(x, z),
     reflectTex: roadReflection.texture,
     terrainStore,
@@ -817,12 +916,25 @@ export async function startV2App(opts = {}) {
   const cliffStore = new CliffStore();
   const cliffInstancer = new CliffInstancer(scene, cliffStore);
   const cliffBvh = new CliffBvh(cliffStore);
-  const cliffSystem = new CliffSystem({ toolState, cliffStore, cliffInstancer, cliffBvh, terrainStore });
+  const cliffSystem = new CliffSystem({
+    toolState,
+    cliffStore,
+    cliffInstancer,
+    cliffBvh,
+    terrainStore,
+  });
   const cliffSlotToType = {};
 
   const propStore = new PropStore();
   const propInstancer = new PropInstancer(scene, propStore);
-  const propSystem = new PropSystem({ toolState, propStore, propInstancer, cliffBvh, terrainStore, config });
+  const propSystem = new PropSystem({
+    toolState,
+    propStore,
+    propInstancer,
+    cliffBvh,
+    terrainStore,
+    config,
+  });
 
   /**
    * Rebuild the material on a primitive slot from its current `materialId` + `triplanar` fields.
@@ -833,7 +945,9 @@ export async function startV2App(opts = {}) {
     if (!slot || !slot.builtin) return false;
     const propMat = propTextureLibrary.getById(slot.materialId);
     if (!propMat) return false;
-    const newMat = createMaterialForLibrary(propMat, { triplanar: !!slot.triplanar });
+    const newMat = createMaterialForLibrary(propMat, {
+      triplanar: !!slot.triplanar,
+    });
     propInstancer.setTypeMaterial(slot.typeIdx, newMat);
     const type = propStore.types[slot.typeIdx];
     if (type) for (const e of type.entries) e.material = newMat;
@@ -861,7 +975,12 @@ export async function startV2App(opts = {}) {
   let propUiCallbacks = {};
 
   const dummyCliffPaintTex = (() => {
-    const t = new THREE.DataTexture(new Uint8Array([0, 0, 0, 0]), 1, 1, THREE.RGBAFormat);
+    const t = new THREE.DataTexture(
+      new Uint8Array([0, 0, 0, 0]),
+      1,
+      1,
+      THREE.RGBAFormat,
+    );
     t.needsUpdate = true;
     return t;
   })();
@@ -877,9 +996,12 @@ export async function startV2App(opts = {}) {
     cliffU.uRockContrast.value = c.blendRockContrast;
     cliffU.uTriplanarSharp.value = c.blendTriplanarSharp;
     cliffBlendPack = createCliffInstancerBlendMaterial(
-      config.world.size, config.world.size * 0.5,
-      slot.albedoTex, slot.ormTex,
-      cliffU, dummyCliffPaintTex
+      config.world.size,
+      config.world.size * 0.5,
+      slot.albedoTex,
+      slot.ormTex,
+      cliffU,
+      dummyCliffPaintTex,
     );
     cliffBlendPack.uCBSlopeLow.value = c.blendSlopeLow;
     cliffBlendPack.uCBSlopeHigh.value = c.blendSlopeHigh;
@@ -920,10 +1042,16 @@ export async function startV2App(opts = {}) {
       const dd = decalSystem.decals[decalSystem.selectedIndex];
       if (dd && !dd.soloMesh) decalSystem.handleTransformChange();
     }
-    if (toolState.mode === "fullRoad" && fullRoadSystem.selectedDecalId != null) {
+    if (
+      toolState.mode === "fullRoad" &&
+      fullRoadSystem.selectedDecalId != null
+    ) {
       fullRoadSystem.handleDecalTransformChange();
     }
-    if (toolState.mode === "smartRoad" && smartRoadSystem.selectedDecalId != null) {
+    if (
+      toolState.mode === "smartRoad" &&
+      smartRoadSystem.selectedDecalId != null
+    ) {
       smartRoadSystem.handleDecalTransformChange();
     }
   });
@@ -936,7 +1064,8 @@ export async function startV2App(opts = {}) {
     if (toolState.mode === "props") propSystem.handleTransformEnd();
     if (toolState.mode === "decals") decalSystem.handleTransformEnd();
     if (toolState.mode === "fullRoad") fullRoadSystem.handleDecalTransformEnd();
-    if (toolState.mode === "smartRoad") smartRoadSystem.handleDecalTransformEnd();
+    if (toolState.mode === "smartRoad")
+      smartRoadSystem.handleDecalTransformEnd();
   });
 
   // ── Water system ──────────────────────────────────────────────────────────
@@ -963,10 +1092,18 @@ export async function startV2App(opts = {}) {
   // collidable geometry? Append it to the array.
   rebakePlayerBvh = () => {
     cliffBvh.bake(terrainStore, config, [
-      propStore, splineSystem, fullRoadSystem, smartRoadSystem, waterfallSystem,
+      propStore,
+      splineSystem,
+      fullRoadSystem,
+      smartRoadSystem,
+      waterfallSystem,
       caveStore,
     ]);
-    grassManager.rebuildCliffHeightTex(cliffBvh, terrainStore, config.world.size);
+    grassManager.rebuildCliffHeightTex(
+      cliffBvh,
+      terrainStore,
+      config.world.size,
+    );
     ui?.refreshCaveCount?.(caveStore.count());
   };
   const decalSystem = new DecalSystem({
@@ -988,9 +1125,8 @@ export async function startV2App(opts = {}) {
       FLEUR_ALPHA_URLS[i] = "../" + FLEUR_ALPHA_URLS[i];
     }
   }
-  const fleurSystem = createFleurSystem(
-    scene,
-    (x, z) => terrainStore.getWorldHeight(x, z),
+  const fleurSystem = createFleurSystem(scene, (x, z) =>
+    terrainStore.getWorldHeight(x, z),
   );
 
   function syncFleurInteraction() {
@@ -1053,13 +1189,25 @@ export async function startV2App(opts = {}) {
       if (erase) {
         leafFxStore.removeInBrush(wx, wz, afx.emitterRadius);
       } else {
-        leafFxStore.addInBrush(wx, wz, afx.emitterRadius, afx.density, afx.leafActiveType);
+        leafFxStore.addInBrush(
+          wx,
+          wz,
+          afx.emitterRadius,
+          afx.density,
+          afx.leafActiveType,
+        );
       }
     } else {
       if (erase) {
         ambientFxStore.removeInBrush(wx, wz, afx.emitterRadius);
       } else {
-        ambientFxStore.addInBrush(wx, wz, afx.emitterRadius, afx.effectType, afx.density);
+        ambientFxStore.addInBrush(
+          wx,
+          wz,
+          afx.emitterRadius,
+          afx.effectType,
+          afx.density,
+        );
       }
     }
   }
@@ -1071,10 +1219,15 @@ export async function startV2App(opts = {}) {
       fleurSystem.removeInBrush(wx, wz, radius);
     } else {
       fleurSystem.addInBrush(
-        wx, wz, radius,
-        fp.perStroke, fp.minSpacing,
-        fp.scaleMin, fp.scaleMax,
-        fp.hoverBase, fp.hoverVariance,
+        wx,
+        wz,
+        radius,
+        fp.perStroke,
+        fp.minSpacing,
+        fp.scaleMin,
+        fp.scaleMax,
+        fp.hoverBase,
+        fp.hoverVariance,
         fp.activeSlot,
         fp.subMode === "stem" ? "stem" : "ground",
         fp.bloomShape,
@@ -1090,7 +1243,10 @@ export async function startV2App(opts = {}) {
     playSfx: (kind) => collectibleSfx.play(kind),
   });
   const playMode = new PlayMode({
-    scene, camera, renderer, controls,
+    scene,
+    camera,
+    renderer,
+    controls,
     getWorldHeight,
     // `getTerrainHeight` drives the play-mode ground-collision test each frame
     // (player + car). Returning a sentinel far below the world when the (x,z)
@@ -1101,7 +1257,9 @@ export async function startV2App(opts = {}) {
     // is left alone so we don't dump the player into the void on respawn /
     // mode switch / fly-over.
     getTerrainHeight: (x, z) =>
-      holeStore.isHoleAt(x, z) ? HOLE_GROUND_SENTINEL : terrainStore.getWorldHeight(x, z),
+      holeStore.isHoleAt(x, z)
+        ? HOLE_GROUND_SENTINEL
+        : terrainStore.getWorldHeight(x, z),
     worldHalf: config.world.size * 0.5,
     cliffBvh,
     isBarrierBlocked: (wx, wz) => barrierStore.isBlocked(wx, wz),
@@ -1116,8 +1274,14 @@ export async function startV2App(opts = {}) {
   const gestureAudioUnlock = () => {
     audioSystem.unlock();
   };
-  window.addEventListener("pointerdown", gestureAudioUnlock, { once: true, capture: true });
-  window.addEventListener("keydown", gestureAudioUnlock, { once: true, capture: true });
+  window.addEventListener("pointerdown", gestureAudioUnlock, {
+    once: true,
+    capture: true,
+  });
+  window.addEventListener("keydown", gestureAudioUnlock, {
+    once: true,
+    capture: true,
+  });
 
   let _pendingPlayImmersive = false;
 
@@ -1152,11 +1316,8 @@ export async function startV2App(opts = {}) {
       grassManager.syncUniforms(toolState.grass, sunDir);
       ui?.pane.refresh();
     }
-    if (toolState.mode === "revoGrass" && !toolState.revoGrass.enabled) {
-      toolState.revoGrass.enabled = true;
-      revoGrassSystem.setEnabled(true);
+    if (toolState.mode === "revoGrass") {
       revoGrassSystem.syncFromState(toolState.revoGrass, sunDir);
-      ui?.pane.refresh();
     }
     if (toolState.mode !== "cliffs") {
       deactivateCliffSelection();
@@ -1170,7 +1331,9 @@ export async function startV2App(opts = {}) {
     if (toolState.mode !== "waterfall") {
       waterfallSystem.deselect();
     } else {
-      transformControls.setMode(toolState.waterfall.transformMode || "translate");
+      transformControls.setMode(
+        toolState.waterfall.transformMode || "translate",
+      );
     }
     if (toolState.mode !== "decals") {
       decalSystem.deselect();
@@ -1185,25 +1348,37 @@ export async function startV2App(opts = {}) {
       fullRoadSystem._clearDecalPreview();
       smartRoadSystem.deselectDecal();
       smartRoadSystem._clearDecalPreview();
-    } else if (activeGraphRoadParams().decalMode && activeGraphRoadSystem().selectedDecalId != null) {
-      transformControls.setMode(activeGraphRoadParams().decalTransformMode || "translate");
+    } else if (
+      activeGraphRoadParams().decalMode &&
+      activeGraphRoadSystem().selectedDecalId != null
+    ) {
+      transformControls.setMode(
+        activeGraphRoadParams().decalTransformMode || "translate",
+      );
     }
     if (toolState.mode !== "spline") {
       splineSystem.dragging = false;
     }
-    roadSystem.handleGroup.visible = toolState.mode === "road" && toolState.road.showHandles;
-    fullRoadSystem.handleGroup.visible = toolState.mode === "fullRoad" && toolState.fullRoad.showHandles;
-    smartRoadSystem.handleGroup.visible = toolState.mode === "smartRoad" && toolState.smartRoad.showHandles;
-    riverSystem.handleGroup.visible = toolState.mode === "river" && toolState.river.showHandles;
-    splineSystem.handleGroup.visible = toolState.mode === "spline" && toolState.spline.showHandles;
+    roadSystem.handleGroup.visible =
+      toolState.mode === "road" && toolState.road.showHandles;
+    fullRoadSystem.handleGroup.visible =
+      toolState.mode === "fullRoad" && toolState.fullRoad.showHandles;
+    smartRoadSystem.handleGroup.visible =
+      toolState.mode === "smartRoad" && toolState.smartRoad.showHandles;
+    riverSystem.handleGroup.visible =
+      toolState.mode === "river" && toolState.river.showHandles;
+    splineSystem.handleGroup.visible =
+      toolState.mode === "spline" && toolState.spline.showHandles;
     if (toolState.mode !== "spline") splineSystem.clearPreview();
     if (ui?.waterFolder) ui.waterFolder.hidden = toolState.mode !== "water";
     if (ui?.decalFolder) ui.decalFolder.hidden = toolState.mode !== "decals";
-    if (ui?.barrierFolder) ui.barrierFolder.expanded = toolState.mode === "barrier";
+    if (ui?.barrierFolder)
+      ui.barrierFolder.expanded = toolState.mode === "barrier";
     if (ui?.holeFolder) ui.holeFolder.expanded = toolState.mode === "hole";
     if (ui?.caveFolder) ui.caveFolder.expanded = toolState.mode === "cave";
     if (ui?.fleurFolder) ui.fleurFolder.hidden = toolState.mode !== "fleurs";
-    if (ui?.ambientFxFolder) ui.ambientFxFolder.hidden = toolState.mode !== "ambientfx";
+    if (ui?.ambientFxFolder)
+      ui.ambientFxFolder.hidden = toolState.mode !== "ambientfx";
     if (toolState.mode === "ambientfx") {
       ambientFxStore.setRingsVisible(toolState.ambientFx.showRings);
       leafFxStore.setRingsVisible(toolState.ambientFx.showRings);
@@ -1232,21 +1407,82 @@ export async function startV2App(opts = {}) {
   /** @type {ReturnType<typeof createTweakpaneUi>} */
   let ui;
   let _saveProject, _loadProject;
-  let _importTreeGlb, _loadTreePreset, _removeTreeSlot, _clearAllTrees, _treeCastShadowChanged, _foliageParamChanged;
-  let _importPropGlb, _addPrimitive, _addLiveProp, _removePropSlot, _importPropLod, _propCastShadowChanged, _deleteSelectedProp, _duplicateSelectedProp, _clearAllProps, _propTransformModeChanged, _rebakeBvh;
-  let _loadFoliageTexture, _foliageSlotStructureChanged, _foliageSlotMaterialChanged, _clearAllFoliage, _foliageLodChanged;
+  let _importTreeGlb,
+    _loadTreePreset,
+    _removeTreeSlot,
+    _clearAllTrees,
+    _treeCastShadowChanged,
+    _foliageParamChanged;
+  let _importPropGlb,
+    _addPrimitive,
+    _addLiveProp,
+    _removePropSlot,
+    _importPropLod,
+    _propCastShadowChanged,
+    _deleteSelectedProp,
+    _duplicateSelectedProp,
+    _clearAllProps,
+    _propTransformModeChanged,
+    _rebakeBvh;
+  let _loadFoliageTexture,
+    _foliageSlotStructureChanged,
+    _foliageSlotMaterialChanged,
+    _clearAllFoliage,
+    _foliageLodChanged;
   let _loadBillboardGrassMask,
     _billboardGrassSlotStructureChanged,
     _billboardGrassSlotMaterialChanged,
     _clearAllBillboardGrass;
-  let _playSpawnChanged, _barrierOverlayChanged, _barrierClear, _barrierFill, _holeOverlayChanged, _holeClear, _caveUndo, _caveRedo, _caveClear;
-  let _ambientFxFlapChanged, _ambientFxRingsChanged, _ambientFxClear, _ambientFxLeafChanged, _ambientFxClearLeaves, _ambientFxLeafRespawn;
-  let _fleurChanged, _fleurColorChanged, _fleurStemChanged, _fleurStemCurveChanged, _fleurInteractionChanged, _fleurClear;
-  let _cliffGrassFill, _cliffGrassClear, _importCliffGlb, _removeCliffSlot, _deleteSelectedCliff, _clearAllCliffs, _cliffTransformModeChanged, _cliffBlendChanged;
-  let _waterChanged, _saveWater, _loadWater, _deleteSelectedWater, _clearAllWater;
+  let _playSpawnChanged,
+    _barrierOverlayChanged,
+    _barrierClear,
+    _barrierFill,
+    _holeOverlayChanged,
+    _holeClear,
+    _caveUndo,
+    _caveRedo,
+    _caveClear;
+  let _ambientFxFlapChanged,
+    _ambientFxRingsChanged,
+    _ambientFxClear,
+    _ambientFxLeafChanged,
+    _ambientFxClearLeaves,
+    _ambientFxLeafRespawn;
+  let _fleurChanged,
+    _fleurColorChanged,
+    _fleurStemChanged,
+    _fleurStemCurveChanged,
+    _fleurInteractionChanged,
+    _fleurClear;
+  let _cliffGrassFill,
+    _cliffGrassClear,
+    _importCliffGlb,
+    _removeCliffSlot,
+    _deleteSelectedCliff,
+    _clearAllCliffs,
+    _cliffTransformModeChanged,
+    _cliffBlendChanged;
+  let _waterChanged,
+    _saveWater,
+    _loadWater,
+    _deleteSelectedWater,
+    _clearAllWater;
   let _waterfallChanged, _deleteSelectedWaterfall, _clearAllWaterfalls;
-  let _decalLoadImage, _decalOpacityChanged, _decalAlignChanged, _decalRefit, _decalDeleteSelected, _decalClearAll, _decalSaveJson, _decalLoadJson, _decalTransformModeChanged;
-  let _riverChanged, _riverNewRiver, _riverDeleteActive, _riverDeleteSelected, _riverSelectedYChanged, _riverActiveIndexChanged;
+  let _decalLoadImage,
+    _decalOpacityChanged,
+    _decalAlignChanged,
+    _decalRefit,
+    _decalDeleteSelected,
+    _decalClearAll,
+    _decalSaveJson,
+    _decalLoadJson,
+    _decalTransformModeChanged;
+  let _riverChanged,
+    _riverNewRiver,
+    _riverDeleteActive,
+    _riverDeleteSelected,
+    _riverSelectedYChanged,
+    _riverActiveIndexChanged;
   let _splineChanged,
     _splineDeleteSelected,
     _splineClearAll,
@@ -1264,9 +1500,18 @@ export async function startV2App(opts = {}) {
     _splineKerbDuplicate,
     _splineKerbSuggestFromCurvature,
     _splineKerbLiveChanged;
-  let _grassChanged, _grassRebuildGeos, _grassFill, _grassClear, _grassSaveDensity, _grassLoadDensity;
+  let _grassChanged,
+    _grassRebuildGeos,
+    _grassFill,
+    _grassClear,
+    _grassSaveDensity,
+    _grassLoadDensity;
   let _revoGrassChanged, _revoGrassRebuild;
-  let _terrainSurfaceChanged, _tslTerrainSync, _autoCliffEditorChanged, _cliffTextureSlotChanged, _groundTextureSlotChanged;
+  let _terrainSurfaceChanged,
+    _tslTerrainSync,
+    _autoCliffEditorChanged,
+    _cliffTextureSlotChanged,
+    _groundTextureSlotChanged;
   ui = createTweakpaneUi({
     toolState,
     config,
@@ -1305,7 +1550,8 @@ export async function startV2App(opts = {}) {
     }),
     onGroundSlotChanged: (_groundTextureSlotChanged = () => {
       disposeImageTexBundle();
-      if (toolState.terrainSurface === "image") applyTerrainSurfaceFromToolState();
+      if (toolState.terrainSurface === "image")
+        applyTerrainSurfaceFromToolState();
     }),
     onPlaySpawnChanged: (_playSpawnChanged = () => {
       syncPlaySpawnMarker();
@@ -1326,20 +1572,32 @@ export async function startV2App(opts = {}) {
       if (!file) return;
       try {
         const { submeshes, name } = await loadTreeGlbFromFile(file);
-        treeLodRenderer.setSlotModel(slotIdx, lod, submeshes, toolState.treeLod.castShadow);
+        treeLodRenderer.setSlotModel(
+          slotIdx,
+          lod,
+          submeshes,
+          toolState.treeLod.castShadow,
+        );
         if (lod === 0) toolState.treeSlots[slotIdx].name = name;
         const matchedUrl = await probeModelsForFile(file.name);
         if (matchedUrl) {
           const slot = toolState.treeSlots[slotIdx];
           if (!slot.glbFile) slot.glbFile = {};
           slot.glbFile[lod === 0 ? "lod0" : "lod1"] = file.name;
-          console.log(`[V2] Tree slot ${slotIdx} LOD${lod}: loaded ${submeshes.length} submesh(es) from ${file.name} — linked to ${matchedUrl}, will auto-restore on load`);
+          console.log(
+            `[V2] Tree slot ${slotIdx} LOD${lod}: loaded ${submeshes.length} submesh(es) from ${file.name} — linked to ${matchedUrl}, will auto-restore on load`,
+          );
         } else {
-          console.warn(`[V2] Tree slot ${slotIdx} LOD${lod}: loaded ${submeshes.length} submesh(es) from ${file.name} — won't auto-restore on load. Put ${file.name} in /models to enable.`);
+          console.warn(
+            `[V2] Tree slot ${slotIdx} LOD${lod}: loaded ${submeshes.length} submesh(es) from ${file.name} — won't auto-restore on load. Put ${file.name} in /models to enable.`,
+          );
         }
         ui?.pane.refresh();
       } catch (err) {
-        console.error(`[V2] Failed to load GLB for slot ${slotIdx} LOD${lod}:`, err);
+        console.error(
+          `[V2] Failed to load GLB for slot ${slotIdx} LOD${lod}:`,
+          err,
+        );
       }
     }),
     onLoadTreePreset: (_loadTreePreset = async (slotIdx) => {
@@ -1350,21 +1608,35 @@ export async function startV2App(opts = {}) {
         const file = input.files?.[0];
         if (!file) return;
         try {
-          const { foliagePreset, trunkSubmeshes, trunkLod1Submeshes, json } = await loadFullPresetFromFile(file);
+          const { foliagePreset, trunkSubmeshes, trunkLod1Submeshes, json } =
+            await loadFullPresetFromFile(file);
 
           if (trunkSubmeshes) {
-            treeLodRenderer.setSlotModel(slotIdx, 0, trunkSubmeshes, toolState.treeLod.castShadow);
-            console.log(`[V2] Trunk LOD0 loaded: ${json.trunkFile} (${trunkSubmeshes.length} submesh)`);
+            treeLodRenderer.setSlotModel(
+              slotIdx,
+              0,
+              trunkSubmeshes,
+              toolState.treeLod.castShadow,
+            );
+            console.log(
+              `[V2] Trunk LOD0 loaded: ${json.trunkFile} (${trunkSubmeshes.length} submesh)`,
+            );
           }
           if (trunkLod1Submeshes) {
-            treeLodRenderer.setSlotModel(slotIdx, 1, trunkLod1Submeshes, toolState.treeLod.castShadow);
+            treeLodRenderer.setSlotModel(
+              slotIdx,
+              1,
+              trunkLod1Submeshes,
+              toolState.treeLod.castShadow,
+            );
             console.log(`[V2] Trunk LOD1 loaded: ${json.trunkLod1File}`);
           }
 
           foliageLodRenderer.setSlotPreset(slotIdx, foliagePreset);
 
           toolState.treeSlots[slotIdx].presetFile = file.name;
-          toolState.treeSlots[slotIdx].name = json.presetName || file.name.replace(/\.json$/, "");
+          toolState.treeSlots[slotIdx].name =
+            json.presetName || file.name.replace(/\.json$/, "");
           if (json.trunkScale != null) {
             toolState.treeSlots[slotIdx].baseScale = json.trunkScale;
           }
@@ -1373,27 +1645,32 @@ export async function startV2App(opts = {}) {
           const m = json.material || {};
           const w = json.wind || {};
           if (m.bottomColor) f.bottomColor = m.bottomColor;
-          if (m.topColor)    f.topColor    = m.topColor;
-          if (m.colorVar != null)    f.colorVar    = m.colorVar;
+          if (m.topColor) f.topColor = m.topColor;
+          if (m.colorVar != null) f.colorVar = m.colorVar;
           if (m.treeColorVar != null) f.treeColorVar = m.treeColorVar;
           if (m.alphaCutoff != null) f.alphaCutoff = m.alphaCutoff;
-          if (m.normalBias != null)  f.normalBias  = m.normalBias;
-          if (m.leafWarp != null)    f.leafWarp    = m.leafWarp;
-          if (m.aoStr != null)       f.aoStr       = m.aoStr;
-          if (m.sssStr != null)      f.sssStr      = m.sssStr;
-          if (m.sssPow != null)      f.sssPow      = m.sssPow;
-          if (m.sssColor)            f.sssColor    = m.sssColor;
-          if (m.rimStr != null)      f.rimStr      = m.rimStr;
-          if (m.rimPow != null)      f.rimPow      = m.rimPow;
-          if (m.rimColor)            f.rimColor    = m.rimColor;
-          if (w.windSpeed != null)   f.windSpeed   = w.windSpeed;
-          if (w.windStr != null)     f.windStr     = w.windStr;
-          if (w.windMicro != null)   f.windMicro   = w.windMicro;
+          if (m.normalBias != null) f.normalBias = m.normalBias;
+          if (m.leafWarp != null) f.leafWarp = m.leafWarp;
+          if (m.aoStr != null) f.aoStr = m.aoStr;
+          if (m.sssStr != null) f.sssStr = m.sssStr;
+          if (m.sssPow != null) f.sssPow = m.sssPow;
+          if (m.sssColor) f.sssColor = m.sssColor;
+          if (m.rimStr != null) f.rimStr = m.rimStr;
+          if (m.rimPow != null) f.rimPow = m.rimPow;
+          if (m.rimColor) f.rimColor = m.rimColor;
+          if (w.windSpeed != null) f.windSpeed = w.windSpeed;
+          if (w.windStr != null) f.windStr = w.windStr;
+          if (w.windMicro != null) f.windMicro = w.windMicro;
 
           ui?.pane.refresh();
-          console.log(`[V2] Tree preset "${json.presetName}" loaded into slot ${slotIdx} (baseScale=${json.trunkScale ?? 1}, ${foliagePreset.lods[0]?.count ?? 0} leaves LOD0)`);
+          console.log(
+            `[V2] Tree preset "${json.presetName}" loaded into slot ${slotIdx} (baseScale=${json.trunkScale ?? 1}, ${foliagePreset.lods[0]?.count ?? 0} leaves LOD0)`,
+          );
         } catch (err) {
-          console.error(`[V2] Failed to load tree preset for slot ${slotIdx}:`, err);
+          console.error(
+            `[V2] Failed to load tree preset for slot ${slotIdx}:`,
+            err,
+          );
         }
       };
       input.click();
@@ -1405,21 +1682,21 @@ export async function startV2App(opts = {}) {
       const u = preset.uniforms;
       u.bottomColor.value.set(f.bottomColor);
       u.topColor.value.set(f.topColor);
-      u.colorVar.value    = f.colorVar;
+      u.colorVar.value = f.colorVar;
       u.treeColorVar.value = f.treeColorVar;
       u.alphaCutoff.value = f.alphaCutoff;
-      u.normalBias.value  = f.normalBias;
-      u.leafWarp.value    = f.leafWarp;
-      u.aoStr.value       = f.aoStr;
-      u.sssStr.value      = f.sssStr;
-      u.sssPow.value      = f.sssPow;
+      u.normalBias.value = f.normalBias;
+      u.leafWarp.value = f.leafWarp;
+      u.aoStr.value = f.aoStr;
+      u.sssStr.value = f.sssStr;
+      u.sssPow.value = f.sssPow;
       u.sssColor.value.set(f.sssColor);
-      u.rimStr.value      = f.rimStr;
-      u.rimPow.value      = f.rimPow;
+      u.rimStr.value = f.rimStr;
+      u.rimPow.value = f.rimPow;
       u.rimColor.value.set(f.rimColor);
-      u.windSpeed.value   = f.windSpeed;
-      u.windStr.value     = f.windStr;
-      u.windMicro.value   = f.windMicro;
+      u.windSpeed.value = f.windSpeed;
+      u.windStr.value = f.windStr;
+      u.windMicro.value = f.windMicro;
     }),
     onRemoveTreeSlot: (_removeTreeSlot = (slotIdx) => {
       treeLodRenderer.disposeSlot(slotIdx);
@@ -1434,7 +1711,9 @@ export async function startV2App(opts = {}) {
       foliagePaintSystem.massPlace(toolState.foliagePaint.massPlaceCount);
     },
     onMassPlaceBillboardGrass: () => {
-      billboardGrassPaintSystem.massPlace(toolState.billboardGrassPaint.massPlaceCount);
+      billboardGrassPaintSystem.massPlace(
+        toolState.billboardGrassPaint.massPlaceCount,
+      );
     },
     onClearAllTrees: (_clearAllTrees = () => {
       treeSystem.clearAll();
@@ -1464,7 +1743,9 @@ export async function startV2App(opts = {}) {
             );
           }
           billboardRenderer.setSlotTexture(slotIdx, tex, slot);
-          document.getElementById("foliage-panel")?._updateFoliageTextureLabel?.(slotIdx);
+          document
+            .getElementById("foliage-panel")
+            ?._updateFoliageTextureLabel?.(slotIdx);
         };
 
         if (projectUrl) {
@@ -1479,12 +1760,17 @@ export async function startV2App(opts = {}) {
           const tex = await loadFoliageTextureFromFile(file);
           applyTex(tex, false);
         } catch (err) {
-          console.warn(`[V2] Foliage slot ${slotIdx}: could not load ${filename}`, err);
+          console.warn(
+            `[V2] Foliage slot ${slotIdx}: could not load ${filename}`,
+            err,
+          );
         }
       };
       input.click();
     }),
-    onFoliageSlotStructureChanged: (_foliageSlotStructureChanged = (slotIdx) => {
+    onFoliageSlotStructureChanged: (_foliageSlotStructureChanged = (
+      slotIdx,
+    ) => {
       billboardRenderer.rebuildSlot(slotIdx, toolState.foliageSlots[slotIdx]);
     }),
     onFoliageSlotMaterialChanged: (_foliageSlotMaterialChanged = (slotIdx) => {
@@ -1514,7 +1800,9 @@ export async function startV2App(opts = {}) {
           if (persist) {
             delete slot.texturePreviewName;
             slot.textureUrl = normalizeBillboardGrassTextureRef(filename);
-            console.log(`[V2] Billboard grass slot ${slotIdx} ← ${slot.textureUrl}`);
+            console.log(
+              `[V2] Billboard grass slot ${slotIdx} ← ${slot.textureUrl}`,
+            );
           } else {
             slot.texturePreviewName = filename;
             console.log(
@@ -1522,7 +1810,9 @@ export async function startV2App(opts = {}) {
             );
           }
           billboardGrassRenderer.setSlotTexture(slotIdx, tex, slot);
-          document.getElementById("billboard-grass-panel")?._updateBillboardGrassMaskLabel?.(slotIdx);
+          document
+            .getElementById("billboard-grass-panel")
+            ?._updateBillboardGrassMaskLabel?.(slotIdx);
         };
 
         if (projectUrl) {
@@ -1537,15 +1827,24 @@ export async function startV2App(opts = {}) {
           const tex = await loadBillboardGrassTextureFromFile(file);
           applyTex(tex, false);
         } catch (err) {
-          console.warn(`[V2] Billboard grass slot ${slotIdx}: could not load ${filename}`, err);
+          console.warn(
+            `[V2] Billboard grass slot ${slotIdx}: could not load ${filename}`,
+            err,
+          );
         }
       };
       input.click();
     }),
-    onBillboardGrassSlotStructureChanged: (_billboardGrassSlotStructureChanged = (slotIdx) => {
-      billboardGrassRenderer.rebuildSlot(slotIdx, toolState.billboardGrassSlots[slotIdx]);
-    }),
-    onBillboardGrassSlotMaterialChanged: (_billboardGrassSlotMaterialChanged = (slotIdx) => {
+    onBillboardGrassSlotStructureChanged: (_billboardGrassSlotStructureChanged =
+      (slotIdx) => {
+        billboardGrassRenderer.rebuildSlot(
+          slotIdx,
+          toolState.billboardGrassSlots[slotIdx],
+        );
+      }),
+    onBillboardGrassSlotMaterialChanged: (_billboardGrassSlotMaterialChanged = (
+      slotIdx,
+    ) => {
       const slot = toolState.billboardGrassSlots[slotIdx];
       const sr = billboardGrassRenderer.slotRender[slotIdx];
       if (sr?.textureObj) {
@@ -1584,7 +1883,9 @@ export async function startV2App(opts = {}) {
     }),
     onGrassSaveDensity: (_grassSaveDensity = () => {
       const data = grassManager.densityTex.image.data;
-      const blob = new Blob([data.buffer], { type: "application/octet-stream" });
+      const blob = new Blob([data.buffer], {
+        type: "application/octet-stream",
+      });
       downloadBlob(blob, "gemini-grass-density.bin");
     }),
     onGrassLoadDensity: (_grassLoadDensity = async () => {
@@ -1628,12 +1929,15 @@ export async function startV2App(opts = {}) {
         const typeIdx = cliffStore.registerType(gltfScene, name);
         if (typeIdx >= 0) {
           cliffInstancer.onTypeRegistered(typeIdx);
-          if (cliffBlendPack) cliffInstancer.setMaterial(cliffBlendPack.material);
+          if (cliffBlendPack)
+            cliffInstancer.setMaterial(cliffBlendPack.material);
           cliffSlotToType[slotIdx] = typeIdx;
           toolState.cliffSlots[slotIdx].name = name;
           toolState.cliffSlots[slotIdx].loaded = true;
           toolState.cliffs.activeSlot = slotIdx;
-          console.log(`[V2] Cliff slot ${slotIdx} "${name}" loaded (${submeshes.length} submeshes)`);
+          console.log(
+            `[V2] Cliff slot ${slotIdx} "${name}" loaded (${submeshes.length} submeshes)`,
+          );
         }
         ui?.pane.refresh();
       } catch (err) {
@@ -1647,7 +1951,8 @@ export async function startV2App(opts = {}) {
       ui?.pane.refresh();
       console.log(`[V2] Cliff slot ${slotIdx} cleared`);
     }),
-    onDeleteSelectedCliff: (_deleteSelectedCliff = () => cliffSystem.handleDelete()),
+    onDeleteSelectedCliff: (_deleteSelectedCliff = () =>
+      cliffSystem.handleDelete()),
     onClearAllCliffs: (_clearAllCliffs = () => cliffSystem.clearAll()),
     onRebakeBvh: (_rebakeBvh = () => rebakePlayerBvh()),
     onCliffTransformModeChanged: (_cliffTransformModeChanged = () => {
@@ -1660,9 +1965,18 @@ export async function startV2App(opts = {}) {
       ui?.pane.refresh();
     },
     onRoadNewRoad: () => roadSystem.startNewRoad(),
-    onRoadDeleteActive: () => { roadSystem.deleteActiveRoad(); ui?.pane.refresh(); },
-    onRoadDeleteSelected: () => { roadSystem.deleteSelected(); ui?.pane.refresh(); },
-    onRoadSnapY: () => { roadSystem.snapSelectedYToTerrain(); ui?.pane.refresh(); },
+    onRoadDeleteActive: () => {
+      roadSystem.deleteActiveRoad();
+      ui?.pane.refresh();
+    },
+    onRoadDeleteSelected: () => {
+      roadSystem.deleteSelected();
+      ui?.pane.refresh();
+    },
+    onRoadSnapY: () => {
+      roadSystem.snapSelectedYToTerrain();
+      ui?.pane.refresh();
+    },
     onRoadFlattenTerrain: () => {
       roadSystem.flattenTerrainUnderRoads();
       roadSystem.rebuildAllMeshes();
@@ -1709,7 +2023,9 @@ export async function startV2App(opts = {}) {
       ui?.pane.refresh();
     },
     onFullRoadSelectedYChanged: () => {
-      activeGraphRoadSystem().setSelectedPointY(activeGraphRoadParams().selectedPointY);
+      activeGraphRoadSystem().setSelectedPointY(
+        activeGraphRoadParams().selectedPointY,
+      );
       ui?.pane.refresh();
     },
     onFullRoadToggleJunction: () => {
@@ -1801,16 +2117,24 @@ export async function startV2App(opts = {}) {
       ui?.pane.refresh();
     }),
     onRiverNewRiver: (_riverNewRiver = () => riverSystem.startNewRiver()),
-    onRiverDeleteActive: (_riverDeleteActive = () => { riverSystem.deleteActiveRiver(); ui?.pane.refresh(); }),
-    onRiverDeleteSelected: (_riverDeleteSelected = () => { riverSystem.deleteSelected(); ui?.pane.refresh(); }),
-    onRiverSelectedYChanged: (_riverSelectedYChanged = () => riverSystem.setSelectedPointY(toolState.river.selectedPointY)),
+    onRiverDeleteActive: (_riverDeleteActive = () => {
+      riverSystem.deleteActiveRiver();
+      ui?.pane.refresh();
+    }),
+    onRiverDeleteSelected: (_riverDeleteSelected = () => {
+      riverSystem.deleteSelected();
+      ui?.pane.refresh();
+    }),
+    onRiverSelectedYChanged: (_riverSelectedYChanged = () =>
+      riverSystem.setSelectedPointY(toolState.river.selectedPointY)),
     onRiverActiveIndexChanged: (_riverActiveIndexChanged = () => {
       riverSystem._clampActive();
       riverSystem.selectedIdx = -1;
       riverSystem._rebuildVisual();
       ui?.pane.refresh();
     }),
-    onRoadSelectedYChanged: () => roadSystem.setSelectedPointY(toolState.road.selectedPointY),
+    onRoadSelectedYChanged: () =>
+      roadSystem.setSelectedPointY(toolState.road.selectedPointY),
     onRoadStyleSectionChanged: () => {
       roadSystem._clampActiveStyleSection();
       roadSystem.loadActiveStyle();
@@ -1869,7 +2193,8 @@ export async function startV2App(opts = {}) {
       splineSystem.bakePlacement();
       ui?.pane.refresh();
     }),
-    onSplineClearPreview: (_splineClearPreview = () => splineSystem.clearPreview()),
+    onSplineClearPreview: (_splineClearPreview = () =>
+      splineSystem.clearPreview()),
     onSplineApplyPlateau: (_splineApplyPlateau = () => {
       const changed = splineSystem.applyPlateau();
       if (!changed) return;
@@ -1949,15 +2274,21 @@ export async function startV2App(opts = {}) {
           const matchedUrl = await probeModelsForFile(file.name);
           const slotIdx = toolState.propSlots.length;
           toolState.propSlots.push({
-            name, loaded: true, typeIdx,
+            name,
+            loaded: true,
+            typeIdx,
             ...(matchedUrl ? { glbFile: file.name } : {}),
           });
           toolState.props.activeSlot = slotIdx;
           propUiCallbacks._rebuildPropUi?.();
           if (matchedUrl) {
-            console.log(`[V2] Prop "${name}" imported (type ${typeIdx}, ${submeshes.length} submeshes) — linked to ${matchedUrl}, will auto-restore on load`);
+            console.log(
+              `[V2] Prop "${name}" imported (type ${typeIdx}, ${submeshes.length} submeshes) — linked to ${matchedUrl}, will auto-restore on load`,
+            );
           } else {
-            console.warn(`[V2] Prop "${name}" imported (type ${typeIdx}, ${submeshes.length} submeshes) — won't auto-restore on load. Put ${file.name} in /models to enable.`);
+            console.warn(
+              `[V2] Prop "${name}" imported (type ${typeIdx}, ${submeshes.length} submeshes) — won't auto-restore on load. Put ${file.name} in /models to enable.`,
+            );
           }
         }
         ui?.pane.refresh();
@@ -1966,26 +2297,36 @@ export async function startV2App(opts = {}) {
       }
     }),
     onAddPrimitive: (_addPrimitive = (primitiveName) => {
-      const existing = toolState.propSlots.find((s) => s.name === primitiveName && s.builtin);
+      const existing = toolState.propSlots.find(
+        (s) => s.name === primitiveName && s.builtin,
+      );
       if (existing) {
         toolState.props.activeSlot = toolState.propSlots.indexOf(existing);
         ui?.pane.refresh();
         return;
       }
       const defs = {
-        Cube:     () => new THREE.BoxGeometry(1, 1, 1),
-        Sphere:   () => new THREE.SphereGeometry(0.5, 32, 16),
+        Cube: () => new THREE.BoxGeometry(1, 1, 1),
+        Sphere: () => new THREE.SphereGeometry(0.5, 32, 16),
         Cylinder: () => new THREE.CylinderGeometry(0.5, 0.5, 1, 32),
-        Plane:    () => new THREE.PlaneGeometry(1, 1).rotateX(-Math.PI / 2),
-        Cone:     () => new THREE.ConeGeometry(0.5, 1, 32),
-        Torus:    () => new THREE.TorusGeometry(0.4, 0.15, 16, 32),
+        Plane: () => new THREE.PlaneGeometry(1, 1).rotateX(-Math.PI / 2),
+        Cone: () => new THREE.ConeGeometry(0.5, 1, 32),
+        Torus: () => new THREE.TorusGeometry(0.4, 0.15, 16, 32),
       };
       const factory = defs[primitiveName];
       if (!factory) return;
       const geometry = factory();
-      const defaultPropMat = propTextureLibrary.getById("__none__") ?? propTextureLibrary.getByIndex(0);
-      const material = createMaterialForLibrary(defaultPropMat, { triplanar: false });
-      const typeIdx = propStore.registerPrimitive(primitiveName, geometry, material);
+      const defaultPropMat =
+        propTextureLibrary.getById("__none__") ??
+        propTextureLibrary.getByIndex(0);
+      const material = createMaterialForLibrary(defaultPropMat, {
+        triplanar: false,
+      });
+      const typeIdx = propStore.registerPrimitive(
+        primitiveName,
+        geometry,
+        material,
+      );
       if (typeIdx >= 0) {
         propInstancer.onTypeRegistered(typeIdx);
         const slotIdx = toolState.propSlots.length;
@@ -1999,21 +2340,37 @@ export async function startV2App(opts = {}) {
         });
         toolState.props.activeSlot = slotIdx;
         propUiCallbacks._rebuildPropUi?.();
-        console.log(`[V2] Primitive "${primitiveName}" added (type ${typeIdx})`);
+        console.log(
+          `[V2] Primitive "${primitiveName}" added (type ${typeIdx})`,
+        );
       }
       ui?.pane.refresh();
     }),
     onAddLiveProp: (_addLiveProp = (livePropName) => {
       const defs = {
-        Flag:  { factoryId: "flag",  defaults: FLAG_DEFAULTS,  bbox: flagBoundingBox },
-        Coin:  { factoryId: "coin",  defaults: COIN_DEFAULTS,  bbox: coinBoundingBox },
-        Heart: { factoryId: "heart", defaults: HEART_DEFAULTS, bbox: heartBoundingBox },
-        Key:   { factoryId: "key",   defaults: KEY_DEFAULTS,   bbox: keyBoundingBox },
+        Flag: {
+          factoryId: "flag",
+          defaults: FLAG_DEFAULTS,
+          bbox: flagBoundingBox,
+        },
+        Coin: {
+          factoryId: "coin",
+          defaults: COIN_DEFAULTS,
+          bbox: coinBoundingBox,
+        },
+        Heart: {
+          factoryId: "heart",
+          defaults: HEART_DEFAULTS,
+          bbox: heartBoundingBox,
+        },
+        Key: { factoryId: "key", defaults: KEY_DEFAULTS, bbox: keyBoundingBox },
       };
       const def = defs[livePropName];
       if (!def) return;
 
-      const existing = toolState.propSlots.find((s) => s.name === livePropName && s.live);
+      const existing = toolState.propSlots.find(
+        (s) => s.name === livePropName && s.live,
+      );
       if (existing) {
         toolState.props.activeSlot = toolState.propSlots.indexOf(existing);
         ui?.pane.refresh();
@@ -2021,10 +2378,21 @@ export async function startV2App(opts = {}) {
       }
 
       const bbox = def.bbox(def.defaults);
-      const typeIdx = propStore.registerLiveType(livePropName, def.factoryId, def.defaults, bbox);
+      const typeIdx = propStore.registerLiveType(
+        livePropName,
+        def.factoryId,
+        def.defaults,
+        bbox,
+      );
       propInstancer.onTypeRegistered(typeIdx);
       const slotIdx = toolState.propSlots.length;
-      toolState.propSlots.push({ name: livePropName, loaded: true, typeIdx, live: true, factoryId: def.factoryId });
+      toolState.propSlots.push({
+        name: livePropName,
+        loaded: true,
+        typeIdx,
+        live: true,
+        factoryId: def.factoryId,
+      });
       toolState.props.activeSlot = slotIdx;
       propUiCallbacks._rebuildPropUi?.();
       console.log(`[V2] Live prop "${livePropName}" added (type ${typeIdx})`);
@@ -2033,7 +2401,10 @@ export async function startV2App(opts = {}) {
     onRemovePropSlot: (_removePropSlot = (slotIdx) => {
       toolState.propSlots.splice(slotIdx, 1);
       if (toolState.props.activeSlot >= toolState.propSlots.length) {
-        toolState.props.activeSlot = Math.max(0, toolState.propSlots.length - 1);
+        toolState.props.activeSlot = Math.max(
+          0,
+          toolState.propSlots.length - 1,
+        );
       }
       ui?.pane.refresh();
       console.log(`[V2] Prop slot ${slotIdx} removed`);
@@ -2053,12 +2424,14 @@ export async function startV2App(opts = {}) {
         if (!slot) return;
         propStore.registerTypeLod(slot.typeIdx, lod, gltfScene);
         propInstancer.onTypeLodRegistered(slot.typeIdx, lod);
-        console.log(`[V2] Prop "${slot.name}" LOD${lod} imported (${submeshes.length} submeshes)`);
+        console.log(
+          `[V2] Prop "${slot.name}" LOD${lod} imported (${submeshes.length} submeshes)`,
+        );
       } catch (err) {
         console.error(`[V2] Failed to load prop LOD${lod} GLB:`, err);
       }
     }),
-    onPropLodChanged: (() => {}),
+    onPropLodChanged: () => {},
     onPropCastShadowChanged: (_propCastShadowChanged = () => {
       propInstancer.setCastShadow(toolState.propLod.castShadow);
     }),
@@ -2132,7 +2505,9 @@ export async function startV2App(opts = {}) {
     }),
     onDecalSaveJson: (_decalSaveJson = () => {
       const data = decalSystem.exportData();
-      const blob = new Blob([JSON.stringify(data, null, 2)], { type: "application/json" });
+      const blob = new Blob([JSON.stringify(data, null, 2)], {
+        type: "application/json",
+      });
       downloadBlob(blob, "decals.json");
     }),
     onDecalLoadJson: (_decalLoadJson = async () => {
@@ -2189,7 +2564,10 @@ export async function startV2App(opts = {}) {
       }
     }),
     onFleurStemChanged: (_fleurStemChanged = () => {
-      fleurSystem.setStemColors(toolState.fleur.stemBase, toolState.fleur.stemTop);
+      fleurSystem.setStemColors(
+        toolState.fleur.stemBase,
+        toolState.fleur.stemTop,
+      );
     }),
     onFleurStemCurveChanged: (_fleurStemCurveChanged = () => {
       fleurSystem.setStemStaticCurve(toolState.fleur.stemStaticCurve);
@@ -2207,7 +2585,8 @@ export async function startV2App(opts = {}) {
       syncLeafFxParams();
     }),
     onAmbientFxRingsChanged: (_ambientFxRingsChanged = () => {
-      const vis = toolState.ambientFx.showRings && toolState.mode === "ambientfx";
+      const vis =
+        toolState.ambientFx.showRings && toolState.mode === "ambientfx";
       ambientFxStore.setRingsVisible(vis);
       leafFxStore.setRingsVisible(vis);
     }),
@@ -2239,7 +2618,8 @@ export async function startV2App(opts = {}) {
       toolState._splineExportData = () => splineSystem.exportData();
       toolState._decalExportData = () => decalSystem.exportData();
       toolState._billboardGrassExportData = () => billboardGrassStore.toJSON();
-      toolState._revoGrassMaskExportData = () => revoGrassSystem.mask.exportData();
+      toolState._revoGrassMaskExportData = () =>
+        revoGrassSystem.mask.exportData();
       toolState.propMaterialOverrides = propTextureLibrary.snapshotOverrides();
       const buf = serializeProject({
         terrainStore,
@@ -2295,7 +2675,10 @@ export async function startV2App(opts = {}) {
           foliageStore.syncAllHeights(terrainStore);
         }
         billboardGrassStore.clear();
-        if (Array.isArray(project.settings?.billboardGrassChunks) && project.settings.billboardGrassChunks.length > 0) {
+        if (
+          Array.isArray(project.settings?.billboardGrassChunks) &&
+          project.settings.billboardGrassChunks.length > 0
+        ) {
           billboardGrassStore.fromJSON(project.settings.billboardGrassChunks);
           billboardGrassStore.syncAllHeights(terrainStore);
         }
@@ -2313,14 +2696,19 @@ export async function startV2App(opts = {}) {
         riverSystem.syncMaterial();
         fullRoadSystem.syncMaterial();
         smartRoadSystem.syncMaterial();
-        if (project.settings?.roads) roadSystem.importData(project.settings.roads);
-        if (project.settings?.fullRoadNetwork) fullRoadSystem.importData(project.settings.fullRoadNetwork);
+        if (project.settings?.roads)
+          roadSystem.importData(project.settings.roads);
+        if (project.settings?.fullRoadNetwork)
+          fullRoadSystem.importData(project.settings.fullRoadNetwork);
         else fullRoadSystem.importData(null);
-        if (project.settings?.smartRoadNetwork) smartRoadSystem.importData(project.settings.smartRoadNetwork);
+        if (project.settings?.smartRoadNetwork)
+          smartRoadSystem.importData(project.settings.smartRoadNetwork);
         else smartRoadSystem.importData(null);
-        if (project.settings?.rivers) riverSystem.importData(project.settings.rivers);
+        if (project.settings?.rivers)
+          riverSystem.importData(project.settings.rivers);
         else riverSystem.importData([]);
-        if (project.settings?.splinePath) splineSystem.importData(project.settings.splinePath);
+        if (project.settings?.splinePath)
+          splineSystem.importData(project.settings.splinePath);
         else splineSystem.importData({ points: [] });
         // Restore cliff instances (types must be re-imported by user)
         if (project.settings?.cliffInstances) {
@@ -2350,31 +2738,45 @@ export async function startV2App(opts = {}) {
               _addLiveProp?.(slot.name);
             } else if (slot.glbFile) {
               // dedupe: skip if a slot with this name already exists (e.g. loading on top of an active session)
-              const already = toolState.propSlots.find((s) => s.name === slot.name && !s.builtin && !s.live);
+              const already = toolState.propSlots.find(
+                (s) => s.name === slot.name && !s.builtin && !s.live,
+              );
               if (already) continue;
-              propGlbLoads.push((async (filename, slotName) => {
-                const url = await probeModelsForFile(filename);
-                if (!url) {
-                  console.warn(`[V2] Could not restore prop "${slotName}": ${filename} not found in /models`);
-                  return;
-                }
-                try {
-                  const { submeshes } = await loadTreeGlbFromUrl(url);
-                  const gltfScene = new THREE.Group();
-                  for (const sm of submeshes) {
-                    const mesh = new THREE.Mesh(sm.geometry, sm.material);
-                    mesh.applyMatrix4(sm.localMatrix);
-                    gltfScene.add(mesh);
+              propGlbLoads.push(
+                (async (filename, slotName) => {
+                  const url = await probeModelsForFile(filename);
+                  if (!url) {
+                    console.warn(
+                      `[V2] Could not restore prop "${slotName}": ${filename} not found in /models`,
+                    );
+                    return;
                   }
-                  const typeIdx = propStore.registerType(gltfScene, slotName);
-                  if (typeIdx < 0) return;
-                  propInstancer.onTypeRegistered(typeIdx);
-                  toolState.propSlots.push({ name: slotName, loaded: true, typeIdx, glbFile: filename });
-                  console.log(`[V2] Restored prop "${slotName}" from ${url}`);
-                } catch (err) {
-                  console.error(`[V2] Failed to restore prop "${slotName}":`, err);
-                }
-              })(slot.glbFile, slot.name));
+                  try {
+                    const { submeshes } = await loadTreeGlbFromUrl(url);
+                    const gltfScene = new THREE.Group();
+                    for (const sm of submeshes) {
+                      const mesh = new THREE.Mesh(sm.geometry, sm.material);
+                      mesh.applyMatrix4(sm.localMatrix);
+                      gltfScene.add(mesh);
+                    }
+                    const typeIdx = propStore.registerType(gltfScene, slotName);
+                    if (typeIdx < 0) return;
+                    propInstancer.onTypeRegistered(typeIdx);
+                    toolState.propSlots.push({
+                      name: slotName,
+                      loaded: true,
+                      typeIdx,
+                      glbFile: filename,
+                    });
+                    console.log(`[V2] Restored prop "${slotName}" from ${url}`);
+                  } catch (err) {
+                    console.error(
+                      `[V2] Failed to restore prop "${slotName}":`,
+                      err,
+                    );
+                  }
+                })(slot.glbFile, slot.name),
+              );
             }
           }
         }
@@ -2401,7 +2803,10 @@ export async function startV2App(opts = {}) {
         } else {
           waterfallSystem.clearAll();
         }
-        if (project.settings?.decals && Array.isArray(project.settings.decals)) {
+        if (
+          project.settings?.decals &&
+          Array.isArray(project.settings.decals)
+        ) {
           await decalSystem.importData(project.settings.decals);
         } else {
           decalSystem.clearAll();
@@ -2426,7 +2831,10 @@ export async function startV2App(opts = {}) {
           caveStore.clearAll();
         }
         // Restore flowers
-        if (project.settings?.fleurPositions && Array.isArray(project.settings.fleurPositions)) {
+        if (
+          project.settings?.fleurPositions &&
+          Array.isArray(project.settings.fleurPositions)
+        ) {
           fleurSystem.setPositions(project.settings.fleurPositions);
         } else {
           fleurSystem.clear();
@@ -2435,21 +2843,28 @@ export async function startV2App(opts = {}) {
           const fi = project.settings.fleurInteraction;
           const fp = toolState.fleur;
           if (fi.interactRadius != null) fp.interactRadius = fi.interactRadius;
-          if (fi.interactStrength != null) fp.interactStrength = fi.interactStrength;
+          if (fi.interactStrength != null)
+            fp.interactStrength = fi.interactStrength;
           if (fi.interactGain != null) fp.interactGain = fi.interactGain;
           if (fi.windAmp != null) fp.windAmp = fi.windAmp;
           if (fi.windSpeed != null) fp.windSpeed = fi.windSpeed;
           syncFleurInteraction();
         }
         // Restore ambient FX emitters
-        if (project.settings?.ambientFxEmitters && Array.isArray(project.settings.ambientFxEmitters)) {
+        if (
+          project.settings?.ambientFxEmitters &&
+          Array.isArray(project.settings.ambientFxEmitters)
+        ) {
           ambientFxStore.setEmitters(project.settings.ambientFxEmitters);
         } else {
           ambientFxStore.clear();
         }
         syncAmbientFxUniforms();
         // Restore leaf FX emitters
-        if (project.settings?.leafFxEmitters && Array.isArray(project.settings.leafFxEmitters)) {
+        if (
+          project.settings?.leafFxEmitters &&
+          Array.isArray(project.settings.leafFxEmitters)
+        ) {
           leafFxStore.setEmitters(project.settings.leafFxEmitters);
         } else {
           leafFxStore.clear();
@@ -2464,16 +2879,24 @@ export async function startV2App(opts = {}) {
           }
           billboardRenderer.rebuildSlot(si, slot);
         }
-        await applyFoliageSlotTextures(billboardRenderer, toolState.foliageSlots);
+        await applyFoliageSlotTextures(
+          billboardRenderer,
+          toolState.foliageSlots,
+        );
 
         for (let gi = 0; gi < toolState.billboardGrassSlots.length; gi++) {
           const slot = toolState.billboardGrassSlots[gi];
           if (slot.textureUrl) {
-            slot.textureUrl = normalizeBillboardGrassTextureRef(slot.textureUrl);
+            slot.textureUrl = normalizeBillboardGrassTextureRef(
+              slot.textureUrl,
+            );
           }
           billboardGrassRenderer.rebuildSlot(gi, slot);
         }
-        await applyBillboardGrassSlotTextures(billboardGrassRenderer, toolState.billboardGrassSlots);
+        await applyBillboardGrassSlotTextures(
+          billboardGrassRenderer,
+          toolState.billboardGrassSlots,
+        );
 
         // Auto-reload tree presets (trunk GLBs + foliage) for slots that had them.
         // Also handles slots imported as raw GLBs from /models (slot.glbFile.lod0/lod1).
@@ -2481,46 +2904,84 @@ export async function startV2App(opts = {}) {
         for (let si = 0; si < toolState.treeSlots.length; si++) {
           const slot = toolState.treeSlots[si];
           if (slot.presetFile) {
-            presetLoads.push((async (slotIdx, filename) => {
-              try {
-                const { foliagePreset, trunkSubmeshes, trunkLod1Submeshes, json } = await loadFullPresetFromUrl(filename);
-                if (trunkSubmeshes) {
-                  treeLodRenderer.setSlotModel(slotIdx, 0, trunkSubmeshes, toolState.treeLod.castShadow);
+            presetLoads.push(
+              (async (slotIdx, filename) => {
+                try {
+                  const {
+                    foliagePreset,
+                    trunkSubmeshes,
+                    trunkLod1Submeshes,
+                    json,
+                  } = await loadFullPresetFromUrl(filename);
+                  if (trunkSubmeshes) {
+                    treeLodRenderer.setSlotModel(
+                      slotIdx,
+                      0,
+                      trunkSubmeshes,
+                      toolState.treeLod.castShadow,
+                    );
+                  }
+                  if (trunkLod1Submeshes) {
+                    treeLodRenderer.setSlotModel(
+                      slotIdx,
+                      1,
+                      trunkLod1Submeshes,
+                      toolState.treeLod.castShadow,
+                    );
+                  }
+                  foliageLodRenderer.setSlotPreset(slotIdx, foliagePreset);
+                  console.log(
+                    `[V2] Auto-loaded preset "${filename}" into slot ${slotIdx}`,
+                  );
+                } catch (err) {
+                  console.warn(
+                    `[V2] Could not auto-load preset "${filename}" for slot ${slotIdx}:`,
+                    err.message,
+                  );
                 }
-                if (trunkLod1Submeshes) {
-                  treeLodRenderer.setSlotModel(slotIdx, 1, trunkLod1Submeshes, toolState.treeLod.castShadow);
-                }
-                foliageLodRenderer.setSlotPreset(slotIdx, foliagePreset);
-                console.log(`[V2] Auto-loaded preset "${filename}" into slot ${slotIdx}`);
-              } catch (err) {
-                console.warn(`[V2] Could not auto-load preset "${filename}" for slot ${slotIdx}:`, err.message);
-              }
-            })(si, slot.presetFile));
+              })(si, slot.presetFile),
+            );
           } else if (slot.glbFile) {
             const lods = [];
             if (slot.glbFile.lod0) lods.push([0, slot.glbFile.lod0]);
             if (slot.glbFile.lod1) lods.push([1, slot.glbFile.lod1]);
             for (const [lod, filename] of lods) {
-              presetLoads.push((async (slotIdx, l, fname) => {
-                const url = await probeModelsForFile(fname);
-                if (!url) {
-                  console.warn(`[V2] Could not restore tree slot ${slotIdx} LOD${l}: ${fname} not found in /models`);
-                  return;
-                }
-                try {
-                  const { submeshes } = await loadTreeGlbFromUrl(url);
-                  treeLodRenderer.setSlotModel(slotIdx, l, submeshes, toolState.treeLod.castShadow);
-                  console.log(`[V2] Restored tree slot ${slotIdx} LOD${l} from ${url}`);
-                } catch (err) {
-                  console.error(`[V2] Failed to restore tree slot ${slotIdx} LOD${l}:`, err);
-                }
-              })(si, lod, filename));
+              presetLoads.push(
+                (async (slotIdx, l, fname) => {
+                  const url = await probeModelsForFile(fname);
+                  if (!url) {
+                    console.warn(
+                      `[V2] Could not restore tree slot ${slotIdx} LOD${l}: ${fname} not found in /models`,
+                    );
+                    return;
+                  }
+                  try {
+                    const { submeshes } = await loadTreeGlbFromUrl(url);
+                    treeLodRenderer.setSlotModel(
+                      slotIdx,
+                      l,
+                      submeshes,
+                      toolState.treeLod.castShadow,
+                    );
+                    console.log(
+                      `[V2] Restored tree slot ${slotIdx} LOD${l} from ${url}`,
+                    );
+                  } catch (err) {
+                    console.error(
+                      `[V2] Failed to restore tree slot ${slotIdx} LOD${l}:`,
+                      err,
+                    );
+                  }
+                })(si, lod, filename),
+              );
             }
           }
         }
         if (presetLoads.length > 0) {
           Promise.all(presetLoads).then(() => {
-            console.log(`[V2] All tree presets restored (${presetLoads.length} slot(s))`);
+            console.log(
+              `[V2] All tree presets restored (${presetLoads.length} slot(s))`,
+            );
           });
         }
 
@@ -2530,7 +2991,8 @@ export async function startV2App(opts = {}) {
         rebuildGlobalHeightTexture();
         grassManager.rebuildTerrainNormalTex(config.world.size);
         syncFog();
-        if (toolState.skyMode === "hdr" && !hdrTexture) toolState.skyMode = "physical";
+        if (toolState.skyMode === "hdr" && !hdrTexture)
+          toolState.skyMode = "physical";
         applySkyMode(toolState.skyMode);
         chunkStream.markAllDirty();
         chunkStream.update(camera.position);
@@ -2558,7 +3020,11 @@ export async function startV2App(opts = {}) {
     }
     const showInMode = toolState.mode === "barrier";
     const visible = showInMode || toolState.barrier.showOverlay;
-    barrierOverlay.sync(barrierStore, visible, toolState.barrier.overlayOpacity);
+    barrierOverlay.sync(
+      barrierStore,
+      visible,
+      toolState.barrier.overlayOpacity,
+    );
   }
   syncBarrierOverlay();
 
@@ -2613,7 +3079,10 @@ export async function startV2App(opts = {}) {
     depthWrite: false,
   });
   brushDomeLineMat.fog = false;
-  const brushDomeLines = new THREE.LineSegments(brushDomeEdgesGeom, brushDomeLineMat);
+  const brushDomeLines = new THREE.LineSegments(
+    brushDomeEdgesGeom,
+    brushDomeLineMat,
+  );
   const brushPreview = new THREE.Group();
   brushPreview.add(brushDomeFill);
   brushPreview.add(brushDomeLines);
@@ -2769,15 +3238,18 @@ export async function startV2App(opts = {}) {
       sun,
       hemi,
       getOccluderMeshes: () => chunkStream.raycastMeshes(),
-    }).then((sys) => {
-      volumetricCloudSystem = sys;
-    }).catch((err) => {
-      console.warn("[V2] Volumetric cloud volume failed to init:", err);
-    });
+    })
+      .then((sys) => {
+        volumetricCloudSystem = sys;
+      })
+      .catch((err) => {
+        console.warn("[V2] Volumetric cloud volume failed to init:", err);
+      });
     return _vcInitPromise;
   }
   function ensureVolumetricCloudSystemOptimized() {
-    if (volumetricCloudSystemOptimized || _vcOptInitPromise) return _vcOptInitPromise;
+    if (volumetricCloudSystemOptimized || _vcOptInitPromise)
+      return _vcOptInitPromise;
     _vcOptInitPromise = createVolumetricCloudSystemOptimized({
       renderer,
       scene,
@@ -2787,11 +3259,13 @@ export async function startV2App(opts = {}) {
       sun,
       hemi,
       getOccluderMeshes: () => chunkStream.raycastMeshes(),
-    }).then((sys) => {
-      volumetricCloudSystemOptimized = sys;
-    }).catch((err) => {
-      console.warn("[V2] Volumetric cloud (optimized) failed to init:", err);
-    });
+    })
+      .then((sys) => {
+        volumetricCloudSystemOptimized = sys;
+      })
+      .catch((err) => {
+        console.warn("[V2] Volumetric cloud (optimized) failed to init:", err);
+      });
     return _vcOptInitPromise;
   }
 
@@ -2811,7 +3285,10 @@ export async function startV2App(opts = {}) {
     const h = hits[0];
     brushPick.point.copy(h.point);
     if (h.face) {
-      brushPick.normal.copy(h.face.normal).transformDirection(h.object.matrixWorld).normalize();
+      brushPick.normal
+        .copy(h.face.normal)
+        .transformDirection(h.object.matrixWorld)
+        .normalize();
       if (brushPick.normal.lengthSq() < 1e-6) brushPick.normal.set(0, 1, 0);
     } else {
       brushPick.normal.set(0, 1, 0);
@@ -2848,7 +3325,22 @@ export async function startV2App(opts = {}) {
   }
 
   function isBrushMode() {
-    return toolState.mode === "sculpt" || toolState.mode === "paint" || toolState.mode === "treePaint" || toolState.mode === "foliagePaint" || toolState.mode === "billboardGrassPaint" || toolState.mode === "grass" || toolState.mode === "revoGrass" || toolState.mode === "cliffGrass" || toolState.mode === "barrier" || toolState.mode === "hole" || toolState.mode === "cave" || toolState.mode === "fleurs" || toolState.mode === "ambientfx" || (toolState.mode === "props" && toolState.props.placementMode === "paint");
+    return (
+      toolState.mode === "sculpt" ||
+      toolState.mode === "paint" ||
+      toolState.mode === "treePaint" ||
+      toolState.mode === "foliagePaint" ||
+      toolState.mode === "billboardGrassPaint" ||
+      toolState.mode === "grass" ||
+      toolState.mode === "revoGrass" ||
+      toolState.mode === "cliffGrass" ||
+      toolState.mode === "barrier" ||
+      toolState.mode === "hole" ||
+      toolState.mode === "cave" ||
+      toolState.mode === "fleurs" ||
+      toolState.mode === "ambientfx" ||
+      (toolState.mode === "props" && toolState.props.placementMode === "paint")
+    );
   }
 
   function updateBrushPreviewFromPick(hit) {
@@ -2858,7 +3350,10 @@ export async function startV2App(opts = {}) {
       syncRampMarker();
       return;
     }
-    const r = toolState.mode === "ambientfx" ? toolState.ambientFx.emitterRadius : toolState.brush.radius;
+    const r =
+      toolState.mode === "ambientfx"
+        ? toolState.ambientFx.emitterRadius
+        : toolState.brush.radius;
     const nudge = 0.012 + Math.min(0.08, r * 0.0004);
     const useCircle = toolState.brush.previewShape === "circle";
     if (useCircle) {
@@ -2943,7 +3438,11 @@ export async function startV2App(opts = {}) {
       event.preventDefault();
       updatePointer(event);
       const hit = pickTerrain(event);
-      const consumed = waterSystem.handlePointerDown(pointerNdc, camera, hit?.point);
+      const consumed = waterSystem.handlePointerDown(
+        pointerNdc,
+        camera,
+        hit?.point,
+      );
       if (consumed) ui?.pane.refresh();
       return;
     }
@@ -2952,19 +3451,34 @@ export async function startV2App(opts = {}) {
       event.preventDefault();
       updatePointer(event);
       const hit = pickTerrain(event);
-      const consumed = waterfallSystem.handlePointerDown(pointerNdc, camera, hit?.point);
+      const consumed = waterfallSystem.handlePointerDown(
+        pointerNdc,
+        camera,
+        hit?.point,
+      );
       if (consumed) ui?.pane.refresh();
       return;
     }
     if (toolState.mode === "decals" && event.button === 0) {
       if (transformControls.dragging) return;
       event.preventDefault();
-      if (decalSystem.handlePointerDown(camera, event.clientX, event.clientY, renderer.domElement)) {
+      if (
+        decalSystem.handlePointerDown(
+          camera,
+          event.clientX,
+          event.clientY,
+          renderer.domElement,
+        )
+      ) {
         ui?.pane.refresh();
       }
       return;
     }
-    if (toolState.mode === "cliffs" && event.button === 0 && !transformControls.dragging) {
+    if (
+      toolState.mode === "cliffs" &&
+      event.button === 0 &&
+      !transformControls.dragging
+    ) {
       const hit = pickTerrain(event);
       if (hit) {
         const typeIdx = cliffSlotToType[toolState.cliffs.activeSlot];
@@ -2975,7 +3489,12 @@ export async function startV2App(opts = {}) {
       }
       return;
     }
-    if (toolState.mode === "props" && toolState.props.placementMode === "place" && event.button === 0 && !transformControls.dragging) {
+    if (
+      toolState.mode === "props" &&
+      toolState.props.placementMode === "place" &&
+      event.button === 0 &&
+      !transformControls.dragging
+    ) {
       const hit = pickTerrain(event);
       if (hit) {
         const slot = toolState.propSlots[toolState.props.activeSlot];
@@ -3007,17 +3526,20 @@ export async function startV2App(opts = {}) {
       }
       return;
     }
-    if ((toolState.mode === "fullRoad" || toolState.mode === "smartRoad") && event.button === 0) {
+    if (
+      (toolState.mode === "fullRoad" || toolState.mode === "smartRoad") &&
+      event.button === 0
+    ) {
       event.preventDefault();
       updatePointer(event);
       raycaster.setFromCamera(pointerNdc, camera);
       const graphRoadSystem = activeGraphRoadSystem();
-      
+
       // Decal placement/selection mode
       if (activeGraphRoadParams().decalMode) {
         // Don't interfere with gizmo dragging
         if (transformControls.dragging) return;
-        
+
         // First try to pick an existing decal
         const pickedDecal = graphRoadSystem.pickDecal(raycaster);
         if (pickedDecal) {
@@ -3035,22 +3557,25 @@ export async function startV2App(opts = {}) {
         }
         return;
       }
-      
+
       // Accessory painting mode (guardrails, kerbs, barriers, fences, tunnels)
       const activeRoadParams = activeGraphRoadParams();
       const accType = activeRoadParams.accessoryType;
-      const isPaintMode = accType && (
-        (accType === "guardrail" && activeRoadParams.guardrailMode) ||
-        (accType === "kerb" && activeRoadParams.kerbMode) ||
-        (accType === "barrier" && activeRoadParams.barrierMode) ||
-        (accType === "fence" && activeRoadParams.fenceMode) ||
-        (accType === "tunnel" && activeRoadParams.tunnelMode)
-      );
+      const isPaintMode =
+        accType &&
+        ((accType === "guardrail" && activeRoadParams.guardrailMode) ||
+          (accType === "kerb" && activeRoadParams.kerbMode) ||
+          (accType === "barrier" && activeRoadParams.barrierMode) ||
+          (accType === "fence" && activeRoadParams.fenceMode) ||
+          (accType === "tunnel" && activeRoadParams.tunnelMode));
       // Also check if shift key is held as quick paint mode
       if (isPaintMode || event.shiftKey) {
         const hit = pickTerrain(event);
         if (hit) {
-          const started = graphRoadSystem.startAccessoryPaint(hit.point, accType);
+          const started = graphRoadSystem.startAccessoryPaint(
+            hit.point,
+            accType,
+          );
           if (started) {
             graphRoadSystem._paintingAccessoryActive = true;
             controls.enabled = false;
@@ -3074,7 +3599,7 @@ export async function startV2App(opts = {}) {
         }
         return;
       }
-      
+
       const picked = graphRoadSystem.pickNode(raycaster);
       if (picked != null) {
         graphRoadSystem.selectedNodeId = picked;
@@ -3087,7 +3612,8 @@ export async function startV2App(opts = {}) {
       } else {
         const hit = pickTerrain(event);
         if (hit) {
-          if (toolState.mode === "smartRoad") smartRoadSystem.clearSelectedEdge();
+          if (toolState.mode === "smartRoad")
+            smartRoadSystem.clearSelectedEdge();
           graphRoadSystem.addOrConnect(hit.point);
           ui?.pane.refresh();
         }
@@ -3179,42 +3705,72 @@ export async function startV2App(opts = {}) {
       // One-shot placement — no brush stroke; one click = one cave.
       caveSystem.placeAt(hit.point);
     } else if (toolState.mode === "fleurs") {
-      paintFleurAt(hit.point.x, hit.point.z, toolState.fleur.erase || event.shiftKey);
+      paintFleurAt(
+        hit.point.x,
+        hit.point.z,
+        toolState.fleur.erase || event.shiftKey,
+      );
     } else if (toolState.mode === "ambientfx") {
-      paintAmbientFxAt(hit.point.x, hit.point.z, toolState.ambientFx.erase || event.shiftKey);
+      paintAmbientFxAt(
+        hit.point.x,
+        hit.point.z,
+        toolState.ambientFx.erase || event.shiftKey,
+      );
     }
   });
 
   renderer.domElement.addEventListener("pointermove", (event) => {
     if (toolState.mode === "play") return;
-    if (toolState.mode === "road" && roadSystem.dragging && roadSystem.selectedIdx >= 0) {
+    if (
+      toolState.mode === "road" &&
+      roadSystem.dragging &&
+      roadSystem.selectedIdx >= 0
+    ) {
       const hit = pickTerrain(event);
       if (hit) roadSystem.moveSelected(hit.point);
       return;
     }
-    if ((toolState.mode === "fullRoad" || toolState.mode === "smartRoad") && activeGraphRoadSystem().dragging && activeGraphRoadSystem().selectedNodeId != null) {
+    if (
+      (toolState.mode === "fullRoad" || toolState.mode === "smartRoad") &&
+      activeGraphRoadSystem().dragging &&
+      activeGraphRoadSystem().selectedNodeId != null
+    ) {
       const hit = pickTerrain(event);
       if (hit) activeGraphRoadSystem().moveSelected(hit.point);
       return;
     }
-    if ((toolState.mode === "fullRoad" || toolState.mode === "smartRoad") && activeGraphRoadSystem()._paintingAccessoryActive) {
+    if (
+      (toolState.mode === "fullRoad" || toolState.mode === "smartRoad") &&
+      activeGraphRoadSystem()._paintingAccessoryActive
+    ) {
       const hit = pickTerrain(event);
       if (hit) activeGraphRoadSystem().continueAccessoryPaint(hit.point);
       return;
     }
     // Decal preview on hover
-    if ((toolState.mode === "fullRoad" || toolState.mode === "smartRoad") && activeGraphRoadParams().decalMode) {
+    if (
+      (toolState.mode === "fullRoad" || toolState.mode === "smartRoad") &&
+      activeGraphRoadParams().decalMode
+    ) {
       const hit = pickTerrain(event);
       if (hit) {
         activeGraphRoadSystem().updateDecalPreview(hit.point);
       }
     }
-    if (toolState.mode === "river" && riverSystem.dragging && riverSystem.selectedIdx >= 0) {
+    if (
+      toolState.mode === "river" &&
+      riverSystem.dragging &&
+      riverSystem.selectedIdx >= 0
+    ) {
       const hit = pickTerrain(event);
       if (hit) riverSystem.moveSelected(hit.point);
       return;
     }
-    if (toolState.mode === "spline" && splineSystem.dragging && splineSystem.selectedIdx >= 0) {
+    if (
+      toolState.mode === "spline" &&
+      splineSystem.dragging &&
+      splineSystem.selectedIdx >= 0
+    ) {
       const hit = pickTerrain(event);
       if (hit) splineSystem.moveSelected(hit.point);
       return;
@@ -3245,9 +3801,17 @@ export async function startV2App(opts = {}) {
     } else if (toolState.mode === "hole") {
       holeSystem.applyAt(hit.point, event);
     } else if (toolState.mode === "fleurs") {
-      paintFleurAt(hit.point.x, hit.point.z, toolState.fleur.erase || event.shiftKey);
+      paintFleurAt(
+        hit.point.x,
+        hit.point.z,
+        toolState.fleur.erase || event.shiftKey,
+      );
     } else if (toolState.mode === "ambientfx") {
-      paintAmbientFxAt(hit.point.x, hit.point.z, toolState.ambientFx.erase || event.shiftKey);
+      paintAmbientFxAt(
+        hit.point.x,
+        hit.point.z,
+        toolState.ambientFx.erase || event.shiftKey,
+      );
     }
   });
 
@@ -3294,10 +3858,16 @@ export async function startV2App(opts = {}) {
       raycaster.setFromCamera(pointerNdc, camera);
       const hitStatic = propInstancer.raycast(raycaster);
       const hitLive = livePropManager.raycast(raycaster);
-      const hit = (!hitStatic && !hitLive) ? null :
-        (!hitStatic) ? hitLive :
-        (!hitLive) ? hitStatic :
-        (hitLive.distance < hitStatic.distance) ? hitLive : hitStatic;
+      const hit =
+        !hitStatic && !hitLive
+          ? null
+          : !hitStatic
+            ? hitLive
+            : !hitLive
+              ? hitStatic
+              : hitLive.distance < hitStatic.distance
+                ? hitLive
+                : hitStatic;
       if (hit) {
         activatePropSelection(hit.instIdx);
       } else {
@@ -3371,7 +3941,8 @@ export async function startV2App(opts = {}) {
     if (toolState.mode === "paint") return paintSystem;
     if (toolState.mode === "treePaint") return treeSystem;
     if (toolState.mode === "foliagePaint") return foliagePaintSystem;
-    if (toolState.mode === "billboardGrassPaint") return billboardGrassPaintSystem;
+    if (toolState.mode === "billboardGrassPaint")
+      return billboardGrassPaintSystem;
     if (toolState.mode === "grass") return grassPaintSystem;
     if (toolState.mode === "revoGrass") return revoGrassMaskPaintSystem;
     if (toolState.mode === "cliffGrass") return cliffGrassPaintSystem;
@@ -3406,7 +3977,10 @@ export async function startV2App(opts = {}) {
       event.preventDefault();
       roadSystem.deleteSelected();
       ui?.pane.refresh();
-    } else if (event.code === "Delete" && (toolState.mode === "fullRoad" || toolState.mode === "smartRoad")) {
+    } else if (
+      event.code === "Delete" &&
+      (toolState.mode === "fullRoad" || toolState.mode === "smartRoad")
+    ) {
       event.preventDefault();
       activeGraphRoadSystem().deleteSelected();
       ui?.pane.refresh();
@@ -3443,7 +4017,8 @@ export async function startV2App(opts = {}) {
         ui?.pane.refresh();
       }
     } else if (
-      event.code === "KeyW" && !ctrl &&
+      event.code === "KeyW" &&
+      !ctrl &&
       toolState.mode !== "cliffs" &&
       toolState.mode !== "props" &&
       toolState.mode !== "water" &&
@@ -3470,7 +4045,12 @@ export async function startV2App(opts = {}) {
       event.preventDefault();
       decalSystem.deleteSelected();
       ui?.pane.refresh();
-    } else if (event.code === "KeyD" && !ctrl && toolState.mode !== "play" && toolState.mode !== "decals") {
+    } else if (
+      event.code === "KeyD" &&
+      !ctrl &&
+      toolState.mode !== "play" &&
+      toolState.mode !== "decals"
+    ) {
       event.preventDefault();
       toolState.mode = "decals";
       applyModeChangedEffects();
@@ -3574,7 +4154,12 @@ export async function startV2App(opts = {}) {
       event.preventDefault();
       toolState.mode = toolState.mode === "ambientfx" ? "view" : "ambientfx";
       applyModeChangedEffects();
-    } else if (event.code === "KeyF" && !ctrl && !playMode.active && toolState.mode !== "play") {
+    } else if (
+      event.code === "KeyF" &&
+      !ctrl &&
+      !playMode.active &&
+      toolState.mode !== "play"
+    ) {
       event.preventDefault();
       _pendingPlayImmersive = event.shiftKey === true;
       toolState.mode = "play";
@@ -3605,11 +4190,15 @@ export async function startV2App(opts = {}) {
       applyModeChangedEffects();
     } else if (event.code === "KeyL" && !ctrl && !playMode.active) {
       event.preventDefault();
-      toolState.mode = toolState.mode === "foliagePaint" ? "view" : "foliagePaint";
+      toolState.mode =
+        toolState.mode === "foliagePaint" ? "view" : "foliagePaint";
       applyModeChangedEffects();
     } else if (event.code === "KeyU" && !ctrl && !playMode.active) {
       event.preventDefault();
-      toolState.mode = toolState.mode === "billboardGrassPaint" ? "view" : "billboardGrassPaint";
+      toolState.mode =
+        toolState.mode === "billboardGrassPaint"
+          ? "view"
+          : "billboardGrassPaint";
       applyModeChangedEffects();
     } else if (event.code === "KeyY" && !ctrl && !playMode.active) {
       event.preventDefault();
@@ -3668,7 +4257,8 @@ export async function startV2App(opts = {}) {
     if (lightSnap !== _lastLightSnap) {
       _lastLightSnap = lightSnap;
       updateSunSky();
-      if (grassManager.uniforms) grassManager.uniforms.uSunDir.value.copy(sunDir);
+      if (grassManager.uniforms)
+        grassManager.uniforms.uSunDir.value.copy(sunDir);
       revoGrassSystem.syncFromState(toolState.revoGrass, sunDir);
       foliageLodRenderer.updateSunDirection(sunDir);
       billboardRenderer.updateSunDirection(sunDir);
@@ -3739,19 +4329,40 @@ export async function startV2App(opts = {}) {
     if (grassManager.uniforms) {
       grassManager.uniforms.uPlayerPos.value.copy(focusPos);
     }
-    grassManager.update(toolState.grass, playMode.active ? playMode.playerPos : null);
+    grassManager.update(
+      toolState.grass,
+      playMode.active ? playMode.playerPos : null,
+    );
     const afxWind = toolState.ambientFx;
     revoGrassSystem.setPlayWind({
       intensityMul: afxWind.windStrength ?? 1,
-      angleDeg: (Math.atan2(afxWind.windZ ?? 0, afxWind.windX ?? 1) * 180) / Math.PI,
+      angleDeg:
+        (Math.atan2(afxWind.windZ ?? 0, afxWind.windX ?? 1) * 180) / Math.PI,
     });
-    revoGrassSystem.update(toolState.revoGrass, focusPos, camera, { playMode: playMode.active });
+    revoGrassSystem.update(toolState.revoGrass, focusPos, camera, {
+      playMode: playMode.active,
+    });
 
-    fleurSystem.update(playMode.active ? playMode.playerPos : focusPos, _appTimeSec);
+    fleurSystem.update(
+      playMode.active ? playMode.playerPos : focusPos,
+      _appTimeSec,
+    );
 
     const afx = toolState.ambientFx;
-    ambientFxStore.update(focusPos, _appTimeSec, afx.windX, afx.windZ, afx.windStrength);
-    leafFxStore.update(focusPos, _appTimeSec, afx.windX, afx.windZ, afx.windStrength);
+    ambientFxStore.update(
+      focusPos,
+      _appTimeSec,
+      afx.windX,
+      afx.windZ,
+      afx.windStrength,
+    );
+    leafFxStore.update(
+      focusPos,
+      _appTimeSec,
+      afx.windX,
+      afx.windZ,
+      afx.windStrength,
+    );
 
     syncBarrierOverlay();
     syncHoleOverlay();
@@ -3760,11 +4371,22 @@ export async function startV2App(opts = {}) {
     _appTimeSec += Math.min(0.05, dtSec);
     waterMaterials.updateTime(_appTimeSec);
     if (waterStore.lakeBodies.length > 0) {
-      waterMaterials.lakeShader.update(dtSec, _appTimeSec, waterStore.lakeBodies);
+      waterMaterials.lakeShader.update(
+        dtSec,
+        _appTimeSec,
+        waterStore.lakeBodies,
+      );
       if (toolState.water.reflectionEnabled) {
-        waterMaterials.setReflectionParams(toolState.water.reflectionScale, toolState.water.reflectionEveryN);
+        waterMaterials.setReflectionParams(
+          toolState.water.reflectionScale,
+          toolState.water.reflectionEveryN,
+        );
         waterMaterials.renderLakeReflection(
-          camera, renderer, scene, waterStore.bodies, waterStore.lakeBodies,
+          camera,
+          renderer,
+          scene,
+          waterStore.bodies,
+          waterStore.lakeBodies,
           [grassManager.group, revoGrassSystem.group],
         );
       } else {
@@ -3793,7 +4415,8 @@ export async function startV2App(opts = {}) {
     const vcOn = toolState.volumetricCloud.enabled;
     const vcOptOn = toolState.volumetricCloudOptimized.enabled;
     if (vcOn && !volumetricCloudSystem) ensureVolumetricCloudSystem();
-    if (vcOptOn && !volumetricCloudSystemOptimized) ensureVolumetricCloudSystemOptimized();
+    if (vcOptOn && !volumetricCloudSystemOptimized)
+      ensureVolumetricCloudSystemOptimized();
     const oOpt = volumetricCloudSystemOptimized;
     if (!vcOptOn) {
       if (oOpt?.cloudMesh) oOpt.cloudMesh.visible = false;
@@ -3850,11 +4473,20 @@ export async function startV2App(opts = {}) {
       playMode.setEditorPointerMode(!on);
     },
     getPlayImmersive() {
-      return document.getElementById("app")?.classList.contains("play-fullscreen") ?? false;
+      return (
+        document.getElementById("app")?.classList.contains("play-fullscreen") ??
+        false
+      );
     },
-    undo() { sculptSystem.undo(); },
-    redo() { sculptSystem.redo(); },
-    saveProject() { _saveProject(); },
+    undo() {
+      sculptSystem.undo();
+    },
+    redo() {
+      sculptSystem.redo();
+    },
+    saveProject() {
+      _saveProject();
+    },
     async saveHeightmapPng() {
       try {
         await downloadWorldHeightmapPng(terrainStore, config);
@@ -3862,15 +4494,22 @@ export async function startV2App(opts = {}) {
         console.error("Heightmap export failed", e);
       }
     },
-    loadProject() { _loadProject(); },
+    loadProject() {
+      _loadProject();
+    },
     config,
     syncFog,
     setCsmEnabled,
     rebuildSkyEnv,
     applySkyMode,
     importHdr,
-    clearRampPoint() { sculptSystem.clearRampPoint(); syncRampMarker(); },
-    runGlobalErosion() { sculptSystem.applyGlobalErosion(); },
+    clearRampPoint() {
+      sculptSystem.clearRampPoint();
+      syncRampMarker();
+    },
+    runGlobalErosion() {
+      sculptSystem.applyGlobalErosion();
+    },
     generateTerrain() {
       sculptSystem.applyProceduralTerrainAllChunks();
       if (toolState.borderMountains.enabled) rebuildBorderMountains();
@@ -3879,19 +4518,37 @@ export async function startV2App(opts = {}) {
     textureLibrary,
     brushMask,
     sculptBrushMask,
-    paintFill() { paintSystem.fillWithActiveLayer(); },
-    paintClear() { paintSystem.clearAll(); },
+    paintFill() {
+      paintSystem.fillWithActiveLayer();
+    },
+    paintClear() {
+      paintSystem.clearAll();
+    },
     syncSoloLayer,
     syncHeightBlend,
     invalidateSurfaceMaterials,
-    importTreeGlb(slotIdx, lod) { _importTreeGlb(slotIdx, lod); },
-    loadTreePreset(slotIdx) { _loadTreePreset(slotIdx); },
-    removeTreeSlot(slotIdx) { _removeTreeSlot(slotIdx); },
-    clearAllTrees() { _clearAllTrees(); },
-    massPlaceTrees() { treeSystem.massPlace(toolState.treePaint.massPlaceCount); },
-    massPlaceFoliage() { foliagePaintSystem.massPlace(toolState.foliagePaint.massPlaceCount); },
+    importTreeGlb(slotIdx, lod) {
+      _importTreeGlb(slotIdx, lod);
+    },
+    loadTreePreset(slotIdx) {
+      _loadTreePreset(slotIdx);
+    },
+    removeTreeSlot(slotIdx) {
+      _removeTreeSlot(slotIdx);
+    },
+    clearAllTrees() {
+      _clearAllTrees();
+    },
+    massPlaceTrees() {
+      treeSystem.massPlace(toolState.treePaint.massPlaceCount);
+    },
+    massPlaceFoliage() {
+      foliagePaintSystem.massPlace(toolState.foliagePaint.massPlaceCount);
+    },
     massPlaceBillboardGrass() {
-      billboardGrassPaintSystem.massPlace(toolState.billboardGrassPaint.massPlaceCount);
+      billboardGrassPaintSystem.massPlace(
+        toolState.billboardGrassPaint.massPlaceCount,
+      );
     },
     billboardGrassSlotStructureChanged(slotIdx) {
       _billboardGrassSlotStructureChanged(slotIdx);
@@ -3905,11 +4562,21 @@ export async function startV2App(opts = {}) {
     loadBillboardGrassMask(slotIdx) {
       _loadBillboardGrassMask(slotIdx);
     },
-    treeCastShadowChanged() { _treeCastShadowChanged(); },
-    foliageParamChanged(slotIdx) { _foliageParamChanged(slotIdx); },
-    importPropGlb() { _importPropGlb(); },
-    addPrimitive(name) { _addPrimitive(name); },
-    addLiveProp(name) { _addLiveProp(name); },
+    treeCastShadowChanged() {
+      _treeCastShadowChanged();
+    },
+    foliageParamChanged(slotIdx) {
+      _foliageParamChanged(slotIdx);
+    },
+    importPropGlb() {
+      _importPropGlb();
+    },
+    addPrimitive(name) {
+      _addPrimitive(name);
+    },
+    addLiveProp(name) {
+      _addLiveProp(name);
+    },
     propTextureLibrary,
     /** Swap the material on a primitive slot. All instances of that slot use the new material. */
     setPrimitiveMaterial(slotIdx, materialId) {
@@ -3918,7 +4585,9 @@ export async function startV2App(opts = {}) {
       slot.materialId = materialId;
       _rebuildPrimitiveMaterial(slotIdx);
       const propMat = propTextureLibrary.getById(materialId);
-      console.log(`[V2] Slot "${slot.name}" material → "${propMat?.name ?? materialId}"`);
+      console.log(
+        `[V2] Slot "${slot.name}" material → "${propMat?.name ?? materialId}"`,
+      );
     },
     /** Toggle triplanar (world-axis) projection on a primitive slot. Rebuilds its material. */
     setPrimitiveTriplanar(slotIdx, enabled) {
@@ -3929,12 +4598,24 @@ export async function startV2App(opts = {}) {
       console.log(`[V2] Slot "${slot.name}" triplanar → ${slot.triplanar}`);
     },
     livePropManager,
-    set onPropSelectionChanged(fn) { _onPropSelectionChanged = fn; },
-    removePropSlot(idx) { _removePropSlot(idx); },
-    importPropLod(slotIdx, lod) { _importPropLod(slotIdx, lod); },
-    propCastShadowChanged() { _propCastShadowChanged(); },
-    deleteSelectedProp() { _deleteSelectedProp(); },
-    duplicateSelectedProp() { _duplicateSelectedProp(); },
+    set onPropSelectionChanged(fn) {
+      _onPropSelectionChanged = fn;
+    },
+    removePropSlot(idx) {
+      _removePropSlot(idx);
+    },
+    importPropLod(slotIdx, lod) {
+      _importPropLod(slotIdx, lod);
+    },
+    propCastShadowChanged() {
+      _propCastShadowChanged();
+    },
+    deleteSelectedProp() {
+      _deleteSelectedProp();
+    },
+    duplicateSelectedProp() {
+      _duplicateSelectedProp();
+    },
     /** After editing `propStore.instances[instIdx]` fields in place (e.g. custom inspector sliders). */
     syncPropInstanceFromInspector(instIdx) {
       const inst = propStore.instances[instIdx];
@@ -3943,68 +4624,190 @@ export async function startV2App(opts = {}) {
       if (propInstancer.selectedIdx === instIdx) propInstancer.select(instIdx);
       if (cliffBvh) cliffBvh.invalidate();
     },
-    clearAllProps() { _clearAllProps(); },
-    propTransformModeChanged() { _propTransformModeChanged(); },
-    rebakeBvh() { _rebakeBvh(); },
-    loadFoliageTexture(slotIdx) { _loadFoliageTexture(slotIdx); },
-    foliageSlotStructureChanged(slotIdx) { _foliageSlotStructureChanged(slotIdx); },
-    foliageSlotMaterialChanged(slotIdx) { _foliageSlotMaterialChanged(slotIdx); },
-    clearAllFoliage() { _clearAllFoliage(); },
-    foliageLodChanged() { _foliageLodChanged(); },
+    clearAllProps() {
+      _clearAllProps();
+    },
+    propTransformModeChanged() {
+      _propTransformModeChanged();
+    },
+    rebakeBvh() {
+      _rebakeBvh();
+    },
+    loadFoliageTexture(slotIdx) {
+      _loadFoliageTexture(slotIdx);
+    },
+    foliageSlotStructureChanged(slotIdx) {
+      _foliageSlotStructureChanged(slotIdx);
+    },
+    foliageSlotMaterialChanged(slotIdx) {
+      _foliageSlotMaterialChanged(slotIdx);
+    },
+    clearAllFoliage() {
+      _clearAllFoliage();
+    },
+    foliageLodChanged() {
+      _foliageLodChanged();
+    },
     billboardFoliageLodChanged() {},
-    playSpawnChanged() { _playSpawnChanged(); },
-    barrierOverlayChanged() { _barrierOverlayChanged(); },
-    barrierClear() { _barrierClear(); },
-    barrierFill() { _barrierFill(); },
-    holeOverlayChanged() { _holeOverlayChanged(); },
-    holeClear() { _holeClear(); },
-    caveUndo() { _caveUndo(); },
-    caveRedo() { _caveRedo(); },
-    caveClear() { _caveClear(); },
-    ambientFxFlapChanged() { _ambientFxFlapChanged(); },
-    ambientFxLeafChanged() { _ambientFxLeafChanged(); },
-    ambientFxRingsChanged() { _ambientFxRingsChanged(); },
-    ambientFxClear() { _ambientFxClear(); },
-    ambientFxClearLeaves() { _ambientFxClearLeaves(); },
-    ambientFxLeafRespawn() { _ambientFxLeafRespawn(); },
-    ambientFxSetLeafTexture(idx, url) { leafFxStore.setLeafTexture(idx, url); },
-    fleurChanged() { _fleurChanged(); },
-    fleurColorChanged(slot) { _fleurColorChanged(slot); },
-    fleurStemChanged() { _fleurStemChanged(); },
-    fleurStemCurveChanged() { _fleurStemCurveChanged(); },
-    fleurInteractionChanged() { _fleurInteractionChanged(); },
-    fleurClear() { _fleurClear(); },
-    cliffGrassFill() { _cliffGrassFill(); },
-    cliffGrassClear() { _cliffGrassClear(); },
-    importCliffGlb(slotIdx) { _importCliffGlb(slotIdx); },
-    removeCliffSlot(slotIdx) { _removeCliffSlot(slotIdx); },
-    deleteSelectedCliff() { _deleteSelectedCliff(); },
-    clearAllCliffs() { _clearAllCliffs(); },
-    cliffTransformModeChanged() { _cliffTransformModeChanged(); },
-    cliffBlendChanged() { _cliffBlendChanged(); },
-    waterChanged() { _waterChanged(); },
-    saveWater() { _saveWater(); },
-    loadWater() { _loadWater(); },
-    deleteSelectedWater() { _deleteSelectedWater(); },
-    clearAllWater() { _clearAllWater(); },
-    waterfallChanged() { _waterfallChanged(); },
-    deleteSelectedWaterfall() { _deleteSelectedWaterfall(); },
-    clearAllWaterfalls() { _clearAllWaterfalls(); },
-    decalLoadImage() { _decalLoadImage(); },
-    decalOpacityChanged() { _decalOpacityChanged(); },
-    decalAlignChanged() { _decalAlignChanged(); },
-    decalRefit() { _decalRefit(); },
-    decalDeleteSelected() { _decalDeleteSelected(); },
-    decalClearAll() { _decalClearAll(); },
-    decalSaveJson() { _decalSaveJson(); },
-    decalLoadJson() { _decalLoadJson(); },
-    decalTransformModeChanged() { _decalTransformModeChanged(); },
-    riverChanged() { _riverChanged(); },
-    riverNewRiver() { _riverNewRiver(); },
-    riverDeleteActive() { _riverDeleteActive(); },
-    riverDeleteSelected() { _riverDeleteSelected(); },
-    riverSelectedYChanged() { _riverSelectedYChanged(); },
-    riverActiveIndexChanged() { _riverActiveIndexChanged(); },
+    playSpawnChanged() {
+      _playSpawnChanged();
+    },
+    barrierOverlayChanged() {
+      _barrierOverlayChanged();
+    },
+    barrierClear() {
+      _barrierClear();
+    },
+    barrierFill() {
+      _barrierFill();
+    },
+    holeOverlayChanged() {
+      _holeOverlayChanged();
+    },
+    holeClear() {
+      _holeClear();
+    },
+    caveUndo() {
+      _caveUndo();
+    },
+    caveRedo() {
+      _caveRedo();
+    },
+    caveClear() {
+      _caveClear();
+    },
+    ambientFxFlapChanged() {
+      _ambientFxFlapChanged();
+    },
+    ambientFxLeafChanged() {
+      _ambientFxLeafChanged();
+    },
+    ambientFxRingsChanged() {
+      _ambientFxRingsChanged();
+    },
+    ambientFxClear() {
+      _ambientFxClear();
+    },
+    ambientFxClearLeaves() {
+      _ambientFxClearLeaves();
+    },
+    ambientFxLeafRespawn() {
+      _ambientFxLeafRespawn();
+    },
+    ambientFxSetLeafTexture(idx, url) {
+      leafFxStore.setLeafTexture(idx, url);
+    },
+    fleurChanged() {
+      _fleurChanged();
+    },
+    fleurColorChanged(slot) {
+      _fleurColorChanged(slot);
+    },
+    fleurStemChanged() {
+      _fleurStemChanged();
+    },
+    fleurStemCurveChanged() {
+      _fleurStemCurveChanged();
+    },
+    fleurInteractionChanged() {
+      _fleurInteractionChanged();
+    },
+    fleurClear() {
+      _fleurClear();
+    },
+    cliffGrassFill() {
+      _cliffGrassFill();
+    },
+    cliffGrassClear() {
+      _cliffGrassClear();
+    },
+    importCliffGlb(slotIdx) {
+      _importCliffGlb(slotIdx);
+    },
+    removeCliffSlot(slotIdx) {
+      _removeCliffSlot(slotIdx);
+    },
+    deleteSelectedCliff() {
+      _deleteSelectedCliff();
+    },
+    clearAllCliffs() {
+      _clearAllCliffs();
+    },
+    cliffTransformModeChanged() {
+      _cliffTransformModeChanged();
+    },
+    cliffBlendChanged() {
+      _cliffBlendChanged();
+    },
+    waterChanged() {
+      _waterChanged();
+    },
+    saveWater() {
+      _saveWater();
+    },
+    loadWater() {
+      _loadWater();
+    },
+    deleteSelectedWater() {
+      _deleteSelectedWater();
+    },
+    clearAllWater() {
+      _clearAllWater();
+    },
+    waterfallChanged() {
+      _waterfallChanged();
+    },
+    deleteSelectedWaterfall() {
+      _deleteSelectedWaterfall();
+    },
+    clearAllWaterfalls() {
+      _clearAllWaterfalls();
+    },
+    decalLoadImage() {
+      _decalLoadImage();
+    },
+    decalOpacityChanged() {
+      _decalOpacityChanged();
+    },
+    decalAlignChanged() {
+      _decalAlignChanged();
+    },
+    decalRefit() {
+      _decalRefit();
+    },
+    decalDeleteSelected() {
+      _decalDeleteSelected();
+    },
+    decalClearAll() {
+      _decalClearAll();
+    },
+    decalSaveJson() {
+      _decalSaveJson();
+    },
+    decalLoadJson() {
+      _decalLoadJson();
+    },
+    decalTransformModeChanged() {
+      _decalTransformModeChanged();
+    },
+    riverChanged() {
+      _riverChanged();
+    },
+    riverNewRiver() {
+      _riverNewRiver();
+    },
+    riverDeleteActive() {
+      _riverDeleteActive();
+    },
+    riverDeleteSelected() {
+      _riverDeleteSelected();
+    },
+    riverSelectedYChanged() {
+      _riverSelectedYChanged();
+    },
+    riverActiveIndexChanged() {
+      _riverActiveIndexChanged();
+    },
     smartRoadChanged() {
       smartRoadSystem.syncMaterial();
       smartRoadSystem.rebuildAllMeshes();
@@ -4076,7 +4879,9 @@ export async function startV2App(opts = {}) {
     },
     smartRoadGraphDecalTransformModeChanged() {
       if (smartRoadSystem.selectedDecalId != null) {
-        transformControls.setMode(toolState.smartRoad.decalTransformMode || "translate");
+        transformControls.setMode(
+          toolState.smartRoad.decalTransformMode || "translate",
+        );
       }
     },
     smartRoadGraphDecalDeleteSelected() {
@@ -4094,35 +4899,91 @@ export async function startV2App(opts = {}) {
       smartRoadSystem.clearAllDecals();
       ui?.pane.refresh();
     },
-    splineChanged() { _splineChanged(); },
-    splineDeleteSelected() { _splineDeleteSelected(); },
-    splineClearAll() { _splineClearAll(); },
-    splineSelectedYChanged() { _splineSelectedYChanged(); },
-    splineClosedChanged() { _splineClosedChanged(); },
-    splinePreview() { _splinePreview(); },
-    splineBake() { _splineBake(); },
-    splineClearPreview() { _splineClearPreview(); },
-    splineApplyPlateau() { _splineApplyPlateau(); },
-    splineClearTunnels() { _splineClearTunnels(); },
-    splineClearLinearFeatures() { _splineClearLinearFeatures(); },
-    splineKerbSelect() { _splineKerbSelect(); },
-    splineKerbApply() { _splineKerbApply(); },
-    splineKerbDelete() { _splineKerbDelete(); },
-    splineKerbDuplicate() { _splineKerbDuplicate(); },
-    splineKerbSuggestFromCurvature() { _splineKerbSuggestFromCurvature(); },
-    splineKerbLiveChanged(key) { _splineKerbLiveChanged(key); },
-    grassChanged() { _grassChanged(); },
-    grassRebuildGeos() { _grassRebuildGeos(); },
-    grassFill() { _grassFill(); },
-    grassClear() { _grassClear(); },
-    grassSaveDensity() { _grassSaveDensity(); },
-    grassLoadDensity() { _grassLoadDensity(); },
-    revoGrassChanged() { _revoGrassChanged?.(); },
-    revoGrassRebuild() { return _revoGrassRebuild?.(); },
-    revoGrassMaskFill() { revoGrassSystem.mask.fillAllow(); },
-    revoGrassMaskClear() { revoGrassSystem.mask.clearAllow(); },
+    splineChanged() {
+      _splineChanged();
+    },
+    splineDeleteSelected() {
+      _splineDeleteSelected();
+    },
+    splineClearAll() {
+      _splineClearAll();
+    },
+    splineSelectedYChanged() {
+      _splineSelectedYChanged();
+    },
+    splineClosedChanged() {
+      _splineClosedChanged();
+    },
+    splinePreview() {
+      _splinePreview();
+    },
+    splineBake() {
+      _splineBake();
+    },
+    splineClearPreview() {
+      _splineClearPreview();
+    },
+    splineApplyPlateau() {
+      _splineApplyPlateau();
+    },
+    splineClearTunnels() {
+      _splineClearTunnels();
+    },
+    splineClearLinearFeatures() {
+      _splineClearLinearFeatures();
+    },
+    splineKerbSelect() {
+      _splineKerbSelect();
+    },
+    splineKerbApply() {
+      _splineKerbApply();
+    },
+    splineKerbDelete() {
+      _splineKerbDelete();
+    },
+    splineKerbDuplicate() {
+      _splineKerbDuplicate();
+    },
+    splineKerbSuggestFromCurvature() {
+      _splineKerbSuggestFromCurvature();
+    },
+    splineKerbLiveChanged(key) {
+      _splineKerbLiveChanged(key);
+    },
+    grassChanged() {
+      _grassChanged();
+    },
+    grassRebuildGeos() {
+      _grassRebuildGeos();
+    },
+    grassFill() {
+      _grassFill();
+    },
+    grassClear() {
+      _grassClear();
+    },
+    grassSaveDensity() {
+      _grassSaveDensity();
+    },
+    grassLoadDensity() {
+      _grassLoadDensity();
+    },
+    revoGrassChanged() {
+      _revoGrassChanged?.();
+    },
+    revoGrassRebuild() {
+      return _revoGrassRebuild?.();
+    },
+    revoGrassMaskFill() {
+      revoGrassSystem.mask.fillAllow();
+    },
+    revoGrassMaskClear() {
+      revoGrassSystem.mask.clearAllow();
+    },
     revoGrassMaskSave() {
-      const blob = new Blob([revoGrassSystem.mask.getSnapshot()], { type: "application/octet-stream" });
+      const blob = new Blob([revoGrassSystem.mask.getSnapshot()], {
+        type: "application/octet-stream",
+      });
       downloadBlob(blob, "revo-grass-mask.bin");
     },
     async revoGrassMaskLoad() {
@@ -4131,12 +4992,24 @@ export async function startV2App(opts = {}) {
       const buf = await file.arrayBuffer();
       revoGrassSystem.mask.restoreSnapshot(new Uint8Array(buf));
     },
-    terrainSurfaceChanged() { _terrainSurfaceChanged(); },
-    tslTerrainSync() { _tslTerrainSync(); },
-    autoCliffEditorChanged(kind) { _autoCliffEditorChanged(kind); },
-    cliffTextureSlotChanged() { _cliffTextureSlotChanged(); },
-    groundTextureSlotChanged() { _groundTextureSlotChanged(); },
-    onConfigChanged() { chunkStream.update(camera.position); },
+    terrainSurfaceChanged() {
+      _terrainSurfaceChanged();
+    },
+    tslTerrainSync() {
+      _tslTerrainSync();
+    },
+    autoCliffEditorChanged(kind) {
+      _autoCliffEditorChanged(kind);
+    },
+    cliffTextureSlotChanged() {
+      _cliffTextureSlotChanged();
+    },
+    groundTextureSlotChanged() {
+      _groundTextureSlotChanged();
+    },
+    onConfigChanged() {
+      chunkStream.update(camera.position);
+    },
     rebuildVolumetricCloudVolume() {
       volumetricCloudSystem?.rebuildVolume?.();
     },
@@ -4157,7 +5030,9 @@ export async function startV2App(opts = {}) {
       volumetricCloudSystemOptimized?.resetTemporalHistory?.();
     },
     dispose() {
-      renderer.domElement.removeEventListener("wheel", onCanvasWheelBrush, { capture: true });
+      renderer.domElement.removeEventListener("wheel", onCanvasWheelBrush, {
+        capture: true,
+      });
       if (csm) {
         sun.shadow.shadowNode = null;
         csm.dispose();
@@ -4220,4 +5095,3 @@ export async function startV2App(opts = {}) {
     },
   };
 }
-

@@ -45,7 +45,7 @@ function srgbColor(hex) {
 }
 
 function buildUniforms(rp) {
-  const windRad = (rp.windAngle ?? 0) * Math.PI / 180;
+  const windRad = ((rp.windAngle ?? 0) * Math.PI) / 180;
   return {
     uAnchorDeltaXZ: uniform(new THREE.Vector2()),
     uAnchorPosition: uniform(new THREE.Vector3()),
@@ -116,9 +116,19 @@ function createSsbo(config, uniforms, { heightTex, windTex, exclusionTex }) {
     const col = float(instanceIndex).mod(fBladesPerSide);
     const randX = hash(instanceIndex.add(4321));
     const randZ = hash(instanceIndex.add(1234));
-    const offsetX = col.mul(fSpacing).sub(fTileHalf).add(randX.mul(fSpacingJitter));
-    const offsetZ = row.mul(fSpacing).sub(fTileHalf).add(randZ.mul(fSpacingJitter));
-    const noiseUv = vec2(offsetX, offsetZ).add(fTileHalf).div(fTileSize).abs().fract();
+    const offsetX = col
+      .mul(fSpacing)
+      .sub(fTileHalf)
+      .add(randX.mul(fSpacingJitter));
+    const offsetZ = row
+      .mul(fSpacing)
+      .sub(fTileHalf)
+      .add(randZ.mul(fSpacingJitter));
+    const noiseUv = vec2(offsetX, offsetZ)
+      .add(fTileHalf)
+      .div(fTileSize)
+      .abs()
+      .fract();
     const noise = texture(windTex, noiseUv);
     const wrapNoise = noise.b.sub(0.5);
     data1.x.assign(offsetX.add(wrapNoise.mul(17).fract()));
@@ -129,7 +139,13 @@ function createSsbo(config, uniforms, { heightTex, windTex, exclusionTex }) {
     data2.x.assign(float(0));
     const n = noise.b;
     const shaped = n.mul(n);
-    const randomScale = remap(shaped, 0, 1, uniforms.uBladeMinScale, uniforms.uBladeMaxScale);
+    const randomScale = remap(
+      shaped,
+      0,
+      1,
+      uniforms.uBladeMinScale,
+      uniforms.uBladeMaxScale,
+    );
     data2.y.assign(randomScale);
     data2.z.assign(randomScale);
     data2.w.assign(posNoise);
@@ -151,7 +167,9 @@ function createSsbo(config, uniforms, { heightTex, windTex, exclusionTex }) {
     const mixTime = sin(time.mul(0.4).add(posNoise.mul(0.1))).mul(0.25);
     const w = clamp(mixRand.add(mixTime), 0.2, 0.8);
     const n = mix(nA, nB, w);
-    const windFactor = n.r.mul(uniforms.uWindStrength).add(n.g.mul(uniforms.uWindStrength).mul(0.35));
+    const windFactor = n.r
+      .mul(uniforms.uWindStrength)
+      .add(n.g.mul(uniforms.uWindStrength).mul(0.35));
     const target = dir.mul(windFactor);
     const k = mix(0.08, 0.25, abs(n.b));
     const newWind = prevWind.add(target.sub(prevWind).mul(k));
@@ -159,8 +177,12 @@ function createSsbo(config, uniforms, { heightTex, windTex, exclusionTex }) {
   });
 
   const computeTrailScale = Fn(([originalScale, currentScale, stepped]) => {
-    const up = currentScale.add(originalScale.sub(currentScale).mul(uniforms.uTrailGrowthRate));
-    const down = currentScale.add(uniforms.uTrailMinScale.sub(currentScale).mul(uniforms.uKDown));
+    const up = currentScale.add(
+      originalScale.sub(currentScale).mul(uniforms.uTrailGrowthRate),
+    );
+    const down = currentScale.add(
+      uniforms.uTrailMinScale.sub(currentScale).mul(uniforms.uKDown),
+    );
     return mix(up, down, stepped);
   });
 
@@ -168,7 +190,11 @@ function createSsbo(config, uniforms, { heightTex, windTex, exclusionTex }) {
     const data1 = buffer1.element(instanceIndex);
     const data2 = buffer2.element(instanceIndex);
 
-    const wrapped = wrapTileOffsetXZ(vec2(data1.x, data1.y), uniforms.uAnchorDeltaXZ, uniforms.uTileSize);
+    const wrapped = wrapTileOffsetXZ(
+      vec2(data1.x, data1.y),
+      uniforms.uAnchorDeltaXZ,
+      uniforms.uTileSize,
+    );
     data1.x.assign(wrapped.x);
     data1.y.assign(wrapped.y);
 
@@ -218,8 +244,13 @@ function createSsbo(config, uniforms, { heightTex, windTex, exclusionTex }) {
     const distSq = diff.dot(diff);
     const inner = uniforms.uTrailRadiusSq.mul(0.35);
     const outer = uniforms.uTrailRadiusSq;
-    const grounded = step(float(0.1), float(1).sub(uniforms.uAnchorPosition.y.sub(yOffset)));
-    const contact = float(1).sub(smoothstep(inner, outer, distSq)).mul(grounded);
+    const grounded = step(
+      float(0.1),
+      float(1).sub(uniforms.uAnchorPosition.y.sub(yOffset)),
+    );
+    const contact = float(1)
+      .sub(smoothstep(inner, outer, distSq))
+      .mul(grounded);
 
     const currentScale = data2.y;
     const originalScale = data2.z;
@@ -284,13 +315,21 @@ function createMaterial(ssbo, uniforms) {
       const bladeScale = vec3(scaleX, scaleY, 1);
       this.scaleNode = mix(vec3(0), bladeScale, isVisible);
 
-      const instanceNoise = hash(instanceIndex.add(196.4356)).sub(0.5).mul(0.25);
+      const instanceNoise = hash(instanceIndex.add(196.4356))
+        .sub(0.5)
+        .mul(0.25);
       const h = uv().y;
       const bendProfile = h.mul(h).mul(uniforms.uBaseBending);
-      const baseBending = positionNoise.sub(0.5).mul(0.25).add(instanceNoise).mul(bendProfile);
+      const baseBending = positionNoise
+        .sub(0.5)
+        .mul(0.25)
+        .add(instanceNoise)
+        .mul(bendProfile);
       this.rotationNode = vec3(baseBending, 0, 0);
 
-      const offscreenOffset = uniforms.uCameraForward.mul(INFINITY).mul(float(1).sub(isVisible));
+      const offscreenOffset = uniforms.uCameraForward
+        .mul(INFINITY)
+        .mul(float(1).sub(isVisible));
       const bladePosition = vec3(offsetX, offsetY, offsetZ);
       const randomPhase = positionNoise.mul(PI2);
       const swayAmount = sin(time.mul(5).add(randomPhase)).mul(0.15);
@@ -299,9 +338,16 @@ function createMaterial(ssbo, uniforms) {
       const dirXZ = uniforms.uWindDir;
       const perp = vec2(dirXZ.y.negate(), dirXZ.x);
       const phase = hash(instanceIndex).mul(PI2);
-      const flutter = sin(time.mul(uniforms.uWindSpeed.mul(1.7)).add(phase.mul(1.3))).mul(0.06).mul(bendProfile);
+      const flutter = sin(
+        time.mul(uniforms.uWindSpeed.mul(1.7)).add(phase.mul(1.3)),
+      )
+        .mul(0.06)
+        .mul(bendProfile);
       const flutterOffset = vec3(perp.x, 0, perp.y).mul(flutter);
-      const windY = float(1).sub(h.mul(h)).mul(uniforms.uWindIntensity).mul(0.25);
+      const windY = float(1)
+        .sub(h.mul(h))
+        .mul(uniforms.uWindIntensity)
+        .mul(0.25);
       const windOffset = vec3(windXZ.x, windY, windXZ.y).mul(bendProfile);
 
       this.positionNode = bladePosition
@@ -313,24 +359,46 @@ function createMaterial(ssbo, uniforms) {
       const r2 = offsetX.mul(offsetX).add(offsetZ.mul(offsetZ));
       const near = float(1).sub(smoothstep(0, uniforms.uAoRadiusSq, r2));
       const edge = uv().x.mul(2).sub(1).abs();
-      const rim = smoothstep(uniforms.uAoRimSmoothness.negate(), uniforms.uAoRimSmoothness, edge);
+      const rim = smoothstep(
+        uniforms.uAoRimSmoothness.negate(),
+        uniforms.uAoRimSmoothness,
+        edge,
+      );
       const hWeight = float(1).sub(smoothstep(0.1, 0.85, h));
       const aoStrength = uniforms.uAoScale.mul(0.25);
       const ao = float(1).sub(aoStrength.mul(near.mul(rim).mul(hWeight)));
 
       const colorProfile = h.mul(uniforms.uColorMixFactor);
-      const jitter = smoothstep(0, uniforms.uColorVariationStrength, positionNoise);
+      const jitter = smoothstep(
+        0,
+        uniforms.uColorVariationStrength,
+        positionNoise,
+      );
       const baseColorJittered = uniforms.uBaseColor.mul(jitter);
-      const baseToTip = mix(baseColorJittered, uniforms.uTipColor, colorProfile);
-      const baseMask = float(1).sub(smoothstep(0, uniforms.uBaseShadeHeight, h));
+      const baseToTip = mix(
+        baseColorJittered,
+        uniforms.uTipColor,
+        colorProfile,
+      );
+      const baseMask = float(1).sub(
+        smoothstep(0, uniforms.uBaseShadeHeight, h),
+      );
       const windAo = mix(
         1,
         float(1).sub(uniforms.uBaseWindShade),
         baseMask.mul(smoothstep(0, 1, swayFactor)),
       );
-      const windTint = mix(float(1), float(1).add(uniforms.uWindColorStrength.mul(0.15)), swayFactor.mul(0.35));
+      const windTint = mix(
+        float(1),
+        float(1).add(uniforms.uWindColorStrength.mul(0.15)),
+        swayFactor.mul(0.35),
+      );
       const withShadow = mix(baseToTip.mul(0.5), baseToTip, shadowFactor);
-      this.colorNode = withShadow.mul(windAo).mul(windTint).mul(ao).mul(uniforms.uColorBrightness);
+      this.colorNode = withShadow
+        .mul(windAo)
+        .mul(windTint)
+        .mul(ao)
+        .mul(uniforms.uColorBrightness);
     }
   }
   return new RevoGrassMaterial();
@@ -375,7 +443,10 @@ export class RevoGrassSystem {
     this._renderer = renderer;
     this._heightTex = heightTex;
     this._geminiDensityTex = opts.geminiDensityTex ?? null;
-    this._exclusionTex = this.resolveExclusionTexture(toolState.revoGrass, this._geminiDensityTex);
+    this._exclusionTex = this.resolveExclusionTexture(
+      toolState.revoGrass,
+      this._geminiDensityTex,
+    );
     this._initialized = true;
     await this.rebuild(toolState.revoGrass, sunDir);
   }
@@ -383,10 +454,15 @@ export class RevoGrassSystem {
   async rebuild(rp, sunDir) {
     this.disposeMesh();
     if (!this._heightTex || !this._windTex) {
-      console.warn("[RevoGrass] rebuild skipped — height/wind texture not ready");
+      console.warn(
+        "[RevoGrass] rebuild skipped — height/wind texture not ready",
+      );
       return;
     }
-    this._exclusionTex = this.resolveExclusionTexture(rp, this._geminiDensityTex);
+    this._exclusionTex = this.resolveExclusionTexture(
+      rp,
+      this._geminiDensityTex,
+    );
     this._revoConfig = getRevoGrassConfig(rp);
     const cfg = this._revoConfig;
     this._uniforms = buildUniforms(rp);
@@ -450,7 +526,7 @@ export class RevoGrassSystem {
     u.uWindStrength.value = rp.windStrength ?? 0.4;
     u.uWindSpeed.value = rp.windSpeed ?? 0.25;
     u.uWindIntensity.value = rp.windIntensity ?? 1;
-    const wr = (rp.windAngle ?? 0) * Math.PI / 180;
+    const wr = ((rp.windAngle ?? 0) * Math.PI) / 180;
     u.uWindDir.value.set(Math.cos(wr), Math.sin(wr));
     u.uUvWindScale.value = rp.uvWindScale ?? 1.75;
     u.uBaseColor.value.copy(srgbColor(rp.baseColor ?? "#8c6b30"));
@@ -488,7 +564,8 @@ export class RevoGrassSystem {
   }
 
   update(rp, anchorPos, camera, opts = {}) {
-    if (!this._initialized || !this._enabled || !this._mesh || !this._ssbo) return;
+    if (!this._initialized || !this._enabled || !this._mesh || !this._ssbo)
+      return;
 
     const minInterval = rp.computeMinIntervalMs ?? 0;
     if (minInterval > 0) {
@@ -499,9 +576,10 @@ export class RevoGrassSystem {
 
     const u = this._uniforms;
     if (opts.playMode && rp.useGlobalWindInPlay !== false) {
-      u.uWindIntensity.value = (rp.windIntensity ?? 1) * this._playWindIntensity;
+      u.uWindIntensity.value =
+        (rp.windIntensity ?? 1) * this._playWindIntensity;
       if (this._playWindAngleDeg != null) {
-        const wr = this._playWindAngleDeg * Math.PI / 180;
+        const wr = (this._playWindAngleDeg * Math.PI) / 180;
         u.uWindDir.value.set(Math.cos(wr), Math.sin(wr));
       }
     }
@@ -514,7 +592,10 @@ export class RevoGrassSystem {
 
     if (camera) {
       camera.getWorldDirection(u.uCameraForward.value);
-      this._cameraMatrix.multiplyMatrices(camera.projectionMatrix, camera.matrixWorldInverse);
+      this._cameraMatrix.multiplyMatrices(
+        camera.projectionMatrix,
+        camera.matrixWorldInverse,
+      );
       u.uCameraMatrix.value.copy(this._cameraMatrix);
       const e = camera.projectionMatrix.elements;
       u.uFx.value = e[0];

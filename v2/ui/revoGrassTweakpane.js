@@ -35,7 +35,7 @@ export function addRevoGrassFolder(pane, toolState, opts) {
   const distFolder = folder.addFolder({ title: "Distance fade", expanded: false });
   distFolder.addBinding(rp, "stochasticR0", { label: "Full density", min: 4, max: 40, step: 1 }).on("change", () => onRevoGrassChanged?.());
   distFolder.addBinding(rp, "stochasticR1", { label: "Fade end", min: 20, max: 120, step: 2 }).on("change", () => onRevoGrassChanged?.());
-  distFolder.addBinding(rp, "stochasticPMin", { label: "Far keep", min: 0, max: 1, step: 0.01 }).on("change", () => onRevoGrassChanged?.());
+  distFolder.addBinding(rp, "stochasticPMin", { label: "Far keep", min: 0, max: 0.5, step: 0.02 }).on("change", () => onRevoGrassChanged?.());
 
   const shadowFolder = folder.addFolder({ title: "Shadow", expanded: false });
   shadowFolder.addBinding(rp, "bakedShadowWeight", { label: "Baked weight", min: 0, max: 1, step: 0.05 }).on("change", () => onRevoGrassChanged?.());

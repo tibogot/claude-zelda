@@ -23,7 +23,15 @@ export function createToolState() {
      */
     paint: {
       activeLayer: V2_CONFIG.paint.defaultActiveLayer,
-      layerSlotIds: ["ground_037", "cobblestone", "cliff_rock", "grass_005", "ground_037", "cobblestone", "cliff_rock"],
+      layerSlotIds: [
+        "ground_037",
+        "cobblestone",
+        "cliff_rock",
+        "grass_005",
+        "ground_037",
+        "cobblestone",
+        "cliff_rock",
+      ],
       noiseMask: 0,
       noiseScale: 3.0,
       noiseOctaves: 3,
@@ -285,10 +293,30 @@ export function createToolState() {
     },
     billboardGrassSlots: ["meadow", "dry", "moss", "wheat"].map((preset, i) => {
       const palettes = {
-        meadow: { colorBottom: "#1a4d12", colorMid: "#3d8f2a", colorTop: "#6bc44a", name: "Meadow" },
-        dry: { colorBottom: "#4a3d1a", colorMid: "#8f7a3d", colorTop: "#c4a85a", name: "Dry field" },
-        moss: { colorBottom: "#142e18", colorMid: "#2a5234", colorTop: "#4a8f55", name: "Moss" },
-        wheat: { colorBottom: "#5a4a18", colorMid: "#9a7a28", colorTop: "#d4b850", name: "Wheat" },
+        meadow: {
+          colorBottom: "#1a4d12",
+          colorMid: "#3d8f2a",
+          colorTop: "#6bc44a",
+          name: "Meadow",
+        },
+        dry: {
+          colorBottom: "#4a3d1a",
+          colorMid: "#8f7a3d",
+          colorTop: "#c4a85a",
+          name: "Dry field",
+        },
+        moss: {
+          colorBottom: "#142e18",
+          colorMid: "#2a5234",
+          colorTop: "#4a8f55",
+          name: "Moss",
+        },
+        wheat: {
+          colorBottom: "#5a4a18",
+          colorMid: "#9a7a28",
+          colorTop: "#d4b850",
+          name: "Wheat",
+        },
       };
       const p = palettes[preset];
       return {
@@ -342,7 +370,7 @@ export function createToolState() {
       swaySpeed: 0,
       swayStrength: 0.12,
     })),
-    treeSlots: [0, 1, 2, 3, 4, 5, 6, 7].map(i => ({
+    treeSlots: [0, 1, 2, 3, 4, 5, 6, 7].map((i) => ({
       name: `Slot ${i + 1}`,
       enabled: true,
       presetFile: null,
@@ -355,7 +383,7 @@ export function createToolState() {
         alphaCutoff: 0.45,
         normalBias: 1.0,
         leafWarp: 0.28,
-        aoStr: 0.70,
+        aoStr: 0.7,
         sssStr: 0.0,
         sssPow: 2.0,
         sssColor: "#c8e070",
@@ -474,8 +502,18 @@ export function createToolState() {
       interactGain: 0.85,
       windAmp: 0.042,
       windSpeed: 1.12,
-      colorA: { preset: "main", inner: "#fff4b8", outer: "#fb8da0", glow: 0.28 },
-      colorB: { preset: "sakura", inner: "#ffd9ea", outer: "#ff7ab2", glow: 0.32 },
+      colorA: {
+        preset: "main",
+        inner: "#fff4b8",
+        outer: "#fb8da0",
+        glow: 0.28,
+      },
+      colorB: {
+        preset: "sakura",
+        inner: "#ffd9ea",
+        outer: "#ff7ab2",
+        glow: 0.32,
+      },
     },
     water: {
       scale: 0.3,
@@ -1192,4 +1230,3 @@ export function tickPerf(perf, nowMs, frameMs) {
     perf.lastFrameStamp = nowMs;
   }
 }
-
