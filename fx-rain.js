@@ -1,207 +1,238 @@
 /**
- * fx-rain.js
- * Stylized rain streaks for the Ambient FX Editor.
- *
- * CPU-updated instanced quads, driven by:
- *  - shared wind (windX, windZ, windStrength)
- *  - a getTerrainHeight(x, z) callback so drops collide with terrain/props
- *
- * Exposes:
- *   createRainFX(scene, shared, getTerrainHeight)
- *   buildRainUI(folder, state)
+ * fx-rain.js — folio RainLines.js port (Bruno Simon folio-2025).
  */
+import * as THREE from "three/webgpu";
+import { attribute, float, Fn, fract, mod, step, uniform, vec2, vec3 } from "three/tsl";
+import {
+  FolioMeshDefaultMaterial,
+  createFolioLighting,
+  updateFolioLightingFromScene,
+} from "./folio-mesh-default-material.js";
+import { computeOptimalArea } from "./folio-optimal-area.js";
 
-import * as THREE from "three";
-
-function createStreakTexture() {
-  const canvas = document.createElement("canvas");
-  canvas.width = 64;
-  canvas.height = 256;
-  const ctx = canvas.getContext("2d");
-  if (!ctx) return null;
-
-  const grad = ctx.createLinearGradient(0, 0, 0, 256);
-  grad.addColorStop(0.0, "rgba(255,255,255,0.0)");
-  grad.addColorStop(0.15, "rgba(255,255,255,0.35)");
-  grad.addColorStop(0.5, "rgba(255,255,255,0.95)");
-  grad.addColorStop(0.85, "rgba(255,255,255,0.35)");
-  grad.addColorStop(1.0, "rgba(255,255,255,0.0)");
-
-  ctx.fillStyle = grad;
-  ctx.fillRect(0, 0, 64, 256);
-
-  const tex = new THREE.CanvasTexture(canvas);
-  tex.wrapS = THREE.ClampToEdgeWrapping;
-  tex.wrapT = THREE.ClampToEdgeWrapping;
-  tex.minFilter = THREE.LinearFilter;
-  tex.magFilter = THREE.LinearFilter;
-  tex.generateMipmaps = false;
-  return tex;
+function remapClamp(input, inLow, inHigh, outLow, outHigh) {
+  const t = (input - inLow) / (inHigh - inLow);
+  const v = outLow + t * (outHigh - outLow);
+  return Math.max(Math.min(v, Math.max(outLow, outHigh)), Math.min(outLow, outHigh));
 }
 
-export function createRainFX(scene, shared, getTerrainHeight) {
+function lerp(a, b, t) {
+  return (1 - t) * a + t * b;
+}
+
+const LINE_COUNT = Math.pow(2, 11);
+
+function buildRainGeometry(count) {
+  const positionArray = new Float32Array(count * 4 * 3);
+  const offsetArray = new Float32Array(count * 4 * 2);
+  const randomArray = new Float32Array(count * 4);
+  const indexArray = new Uint16Array(count * 6);
+
+  for (let lineIndex = 0; lineIndex < count; lineIndex++) {
+    const x = Math.random();
+    const y = 0;
+    const z = Math.random();
+    const random = Math.random();
+
+    for (let vertexIndex = 0; vertexIndex < 4; vertexIndex++) {
+      const positionIndex = (lineIndex * 4 + vertexIndex) * 3;
+      positionArray[positionIndex + 0] = x;
+      positionArray[positionIndex + 1] = y;
+      positionArray[positionIndex + 2] = z;
+
+      const offsetIndex = (lineIndex * 4 + vertexIndex) * 2;
+      offsetArray[offsetIndex + 0] = 0;
+      offsetArray[offsetIndex + 1] = 0;
+
+      if (vertexIndex === 0 || vertexIndex === 1) offsetArray[offsetIndex + 0] = 1;
+      if (vertexIndex === 0 || vertexIndex === 3) offsetArray[offsetIndex + 1] = 1;
+
+      randomArray[lineIndex * 4 + vertexIndex] = random;
+    }
+
+    indexArray[lineIndex * 6 + 0] = lineIndex * 4 + 0;
+    indexArray[lineIndex * 6 + 1] = lineIndex * 4 + 3;
+    indexArray[lineIndex * 6 + 2] = lineIndex * 4 + 2;
+    indexArray[lineIndex * 6 + 3] = lineIndex * 4 + 2;
+    indexArray[lineIndex * 6 + 4] = lineIndex * 4 + 1;
+    indexArray[lineIndex * 6 + 5] = lineIndex * 4 + 0;
+  }
+
+  const geometry = new THREE.BufferGeometry();
+  geometry.setAttribute("position", new THREE.Float32BufferAttribute(positionArray, 3));
+  geometry.setAttribute("offset", new THREE.Float32BufferAttribute(offsetArray, 2));
+  geometry.setAttribute("random", new THREE.Float32BufferAttribute(randomArray, 1));
+  geometry.index = new THREE.Uint16BufferAttribute(indexArray, 1);
+  return geometry;
+}
+
+/** Folio weather bindings (RainLines update + manual bindings). */
+function applyWeatherBindings(state, sh) {
+  const rain = state.params.enabled
+    ? Math.max(0, Math.min(1, state.params.rain * (sh.density ?? 1)))
+    : 0;
+
+  state.visibleRatio.value = Math.pow(rain, 2);
+
+  const baseLength = remapClamp(rain, 0, 1, 1, 3);
+  const snowRatio = 1 - Math.pow(1 - Math.max(state.params.snow, 0), 4);
+  const snowLength = 0.03;
+  state.length.value = lerp(baseLength, snowLength, snowRatio);
+
+  const baseSpeed = remapClamp(rain, 0, 1, 0.2, 0.4);
+  const snowSpeed = 0.05;
+  state.speed = lerp(baseSpeed, snowSpeed, snowRatio);
+
+  const wind = Math.max(0, Math.min(1, sh.windStrength ?? 1));
+  state.incline.value = remapClamp(wind, 0, 1, 0.1, 0.4);
+}
+
+/**
+ * @param {THREE.Scene} scene
+ * @param {object} shared
+ */
+export function createRainFX(scene, shared, _getTerrainHeight) {
   const params = {
     enabled: true,
-    count: 6000,
-    areaSize: 100,
-    minHeight: 15,
-    maxHeight: 55,
-    fallSpeed: 22,
-    swayAmount: 1.5,
-    swayFrequency: 2.2,
-    dropLength: 1.8,
-    dropWidth: 0.03,
-    opacity: 0.55,
+    rain: 1.0,
+    snow: 0,
+    elevation: 20,
+    thickness: 0.015,
   };
 
-  const maxCount = 20000;
+  const lighting = createFolioLighting();
 
-  const geom = new THREE.PlaneGeometry(1, 1);
-  const streakTex = createStreakTexture();
-  const mat = new THREE.MeshBasicMaterial({
-    map: streakTex || null,
-    color: 0xa8c8ff,
+  const thickness = uniform(0.015);
+  const elevation = uniform(20);
+  const incline = uniform(0.2);
+  const size = uniform(48);
+  const center = uniform(vec2());
+  const length = uniform(2);
+  const localTime = uniform(0);
+  const visibleRatio = uniform(0);
+
+  const material = new FolioMeshDefaultMaterial(lighting, {
+    normalNode: vec3(0, 1, 0),
     transparent: true,
-    opacity: params.opacity,
-    depthWrite: false,
-    depthTest: true,
-    blending: THREE.AdditiveBlending,
-    side: THREE.DoubleSide,
+    wireframe: false,
+    hasCoreShadows: true,
+    hasDropShadows: false,
+    hasLightBounce: false,
+    hasFog: false,
+    hasWater: false,
   });
 
-  const mesh = new THREE.InstancedMesh(geom, mat, maxCount);
+  material.positionNode = Fn(() => {
+    const newPosition = attribute("position").toVar();
+    const offset = attribute("offset");
+    const random = attribute("random");
+    const tangent = vec2(0.707, -0.707);
+
+    newPosition.xz.mulAssign(size);
+    newPosition.xz.subAssign(center);
+    const halfSize = size.mul(0.5);
+    newPosition.x.assign(mod(newPosition.x.add(halfSize), size).sub(halfSize));
+    newPosition.z.assign(mod(newPosition.z.add(halfSize), size).sub(halfSize));
+    newPosition.xz.addAssign(center);
+
+    newPosition.xz.addAssign(tangent.mul(offset.x.mul(thickness)));
+
+    const progress = localTime.add(random).mod(1);
+    newPosition.y.assign(elevation.add(length));
+    newPosition.y.subAssign(length.mul(offset.y.oneMinus()));
+    newPosition.y.subAssign(progress.mul(elevation.add(length)));
+    newPosition.y.assign(newPosition.y.clamp(0, elevation));
+
+    const visible = step(visibleRatio, fract(random.mul(99)));
+    newPosition.y.addAssign(visible.mul(99));
+
+    newPosition.xz.addAssign(tangent.mul(newPosition.y.mul(incline).mul(-1)));
+
+    return newPosition;
+  })();
+
+  const geometry = buildRainGeometry(LINE_COUNT);
+  const mesh = new THREE.Mesh(geometry, material);
+  mesh.position.y = -0.3;
   mesh.frustumCulled = false;
+  mesh.renderOrder = 1;
   scene.add(mesh);
 
-  const drops = new Array(maxCount);
-  const dummy = new THREE.Object3D();
-  
-  // Reusable vectors for billboard calculation
-  const _camPos = new THREE.Vector3();
-  const _fallDir = new THREE.Vector3();
-  const _toCamera = new THREE.Vector3();
-  const _right = new THREE.Vector3();
-  const _up = new THREE.Vector3();
-  const _matrix = new THREE.Matrix4();
-
-  const randRange = (min, max) => min + Math.random() * (max - min);
-
-  function spawnDrop(i) {
-    const halfArea = params.areaSize * 0.5;
-    const x = randRange(-halfArea, halfArea);
-    const z = randRange(-halfArea, halfArea);
-    const baseY = getTerrainHeight ? getTerrainHeight(x, z) : shared.groundY;
-    const y = baseY + randRange(params.minHeight, params.maxHeight);
-
-    const speed = params.fallSpeed * (0.7 + Math.random() * 0.6);
-    const swayPhase = Math.random() * Math.PI * 2;
-
-    drops[i] = { x, y, z, speed, swayPhase };
-  }
-
-  for (let i = 0; i < maxCount; i++) {
-    spawnDrop(i);
-  }
-
-  // Store camera reference for billboarding
   let camera = null;
+  let controls = null;
+  let speed = 0.25;
 
-  function applyMatrices(time) {
-    const n = Math.min(params.count, maxCount);
-    mesh.count = n;
+  const state = {
+    params,
+    thickness,
+    elevation,
+    incline,
+    size,
+    center,
+    length,
+    localTime,
+    visibleRatio,
+    speed,
+  };
 
-    const halfArea = params.areaSize * 0.5;
-    const windX = shared.windX * shared.windStrength;
-    const windZ = shared.windZ * shared.windStrength;
-
-    // Get camera position for billboarding
-    if (camera) {
-      _camPos.copy(camera.position);
-    } else {
-      _camPos.set(0, 10, 20);
-    }
-
-    // Fall direction (slanted by wind)
-    _fallDir.set(windX * 0.6, -1, windZ * 0.6).normalize();
-
-    for (let i = 0; i < n; i++) {
-      const d = drops[i];
-
-      const sway = Math.sin(time * params.swayFrequency + d.swayPhase) * params.swayAmount;
-
-      const px = d.x + sway * 0.18;
-      const pz = d.z;
-      const py = d.y;
-
-      dummy.position.set(px, py, pz);
-
-      // Billboard calculation: make plane face camera while aligning Y with fall direction
-      _toCamera.subVectors(_camPos, dummy.position).normalize();
-      
-      // Right vector: perpendicular to both camera direction and fall direction
-      _right.crossVectors(_toCamera, _fallDir);
-      if (_right.lengthSq() < 0.001) {
-        // Fallback if fall direction is parallel to camera view
-        _right.set(1, 0, 0);
-      }
-      _right.normalize();
-      
-      // Up vector: along the fall direction, projected to be perpendicular to right
-      _up.crossVectors(_right, _toCamera).normalize();
-      
-      // Build rotation from basis vectors (right = X, up = Y, toCamera = Z)
-      _matrix.makeBasis(_right, _up, _toCamera);
-      dummy.quaternion.setFromRotationMatrix(_matrix);
-      
-      dummy.scale.set(params.dropWidth, params.dropLength, 1);
-      dummy.updateMatrix();
-      mesh.setMatrixAt(i, dummy.matrix);
-
-      // Respawn if too far out of area to avoid drift build-up.
-      if (Math.abs(d.x) > halfArea * 1.6 || Math.abs(d.z) > halfArea * 1.6) {
-        spawnDrop(i);
-      }
-    }
-
-    mesh.instanceMatrix.needsUpdate = true;
+  function updateOptimalArea() {
+    if (!camera) return;
+    const focus = controls
+      ? { x: controls.target.x, z: controls.target.z }
+      : null;
+    const optimal = computeOptimalArea(camera, focus);
+    center.value.set(optimal.position.x, optimal.position.z);
+    size.value = optimal.radius * 2;
   }
-  
+
+  function update(dt, _elapsed, sh) {
+    updateFolioLightingFromScene(lighting, scene);
+
+    thickness.value = params.thickness;
+    elevation.value = params.elevation;
+
+    applyWeatherBindings(state, sh);
+
+    mesh.visible = visibleRatio.value > 0.00001;
+    if (!mesh.visible) return;
+
+    updateOptimalArea();
+    localTime.value += dt * speed;
+  }
+
   function setCamera(cam) {
     camera = cam;
+    updateOptimalArea();
   }
 
-  function update(dt, elapsed, sh) {
-    mesh.visible = params.enabled;
-    mat.opacity = params.opacity;
-    if (!params.enabled) return;
+  function setView(cam, ctrl) {
+    camera = cam;
+    controls = ctrl;
+    updateOptimalArea();
+  }
 
-    const n = Math.min(params.count, maxCount);
-
-    for (let i = 0; i < n; i++) {
-      const d = drops[i];
-
-      d.y -= d.speed * dt;
-      d.x += sh.windX * sh.windStrength * 0.55 * dt;
-      d.z += sh.windZ * sh.windStrength * 0.55 * dt;
-
-      const terrainY = getTerrainHeight ? getTerrainHeight(d.x, d.z) : sh.groundY;
-      const hitY = terrainY + 0.25;
-
-      if (d.y < hitY) {
-        spawnDrop(i);
-      }
-    }
-
-    applyMatrices(elapsed);
+  function onResize() {
+    updateOptimalArea();
   }
 
   function dispose(sc) {
     sc.remove(mesh);
-    mesh.geometry.dispose();
-    mesh.material.dispose();
+    geometry.dispose();
+    material.dispose();
   }
 
-  return { update, dispose, params, setCamera };
+  applyWeatherBindings(state, shared);
+  updateOptimalArea();
+
+  return {
+    update,
+    dispose,
+    params,
+    setCamera,
+    setView,
+    onResize,
+    mesh,
+  };
 }
 
 export function buildRainUI(folder, state) {
@@ -209,74 +240,31 @@ export function buildRainUI(folder, state) {
 
   folder.addBinding(p, "enabled", { label: "Enabled" });
 
-  folder.addBinding(p, "count", {
-    label: "Drop Count",
-    min: 1000,
-    max: 20000,
-    step: 100,
-  });
-
-  folder.addBinding(p, "areaSize", {
-    label: "Area Size",
-    min: 20,
-    max: 160,
-    step: 5,
-  });
-
-  folder.addBinding(p, "minHeight", {
-    label: "Min Height",
-    min: 2,
-    max: 40,
-    step: 1,
-  });
-
-  folder.addBinding(p, "maxHeight", {
-    label: "Max Height",
-    min: 10,
-    max: 80,
-    step: 1,
-  });
-
-  folder.addBinding(p, "fallSpeed", {
-    label: "Fall Speed",
-    min: 4,
-    max: 40,
-    step: 1,
-  });
-
-  folder.addBinding(p, "swayAmount", {
-    label: "Sway Amount",
+  folder.addBinding(p, "rain", {
+    label: "Rain",
     min: 0,
-    max: 5,
+    max: 1,
+    step: 0.001,
+  });
+
+  folder.addBinding(p, "snow", {
+    label: "Snow",
+    min: -1,
+    max: 1,
+    step: 0.001,
+  });
+
+  folder.addBinding(p, "elevation", {
+    label: "Elevation",
+    min: 0,
+    max: 50,
     step: 0.1,
   });
 
-  folder.addBinding(p, "swayFrequency", {
-    label: "Sway Freq",
-    min: 0.2,
-    max: 4,
-    step: 0.1,
-  });
-
-  folder.addBinding(p, "dropLength", {
-    label: "Drop Length",
-    min: 0.4,
-    max: 3,
-    step: 0.1,
-  });
-
-  folder.addBinding(p, "dropWidth", {
-    label: "Drop Width",
-    min: 0.01,
-    max: 0.15,
-    step: 0.005,
-  });
-
-  folder.addBinding(p, "opacity", {
-    label: "Opacity",
-    min: 0.05,
-    max: 0.8,
-    step: 0.05,
+  folder.addBinding(p, "thickness", {
+    label: "Thickness",
+    min: 0,
+    max: 0.1,
+    step: 0.001,
   });
 }
-
