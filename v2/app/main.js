@@ -74,7 +74,9 @@ import { BillboardGrassPaintSystem } from "../tools/billboardGrass/billboardGras
 import { BillboardGrassRenderer } from "../render/billboardGrass/billboardGrassRenderer.js";
 import { loadFullPresetFromFile, loadFullPresetFromUrl } from "../core/foliage/presetLoader.js";
 import { GrassManager } from "../render/foliage/grassManager.js";
+import { RevoGrassSystem } from "../render/revoGrass/revoGrassSystem.js";
 import { GrassPaintSystem } from "../tools/foliage/grassPaintSystem.js";
+import { RevoGrassMaskPaintSystem } from "../tools/revoGrass/revoGrassMaskPaintSystem.js";
 import { CliffGrassPaintSystem } from "../tools/foliage/cliffGrassPaintSystem.js";
 import { PlayMode } from "../play/playMode.js";
 import { createV2AudioSystem } from "../audio/createV2AudioSystem.js";
@@ -763,7 +765,13 @@ export async function startV2App(opts = {}) {
   applyBillboardGrassSlotTextures(billboardGrassRenderer, toolState.billboardGrassSlots).catch(() => {});
 
   const grassManager = new GrassManager({ scene, camera, config });
+  const revoGrassSystem = new RevoGrassSystem({ scene, config });
   const grassPaintSystem = new GrassPaintSystem({ toolState, grassManager, config });
+  const revoGrassMaskPaintSystem = new RevoGrassMaskPaintSystem({
+    toolState,
+    mask: revoGrassSystem.mask,
+    config,
+  });
   const cliffGrassPaintSystem = new CliffGrassPaintSystem({ toolState, grassManager, config });
   const roadReflection = new RoadPlanarReflection({
     renderer, scene, camera, resScale: 0.75,
@@ -1144,6 +1152,12 @@ export async function startV2App(opts = {}) {
       grassManager.syncUniforms(toolState.grass, sunDir);
       ui?.pane.refresh();
     }
+    if (toolState.mode === "revoGrass" && !toolState.revoGrass.enabled) {
+      toolState.revoGrass.enabled = true;
+      revoGrassSystem.setEnabled(true);
+      revoGrassSystem.syncFromState(toolState.revoGrass, sunDir);
+      ui?.pane.refresh();
+    }
     if (toolState.mode !== "cliffs") {
       deactivateCliffSelection();
     }
@@ -1251,6 +1265,7 @@ export async function startV2App(opts = {}) {
     _splineKerbSuggestFromCurvature,
     _splineKerbLiveChanged;
   let _grassChanged, _grassRebuildGeos, _grassFill, _grassClear, _grassSaveDensity, _grassLoadDensity;
+  let _revoGrassChanged, _revoGrassRebuild;
   let _terrainSurfaceChanged, _tslTerrainSync, _autoCliffEditorChanged, _cliffTextureSlotChanged, _groundTextureSlotChanged;
   ui = createTweakpaneUi({
     toolState,
@@ -1585,6 +1600,13 @@ export async function startV2App(opts = {}) {
         grassManager.syncUniforms(toolState.grass, sunDir);
         ui?.pane.refresh();
       }
+    }),
+    onRevoGrassChanged: (_revoGrassChanged = () => {
+      revoGrassSystem.syncFromState(toolState.revoGrass, sunDir);
+    }),
+    onRevoGrassRebuild: (_revoGrassRebuild = async () => {
+      await revoGrassSystem.rebuild(toolState.revoGrass, sunDir);
+      revoGrassSystem.precompile(renderer, camera);
     }),
     onTreeCastShadowChanged: (_treeCastShadowChanged = () => {
       for (let i = 0; i < toolState.treeSlots.length; i++) {
@@ -2217,6 +2239,7 @@ export async function startV2App(opts = {}) {
       toolState._splineExportData = () => splineSystem.exportData();
       toolState._decalExportData = () => decalSystem.exportData();
       toolState._billboardGrassExportData = () => billboardGrassStore.toJSON();
+      toolState._revoGrassMaskExportData = () => revoGrassSystem.mask.exportData();
       toolState.propMaterialOverrides = propTextureLibrary.snapshotOverrides();
       const buf = serializeProject({
         terrainStore,
@@ -2243,6 +2266,7 @@ export async function startV2App(opts = {}) {
       delete toolState._splineExportData;
       delete toolState._decalExportData;
       delete toolState._billboardGrassExportData;
+      delete toolState._revoGrassMaskExportData;
       const blob = new Blob([buf], { type: "application/octet-stream" });
       const ts = new Date().toISOString().replace(/[:.]/g, "-").slice(0, 19);
       downloadBlob(blob, `terrain-${ts}.v2terrain`);
@@ -2277,6 +2301,14 @@ export async function startV2App(opts = {}) {
         }
         // Restore settings
         applySettings(toolState, project.settings);
+        if (project.settings?.revoGrassMask) {
+          revoGrassSystem.mask.importData(project.settings.revoGrassMask);
+        }
+        if (project.settings?.revoGrass) {
+          await revoGrassSystem.rebuild(toolState.revoGrass, sunDir);
+          revoGrassSystem.syncFromState(toolState.revoGrass, sunDir);
+          revoGrassSystem.precompile(renderer, camera);
+        }
         propTextureLibrary.applyOverrides(toolState.propMaterialOverrides);
         riverSystem.syncMaterial();
         fullRoadSystem.syncMaterial();
@@ -2688,6 +2720,11 @@ export async function startV2App(opts = {}) {
   grassManager.rebuildTerrainNormalTex(config.world.size);
   grassManager.precompile(renderer, camera);
 
+  await revoGrassSystem.init(renderer, globalHeightTex, sunDir, toolState, {
+    geminiDensityTex: grassManager.densityTex,
+  });
+  revoGrassSystem.precompile(renderer, camera);
+
   // Pre-compile terrain pipelines for all LOD segment counts to avoid hitches
   {
     const tmpMeshes = [];
@@ -2811,7 +2848,7 @@ export async function startV2App(opts = {}) {
   }
 
   function isBrushMode() {
-    return toolState.mode === "sculpt" || toolState.mode === "paint" || toolState.mode === "treePaint" || toolState.mode === "foliagePaint" || toolState.mode === "billboardGrassPaint" || toolState.mode === "grass" || toolState.mode === "cliffGrass" || toolState.mode === "barrier" || toolState.mode === "hole" || toolState.mode === "cave" || toolState.mode === "fleurs" || toolState.mode === "ambientfx" || (toolState.mode === "props" && toolState.props.placementMode === "paint");
+    return toolState.mode === "sculpt" || toolState.mode === "paint" || toolState.mode === "treePaint" || toolState.mode === "foliagePaint" || toolState.mode === "billboardGrassPaint" || toolState.mode === "grass" || toolState.mode === "revoGrass" || toolState.mode === "cliffGrass" || toolState.mode === "barrier" || toolState.mode === "hole" || toolState.mode === "cave" || toolState.mode === "fleurs" || toolState.mode === "ambientfx" || (toolState.mode === "props" && toolState.props.placementMode === "paint");
   }
 
   function updateBrushPreviewFromPick(hit) {
@@ -3128,6 +3165,8 @@ export async function startV2App(opts = {}) {
       billboardGrassPaintSystem.beginStroke(hit.point, event);
     } else if (toolState.mode === "grass") {
       grassPaintSystem.beginStroke(hit.point, event);
+    } else if (toolState.mode === "revoGrass") {
+      revoGrassMaskPaintSystem.beginStroke(hit.point, event);
     } else if (toolState.mode === "cliffGrass") {
       cliffGrassPaintSystem.beginStroke(hit.point, event);
     } else if (toolState.mode === "props") {
@@ -3195,6 +3234,8 @@ export async function startV2App(opts = {}) {
       billboardGrassPaintSystem.applyAt(hit.point, event);
     } else if (toolState.mode === "grass") {
       grassPaintSystem.applyAt(hit.point, event);
+    } else if (toolState.mode === "revoGrass") {
+      revoGrassMaskPaintSystem.applyAt(hit.point, event);
     } else if (toolState.mode === "cliffGrass") {
       cliffGrassPaintSystem.applyAt(hit.point, event);
     } else if (toolState.mode === "props") {
@@ -3313,6 +3354,8 @@ export async function startV2App(opts = {}) {
       billboardGrassPaintSystem.endStroke();
     } else if (toolState.mode === "grass") {
       grassPaintSystem.endStroke();
+    } else if (toolState.mode === "revoGrass") {
+      revoGrassMaskPaintSystem.endStroke();
     } else if (toolState.mode === "cliffGrass") {
       cliffGrassPaintSystem.endStroke();
     } else if (toolState.mode === "props") {
@@ -3330,6 +3373,7 @@ export async function startV2App(opts = {}) {
     if (toolState.mode === "foliagePaint") return foliagePaintSystem;
     if (toolState.mode === "billboardGrassPaint") return billboardGrassPaintSystem;
     if (toolState.mode === "grass") return grassPaintSystem;
+    if (toolState.mode === "revoGrass") return revoGrassMaskPaintSystem;
     if (toolState.mode === "cliffGrass") return cliffGrassPaintSystem;
     if (toolState.mode === "road") return roadSystem;
     if (toolState.mode === "fullRoad") return fullRoadSystem;
@@ -3567,6 +3611,10 @@ export async function startV2App(opts = {}) {
       event.preventDefault();
       toolState.mode = toolState.mode === "billboardGrassPaint" ? "view" : "billboardGrassPaint";
       applyModeChangedEffects();
+    } else if (event.code === "KeyY" && !ctrl && !playMode.active) {
+      event.preventDefault();
+      toolState.mode = toolState.mode === "revoGrass" ? "view" : "revoGrass";
+      applyModeChangedEffects();
     } else if (event.code === "KeyB" && !ctrl && !playMode.active) {
       event.preventDefault();
       toolState.mode = toolState.mode === "barrier" ? "view" : "barrier";
@@ -3621,6 +3669,7 @@ export async function startV2App(opts = {}) {
       _lastLightSnap = lightSnap;
       updateSunSky();
       if (grassManager.uniforms) grassManager.uniforms.uSunDir.value.copy(sunDir);
+      revoGrassSystem.syncFromState(toolState.revoGrass, sunDir);
       foliageLodRenderer.updateSunDirection(sunDir);
       billboardRenderer.updateSunDirection(sunDir);
       billboardGrassRenderer.updateSunDirection(sunDir);
@@ -3691,6 +3740,12 @@ export async function startV2App(opts = {}) {
       grassManager.uniforms.uPlayerPos.value.copy(focusPos);
     }
     grassManager.update(toolState.grass, playMode.active ? playMode.playerPos : null);
+    const afxWind = toolState.ambientFx;
+    revoGrassSystem.setPlayWind({
+      intensityMul: afxWind.windStrength ?? 1,
+      angleDeg: (Math.atan2(afxWind.windZ ?? 0, afxWind.windX ?? 1) * 180) / Math.PI,
+    });
+    revoGrassSystem.update(toolState.revoGrass, focusPos, camera, { playMode: playMode.active });
 
     fleurSystem.update(playMode.active ? playMode.playerPos : focusPos, _appTimeSec);
 
@@ -3710,7 +3765,7 @@ export async function startV2App(opts = {}) {
         waterMaterials.setReflectionParams(toolState.water.reflectionScale, toolState.water.reflectionEveryN);
         waterMaterials.renderLakeReflection(
           camera, renderer, scene, waterStore.bodies, waterStore.lakeBodies,
-          [grassManager.group],
+          [grassManager.group, revoGrassSystem.group],
         );
       } else {
         waterMaterials.lakeShader.uniforms.reflectEnabled.value = 0;
@@ -4062,6 +4117,20 @@ export async function startV2App(opts = {}) {
     grassClear() { _grassClear(); },
     grassSaveDensity() { _grassSaveDensity(); },
     grassLoadDensity() { _grassLoadDensity(); },
+    revoGrassChanged() { _revoGrassChanged?.(); },
+    revoGrassRebuild() { return _revoGrassRebuild?.(); },
+    revoGrassMaskFill() { revoGrassSystem.mask.fillAllow(); },
+    revoGrassMaskClear() { revoGrassSystem.mask.clearAllow(); },
+    revoGrassMaskSave() {
+      const blob = new Blob([revoGrassSystem.mask.getSnapshot()], { type: "application/octet-stream" });
+      downloadBlob(blob, "revo-grass-mask.bin");
+    },
+    async revoGrassMaskLoad() {
+      const file = await openFilePicker(".bin");
+      if (!file) return;
+      const buf = await file.arrayBuffer();
+      revoGrassSystem.mask.restoreSnapshot(new Uint8Array(buf));
+    },
     terrainSurfaceChanged() { _terrainSurfaceChanged(); },
     tslTerrainSync() { _tslTerrainSync(); },
     autoCliffEditorChanged(kind) { _autoCliffEditorChanged(kind); },

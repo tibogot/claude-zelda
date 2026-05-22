@@ -482,6 +482,8 @@ function extractSerializableSettings(toolState) {
     }),
     treeSlots: toolState.treeSlots.map((s) => ({ ...s, foliage: { ...s.foliage } })),
     grass: { ...toolState.grass },
+    revoGrass: { ...toolState.revoGrass },
+    revoGrassMask: toolState._revoGrassMaskExportData?.() ?? null,
     cliffs: { ...toolState.cliffs },
     cliffInstances: toolState._cliffExportData?.() ?? null,
     props: { ...toolState.props },
@@ -619,6 +621,7 @@ export function applySettings(toolState, settings) {
     }
   }
   if (settings.grass) Object.assign(toolState.grass, settings.grass);
+  if (settings.revoGrass) Object.assign(toolState.revoGrass, settings.revoGrass);
   if (settings.cliffs) Object.assign(toolState.cliffs, settings.cliffs);
   if (settings.props) Object.assign(toolState.props, settings.props);
   if (settings.propMaterialOverrides) toolState.propMaterialOverrides = settings.propMaterialOverrides;

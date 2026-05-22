@@ -7,6 +7,7 @@ import { addTreeFolder } from "./treeTweakpane.js";
 import { addFoliageFolder } from "./foliageTweakpane.js";
 import { addBillboardGrassFolder } from "./billboardGrassTweakpane.js";
 import { addGrassFolder } from "./grassTweakpane.js";
+import { addRevoGrassFolder } from "./revoGrassTweakpane.js";
 import { addCliffFolder } from "./cliffTweakpane.js";
 import { addPropFolder } from "./propTweakpane.js";
 import { addRoadFolder } from "./roadTweakpane.js";
@@ -77,6 +78,8 @@ export function createTweakpaneUi({
   onGrassClear,
   onGrassSaveDensity,
   onGrassLoadDensity,
+  onRevoGrassChanged,
+  onRevoGrassRebuild,
   onCliffGrassFill,
   onCliffGrassClear,
   onImportCliffGlb,
@@ -410,6 +413,11 @@ export function createTweakpaneUi({
     onGrassClear,
     onGrassSaveDensity,
     onGrassLoadDensity,
+  });
+
+  addRevoGrassFolder(pane, toolState, {
+    onRevoGrassChanged,
+    onRevoGrassRebuild,
   });
 
   const cliffGrassFolder = pane.addFolder({ title: "Cliff Grass", expanded: false });

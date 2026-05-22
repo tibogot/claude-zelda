@@ -667,6 +667,7 @@
       <button class="toolbar-btn" data-mode="water" title="Water (W)"><i data-lucide="waves"></i></button>
       <button class="toolbar-btn" data-mode="road" title="Roads"><i data-lucide="route"></i></button>
       <button class="toolbar-btn" data-mode="grass" title="Grass (G)"><i data-lucide="sprout"></i></button>
+      <button class="toolbar-btn" data-mode="revoGrass" title="Revo Grass (Y)"><i data-lucide="wind"></i></button>
       <button class="toolbar-btn" data-mode="cliffs" title="Cliffs (O)"><i data-lucide="triangle"></i></button>
       <button class="toolbar-btn" data-mode="river" title="River (V)"><i data-lucide="droplets"></i></button>
     </div>
@@ -746,6 +747,7 @@
           <option value="foliagePaint">Foliage Paint (L)</option>
           <option value="billboardGrassPaint">Billboard Grass (U)</option>
           <option value="grass">Grass (G)</option>
+          <option value="revoGrass">Revo Grass (Y)</option>
           <option value="cliffGrass">Cliff Grass</option>
           <option value="road">Road</option>
           <option value="fullRoad">Full Road</option>
@@ -1209,6 +1211,7 @@ const MODE_FOLDERS = {
   foliagePaint: ['Brush', 'Billboard Foliage'],
   billboardGrassPaint: ['Brush', 'Billboard Grass'],
   grass: ['Brush', 'Grass'],
+  revoGrass: [],
   cliffGrass: ['Brush', 'Cliff Grass'],
   road: ['Road'],
   fullRoad: ['Full Road'],
@@ -1235,7 +1238,7 @@ const ALWAYS_HIDDEN = new Set([
 ]);
 const ALWAYS_VISIBLE = new Set();
 
-const CUSTOM_MODES = new Set(['sculpt', 'paint', 'treePaint', 'props', 'foliagePaint', 'billboardGrassPaint', 'playSpawn', 'hole', 'barrier', 'ambientfx', 'fleurs', 'cliffGrass', 'cliffs', 'water', 'waterfall', 'decals', 'river', 'spline', 'grass', 'smartRoad']);
+const CUSTOM_MODES = new Set(['sculpt', 'paint', 'treePaint', 'props', 'foliagePaint', 'billboardGrassPaint', 'playSpawn', 'hole', 'barrier', 'ambientfx', 'fleurs', 'cliffGrass', 'cliffs', 'water', 'waterfall', 'decals', 'river', 'spline', 'grass', 'revoGrass', 'smartRoad']);
 
 function syncToolsTab(pane, mode) {
   if (!pane) return;
@@ -1280,6 +1283,8 @@ function syncToolsTab(pane, mode) {
   if (splinePanel) splinePanel.style.display = mode === 'spline' ? '' : 'none';
   const grassPanel = document.getElementById('grass-panel');
   if (grassPanel) grassPanel.style.display = mode === 'grass' ? '' : 'none';
+  const revoGrassPanel = document.getElementById('revo-grass-panel');
+  if (revoGrassPanel) revoGrassPanel.style.display = mode === 'revoGrass' ? '' : 'none';
   const smartRoadPanel = document.getElementById('smartroad-panel');
   if (smartRoadPanel) smartRoadPanel.style.display = mode === 'smartRoad' ? '' : 'none';
 
@@ -3427,6 +3432,97 @@ function buildSplinePanel(app) {
   return panel;
 }
 
+// === Revo fluffy grass (Y toggle) — not Gemini G / billboard U ===
+function buildRevoGrassPanel(app) {
+  const panel = document.createElement('div');
+  panel.id = 'revo-grass-panel';
+  const rp = app.toolState.revoGrass;
+  const rCh = () => app.revoGrassChanged();
+  const rRb = () => { app.revoGrassRebuild(); };
+
+  const mainBody = _section(panel, 'Revo Grass');
+  _toggle(mainBody, rp, 'enabled', { label: 'Enabled', onChange: rCh });
+
+  const tileBody = _section(panel, 'Tile', false);
+  _slider(tileBody, rp, 'tileSize', { label: 'Size (m)', min: 40, max: 160, step: 5, onChange: rRb });
+  _slider(tileBody, rp, 'bladesPerSide', { label: 'Grid side', min: 64, max: 1088, step: 16, onChange: rRb });
+  _slider(tileBody, rp, 'segments', { label: 'Segments', min: 2, max: 6, step: 1, onChange: rRb });
+
+  const bladeBody = _section(panel, 'Blade', false);
+  _slider(bladeBody, rp, 'bladeHeight', { label: 'Height', min: 0.4, max: 2.5, step: 0.05, onChange: rRb });
+  _slider(bladeBody, rp, 'bladeWidth', { label: 'Width', min: 0.03, max: 0.12, step: 0.005, onChange: rRb });
+  _slider(bladeBody, rp, 'bladeMinScale', { label: 'Min scale', min: 0.2, max: 2, step: 0.05, onChange: rCh });
+  _slider(bladeBody, rp, 'bladeMaxScale', { label: 'Max scale', min: 0.5, max: 3, step: 0.05, onChange: rCh });
+  _slider(bladeBody, rp, 'baseBending', { label: 'Base bend', min: 0, max: 4, step: 0.1, onChange: rCh });
+
+  const colorBody = _section(panel, 'Color', false);
+  _color(colorBody, rp, 'baseColor', { label: 'Base', onChange: rCh });
+  _color(colorBody, rp, 'tipColor', { label: 'Tip', onChange: rCh });
+  _slider(colorBody, rp, 'colorMixFactor', { label: 'Tip mix', min: 0, max: 1, step: 0.01, onChange: rCh });
+  _slider(colorBody, rp, 'colorVariationStrength', { label: 'Variation', min: 0, max: 3, step: 0.05, onChange: rCh });
+  _slider(colorBody, rp, 'windColorStrength', { label: 'Wind tint', min: 0, max: 1, step: 0.01, onChange: rCh });
+  _slider(colorBody, rp, 'colorBrightness', { label: 'Brightness', min: 0.5, max: 2, step: 0.05, onChange: rCh });
+
+  const aoBody = _section(panel, 'AO', false);
+  _slider(aoBody, rp, 'aoScale', { label: 'AO scale', min: 0, max: 5, step: 0.05, onChange: rCh });
+  _slider(aoBody, rp, 'aoRimSmoothness', { label: 'Rim smooth', min: 0, max: 5, step: 0.1, onChange: rCh });
+  _slider(aoBody, rp, 'aoRadius', { label: 'AO radius', min: 0, max: 100, step: 1, onChange: rCh });
+
+  const windBody = _section(panel, 'Wind', false);
+  _slider(windBody, rp, 'windStrength', { label: 'Strength', min: 0, max: 1.5, step: 0.01, onChange: rCh });
+  _slider(windBody, rp, 'windSpeed', { label: 'Speed', min: 0, max: 1, step: 0.01, onChange: rCh });
+  _slider(windBody, rp, 'windIntensity', { label: 'Intensity', min: 0, max: 2, step: 0.05, onChange: rCh });
+  _slider(windBody, rp, 'uvWindScale', { label: 'UV scale', min: 0, max: 10, step: 0.1, onChange: rCh });
+  _slider(windBody, rp, 'windAngle', { label: 'Direction (°)', min: 0, max: 360, step: 1, onChange: rCh });
+  _slider(windBody, rp, 'baseWindShade', { label: 'Wind shade', min: 0, max: 2, step: 0.05, onChange: rCh });
+  _slider(windBody, rp, 'baseShadeHeight', { label: 'Shade height', min: 0, max: 10, step: 0.1, onChange: rCh });
+
+  const shadowBody = _section(panel, 'Shadow', false);
+  _slider(shadowBody, rp, 'bakedShadowWeight', { label: 'Baked weight', min: 0, max: 1, step: 0.05, onChange: rCh });
+  _toggle(shadowBody, rp, 'playerShadowEnabled', { label: 'Player shadow', onChange: rCh });
+
+  const cullBody = _section(panel, 'Frustum cull', false);
+  _toggle(cullBody, rp, 'frustumCullEnabled', { label: 'Enabled', onChange: rCh });
+  _slider(cullBody, rp, 'cullPadNdcX', { label: 'Pad X', min: 0, max: 0.5, step: 0.005, onChange: rCh });
+  _slider(cullBody, rp, 'cullPadNdcYNear', { label: 'Pad Y near', min: 0, max: 1, step: 0.01, onChange: rCh });
+  _slider(cullBody, rp, 'cullPadNdcYFar', { label: 'Pad Y far', min: 0, max: 1, step: 0.01, onChange: rCh });
+
+  const brushBody = _section(panel, 'Mask brush', false);
+  _slider(brushBody, app.toolState.brush, 'radius', { label: 'Radius', min: app.config.sculpt.brushMin, max: app.config.sculpt.brushMax, step: 0.5 });
+  _slider(brushBody, app.toolState.brush, 'strength', { label: 'Strength', min: app.config.sculpt.strengthMin, max: app.config.sculpt.strengthMax, step: 0.05 });
+  _info(brushBody, 'Paint', 'Click terrain — Alt = erase');
+  _toggle(brushBody, app.toolState.revoGrassPaint, 'erase', { label: 'Erase mode' });
+
+  const exclBody = _section(panel, 'Exclusion mask', false);
+  _dropdown(exclBody, rp, 'exclusionSource', {
+    label: 'Source',
+    options: { 'Revo mask (G)': 'mask', 'Gemini density (G)': 'gemini' },
+    onChange: rRb,
+  });
+  _toggle(exclBody, rp, 'exclusionEnabled', { label: 'Apply mask', onChange: rCh });
+  _slider(exclBody, rp, 'exclusionThreshold', { label: 'Threshold', min: 0, max: 1, step: 0.01, onChange: rCh });
+  _button(exclBody, { title: 'Allow everywhere', onClick: () => app.revoGrassMaskFill() });
+  _button(exclBody, { title: 'Block everywhere', onClick: () => app.revoGrassMaskClear() });
+  _button(exclBody, { title: 'Save mask .bin', onClick: () => app.revoGrassMaskSave() });
+  _button(exclBody, { title: 'Load mask .bin', onClick: () => app.revoGrassMaskLoad() });
+
+  const perfBody = _section(panel, 'Perf / wind', false);
+  _slider(perfBody, rp, 'computeMinIntervalMs', { label: 'Compute interval (ms)', min: 0, max: 50, step: 1, onChange: rCh });
+  _toggle(perfBody, rp, 'useGlobalWindInPlay', { label: 'Global wind in play', onChange: rCh });
+
+  const trailBody = _section(panel, 'Trail crush', false);
+  _slider(trailBody, rp, 'trailRadius', { label: 'Radius', min: 0.3, max: 2.5, step: 0.05, onChange: rCh });
+  _slider(trailBody, rp, 'trailCrushSpeed', { label: 'Crush speed', min: 0.05, max: 2, step: 0.05, onChange: rCh });
+  _slider(trailBody, rp, 'trailGrowthRate', { label: 'Regrow', min: 0.01, max: 0.15, step: 0.005, onChange: rCh });
+
+  const distBody = _section(panel, 'Distance fade', false);
+  _slider(distBody, rp, 'stochasticR0', { label: 'Full density', min: 4, max: 40, step: 1, onChange: rCh });
+  _slider(distBody, rp, 'stochasticR1', { label: 'Fade end', min: 20, max: 120, step: 2, onChange: rCh });
+  _slider(distBody, rp, 'stochasticPMin', { label: 'Far keep', min: 0, max: 1, step: 0.01, onChange: rCh });
+
+  return panel;
+}
+
 // === Build custom Grass panel (parity with v2/ui/grassTweakpane.js + Brush) ===
 function buildGrassPanel(app) {
   const panel = document.createElement('div');
@@ -4548,6 +4644,7 @@ async function bootEditor(opts = {}) {
     toolsTab.appendChild(buildRiverPanel(app));
     toolsTab.appendChild(buildSplinePanel(app));
     toolsTab.appendChild(buildGrassPanel(app));
+    toolsTab.appendChild(buildRevoGrassPanel(app));
     toolsTab.appendChild(buildSmartRoadPanel(app));
 
     // Move Tweakpane pane into the Tools tab & apply mode-aware folder visibility
