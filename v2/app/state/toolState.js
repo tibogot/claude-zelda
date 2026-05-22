@@ -274,6 +274,9 @@ export function createToolState() {
       eraseAllSlots: false,
     },
     billboardGrassLod: {
+      /** Paint spacing grid (render uses terrain chunks, not this size). */
+      patchSize: 16,
+      lodHysteresis: 2,
       lod0Distance: 50,
       lod1Distance: 120,
       fadeOutDistance: 280,

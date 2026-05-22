@@ -1,7 +1,6 @@
 /**
- * BillboardGrassRenderer — instanced procedural billboard ground cover (separate from foliage paint).
- *
- * Perf: one InstancedMesh per chunk×slot (active LOD only), aerial distance scale, throttled LOD passes.
+ * BillboardGrassRenderer — stream visible terrain chunks (few draws), mesh pools.
+ * Patch index in the store is for paint/spacing only — not per-frame grid iteration.
  */
 import * as THREE from "three";
 import { texture, uv } from "three/tsl";
@@ -43,14 +42,24 @@ function planeCountForLodTier(fullCount, tier) {
   return 1;
 }
 
+/** Closest XZ distance from a point to an axis-aligned square chunk. */
+function distXZToChunk(camX, camZ, minX, minZ, chunkSize) {
+  const maxX = minX + chunkSize;
+  const maxZ = minZ + chunkSize;
+  const nx = THREE.MathUtils.clamp(camX, minX, maxX);
+  const nz = THREE.MathUtils.clamp(camZ, minZ, maxZ);
+  return Math.hypot(camX - nx, camZ - nz);
+}
+
 /** @returns {'lod0'|'lod1'|'lod2'|null} */
-function pickLodTier(dist, lodCfg, showChunk) {
-  const lod0D = lodCfg.lod0Distance ?? 60;
-  const lod1D = lodCfg.lod1Distance ?? 150;
-  const fadeD = lodCfg.fadeOutDistance ?? 400;
-  if (!showChunk || dist > fadeD) return null;
-  if (dist > lod1D) return "lod2";
-  if (dist > lod0D) return "lod1";
+function pickLodTier(dist, lodCfg, hysteresis = 2) {
+  const lod0D = lodCfg.lod0Distance ?? 50;
+  const lod1D = lodCfg.lod1Distance ?? 120;
+  const fadeD = lodCfg.fadeOutDistance ?? 280;
+  const h = hysteresis;
+  if (dist > fadeD + h) return null;
+  if (dist > lod1D + h) return "lod2";
+  if (dist > lod0D + h) return "lod1";
   return "lod0";
 }
 
@@ -58,9 +67,14 @@ export class BillboardGrassRenderer {
   constructor(scene, config) {
     this.scene = scene;
     this.config = config;
+    this.group = new THREE.Group();
+    this.group.name = "BillboardGrass";
+    scene.add(this.group);
+
     this.slotRender = [];
-    this._chunkMeshes = new Map();
     this._windTex = createWindTexture();
+    this._sunDir = new THREE.Vector3(0.5, 0.8, 0.3).normalize();
+
     this._frustum = new THREE.Frustum();
     this._projScreen = new THREE.Matrix4();
     this._box = new THREE.Box3();
@@ -69,10 +83,8 @@ export class BillboardGrassRenderer {
     this._quat = new THREE.Quaternion();
     this._scl = new THREE.Vector3();
     this._yAxis = new THREE.Vector3(0, 1, 0);
-    this._sunDir = new THREE.Vector3(0.5, 0.8, 0.3).normalize();
-    this._lastCamX = NaN;
-    this._lastCamZ = NaN;
-    this._lodTick = 0;
+
+    this._chunkKeysBuf = [];
   }
 
   _buildGeometry(slot) {
@@ -104,39 +116,18 @@ export class BillboardGrassRenderer {
     for (const k of LOD_KEYS) geometries[k]?.dispose();
   }
 
-  _removeSlotMesh(sm) {
-    if (!sm?.mesh) return;
-    this.scene.remove(sm.mesh);
-    sm.mesh.geometry = null;
-    sm.mesh.material = null;
-    sm.mesh = null;
-    sm.activeLod = null;
+  _makeSlotPools() {
+    const pools = {};
+    for (const k of LOD_KEYS) pools[k] = { meshes: [], idx: 0 };
+    return pools;
   }
 
-  _disposeSlotMeshes(slotMeshes) {
-    if (!slotMeshes) return;
-    this._removeSlotMesh(slotMeshes);
-  }
-
-  _disposeChunkEntry(key) {
-    const entry = this._chunkMeshes.get(key);
-    if (!entry) return;
-    for (const sm of entry.slots.values()) this._disposeSlotMeshes(sm);
-    this._chunkMeshes.delete(key);
-  }
-
-  _disposeChunkMeshesForSlot(slotIdx) {
-    for (const [, entry] of this._chunkMeshes) {
-      const sm = entry.slots.get(slotIdx);
-      if (sm) {
-        this._disposeSlotMeshes(sm);
-        entry.slots.delete(slotIdx);
-      }
+  _trimPool(pool, maxKeep) {
+    while (pool.meshes.length > maxKeep) {
+      const m = pool.meshes.pop();
+      this.group.remove(m);
+      m.dispose();
     }
-  }
-
-  _invalidateAllChunks() {
-    for (const [, entry] of this._chunkMeshes) entry.gen = -1;
   }
 
   _uploadInstances(im, list) {
@@ -151,7 +142,29 @@ export class BillboardGrassRenderer {
     }
     im.count = n;
     im.instanceMatrix.needsUpdate = true;
-    im.frustumCulled = true;
+  }
+
+  _getPooledMesh(pool, geometry, material, instanceCount) {
+    const need = Math.max(instanceCount, 1);
+    while (pool.idx < pool.meshes.length) {
+      const m = pool.meshes[pool.idx++];
+      if (m.instanceMatrix.count >= need) {
+        m.geometry = geometry;
+        m.material = material;
+        m.visible = true;
+        return m;
+      }
+    }
+    const cap = Math.max(need, 64);
+    const im = new THREE.InstancedMesh(geometry, material, cap);
+    im.castShadow = false;
+    im.receiveShadow = false;
+    im.frustumCulled = false;
+    this.group.add(im);
+    pool.meshes.push(im);
+    pool.idx++;
+    this._trimPool(pool, 192);
+    return im;
   }
 
   _materialForLod(sr, lodKey) {
@@ -172,25 +185,32 @@ export class BillboardGrassRenderer {
     });
     this._applyMaskChannel(full.uniforms, prevTex);
     this._applyMaskChannel(lod.uniforms, prevTex);
-    return { material: full.material, materialLod: lod.material, uniforms: full.uniforms, uniformsLod: lod.uniforms };
+    return {
+      material: full.material,
+      materialLod: lod.material,
+      uniforms: full.uniforms,
+      uniformsLod: lod.uniforms,
+    };
   }
 
   rebuildSlot(slotIdx, slot) {
     const prevTex = this.slotRender[slotIdx]?.textureObj ?? null;
-    this._disposeChunkMeshesForSlot(slotIdx);
     const prev = this.slotRender[slotIdx];
     if (prev) {
       this._disposeLodGeometries(prev.geometries);
       prev.material.dispose();
       prev.materialLod.dispose();
+      for (const k of LOD_KEYS) {
+        for (const m of prev._pools[k].meshes) {
+          this.group.remove(m);
+          m.dispose();
+        }
+      }
     }
     while (this.slotRender.length <= slotIdx) this.slotRender.push(null);
     this.slotRender[slotIdx] = null;
 
-    if (!slot?.enabled) {
-      this._invalidateAllChunks();
-      return;
-    }
+    if (!slot?.enabled) return;
 
     const geometries = this._buildLodGeometries(slot);
     const mats = this._createSlotMaterials(slot, prevTex);
@@ -202,8 +222,8 @@ export class BillboardGrassRenderer {
       uniforms: mats.uniforms,
       uniformsLod: mats.uniformsLod,
       textureObj: prevTex,
+      _pools: this._makeSlotPools(),
     };
-    this._invalidateAllChunks();
   }
 
   setSlotTexture(slotIdx, tex, slotConfig = null) {
@@ -217,20 +237,13 @@ export class BillboardGrassRenderer {
       tex.needsUpdate = true;
     }
     sr.textureObj = tex;
-    const slot = slotConfig || {};
-    const mats = this._createSlotMaterials(slot, tex);
+    const mats = this._createSlotMaterials(slotConfig || {}, tex);
     sr.material.dispose();
     sr.materialLod.dispose();
     sr.material = mats.material;
     sr.materialLod = mats.materialLod;
     sr.uniforms = mats.uniforms;
     sr.uniformsLod = mats.uniformsLod;
-
-    for (const [, entry] of this._chunkMeshes) {
-      const sm = entry.slots.get(slotIdx);
-      if (!sm?.mesh || !sm.activeLod) continue;
-      sm.mesh.material = this._materialForLod(sr, sm.activeLod);
-    }
   }
 
   updateSlotUniforms(slotIdx, slot) {
@@ -252,7 +265,7 @@ export class BillboardGrassRenderer {
     }
   }
 
-  _groupItemsBySlot(items) {
+  _groupBySlot(items) {
     const bySlot = new Map();
     for (const f of items) {
       const si = f.slotIdx;
@@ -262,53 +275,13 @@ export class BillboardGrassRenderer {
     return bySlot;
   }
 
-  _ensureSlotMesh(entry, slotIdx, list, lodKey, sr) {
-    let sm = entry.slots.get(slotIdx);
-    if (!sm) {
-      sm = { activeLod: null, mesh: null };
-      entry.slots.set(slotIdx, sm);
-    }
-    if (sm.activeLod === lodKey && sm.mesh) return;
-
-    this._removeSlotMesh(sm);
-    const geom = sr.geometries[lodKey];
-    const mat = this._materialForLod(sr, lodKey);
-    const im = new THREE.InstancedMesh(geom, mat, list.length);
-    im.castShadow = false;
-    im.receiveShadow = false;
-    this._uploadInstances(im, list);
-    this.scene.add(im);
-    sm.mesh = im;
-    sm.activeLod = lodKey;
-  }
-
-  _rebuildChunkEntry(key, items, grassSlots) {
-    const entry = { gen: -1, slots: new Map() };
-    this._chunkMeshes.set(key, entry);
-    const bySlot = this._groupItemsBySlot(items);
-
-    for (const [slotIdx, list] of bySlot) {
-      const sr = this.slotRender[slotIdx];
-      const slotCfg = grassSlots[slotIdx];
-      if (!sr || !slotCfg?.enabled) continue;
-      entry.slots.set(slotIdx, { activeLod: null, mesh: null, items: list });
-    }
-  }
-
   _effectiveFadeDistance(lodCfg, camY, perfOpts) {
-    const fadeD = lodCfg.fadeOutDistance ?? 400;
+    const fadeD = lodCfg.fadeOutDistance ?? 280;
     const aerial = lodCfg.aerialFadeStrength ?? 1;
     const boost = perfOpts?.aerialStrict ? 1.35 : 1;
     const alt = Math.max(0, camY - 25);
-    return fadeD / (1 + alt * 0.012 * aerial * boost);
-  }
-
-  _scaleLodDistances(lodCfg, fadeMul) {
-    return {
-      lod0Distance: (lodCfg.lod0Distance ?? 60) * fadeMul,
-      lod1Distance: (lodCfg.lod1Distance ?? 150) * fadeMul,
-      fadeOutDistance: (lodCfg.fadeOutDistance ?? 400) * fadeMul,
-    };
+    const scaled = fadeD / (1 + alt * 0.012 * aerial * boost);
+    return Math.max(scaled, fadeD * 0.45);
   }
 
   /**
@@ -316,91 +289,60 @@ export class BillboardGrassRenderer {
    * @param {{ aerialStrict?: boolean }} [perfOpts]
    */
   update(grassStore, camera, lodCfg, grassSlots, perfOpts = {}) {
-    const chunkSize = this.config.world.chunkSize;
     const camX = camera.position.x;
     const camZ = camera.position.z;
     const camY = camera.position.y;
+    const chunkSize = this.config.world.chunkSize;
 
     const fadeD = this._effectiveFadeDistance(lodCfg, camY, perfOpts);
-    const fadeSq = fadeD * fadeD;
-    const fadeMul = fadeD / (lodCfg.fadeOutDistance ?? 400);
-    const scaledLod = this._scaleLodDistances(lodCfg, fadeMul);
+    const fadeMul = fadeD / (lodCfg.fadeOutDistance ?? 280);
+    const scaledLod = {
+      lod0Distance: (lodCfg.lod0Distance ?? 50) * fadeMul,
+      lod1Distance: (lodCfg.lod1Distance ?? 120) * fadeMul,
+      fadeOutDistance: fadeD,
+    };
+    const hysteresis = lodCfg.lodHysteresis ?? 2;
+    const searchRadius = fadeD + chunkSize * Math.SQRT2;
 
-    const camMoved =
-      (camX - this._lastCamX) ** 2 + (camZ - this._lastCamZ) ** 2 > 16 ||
-      Number.isNaN(this._lastCamX);
-    this._lodTick++;
-    const runLodPass = camMoved || (this._lodTick & 3) === 0;
-
-    if (runLodPass) {
-      this._projScreen.multiplyMatrices(camera.projectionMatrix, camera.matrixWorldInverse);
-      this._frustum.setFromProjectionMatrix(this._projScreen);
-      this._lastCamX = camX;
-      this._lastCamZ = camZ;
+    for (const sr of this.slotRender) {
+      if (!sr?._pools) continue;
+      for (const k of LOD_KEYS) sr._pools[k].idx = 0;
     }
+    for (const child of this.group.children) child.visible = false;
 
-    const activeKeys = new Set();
+    this._projScreen.multiplyMatrices(camera.projectionMatrix, camera.matrixWorldInverse);
+    this._frustum.setFromProjectionMatrix(this._projScreen);
 
-    for (const [key, items] of grassStore.chunks) {
+    const keys = grassStore.getChunkKeysInRadius(camX, camZ, searchRadius);
+
+    for (let ki = 0; ki < keys.length; ki++) {
+      const key = keys[ki];
+      const items = grassStore.chunks.get(key);
       if (!items?.length) continue;
-      activeKeys.add(key);
 
       const { cx, cz } = parseChunkKey(key);
       const minX = chunkMinWorldX(cx, this.config);
       const minZ = chunkMinWorldZ(cz, this.config);
-      const chunkCX = minX + chunkSize * 0.5;
-      const chunkCZ = minZ + chunkSize * 0.5;
-      const dcx = chunkCX - camX;
-      const dcz = chunkCZ - camZ;
-      const chunkDistSq = dcx * dcx + dcz * dcz;
+      const chunkDist = distXZToChunk(camX, camZ, minX, minZ, chunkSize);
+      if (chunkDist > fadeD) continue;
 
-      if (chunkDistSq > fadeSq) {
-        const entry = this._chunkMeshes.get(key);
-        if (entry) {
-          for (const sm of entry.slots.values()) this._removeSlotMesh(sm);
-        }
-        continue;
-      }
+      this._box.min.set(minX, -60, minZ);
+      this._box.max.set(minX + chunkSize, 180, minZ + chunkSize);
+      if (!this._frustum.intersectsBox(this._box)) continue;
 
-      const chunkDist = Math.sqrt(chunkDistSq);
-      const gen = grassStore.getGen(key);
-      let entry = this._chunkMeshes.get(key);
-      if (!entry || entry.gen !== gen) {
-        if (entry) {
-          for (const sm of entry.slots.values()) this._disposeSlotMeshes(sm);
-        }
-        this._rebuildChunkEntry(key, items, grassSlots);
-        entry = this._chunkMeshes.get(key);
-        if (entry) entry.gen = gen;
-      }
-      if (!entry) continue;
+      const lodKey = pickLodTier(chunkDist, scaledLod, hysteresis);
+      if (!lodKey) continue;
 
-      if (!runLodPass) continue;
-
-      this._box.min.set(minX, -5, minZ);
-      this._box.max.set(minX + chunkSize, 12, minZ + chunkSize);
-      const showChunk = this._frustum.intersectsBox(this._box);
-      const lodKey = pickLodTier(chunkDist, scaledLod, showChunk);
-
-      for (const [slotIdx, sm] of entry.slots) {
-        const list = sm.items ?? items.filter((f) => f.slotIdx === slotIdx);
+      const bySlot = this._groupBySlot(items);
+      for (const [slotIdx, list] of bySlot) {
         const sr = this.slotRender[slotIdx];
         const slotCfg = grassSlots[slotIdx];
-        if (!sr || !slotCfg?.enabled || !list.length) {
-          this._removeSlotMesh(sm);
-          continue;
-        }
-        if (!lodKey) {
-          this._removeSlotMesh(sm);
-          continue;
-        }
-        this._ensureSlotMesh(entry, slotIdx, list, lodKey, sr);
-      }
-    }
+        if (!sr || !slotCfg?.enabled || !list.length) continue;
 
-    if (this._chunkMeshes.size > activeKeys.size + 16) {
-      for (const key of [...this._chunkMeshes.keys()]) {
-        if (!activeKeys.has(key)) this._disposeChunkEntry(key);
+        const geom = sr.geometries[lodKey];
+        const mat = this._materialForLod(sr, lodKey);
+        const im = this._getPooledMesh(sr._pools[lodKey], geom, mat, list.length);
+        this._uploadInstances(im, list);
       }
     }
   }
@@ -423,7 +365,10 @@ export class BillboardGrassRenderer {
   }
 
   dispose() {
-    for (const key of [...this._chunkMeshes.keys()]) this._disposeChunkEntry(key);
+    for (const child of [...this.group.children]) {
+      this.group.remove(child);
+      child.dispose?.();
+    }
     for (let i = 0; i < this.slotRender.length; i++) {
       const sr = this.slotRender[i];
       if (sr) {
@@ -432,6 +377,7 @@ export class BillboardGrassRenderer {
         sr.materialLod.dispose();
       }
     }
+    this.scene.remove(this.group);
     this._windTex?.dispose();
   }
 }

@@ -123,6 +123,7 @@ export class BillboardGrassPaintSystem {
     this.redoStack.length = 0;
     if (this.undoStack.length > 64) this.undoStack.shift();
     this.beforeMap.clear();
+    this.grassStore.rebuildOccupancy();
   }
 
   massPlace(count) {
@@ -175,6 +176,7 @@ export class BillboardGrassPaintSystem {
     this.redoStack.length = 0;
     if (this.undoStack.length > 64) this.undoStack.shift();
 
+    this.grassStore.rebuildOccupancy();
     console.log(`[BillboardGrass] Mass-placed ${placed} (requested ${count})`);
     return placed;
   }
