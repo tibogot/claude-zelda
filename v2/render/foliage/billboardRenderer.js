@@ -1,11 +1,12 @@
 /**
- * BillboardRenderer — instanced rendering for billboard foliage (cross/Y cards).
+ * BillboardRenderer — per-chunk instanced billboard foliage (cross/Y cards).
  *
- * Each slot has its own InstancedMesh with merged plane geometry.
- * Uses TSL for wind animation, SSS, and ground occlusion.
+ * Each terrain chunk gets its own InstancedMesh per active slot (shared geometry +
+ * material per slot). Matrices upload only when FoliageStore bumps chunk generation.
  */
 import * as THREE from "three";
 import * as BufferGeometryUtils from "three/addons/utils/BufferGeometryUtils.js";
+import { parseChunkKey, chunkMinWorldX, chunkMinWorldZ } from "../../core/terrain/chunkMath.js";
 import {
   Fn,
   uv,
@@ -16,18 +17,13 @@ import {
   texture,
   positionLocal,
   color,
-  normalLocal,
   normalWorld,
   normalize,
   dot,
   cameraPosition,
   positionWorld,
   max,
-  mix,
-  abs,
 } from "three/tsl";
-
-const MAX_INSTANCES = 8192;
 
 function stableHash01(i, seed) {
   const x = Math.sin(i * 12.9898 + seed * 78.233) * 43758.5453123;
@@ -54,22 +50,24 @@ export class BillboardRenderer {
     this.scene = scene;
     this.config = config;
     /**
-     * slotRender[slotIdx] = {
-     *   geometry, material, instancedMesh, uniforms, textureObj
-     * } | null
+     * Shared assets per paint slot (geometry + material reused by chunk meshes).
+     * slotRender[slotIdx] = { geometry, material, uniforms, textureObj } | null
      */
     this.slotRender = [];
 
-    this._cache = new Map();
+    /**
+     * chunkMeshes: Map<chunkKey, { gen, slots: Map<slotIdx, InstancedMesh> }>
+     */
+    this._chunkMeshes = new Map();
+
     this._frustum = new THREE.Frustum();
     this._projScreen = new THREE.Matrix4();
+    this._box = new THREE.Box3();
     this._worldMat = new THREE.Matrix4();
     this._pos = new THREE.Vector3();
     this._quat = new THREE.Quaternion();
     this._scl = new THREE.Vector3();
     this._yAxis = new THREE.Vector3(0, 1, 0);
-
-    this._time = 0;
     this._sunDir = new THREE.Vector3(0.5, 0.8, 0.3).normalize();
   }
 
@@ -113,8 +111,7 @@ export class BillboardRenderer {
       const viewDir = normalize(cameraPosition.sub(positionWorld));
       const upBias = vec3(0, 0.85, 0);
       const viewBias = vec3(viewDir.x.mul(0.3), 0, viewDir.z.mul(0.3));
-      const foliageNormal = normalize(upBias.add(viewBias));
-      return foliageNormal;
+      return normalize(upBias.add(viewBias));
     })();
 
     const defaultColor = vec4(0.28, 0.62, 0.22, 1.0);
@@ -154,34 +151,67 @@ export class BillboardRenderer {
     return { material, uniforms: u };
   }
 
+  _removeChunkMesh(im) {
+    if (!im) return;
+    this.scene.remove(im);
+    im.geometry = null;
+    im.material = null;
+  }
+
+  _disposeChunkEntry(key) {
+    const entry = this._chunkMeshes.get(key);
+    if (!entry) return;
+    for (const im of entry.slots.values()) {
+      this._removeChunkMesh(im);
+    }
+    this._chunkMeshes.delete(key);
+  }
+
+  _disposeChunkMeshesForSlot(slotIdx) {
+    for (const [, entry] of this._chunkMeshes) {
+      const im = entry.slots.get(slotIdx);
+      if (im) {
+        this._removeChunkMesh(im);
+        entry.slots.delete(slotIdx);
+      }
+    }
+  }
+
+  _invalidateAllChunks() {
+    for (const [, entry] of this._chunkMeshes) {
+      entry.gen = -1;
+    }
+  }
+
   rebuildSlot(slotIdx, slot) {
     const prevTex = this.slotRender[slotIdx]?.textureObj ?? null;
-    this._disposeSlot(slotIdx);
+    this._disposeChunkMeshesForSlot(slotIdx);
 
-    if (!slot || !slot.enabled) return;
+    const prev = this.slotRender[slotIdx];
+    if (prev) {
+      prev.geometry.dispose();
+      prev.material.dispose();
+    }
+    while (this.slotRender.length <= slotIdx) this.slotRender.push(null);
+    this.slotRender[slotIdx] = null;
+
+    if (!slot || !slot.enabled) {
+      this._invalidateAllChunks();
+      return;
+    }
 
     const geometry = this._buildGeometry(slot);
     const slotForMat =
-      prevTex != null
-        ? { ...slot, _textureNode: texture(prevTex, uv()) }
-        : slot;
+      prevTex != null ? { ...slot, _textureNode: texture(prevTex, uv()) } : slot;
     const { material, uniforms } = this._createMaterial(slotForMat);
 
-    const im = new THREE.InstancedMesh(geometry, material, MAX_INSTANCES);
-    im.count = 0;
-    im.castShadow = false;
-    im.receiveShadow = true;
-    im.frustumCulled = false;
-    this.scene.add(im);
-
-    while (this.slotRender.length <= slotIdx) this.slotRender.push(null);
     this.slotRender[slotIdx] = {
       geometry,
       material,
-      instancedMesh: im,
       uniforms,
       textureObj: prevTex,
     };
+    this._invalidateAllChunks();
   }
 
   setSlotTexture(slotIdx, tex, slotConfig = null) {
@@ -190,9 +220,13 @@ export class BillboardRenderer {
     sr.textureObj = tex;
     const slot = { ...(slotConfig || {}), _textureNode: tex ? texture(tex, uv()) : null };
     const { material, uniforms } = this._createMaterial(slot);
-    sr.instancedMesh.material.dispose();
-    sr.instancedMesh.material = material;
+    sr.material.dispose();
+    sr.material = material;
     sr.uniforms = uniforms;
+    for (const [, entry] of this._chunkMeshes) {
+      const im = entry.slots.get(slotIdx);
+      if (im) im.material = material;
+    }
   }
 
   updateSlotUniforms(slotIdx, slot) {
@@ -208,123 +242,130 @@ export class BillboardRenderer {
   }
 
   _disposeSlot(slotIdx) {
+    this._disposeChunkMeshesForSlot(slotIdx);
     const sr = this.slotRender[slotIdx];
     if (!sr) return;
-    sr.instancedMesh.geometry.dispose();
-    sr.instancedMesh.material.dispose();
-    this.scene.remove(sr.instancedMesh);
+    sr.geometry.dispose();
+    sr.material.dispose();
     this.slotRender[slotIdx] = null;
   }
 
-  _rebuildChunkCache(key, items, gen) {
-    const n = items.length;
-    let entry = this._cache.get(key);
-    if (!entry || entry.mats.length < n * 16) {
-      entry = {
-        gen,
-        count: n,
-        slots: new Uint8Array(Math.max(n, 64)),
-        mats: new Float32Array(Math.max(n, 64) * 16),
-        xs: new Float32Array(Math.max(n, 64)),
-        ys: new Float32Array(Math.max(n, 64)),
-        zs: new Float32Array(Math.max(n, 64)),
-      };
-      this._cache.set(key, entry);
+  /**
+   * Rebuild all InstancedMeshes for one chunk (grouped by slotIdx).
+   * @param {string} key
+   * @param {Array} items
+   * @param {object[]} foliageSlots
+   */
+  _rebuildChunkMeshes(key, items, foliageSlots) {
+    let entry = this._chunkMeshes.get(key);
+    if (entry) {
+      for (const im of entry.slots.values()) {
+        this._removeChunkMesh(im);
+      }
+      entry.slots.clear();
+    } else {
+      entry = { gen: -1, slots: new Map() };
+      this._chunkMeshes.set(key, entry);
     }
-    entry.gen = gen;
-    entry.count = n;
 
-    const me = this._worldMat.elements;
-    for (let i = 0; i < n; i++) {
-      const f = items[i];
-      entry.slots[i] = f.slotIdx;
-      entry.xs[i] = f.x;
-      entry.ys[i] = f.y ?? 0;
-      entry.zs[i] = f.z;
+    const bySlot = new Map();
+    for (const f of items) {
+      const si = f.slotIdx;
+      if (!bySlot.has(si)) bySlot.set(si, []);
+      bySlot.get(si).push(f);
+    }
 
-      this._pos.set(f.x, f.y ?? 0, f.z);
-      this._quat.setFromAxisAngle(this._yAxis, f.rotY);
-      this._scl.setScalar(f.scale);
-      this._worldMat.compose(this._pos, this._quat, this._scl);
+    for (const [slotIdx, list] of bySlot) {
+      const sr = this.slotRender[slotIdx];
+      const slotCfg = foliageSlots[slotIdx];
+      if (!sr || !slotCfg?.enabled) continue;
 
-      const off = i * 16;
-      for (let j = 0; j < 16; j++) entry.mats[off + j] = me[j];
+      const n = list.length;
+      const im = new THREE.InstancedMesh(sr.geometry, sr.material, n);
+      im.count = n;
+      im.castShadow = false;
+      im.receiveShadow = true;
+      im.frustumCulled = true;
+
+      for (let i = 0; i < n; i++) {
+        const f = list[i];
+        this._pos.set(f.x, f.y ?? 0, f.z);
+        this._quat.setFromAxisAngle(this._yAxis, f.rotY);
+        this._scl.setScalar(f.scale);
+        this._worldMat.compose(this._pos, this._quat, this._scl);
+        im.setMatrixAt(i, this._worldMat);
+      }
+      im.instanceMatrix.needsUpdate = true;
+      im.computeBoundingSphere();
+
+      this.scene.add(im);
+      entry.slots.set(slotIdx, im);
     }
   }
 
-  /** @param {{ fadeOutDistance?: number }} lodCfg — billboard cull distance (no LOD tiers). */
-  update(foliageStore, camera, lodCfg) {
-    for (const sr of this.slotRender) {
-      if (sr?.instancedMesh) sr.instancedMesh.count = 0;
-    }
-
+  /**
+   * @param {import("../../core/foliage/foliageStore.js").FoliageStore} foliageStore
+   * @param {THREE.Camera} camera
+   * @param {{ fadeOutDistance?: number }} lodCfg
+   * @param {object[]} foliageSlots
+   */
+  update(foliageStore, camera, lodCfg, foliageSlots) {
     this._projScreen.multiplyMatrices(camera.projectionMatrix, camera.matrixWorldInverse);
     this._frustum.setFromProjectionMatrix(this._projScreen);
 
-    const camX = camera.position.x;
-    const camY = camera.position.y;
-    const camZ = camera.position.z;
-    const fadeD2 = (lodCfg.fadeOutDistance ?? 200) * (lodCfg.fadeOutDistance ?? 200);
+    const fadeD = lodCfg.fadeOutDistance ?? 200;
+    const chunkFarD2 = fadeD * fadeD * 2.25;
     const chunkSize = this.config.world.chunkSize;
-    const half = this.config.world.size * 0.5;
 
-    const counts = [];
-    for (let i = 0; i < this.slotRender.length; i++) counts.push(0);
+    const camX = camera.position.x;
+    const camZ = camera.position.z;
+    const activeKeys = new Set();
 
     for (const [key, items] of foliageStore.chunks) {
-      if (items.length === 0) continue;
+      if (!items || items.length === 0) continue;
+      activeKeys.add(key);
+
+      const { cx, cz } = parseChunkKey(key);
+      const minX = chunkMinWorldX(cx, this.config);
+      const minZ = chunkMinWorldZ(cz, this.config);
+      const chunkCX = minX + chunkSize * 0.5;
+      const chunkCZ = minZ + chunkSize * 0.5;
+
+      const dcx = chunkCX - camX;
+      const dcz = chunkCZ - camZ;
+      const chunkDist2 = dcx * dcx + dcz * dcz;
 
       const gen = foliageStore.getGen(key);
-      let entry = this._cache.get(key);
+      let entry = this._chunkMeshes.get(key);
       if (!entry || entry.gen !== gen) {
-        this._rebuildChunkCache(key, items, gen);
-        entry = this._cache.get(key);
+        this._rebuildChunkMeshes(key, items, foliageSlots);
+        entry = this._chunkMeshes.get(key);
+        if (entry) entry.gen = gen;
       }
 
-      const parts = key.split(",");
-      const cx = parseInt(parts[0]);
-      const cz = parseInt(parts[1]);
-      const chunkCenterX = (cx + 0.5) * chunkSize - half;
-      const chunkCenterZ = (cz + 0.5) * chunkSize - half;
+      if (!entry) continue;
 
-      const dcx = chunkCenterX - camX;
-      const dcz = chunkCenterZ - camZ;
-      const chunkDist2 = dcx * dcx + dcz * dcz;
-      if (chunkDist2 > fadeD2 * 1.5) continue;
+      const inRange = chunkDist2 <= chunkFarD2;
+      this._box.min.set(minX, -100, minZ);
+      this._box.max.set(minX + chunkSize, 600, minZ + chunkSize);
+      const inFrustum = this._frustum.intersectsBox(this._box);
+      const show = inRange && inFrustum;
 
-      for (let i = 0; i < entry.count; i++) {
-        const slotIdx = entry.slots[i];
-        const sr = this.slotRender[slotIdx];
-        if (!sr) continue;
-
-        const dx = entry.xs[i] - camX;
-        const dy = entry.ys[i] - camY;
-        const dz = entry.zs[i] - camZ;
-        const d2 = dx * dx + dy * dy + dz * dz;
-        if (d2 > fadeD2) continue;
-
-        const c = counts[slotIdx];
-        if (c >= MAX_INSTANCES) continue;
-
-        const off = i * 16;
-        this._worldMat.fromArray(entry.mats, off);
-        sr.instancedMesh.setMatrixAt(c, this._worldMat);
-        counts[slotIdx] = c + 1;
+      for (const im of entry.slots.values()) {
+        im.visible = show;
       }
     }
 
-    for (let i = 0; i < this.slotRender.length; i++) {
-      const sr = this.slotRender[i];
-      if (!sr) continue;
-      sr.instancedMesh.count = counts[i];
-      if (counts[i] > 0) {
-        sr.instancedMesh.instanceMatrix.needsUpdate = true;
+    if (this._chunkMeshes.size > activeKeys.size + 16) {
+      for (const key of [...this._chunkMeshes.keys()]) {
+        if (!activeKeys.has(key)) {
+          this._disposeChunkEntry(key);
+        }
       }
     }
   }
 
   updateTime(t) {
-    this._time = t;
     for (const sr of this.slotRender) {
       if (sr?.uniforms?.time) sr.uniforms.time.value = t;
     }
@@ -340,9 +381,11 @@ export class BillboardRenderer {
   }
 
   dispose() {
+    for (const key of [...this._chunkMeshes.keys()]) {
+      this._disposeChunkEntry(key);
+    }
     for (let i = 0; i < this.slotRender.length; i++) {
       this._disposeSlot(i);
     }
-    this._cache.clear();
   }
 }
