@@ -840,6 +840,8 @@ export class PlayMode {
     this._playerGroundY = 0;
 
     this.active = false;
+    /** Set by DialogueRunner — blocks player locomotion while a line is showing. */
+    this.dialogueMovementLock = false;
     this.camView = "follow";
     this.moveMode = "capsule";
     this.playerPos = new THREE.Vector3();
@@ -3997,6 +3999,13 @@ export class PlayMode {
     if (charMode && (this.charAttacking || inSpell)) {
       mx = 0;
       mz = 0;
+    }
+
+    if (this.dialogueMovementLock) {
+      mx = 0;
+      mz = 0;
+      this._moveTarget = null;
+      this.isoTargetRing.visible = false;
     }
 
     const mlen = Math.hypot(mx, mz);

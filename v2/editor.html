@@ -1481,6 +1481,9 @@
           <button class="toolbar-btn" data-mode="river" title="River (V)">
             <i data-lucide="droplets"></i>
           </button>
+          <button class="toolbar-btn" data-mode="actors" title="Actors (N)">
+            <i data-lucide="users"></i>
+          </button>
         </div>
         <div class="toolbar-group" style="margin-left: auto">
           <button
@@ -1601,6 +1604,7 @@
               <option value="props">Props (I)</option>
               <option value="water">Water (W)</option>
               <option value="waterfall">Waterfall (H)</option>
+              <option value="actors">Actors (N)</option>
               <option value="decals">Decals (D)</option>
               <option value="fleurs">Flowers (M)</option>
               <option value="ambientfx">Ambient FX (X)</option>
@@ -2184,6 +2188,7 @@
         props: ["Props"],
         water: ["Water bodies · W"],
         waterfall: ["Waterfall"],
+        actors: ["Actors · N"],
         decals: ["Decals · D"],
         fleurs: ["Flowers · M"],
         ambientfx: ["Ambient FX · X"],
@@ -2223,6 +2228,7 @@
         "cliffs",
         "water",
         "waterfall",
+        "actors",
         "decals",
         "river",
         "spline",
@@ -2283,6 +2289,10 @@
         const waterfallPanel = document.getElementById("waterfall-panel");
         if (waterfallPanel)
           waterfallPanel.style.display = mode === "waterfall" ? "" : "none";
+        const actorsPanel = document.getElementById("actors-panel");
+        if (actorsPanel)
+          actorsPanel.style.display = mode === "actors" ? "" : "none";
+        if (mode === "actors") actorsPanel?._refreshCounts?.();
         const decalsPanel = document.getElementById("decals-panel");
         if (decalsPanel)
           decalsPanel.style.display = mode === "decals" ? "" : "none";
@@ -5921,6 +5931,172 @@
           onChange: wc,
         });
 
+        return panel;
+      }
+
+      // === Build custom Actors panel (NPC / enemies) ===
+      function buildActorsPanel(app) {
+        const panel = document.createElement("div");
+        panel.id = "actors-panel";
+        panel.style.display = "none";
+        const p = app.toolState.actors;
+        const ac = () => app.actorsChanged();
+        const refreshCounts = () => {
+          const c = app.actorSystem?.getCounts?.() ?? { npc: 0, enemy: 0 };
+          panel._placedInfo?.update(`${c.npc} NPC · ${c.enemy} enemy`);
+        };
+        panel._refreshCounts = refreshCounts;
+
+        const body = _section(panel, "Actors");
+        _dropdown(body, p, "placeTool", {
+          label: "Place on click",
+          options: { NPC: "npc", Enemy: "enemy" },
+        });
+        const dlg = p.dialogue;
+        const dlgBody = _section(panel, "Dialogue (play)", false);
+        _toggle(dlgBody, dlg, "enabled", { label: "Enabled" });
+        _slider(dlgBody, dlg, "interactRadius", {
+          label: "Interact radius",
+          min: 1,
+          max: 12,
+          step: 0.25,
+        });
+        const graphOpts = app.listDialogueGraphIds?.() ?? ["villager_greet"];
+        _dropdown(dlgBody, dlg, "defaultDialogueId", {
+          label: "Default graph",
+          options: Object.fromEntries(graphOpts.map((id) => [id, id])),
+        });
+        panel._placedInfo = _info(body, "Placed", "0 NPC · 0 enemy");
+        _dropdown(body, p, "transformMode", {
+          label: "Gizmo [W/E/R]",
+          options: {
+            "Translate (W)": "translate",
+            "Rotate (E)": "rotate",
+            "Scale (R)": "scale",
+          },
+          onChange: () => app.actorsTransformModeChanged(),
+        });
+
+        const capBody = _section(panel, "Capsule placeholder", false);
+        _slider(capBody, p, "capsuleRadius", {
+          label: "Radius",
+          min: 0.15,
+          max: 1.2,
+          step: 0.02,
+          onChange: ac,
+        });
+        _slider(capBody, p, "capsuleHeight", {
+          label: "Height",
+          min: 0.4,
+          max: 2.5,
+          step: 0.05,
+          onChange: ac,
+        });
+        _slider(capBody, p, "floorOffset", {
+          label: "Floor offset",
+          min: -1,
+          max: 2,
+          step: 0.02,
+          onChange: () => {
+            for (const inst of app.actorSystem?.instances ?? []) {
+              app.actorSystem.snapMeshToTerrain(inst.mesh);
+            }
+            refreshCounts();
+          },
+        });
+        _color(capBody, p, "npcColor", { label: "NPC color", onChange: ac });
+        _color(capBody, p, "enemyColor", { label: "Enemy color", onChange: ac });
+
+        const npcBody = _section(panel, "NPC defaults (runtime later)", false);
+        _toggle(npcBody, p.npcDefaults, "enabled", { label: "Enabled" });
+        _slider(npcBody, p.npcDefaults, "speed", {
+          label: "Speed",
+          min: 0,
+          max: 8,
+          step: 0.1,
+        });
+        _slider(npcBody, p.npcDefaults, "wanderRadius", {
+          label: "Wander radius",
+          min: 2,
+          max: 80,
+          step: 1,
+        });
+        _slider(npcBody, p.npcDefaults, "directionChangeInterval", {
+          label: "Dir change (s)",
+          min: 0.5,
+          max: 15,
+          step: 0.25,
+        });
+        _slider(npcBody, p.npcDefaults, "turnSpeed", {
+          label: "Turn speed",
+          min: 1,
+          max: 12,
+          step: 0.25,
+        });
+        _toggle(npcBody, p.npcDefaults, "idleWhenNearPlayer", { label: "Idle near player" });
+        _slider(npcBody, p.npcDefaults, "nearPlayerDistance", {
+          label: "Near distance",
+          min: 1,
+          max: 20,
+          step: 0.25,
+        });
+
+        const enemyBody = _section(panel, "Enemy defaults (runtime later)", false);
+        _toggle(enemyBody, p.enemyDefaults, "enabled", { label: "Enabled" });
+        _slider(enemyBody, p.enemyDefaults, "maxHp", {
+          label: "Max HP",
+          min: 1,
+          max: 500,
+          step: 1,
+        });
+        _slider(enemyBody, p.enemyDefaults, "speed", {
+          label: "Speed",
+          min: 0,
+          max: 8,
+          step: 0.1,
+        });
+        _slider(enemyBody, p.enemyDefaults, "wanderRadius", {
+          label: "Wander radius",
+          min: 2,
+          max: 80,
+          step: 1,
+        });
+        _slider(enemyBody, p.enemyDefaults, "directionChangeInterval", {
+          label: "Dir change (s)",
+          min: 0.5,
+          max: 15,
+          step: 0.25,
+        });
+        _slider(enemyBody, p.enemyDefaults, "turnSpeed", {
+          label: "Turn speed",
+          min: 1,
+          max: 12,
+          step: 0.25,
+        });
+
+        _separator(panel);
+        _button(panel, {
+          title: "Snap selected to terrain",
+          onClick: () => app.snapSelectedActorToTerrain(),
+        });
+        _button(panel, {
+          title: "Delete selected [Del]",
+          onClick: () => app.deleteSelectedActor(),
+        });
+        _button(panel, {
+          title: "Clear all actors",
+          onClick: () => app.clearAllActors(),
+        });
+        _button(panel, {
+          title: "Clear NPCs only",
+          onClick: () => app.clearNpcs(),
+        });
+        _button(panel, {
+          title: "Clear enemies only",
+          onClick: () => app.clearEnemies(),
+        });
+
+        refreshCounts();
         return panel;
       }
 
@@ -9932,6 +10108,20 @@
           });
         }
 
+        // Actors (NPC / enemies)
+        if (app.actorSystem?.instances) {
+          for (let i = 0; i < app.actorSystem.instances.length; i++) {
+            const inst = app.actorSystem.instances[i];
+            const roleLabel = inst.role === "enemy" ? "Enemy" : "NPC";
+            items.push({
+              id: `actor_${i}`,
+              name: inst.label?.trim() ? inst.label : `${roleLabel} ${i}`,
+              icon: inst.role === "enemy" ? "skull" : "user",
+              category: "Actors",
+            });
+          }
+        }
+
         // Roads (simple)
         for (let i = 0; i < app.roadSystem.segments.length; i++) {
           items.push({
@@ -10616,6 +10806,30 @@
               break;
             }
 
+            // --- Actor spawn ---
+            const actorMatch = itemId.match(/^actor_(\d+)$/);
+            if (actorMatch) {
+              const idx = parseInt(actorMatch[1]);
+              const inst = app.actorSystem?.instances?.[idx];
+              if (inst?.mesh) {
+                const m = inst.mesh;
+                const sec = _section(
+                  container,
+                  inst.role === "enemy" ? `Enemy ${idx}` : `NPC ${idx}`,
+                );
+                _info(sec, "Role", inst.role);
+                if (inst.role === "npc") {
+                  _info(sec, "Dialogue", inst.dialogueId || "(default)");
+                }
+                _info(sec, "Position X", m.position.x.toFixed(1));
+                _info(sec, "Position Y", m.position.y.toFixed(1));
+                _info(sec, "Position Z", m.position.z.toFixed(1));
+                _info(sec, "Yaw °", ((m.rotation.y * 180) / Math.PI).toFixed(0));
+                if (inst.role === "enemy") _info(sec, "Max HP", String(inst.maxHp));
+              }
+              break;
+            }
+
             // --- Road (simple) ---
             const roadMatch = itemId.match(/^road_(\d+)$/);
             if (roadMatch) {
@@ -10898,6 +11112,9 @@
           toolsTab.appendChild(buildCliffsPanel(app));
           toolsTab.appendChild(buildWaterPanel(app));
           toolsTab.appendChild(buildWaterfallPanel(app));
+          const actorsPanel = buildActorsPanel(app);
+          toolsTab.appendChild(actorsPanel);
+          app.setActorsPanelRefresh(() => actorsPanel._refreshCounts?.());
           toolsTab.appendChild(buildDecalsPanel(app));
           toolsTab.appendChild(buildRiverPanel(app));
           toolsTab.appendChild(buildSplinePanel(app));

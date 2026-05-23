@@ -515,6 +515,13 @@ function extractSerializableSettings(toolState) {
     waterBodies: toolState._waterExportData?.() ?? null,
     waterfall: { ...toolState.waterfall },
     waterfallItems: toolState._waterfallExportData?.() ?? null,
+    actors: {
+      ...toolState.actors,
+      npcDefaults: { ...toolState.actors.npcDefaults },
+      enemyDefaults: { ...toolState.actors.enemyDefaults },
+      dialogue: { ...toolState.actors.dialogue },
+    },
+    actorSpawns: toolState._actorExportData?.() ?? null,
     decal: { ...toolState.decal },
     decals: toolState._decalExportData?.() ?? null,
     barrier: { ...toolState.barrier },
@@ -643,6 +650,12 @@ export function applySettings(toolState, settings) {
   if (settings.spline) Object.assign(toolState.spline, settings.spline);
   if (settings.water) Object.assign(toolState.water, settings.water);
   if (settings.waterfall) Object.assign(toolState.waterfall, settings.waterfall);
+  if (settings.actors) {
+    Object.assign(toolState.actors, settings.actors);
+    if (settings.actors.npcDefaults) Object.assign(toolState.actors.npcDefaults, settings.actors.npcDefaults);
+    if (settings.actors.enemyDefaults) Object.assign(toolState.actors.enemyDefaults, settings.actors.enemyDefaults);
+    if (settings.actors.dialogue) Object.assign(toolState.actors.dialogue, settings.actors.dialogue);
+  }
   if (settings.decal) Object.assign(toolState.decal, settings.decal);
   if (settings.barrier) Object.assign(toolState.barrier, settings.barrier);
   if (settings.hole) Object.assign(toolState.hole, settings.hole);

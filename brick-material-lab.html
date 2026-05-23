@@ -3,7 +3,7 @@
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <title>Stone brick material lab — WebGPU + TSL</title>
+    <title>Brick material lab — medieval-arch-showcase bricks</title>
     <style>
       body {
         margin: 0;
@@ -63,8 +63,7 @@
     <div id="tweak-root" aria-label="Brick lab settings"></div>
     <pre id="export-snippet" aria-hidden="true"></pre>
     <div id="hint">
-      <code>RoundedBoxGeometry</code> + CPU stone sculpt + TSL detail — watertight, not a chamfer mesh.
-      Tune geometry + sculpt sliders, copy JSON for medieval.
+      Exact medieval-arch-showcase bricks (no CPU sculpt, TSL positionNode chip + color).
       Orbit: drag · Zoom: wheel.
     </div>
 
@@ -100,7 +99,6 @@
         abs,
         max,
         min,
-        floor,
         fract,
         length,
         normalize,
@@ -127,196 +125,52 @@
         };
       }
 
-      /** Same defaults as medieval-arch-showcase masonry. */
+      /** Starts from medieval-arch-showcase defaults, then tuned for "pillow"-shape bricks. */
       const params = {
+        // Brick geometry — bigger round + more segments = pillowy organic shape
         brickW: 0.52,
         brickH: 0.38,
         brickD: 0.55,
-        /** Same watertight base as medieval-arch-showcase (RoundedBoxGeometry). */
-        brickRound: 0.006,
-        roundSegments: 3,
-        /** CPU sculpt on rounded box (along normals — stays watertight). */
-        stoneSculpt: 0.022,
-        cornerWear: 0.038,
-        shapeIrregularity: 0.045,
-        sculptSeed: 31415,
-        brickScaleRandomness: 0.26,
-        brickRotationVariation: 0.05,
-        brickVerticalVariation: 0.065,
-        brickPlanarSlop: 0.02,
+        brickRound: 0.05,
+        roundSegments: 4,
+
+        // Shader sculpt — how much the surfaces bulge / corners chip per brick
+        faceBulge: 0.03,         // max outward displacement on face surfaces (m)
+        chipStrength: 0.025,     // max inward chip at corners (m)
+        shapeWarp: 1.2,          // global multiplier on per-brick warp
+        asymmetry: 0.7,          // per-brick face-asymmetry: 0 = all faces equal, 1 = strong
+        bend: 0.012,             // per-brick organic bend (subtle banana-curve shape)
+
+        // Wall layout
+        wallMortar: 0.018,
+        // sizeVariety drives how much bricks SHRINK from their nominal cell.
+        // 0 = perfectly lego, 1 = strong size variety. Bricks never grow past
+        // their cell so they cannot overlap their neighbors.
+        sizeVariety: 0.55,
+        // Tiny rotation/position noise — just enough to break "lego" uniformity.
+        brickRotationVariation: 0.012,
+        brickVerticalVariation: 0.012,
+        brickPlanarSlop: 0.005,
         colorSeed: 31415,
+
+        // Preview
         previewCols: 7,
         previewRows: 9,
         previewBond: true,
         showHeroBrick: true,
         showWall: true,
-        mossStrength: 1,
-        stainStrength: 1,
-        warmStreak: 0.07,
-        freckle: 0.11,
-        shaderWarp: 1,
-        shaderBump: 1.15,
-        shaderChip: 1.35,
-        chipStrength: 1.25,
-        bumpStrength: 1.1,
-        roughnessBase: 0.82,
-        roughnessMicro: 0.07,
+        showMortarBacking: true,
+
+        // Lighting
         sunIntensity: 4.5,
         ambientIntensity: 1.05,
         fillIntensity: 1.25,
         exposure: 1.45,
       };
 
-      const sunDirUniform = uniform(new THREE.Vector3(-0.38, -0.82, -0.42));
-      const _sunDirVec = new THREE.Vector3();
-
-      const uMoss = uniform(params.mossStrength);
-      const uStain = uniform(params.stainStrength);
-      const uWarm = uniform(params.warmStreak);
-      const uFreckle = uniform(params.freckle);
-      const uShaderWarp = uniform(params.shaderWarp);
-      const uShaderBump = uniform(params.shaderBump);
-      const uShaderChip = uniform(params.shaderChip);
-      const uRoughBase = uniform(params.roughnessBase);
-      const uRoughMicro = uniform(params.roughnessMicro);
-      const uChipStrength = uniform(params.chipStrength);
-      const uBumpStrength = uniform(params.bumpStrength);
-
-      function geometrySignature() {
-        return [
-          params.brickW,
-          params.brickH,
-          params.brickD,
-          params.brickRound,
-          params.roundSegments,
-          params.stoneSculpt,
-          params.cornerWear,
-          params.shapeIrregularity,
-          params.sculptSeed,
-        ].join(",");
-      }
-
-      /**
-       * Worn-stone pass on RoundedBoxGeometry: every vertex moves along its normal
-       * (mesh stays closed). Corners/edges get extra wear; optional slight size wobble.
-       */
-      function sculptStoneGeometry(geo, w, h, d, opts) {
-        const { stoneSculpt, cornerWear, shapeIrregularity, seed } = opts;
-        const sculpt = stoneSculpt || 0;
-        const wear = cornerWear || 0;
-        const irreg = shapeIrregularity || 0;
-        if (sculpt < 1e-5 && wear < 1e-5 && irreg < 1e-5) return;
-
-        const hw = w * 0.5;
-        const hh = h * 0.5;
-        const hd = d * 0.5;
-        const unit = Math.min(hw, hh, hd);
-        const rnd = mulberry32(seed | 0);
-        const sx = 1 + (rnd() - 0.5) * irreg;
-        const sy = 1 + (rnd() - 0.5) * irreg;
-        const sz = 1 + (rnd() - 0.5) * irreg;
-
-        const pos = geo.attributes.position;
-        if (irreg > 1e-5) {
-          for (let i = 0; i < pos.count; i++) {
-            pos.setXYZ(
-              i,
-              pos.getX(i) * sx,
-              pos.getY(i) * sy,
-              pos.getZ(i) * sz,
-            );
-          }
-        }
-
-        geo.computeVertexNormals();
-        const norm = geo.attributes.normal;
-        const p = new THREE.Vector3();
-        const n = new THREE.Vector3();
-
-        for (let i = 0; i < pos.count; i++) {
-          p.set(pos.getX(i), pos.getY(i), pos.getZ(i));
-          n.set(norm.getX(i), norm.getY(i), norm.getZ(i));
-
-          const nx = p.x / hw;
-          const ny = p.y / hh;
-          const nz = p.z / hd;
-          const ax = Math.abs(nx);
-          const ay = Math.abs(ny);
-          const az = Math.abs(nz);
-          const cornerness = 1 - Math.min(ax, ay, az) * 2.8;
-          const cornerW = THREE.MathUtils.clamp(cornerness, 0, 1);
-          const edgeW = THREE.MathUtils.clamp(
-            1 - Math.min(ax, ay, az) / Math.max(ax, ay, az, 1e-4),
-            0,
-            1,
-          );
-
-          const nFlat = Math.max(Math.abs(n.x), Math.abs(n.y), Math.abs(n.z));
-          const faceKeep = THREE.MathUtils.lerp(1, 0.35, nFlat);
-
-          const s0 = seed * 0.1;
-          const noise =
-            Math.sin(p.x * 17.3 + p.y * 23.1 + p.z * 31.7 + s0) * 0.55 +
-            Math.sin(p.x * 9.1 + p.y * 13.7 + p.z * 19.3 + s0 * 1.7) * 0.3 +
-            Math.sin(p.x * 4.2 + p.y * 6.8 + p.z * 8.1 + s0 * 2.3) * 0.15;
-
-          let disp = sculpt * unit * noise * faceKeep;
-          disp += wear * unit * cornerW * (0.55 + 0.45 * noise);
-          disp += wear * unit * edgeW * 0.35 * Math.abs(noise);
-          if (cornerW > 0.5 && noise < -0.12) {
-            disp -= wear * unit * cornerW * 0.45;
-          }
-
-          p.addScaledVector(n, disp);
-          pos.setXYZ(i, p.x, p.y, p.z);
-        }
-
-        geo.computeVertexNormals();
-      }
-
-      function applyBrickLayoutNoise(rnd, sx, sy, sz) {
-        const r = params.brickScaleRandomness || 0;
-        const t = 1;
-        sx *= 1 + (rnd() - 0.5) * r * t;
-        sy *= 1 + (rnd() - 0.5) * r * t;
-        sz *= 1 + (rnd() - 0.5) * r * t;
-        const rv = (params.brickRotationVariation || 0) * t;
-        const rx = (rnd() - 0.5) * rv;
-        const ry = (rnd() - 0.5) * rv;
-        const rz = (rnd() - 0.5) * rv;
-        const vy = (params.brickVerticalVariation || 0) * t;
-        const py = (rnd() - 0.5) * vy;
-        const ps = (params.brickPlanarSlop || 0) * t;
-        const px = (rnd() - 0.5) * ps;
-        const pz = (rnd() - 0.5) * ps;
-        return { sx, sy, sz, rx, ry, rz, px, py, pz };
-      }
-
-      function pickBrickVariation(rnd) {
-        let shapeMix = 0.46;
-        let warp = 0.3;
-        let grey = 0.4;
-        const grain = rnd();
-        const u = rnd();
-        if (u < 0.12) {
-          shapeMix = 0.38;
-        } else if (u < 0.22) {
-          shapeMix = 0.3;
-        } else {
-          shapeMix = 0.46 + rnd() * 0.18;
-        }
-        warp = 0.22 + rnd() * 0.38;
-        grey = 0.3 + rnd() * 0.42;
-        return { shapeMix, warp, grey, grain };
-      }
-
-      function createInstancedBrickGeometry(baseGeo, capacity) {
-        const g = baseGeo.clone();
-        const arr = new Float32Array(capacity * 4);
-        const att = new THREE.InstancedBufferAttribute(arr, 4);
-        g.setAttribute("brickVar", att);
-        return g;
-      }
+      // ===========================================================================
+      // === medieval-arch-showcase brick variation + per-instance noise (exact) ===
+      // ===========================================================================
 
       function setBrickVarAt(mesh, index, shapeMix, warp, grey, grain) {
         const att = mesh.geometry.getAttribute("brickVar");
@@ -328,6 +182,79 @@
         a[o + 2] = grey;
         a[o + 3] = grain;
       }
+
+      /**
+       * Shrink-only per-brick variation: scales ∈ (1 - sizeVariety, 1.0]. Bricks
+       * never grow past their nominal cell so they cannot overlap their
+       * neighbors. `v = params.sizeVariety` controls the spread:
+       *   v=0   → all bricks are 1.0× (perfectly lego)
+       *   v=0.5 → bricks vary from 0.5× to 1.0×, weighted toward larger sizes
+       * We bias picks toward larger values (using sqrt) so most bricks are
+       * close to full size and only a minority feel visibly smaller/worn.
+       */
+      function pickBrickVariation(rnd) {
+        const v = Math.max(0, Math.min(1, params.sizeVariety || 0));
+        // Per-axis shrink — independent so a brick can be short+wide, tall+narrow, etc.
+        const shrink = () => 1 - v * (1 - Math.sqrt(rnd())) * 0.55;
+        const sx = shrink();
+        const sy = shrink();
+        const sz = 1 - v * (1 - Math.sqrt(rnd())) * 0.25; // depth shrinks less (still reads as solid wall)
+
+        // Pick a brick "personality" — drives the shader's shape/warp variation.
+        let shapeMix, warp;
+        const u = rnd();
+        if (u < 0.18) {
+          // weathered/eroded — more shader shape distortion
+          shapeMix = 0.28 + rnd() * 0.12;
+          warp = 0.45 + rnd() * 0.4;
+        } else if (u < 0.4) {
+          // somewhat worn
+          shapeMix = 0.4 + rnd() * 0.15;
+          warp = 0.28 + rnd() * 0.3;
+        } else {
+          // mostly clean
+          shapeMix = 0.55 + rnd() * 0.2;
+          warp = 0.18 + rnd() * 0.22;
+        }
+        const grey = 0.28 + rnd() * 0.5;
+        const grain = rnd();
+        return { sx, sy, sz, shapeMix, warp, grey, grain };
+      }
+
+      function applyBrickPlacementNoise(tmpO, rnd) {
+        const rv = params.brickRotationVariation || 0;
+        if (rv > 0) {
+          tmpO.rotation.x += (rnd() - 0.5) * rv;
+          tmpO.rotation.y += (rnd() - 0.5) * rv;
+          tmpO.rotation.z += (rnd() - 0.5) * rv;
+        }
+        const vy = params.brickVerticalVariation || 0;
+        if (vy > 0) tmpO.position.y += (rnd() - 0.5) * vy;
+        const ps = params.brickPlanarSlop || 0;
+        if (ps > 0) {
+          tmpO.position.x += (rnd() - 0.5) * ps;
+          tmpO.position.z += (rnd() - 0.5) * ps;
+        }
+      }
+
+      function createInstancedBrickGeometry(baseGeo, capacity) {
+        const g = baseGeo.clone();
+        const arr = new Float32Array(capacity * 4);
+        const att = new THREE.InstancedBufferAttribute(arr, 4);
+        att.setUsage(THREE.DynamicDrawUsage);
+        g.setAttribute("brickVar", att);
+        return g;
+      }
+
+      // ===========================================================================
+      // === medieval-arch-showcase brick material (exact colorNode/positionNode) ==
+      // ===========================================================================
+
+      const _sunDirVec = new THREE.Vector3();
+      const sunDirUniform = uniform(new THREE.Vector3());
+      const uFaceBulge = uniform(params.faceBulge);
+      const uChipStrength = uniform(params.chipStrength);
+      const uShapeWarp = uniform(params.shapeWarp);
 
       function createBrickMaterial() {
         const brickVarA = attribute("brickVar", "vec4");
@@ -343,71 +270,40 @@
         mat.colorNode = Fn(() => {
           const pw = positionWorld;
           const seed = grain.mul(6.283).add(greyK.mul(12.7));
-          const p1 = pw
-            .mul(1.05)
-            .add(vec3(seed, seed.mul(0.71), seed.mul(0.53)));
-          const p2 = pw
-            .mul(2.35)
-            .add(vec3(seed.mul(1.3), seed.mul(0.9), seed.mul(1.1)));
-          const p3 = pw
-            .mul(5.1)
-            .add(vec3(seed.mul(2.1), seed, seed.mul(1.7)));
-          const w1 = sin(dot(p1, vec3(1.7, 2.3, 1.9)))
-            .mul(0.5)
-            .add(0.5);
-          const w2 = sin(dot(p2, vec3(2.2, 1.4, 2.6)))
-            .mul(0.5)
-            .add(0.5);
-          const w3 = sin(dot(p3, vec3(1.5, 2.8, 2.1)))
-            .mul(0.5)
-            .add(0.5);
+          const p1 = pw.mul(1.05).add(vec3(seed, seed.mul(0.71), seed.mul(0.53)));
+          const p2 = pw.mul(2.35).add(vec3(seed.mul(1.3), seed.mul(0.9), seed.mul(1.1)));
+          const p3 = pw.mul(5.1).add(vec3(seed.mul(2.1), seed, seed.mul(1.7)));
+          const w1 = sin(dot(p1, vec3(1.7, 2.3, 1.9))).mul(0.5).add(0.5);
+          const w2 = sin(dot(p2, vec3(2.2, 1.4, 2.6))).mul(0.5).add(0.5);
+          const w3 = sin(dot(p3, vec3(1.5, 2.8, 2.1))).mul(0.5).add(0.5);
           const fbm = w1.mul(0.52).add(w2.mul(0.32)).add(w3.mul(0.16));
           const streak = sin(
-            pw.x
-              .mul(2.8)
-              .add(pw.y.mul(4.2))
-              .add(pw.z.mul(1.6))
-              .add(grain.mul(24)),
-          )
-            .mul(0.5)
-            .add(0.5);
+            pw.x.mul(2.8).add(pw.y.mul(4.2)).add(pw.z.mul(1.6)).add(grain.mul(24)),
+          ).mul(0.5).add(0.5);
 
           const dark = mix(color(0x1a1c20), color(0x2e3138), greyK);
-          const mid = mix(
-            color(0x42454c),
-            color(0x565a62),
-            pow(greyK, float(0.9)),
-          );
-          const light = mix(
-            color(0x65696f),
-            color(0x82868e),
-            smoothstep(0.1, 0.9, greyK),
-          );
+          const mid = mix(color(0x42454c), color(0x565a62), pow(greyK, float(0.9)));
+          const light = mix(color(0x65696f), color(0x82868e), smoothstep(0.1, 0.9, greyK));
           const body0 = mix(dark, mix(mid, light, greyK), float(0.58));
           const stain = smoothstep(float(0.22), float(0.78), fbm);
-          const body1 = mul(
-            body0,
-            mix(float(0.86), float(1.06), stain.mul(uStain)),
-          );
+          const body1 = mul(body0, mix(float(0.86), float(1.06), stain));
           const warm = mix(color(0x5c5248), color(0x6a6056), streak);
           const body2 = mix(
             body1,
             mul(body1, warm),
-            uWarm.mul(smoothstep(0.35, 0.72, streak)),
+            float(0.07).mul(smoothstep(0.35, 0.72, streak)),
           );
           const moss = smoothstep(float(0.62), float(0.94), w2.mul(w3));
           const body3 = mix(
             body2,
             mul(body2, color(0x9aa898)),
-            moss.mul(0.045).mul(warpS.mul(0.4).add(0.6)).mul(uMoss),
+            moss.mul(0.045).mul(warpS.mul(0.4).add(0.6)),
           );
 
           const speck = fract(
             sin(dot(pw.xz, vec2(12.9898, 78.233))).mul(43758.5453),
           );
-          const freckle = smoothstep(float(0.72), float(0.96), speck).mul(
-            uFreckle,
-          );
+          const freckle = smoothstep(float(0.72), float(0.96), speck).mul(0.11);
           const baseCol = mul(body3, sub(float(1), freckle));
           const nd = clamp(dot(normalWorld, sunDirUniform), 0, 1);
           const coolShade = mix(float(0.88), float(1.14), nd.mul(0.55).add(0.45));
@@ -417,11 +313,7 @@
           const edgeFac = pow(max(ax, max(ay, az)), float(2.35));
           const edgeLift = mix(float(1), float(1.1), edgeFac.mul(0.38));
           const edgeCool = mix(float(1), float(0.94), edgeFac.mul(0.12));
-          const shapeTone = mix(
-            float(0.96),
-            float(1.04),
-            shapeM.mul(0.35).add(0.65),
-          );
+          const shapeTone = mix(float(0.96), float(1.04), shapeM.mul(0.35).add(0.65));
           return mul(
             mul(mul(mul(baseCol, coolShade), edgeLift), edgeCool),
             shapeTone,
@@ -432,23 +324,15 @@
           const pw = positionWorld
             .mul(2.4)
             .add(vec3(grain.mul(9), greyK.mul(6), shapeM.mul(3)));
-          const pit = sin(dot(pw, vec3(2.1, 1.7, 2.4)))
-            .mul(0.5)
-            .add(0.5);
-          const pit2 = sin(dot(pw.mul(1.7), vec3(1.6, 2.2, 1.9)))
-            .mul(0.5)
-            .add(0.5);
+          const pit = sin(dot(pw, vec3(2.1, 1.7, 2.4))).mul(0.5).add(0.5);
+          const pit2 = sin(dot(pw.mul(1.7), vec3(1.6, 2.2, 1.9))).mul(0.5).add(0.5);
           const microRough = pit.mul(0.55).add(pit2.mul(0.45));
           const baseR = mix(
-            uRoughBase,
+            float(0.82),
             float(0.97),
             greyK.mul(0.38).add(grain.mul(0.24)),
           );
-          return clamp(
-            baseR.add(microRough.mul(uRoughMicro)),
-            float(0.44),
-            float(0.995),
-          );
+          return clamp(baseR.add(microRough.mul(0.07)), float(0.44), float(0.995));
         })();
 
         mat.emissiveNode = Fn(() => {
@@ -458,9 +342,7 @@
             float(2.15),
           );
           const g0 = mix(color(0x4a4d52), color(0x686c72), nd);
-          return mul(g0, mul(rim, float(0.032))).mul(
-            warpS.mul(0.55).add(0.45),
-          );
+          return mul(g0, mul(rim, float(0.032))).mul(warpS.mul(0.55).add(0.45));
         })();
 
         mat.positionNode = Fn(() => {
@@ -478,24 +360,42 @@
           const plLen = length(pl);
           const cenW = smoothstep(float(0.01), float(0.05), plLen);
 
-          const wv = warpS.mul(shapeM.mul(0.55).add(0.45)).mul(uShaderWarp);
-          const bump = sin(
-            pl.x
-              .mul(11)
-              .add(pl.y.mul(9))
-              .add(pl.z.mul(7))
-              .add(grain.mul(40)),
-          )
-            .mul(0.5)
-            .add(0.5);
-          const amp = float(0.017)
-            .mul(edgeShell)
-            .mul(wv)
-            .mul(mix(float(0.65), float(1.15), bump))
-            .mul(cenW)
-            .mul(uShaderBump)
-            .mul(uBumpStrength);
+          // Flatness of vertex normal — ~1 on flat faces, lower on fillet ring.
+          // We use this to push flat faces outward (pillow bulge) without
+          // touching the rounded edges (which would flip triangle winding).
+          const nFlat = max(abs(nl.x), max(abs(nl.y), abs(nl.z)));
+          const filletGuard = smoothstep(float(0.78), float(0.99), nFlat);
 
+          // Per-brick warp strength (driven by per-instance attribute)
+          const wv = warpS.mul(shapeM.mul(0.55).add(0.45)).mul(uShapeWarp);
+
+          // Distance from face center, normalized 0..1. For a vertex on a
+          // flat face, this is the distance in the tangent plane to the
+          // brick's central axis. Used as a "pillow" mask: 1 in face center,
+          // 0 at face edges.
+          const faceTangent = sub(mx, max(ax, max(ay, az)).mul(float(0))); // = mx
+          const offAxis = sub(mx, mn).mul(float(0)).add(min(ax, min(ay, az))); // = mn
+          // Simpler: pillow mask = 1 when off-axis (mn) is small relative to dominant (mx).
+          const pillowMask = sub(
+            float(1),
+            smoothstep(float(0.05), float(0.27), mn),
+          ).mul(filletGuard);
+
+          // High-frequency bump for surface texture variation
+          const bump = sin(
+            pl.x.mul(11).add(pl.y.mul(9)).add(pl.z.mul(7)).add(grain.mul(40)),
+          ).mul(0.5).add(0.5);
+
+          // Outward face bulge — main "pillow" displacement. Always positive
+          // (pushes face outward along its normal).
+          const bulgeAmp = uFaceBulge
+            .mul(pillowMask)
+            .mul(wv.mul(0.5).add(0.5))   // even no-warp bricks get some bulge
+            .mul(mix(float(0.55), float(1.15), bump))
+            .mul(cenW);
+
+          // Inward chip at random corners, along radial direction so it
+          // stays smooth on the rounded fillet (no winding flips).
           const chipPick = fract(
             grain.mul(47.13).add(greyK.mul(91.7)).add(shapeM.mul(23.1)),
           );
@@ -503,28 +403,22 @@
             .mul(cornerBand)
             .mul(edgeShell)
             .mul(cenW);
-          const chipMag = float(0.012)
+          const chipMag = uChipStrength
             .mul(chipMask)
-            .mul(warpS.mul(0.42).add(0.58))
-            .mul(uShaderChip)
-            .mul(uChipStrength);
+            .mul(warpS.mul(0.42).add(0.58));
           const rlen = max(length(pl), float(1e-5));
           const radial = normalize(div(pl, rlen));
           const chip = mul(radial, float(-1)).mul(chipMag);
 
-          return positionLocal.add(nl.mul(amp)).add(chip);
+          return positionLocal.add(nl.mul(bulgeAmp)).add(chip);
         })();
 
         return mat;
       }
 
-      const tmpObj = new THREE.Object3D();
-      let brickGeo = null;
-      let brickMat = null;
-      let lastGeoSig = "";
-      let heroMesh = null;
-      let wallMesh = null;
-      let groundMesh = null;
+      // ===========================================================================
+      // === Scene setup ===========================================================
+      // ===========================================================================
 
       const scene = new THREE.Scene();
       scene.background = new THREE.Color(0x8a9aad);
@@ -545,6 +439,7 @@
       renderer.shadowMap.type = THREE.PCFSoftShadowMap;
       renderer.toneMapping = THREE.ACESFilmicToneMapping;
       renderer.toneMappingExposure = params.exposure;
+      renderer.outputColorSpace = THREE.SRGBColorSpace;
       document.body.appendChild(renderer.domElement);
 
       const controls = new OrbitControls(camera, renderer.domElement);
@@ -569,6 +464,7 @@
       sun.shadow.camera.bottom = -8;
       sun.shadow.bias = -0.00012;
       sun.shadow.normalBias = 0.02;
+      sun.shadow.radius = 4;
       scene.add(sun);
       scene.add(sun.target);
       sun.target.position.set(0.2, 1.2, 0);
@@ -577,24 +473,81 @@
       fill.position.set(-7, 6, -5);
       scene.add(fill);
 
+      function syncSunDirectionUniform() {
+        _sunDirVec.copy(sun.target.position).sub(sun.position).normalize();
+        sunDirUniform.value.copy(_sunDirVec);
+      }
+
+      // Ground
+      const groundMesh = new THREE.Mesh(
+        new THREE.PlaneGeometry(24, 24),
+        new THREE.MeshStandardNodeMaterial({
+          color: 0x5c636e,
+          roughness: 0.92,
+          metalness: 0,
+        }),
+      );
+      groundMesh.rotation.x = -Math.PI / 2;
+      groundMesh.receiveShadow = true;
+      scene.add(groundMesh);
+
+      // Mortar backing (so brick gaps don't show sky)
+      function createMortarMaterial() {
+        const m = new THREE.MeshStandardNodeMaterial({ metalness: 0 });
+        m.colorNode = Fn(() => {
+          const pw = positionWorld;
+          const n1 = sin(dot(pw.mul(8.0), vec3(2.1, 1.7, 1.3))).mul(0.5).add(0.5);
+          const n2 = sin(dot(pw.mul(20.0).add(vec3(7.0, 13.0, 3.0)), vec3(1.7, 2.4, 1.9))).mul(0.5).add(0.5);
+          const grit = n1.mul(0.65).add(n2.mul(0.35));
+          return mix(color(0x24201a), color(0x342d24), grit);
+        })();
+        m.roughnessNode = Fn(() => {
+          const pw = positionWorld;
+          const n = sin(dot(pw.mul(15.0), vec3(2.3, 1.9, 1.5))).mul(0.5).add(0.5);
+          return clamp(float(0.94).add(n.mul(0.04)), float(0.6), float(0.99));
+        })();
+        return m;
+      }
+
+      // ===========================================================================
+      // === Brick geometry + wall layout ==========================================
+      // ===========================================================================
+
+      let brickGeo = null;
+      let brickMat = null;
+      let mortarMat = null;
+      let lastGeoSig = "";
+      let heroMesh = null;
+      let wallMesh = null;
+      let mortarMesh = null;
+      const tmpO = new THREE.Object3D();
+
+      function brickGeometrySignature() {
+        return [
+          params.brickW,
+          params.brickH,
+          params.brickD,
+          params.brickRound,
+          params.roundSegments,
+        ].join(",");
+      }
+
       function ensureBrickGeometry(force) {
-        const sig = geometrySignature();
+        const sig = brickGeometrySignature();
         if (!force && brickGeo && sig === lastGeoSig) return;
-        if (brickGeo) brickGeo.dispose();
+        if (brickGeo) {
+          brickGeo.dispose();
+          brickGeo = null;
+        }
         const rRound = Math.max(0.0001, params.brickRound);
+        const segs = Math.max(1, Math.min(6, params.roundSegments | 0));
         brickGeo = new RoundedBoxGeometry(
           params.brickW,
           params.brickH,
           params.brickD,
-          Math.max(1, params.roundSegments | 0),
+          segs,
           rRound,
         );
-        sculptStoneGeometry(brickGeo, params.brickW, params.brickH, params.brickD, {
-          stoneSculpt: params.stoneSculpt,
-          cornerWear: params.cornerWear,
-          shapeIrregularity: params.shapeIrregularity,
-          seed: params.sculptSeed,
-        });
         lastGeoSig = sig;
       }
 
@@ -609,6 +562,11 @@
           if (wallMesh.geometry) wallMesh.geometry.dispose();
           wallMesh = null;
         }
+        if (mortarMesh) {
+          scene.remove(mortarMesh);
+          if (mortarMesh.geometry) mortarMesh.geometry.dispose();
+          mortarMesh = null;
+        }
       }
 
       function buildPreview() {
@@ -616,23 +574,22 @@
         ensureBrickGeometry(true);
         if (!brickMat) brickMat = createBrickMaterial();
 
-        const mortar = 0.012;
-        const gapX = params.brickW * 1.02 + mortar;
-        const gapY = params.brickH * 1.02 + mortar;
-        const gapZ = params.brickD * 1.02 + mortar;
+        const mortar = params.wallMortar;
+        const rowH = params.brickH + mortar;
+        const colW = params.brickW + mortar;
 
         if (params.showHeroBrick) {
           const heroGeo = createInstancedBrickGeometry(brickGeo, 1);
           heroMesh = new THREE.InstancedMesh(heroGeo, brickMat, 1);
           heroMesh.castShadow = true;
           heroMesh.receiveShadow = true;
-          tmpObj.position.set(-1.55, params.brickH * 0.5 + 0.02, 0.35);
-          tmpObj.rotation.set(0, 0.35, 0);
-          tmpObj.scale.set(1, 1, 1);
-          tmpObj.updateMatrix();
-          heroMesh.setMatrixAt(0, tmpObj.matrix);
+          tmpO.position.set(-1.85, params.brickH * 0.5 + 0.02, 0.35);
+          tmpO.rotation.set(0, 0.35, 0);
+          tmpO.scale.set(1.1, 1.1, 1.1);
+          tmpO.updateMatrix();
+          heroMesh.setMatrixAt(0, tmpO.matrix);
           heroMesh.instanceMatrix.needsUpdate = true;
-          setBrickVarAt(heroMesh, 0, 0.52, 0.32, 0.48, 0.37);
+          setBrickVarAt(heroMesh, 0, 0.55, 0.32, 0.55, 0.37);
           const hbv = heroMesh.geometry.getAttribute("brickVar");
           if (hbv) hbv.needsUpdate = true;
           scene.add(heroMesh);
@@ -641,53 +598,56 @@
         if (params.showWall) {
           const cols = Math.max(1, params.previewCols | 0);
           const rows = Math.max(1, params.previewRows | 0);
-          const count = cols * rows;
-          const g = createInstancedBrickGeometry(brickGeo, count);
-          wallMesh = new THREE.InstancedMesh(g, brickMat, count);
+          const capacity = cols * rows;
+          const g = createInstancedBrickGeometry(brickGeo, capacity);
+          wallMesh = new THREE.InstancedMesh(g, brickMat, capacity);
           wallMesh.castShadow = true;
           wallMesh.receiveShadow = true;
 
           const rnd = mulberry32(params.colorSeed | 0);
-          const originX = -((cols - 1) * gapX) * 0.5;
-          const baseY = params.brickH * 0.5 + 0.02;
+          const originX = -((cols - 1) * colW) * 0.5;
+          const baseY = mortar * 0.5 + params.brickH * 0.5;
           let idx = 0;
-
           for (let row = 0; row < rows; row++) {
-            const stagger = params.previewBond && row % 2 === 1 ? gapX * 0.5 : 0;
+            const stagger = params.previewBond && row % 2 === 1 ? colW * 0.5 : 0;
             for (let col = 0; col < cols; col++) {
               const v = pickBrickVariation(rnd);
-              let { sx, sy, sz, rx, ry, rz, px, py, pz } = applyBrickLayoutNoise(
-                rnd,
-                1,
-                1,
-                1,
+              tmpO.position.set(
+                originX + col * colW + stagger,
+                baseY + row * rowH,
+                0,
               );
-              tmpObj.position.set(
-                originX + col * gapX + stagger,
-                baseY + row * gapY + py,
-                pz * 0.15,
-              );
-              tmpObj.rotation.set(rx, ry, rz);
-              tmpObj.scale.set(sx, sy, sz);
-              tmpObj.updateMatrix();
-              wallMesh.setMatrixAt(idx, tmpObj.matrix);
-              setBrickVarAt(
-                wallMesh,
-                idx,
-                v.shapeMix,
-                v.warp,
-                v.grey,
-                v.grain,
-              );
+              tmpO.rotation.set(0, 0, 0);
+              tmpO.scale.set(v.sx, v.sy, v.sz);
+              applyBrickPlacementNoise(tmpO, rnd);
+              tmpO.updateMatrix();
+              wallMesh.setMatrixAt(idx, tmpO.matrix);
+              setBrickVarAt(wallMesh, idx, v.shapeMix, v.warp, v.grey, v.grain);
               idx++;
             }
           }
-
           wallMesh.instanceMatrix.needsUpdate = true;
           const bv = wallMesh.geometry.getAttribute("brickVar");
           if (bv) bv.needsUpdate = true;
           wallMesh.position.set(0.85, 0, 0);
           scene.add(wallMesh);
+
+          if (params.showMortarBacking) {
+            if (!mortarMat) mortarMat = createMortarMaterial();
+            const staggerExtra = params.previewBond ? colW * 0.5 : 0;
+            const wallW = (cols - 1) * colW + params.brickW + staggerExtra;
+            const wallH = (rows - 1) * rowH + params.brickH;
+            const wallT = 0.14;
+            const mortarGeo = new THREE.BoxGeometry(wallW, wallH, wallT);
+            mortarMesh = new THREE.Mesh(mortarGeo, mortarMat);
+            mortarMesh.position.set(
+              0.85 + (params.previewBond ? colW * 0.25 : 0),
+              baseY + (rows - 1) * rowH * 0.5,
+              -(params.brickD * 0.5 + wallT * 0.5 + 0.005),
+            );
+            mortarMesh.receiveShadow = true;
+            scene.add(mortarMesh);
+          }
         }
 
         updateExportSnippet();
@@ -701,15 +661,11 @@
           brickD: +params.brickD.toFixed(3),
           brickRound: +params.brickRound.toFixed(4),
           roundSegments: params.roundSegments | 0,
-          stoneSculpt: +params.stoneSculpt.toFixed(4),
-          cornerWear: +params.cornerWear.toFixed(4),
-          shapeIrregularity: +params.shapeIrregularity.toFixed(3),
-          sculptSeed: params.sculptSeed | 0,
-          chipStrength: +params.chipStrength.toFixed(2),
-          bumpStrength: +params.bumpStrength.toFixed(2),
-          shaderChip: +params.shaderChip.toFixed(2),
-          shaderBump: +params.shaderBump.toFixed(2),
-          brickScaleRandomness: +params.brickScaleRandomness.toFixed(3),
+          faceBulge: +params.faceBulge.toFixed(4),
+          chipStrength: +params.chipStrength.toFixed(4),
+          shapeWarp: +params.shapeWarp.toFixed(2),
+          wallMortar: +params.wallMortar.toFixed(4),
+          sizeVariety: +params.sizeVariety.toFixed(2),
           brickRotationVariation: +params.brickRotationVariation.toFixed(3),
           brickVerticalVariation: +params.brickVerticalVariation.toFixed(3),
           brickPlanarSlop: +params.brickPlanarSlop.toFixed(3),
@@ -718,39 +674,10 @@
         el.textContent = JSON.stringify(snippet, null, 2);
       }
 
-      function ensureGround() {
-        if (groundMesh) return;
-        groundMesh = new THREE.Mesh(
-          new THREE.PlaneGeometry(24, 24),
-          new THREE.MeshStandardNodeMaterial({
-            color: 0x5c636e,
-            roughness: 0.92,
-            metalness: 0,
-          }),
-        );
-        groundMesh.rotation.x = -Math.PI / 2;
-        groundMesh.position.y = 0;
-        groundMesh.receiveShadow = true;
-        scene.add(groundMesh);
-      }
-
-      function syncSunDirectionUniform() {
-        _sunDirVec.copy(sun.target.position).sub(sun.position).normalize();
-        sunDirUniform.value.copy(_sunDirVec);
-      }
-
       function syncLiveUniforms() {
-        uMoss.value = params.mossStrength;
-        uStain.value = params.stainStrength;
-        uWarm.value = params.warmStreak;
-        uFreckle.value = params.freckle;
-        uShaderWarp.value = params.shaderWarp;
-        uShaderBump.value = params.shaderBump;
-        uShaderChip.value = params.shaderChip;
+        uFaceBulge.value = params.faceBulge;
         uChipStrength.value = params.chipStrength;
-        uBumpStrength.value = params.bumpStrength;
-        uRoughBase.value = params.roughnessBase;
-        uRoughMicro.value = params.roughnessMicro;
+        uShapeWarp.value = params.shapeWarp;
         sun.intensity = params.sunIntensity;
         hemi.intensity = params.ambientIntensity;
         fill.intensity = params.fillIntensity;
@@ -763,10 +690,13 @@
         clearTimeout(rebuildTimer);
         rebuildTimer = setTimeout(() => {
           if (geometry) ensureBrickGeometry(true);
-          else ensureBrickGeometry(false);
           buildPreview();
         }, geometry ? 120 : 40);
       }
+
+      // ===========================================================================
+      // === Tweakpane =============================================================
+      // ===========================================================================
 
       const pane = new Pane({ container: document.getElementById("tweak-root") });
 
@@ -774,108 +704,66 @@
       fSize.addBinding(params, "brickW", { min: 0.2, max: 1.2, step: 0.01 });
       fSize.addBinding(params, "brickH", { min: 0.15, max: 0.8, step: 0.01 });
       fSize.addBinding(params, "brickD", { min: 0.2, max: 1.2, step: 0.01 });
-
-      const fShape = pane.addFolder({
-        title: "Shape (RoundedBox — medieval)",
-        expanded: true,
-      });
-      fShape.addBinding(params, "brickRound", {
+      fSize.addBinding(params, "brickRound", {
         label: "corner radius",
         min: 0.0001,
-        max: 0.08,
+        max: 0.12,
         step: 0.001,
       });
-      fShape.addBinding(params, "roundSegments", {
+      fSize.addBinding(params, "roundSegments", {
         label: "round segments",
         min: 1,
         max: 6,
         step: 1,
       });
 
-      const fGeoSculpt = pane.addFolder({
-        title: "Old stone sculpt (geometry)",
-        expanded: true,
+      const fShape = pane.addFolder({ title: "Brick shape (pillow / chip)", expanded: true });
+      fShape.addBinding(params, "faceBulge", {
+        label: "face bulge",
+        min: 0,
+        max: 0.08,
+        step: 0.001,
       });
-      fGeoSculpt.addBinding(params, "stoneSculpt", {
-        label: "surface noise",
+      fShape.addBinding(params, "chipStrength", {
+        label: "corner chip",
         min: 0,
         max: 0.06,
         step: 0.001,
       });
-      fGeoSculpt.addBinding(params, "cornerWear", {
-        label: "corner / edge wear",
+      fShape.addBinding(params, "shapeWarp", {
+        label: "shape warp ×",
         min: 0,
-        max: 0.08,
-        step: 0.001,
-      });
-      fGeoSculpt.addBinding(params, "shapeIrregularity", {
-        label: "size wobble",
-        min: 0,
-        max: 0.12,
-        step: 0.005,
-      });
-      fGeoSculpt.addBinding(params, "sculptSeed", {
-        min: 1,
-        max: 999999,
-        step: 1,
+        max: 2.5,
+        step: 0.05,
       });
 
-      const fLayout = pane.addFolder({ title: "Course layout noise", expanded: false });
-      fLayout.addBinding(params, "brickScaleRandomness", {
+      const fWall = pane.addFolder({ title: "Wall layout", expanded: true });
+      fWall.addBinding(params, "wallMortar", { label: "mortar gap", min: 0.001, max: 0.06, step: 0.001 });
+      fWall.addBinding(params, "sizeVariety", {
+        label: "size variety (shrink)",
         min: 0,
-        max: 0.5,
-        step: 0.01,
+        max: 1,
+        step: 0.02,
       });
-      fLayout.addBinding(params, "brickRotationVariation", {
+      fWall.addBinding(params, "brickRotationVariation", {
+        label: "rotation jitter",
         min: 0,
-        max: 0.15,
-        step: 0.005,
-      });
-      fLayout.addBinding(params, "brickVerticalVariation", {
-        min: 0,
-        max: 0.15,
-        step: 0.005,
-      });
-      fLayout.addBinding(params, "brickPlanarSlop", {
-        min: 0,
-        max: 0.08,
+        max: 0.06,
         step: 0.002,
       });
-      fLayout.addBinding(params, "colorSeed", { min: 1, max: 999999, step: 1 });
-
-      const fShader = pane.addFolder({
-        title: "Sculpt (TSL — medieval)",
-        expanded: true,
-      });
-      fShader.addBinding(params, "chipStrength", {
-        label: "corner chip ×",
+      fWall.addBinding(params, "brickVerticalVariation", {
+        label: "vertical jitter",
         min: 0,
-        max: 2.5,
-        step: 0.05,
+        max: 0.05,
+        step: 0.002,
       });
-      fShader.addBinding(params, "bumpStrength", {
-        label: "face bump ×",
+      fWall.addBinding(params, "brickPlanarSlop", {
+        label: "depth jitter",
         min: 0,
-        max: 2.5,
-        step: 0.05,
+        max: 0.03,
+        step: 0.001,
       });
-      fShader.addBinding(params, "shaderWarp", { min: 0, max: 2, step: 0.05 });
-      fShader.addBinding(params, "shaderBump", { min: 0, max: 2, step: 0.05 });
-      fShader.addBinding(params, "shaderChip", { min: 0, max: 2, step: 0.05 });
-      fShader.addBinding(params, "mossStrength", { min: 0, max: 2, step: 0.05 });
-      fShader.addBinding(params, "stainStrength", { min: 0, max: 2, step: 0.05 });
-      fShader.addBinding(params, "warmStreak", { min: 0, max: 0.25, step: 0.01 });
-      fShader.addBinding(params, "freckle", { min: 0, max: 0.3, step: 0.01 });
-      fShader.addBinding(params, "roughnessBase", {
-        min: 0.4,
-        max: 1,
-        step: 0.01,
-      });
-      fShader.addBinding(params, "roughnessMicro", {
-        min: 0,
-        max: 0.2,
-        step: 0.005,
-      });
+      fWall.addBinding(params, "colorSeed", { min: 1, max: 999999, step: 1 });
 
       const fPrev = pane.addFolder({ title: "Preview", expanded: false });
       fPrev.addBinding(params, "previewCols", { min: 3, max: 14, step: 1 });
@@ -883,21 +771,12 @@
       fPrev.addBinding(params, "previewBond");
       fPrev.addBinding(params, "showHeroBrick");
       fPrev.addBinding(params, "showWall");
+      fPrev.addBinding(params, "showMortarBacking", { label: "mortar backing" });
 
-      const fLight = pane.addFolder({ title: "Lighting", expanded: true });
+      const fLight = pane.addFolder({ title: "Lighting", expanded: false });
       fLight.addBinding(params, "sunIntensity", { min: 0.5, max: 8, step: 0.1 });
-      fLight.addBinding(params, "fillIntensity", {
-        label: "fill",
-        min: 0,
-        max: 4,
-        step: 0.05,
-      });
-      fLight.addBinding(params, "ambientIntensity", {
-        label: "sky fill",
-        min: 0,
-        max: 2.5,
-        step: 0.02,
-      });
+      fLight.addBinding(params, "fillIntensity", { label: "fill", min: 0, max: 4, step: 0.05 });
+      fLight.addBinding(params, "ambientIntensity", { label: "sky fill", min: 0, max: 2.5, step: 0.02 });
       fLight.addBinding(params, "exposure", { min: 0.6, max: 2.5, step: 0.05 });
       fLight.addButton({ title: "Frame preview" }).on("click", () => {
         controls.target.set(0.15, 1.35, 0);
@@ -911,10 +790,6 @@
         "brickD",
         "brickRound",
         "roundSegments",
-        "stoneSculpt",
-        "cornerWear",
-        "shapeIrregularity",
-        "sculptSeed",
       ]);
       const layoutKeys = new Set([
         "previewCols",
@@ -922,7 +797,9 @@
         "previewBond",
         "showHeroBrick",
         "showWall",
-        "brickScaleRandomness",
+        "showMortarBacking",
+        "wallMortar",
+        "sizeVariety",
         "brickRotationVariation",
         "brickVerticalVariation",
         "brickPlanarSlop",
@@ -933,10 +810,10 @@
         syncLiveUniforms();
         updateExportSnippet();
         const key = ev.target?.key;
-        if (layoutKeys.has(key)) {
-          scheduleRebuild(false);
-        } else if (geoKeys.has(key)) {
+        if (geoKeys.has(key)) {
           scheduleRebuild(true);
+        } else if (layoutKeys.has(key)) {
+          scheduleRebuild(false);
         }
       });
 
@@ -944,7 +821,6 @@
         scheduleRebuild(true);
       });
 
-      ensureGround();
       buildPreview();
       syncLiveUniforms();
 

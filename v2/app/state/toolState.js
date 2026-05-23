@@ -543,6 +543,41 @@ export function createToolState() {
       reflectionScale: 0.5,
       reflectionEveryN: 2,
     },
+    /** NPC / enemy spawn authoring (capsule placeholders → GLB later). */
+    actors: {
+      placeTool: "npc",
+      transformMode: "translate",
+      capsuleRadius: 0.35,
+      capsuleHeight: 1.0,
+      floorOffset: 0,
+      npcColor: "#33aa88",
+      enemyColor: "#8b2549",
+      npcDefaults: {
+        enabled: true,
+        speed: 2.2,
+        wanderRadius: 12,
+        directionChangeInterval: 3,
+        turnSpeed: 5,
+        idleWhenNearPlayer: true,
+        nearPlayerDistance: 4,
+      },
+      enemyDefaults: {
+        enabled: true,
+        maxHp: 100,
+        speed: 1.8,
+        wanderRadius: 8,
+        directionChangeInterval: 4,
+        turnSpeed: 4,
+        /** Enemies keep patrolling when the player is close (unlike NPCs). */
+        idleWhenNearPlayer: false,
+        nearPlayerDistance: 5,
+      },
+      dialogue: {
+        enabled: true,
+        interactRadius: 3.5,
+        defaultDialogueId: "villager_greet",
+      },
+    },
     waterfall: {
       placeTool: "waterfall",
       splashVisible: true,

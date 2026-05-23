@@ -132,6 +132,9 @@ import { createWaterMaterials } from "../render/water/waterMaterial.js";
 import { WaterSystem } from "../tools/water/waterSystem.js";
 import { DecalSystem } from "../tools/decals/decalSystem.js";
 import { WaterfallSystem } from "../tools/waterfall/waterfallSystem.js";
+import { ActorSystem } from "../tools/actors/actorSystem.js";
+import { DialogueRunner } from "../play/dialogue/dialogueRunner.js";
+import { listDialogueGraphIds } from "../play/dialogue/dialogueGraphs.js";
 import { BarrierStore } from "../core/barrier/barrierStore.js";
 import { BarrierSystem } from "../tools/barrier/barrierSystem.js";
 import { BarrierOverlay } from "../render/barrier/barrierOverlay.js";
@@ -1088,6 +1091,7 @@ export async function startV2App(opts = {}) {
     if (toolState.mode === "fullRoad") fullRoadSystem.handleDecalTransformEnd();
     if (toolState.mode === "smartRoad")
       smartRoadSystem.handleDecalTransformEnd();
+    if (toolState.mode === "actors") actorSystem.handleTransformEnd();
   });
 
   // ── Water system ──────────────────────────────────────────────────────────
@@ -1107,6 +1111,21 @@ export async function startV2App(opts = {}) {
     toolState,
     transformControls,
   });
+  const actorSystem = new ActorSystem({
+    scene,
+    toolState,
+    getWorldHeight: (x, z) => terrainStore.getWorldHeight(x, z),
+    transformControls,
+    worldHalf: config.world.size * 0.5,
+  });
+
+  {
+    const sculptHeightsChanged = sculptSystem.onHeightsChanged;
+    sculptSystem.onHeightsChanged = () => {
+      sculptHeightsChanged();
+      actorSystem.snapAllToTerrain();
+    };
+  }
 
   // Single source of truth for the player BVH bake. Used by both the manual
   // rebake button (cliffs/props panel) and the cave system (auto-rebake on
@@ -1294,6 +1313,16 @@ export async function startV2App(opts = {}) {
     excludeFromReflection: (obj) => roadReflection.excludeFromReflection(obj),
     onSpawnChanged: () => _playSpawnChanged?.(),
   });
+
+  const dialogueRunner = new DialogueRunner({
+    toolState,
+    actorSystem,
+    playMode,
+    camera,
+    domElement: renderer.domElement,
+  });
+  dialogueRunner.attach();
+
   const gestureAudioUnlock = () => {
     audioSystem.unlock();
   };
@@ -1358,6 +1387,13 @@ export async function startV2App(opts = {}) {
         toolState.waterfall.transformMode || "translate",
       );
     }
+    if (toolState.mode !== "actors") {
+      actorSystem.deselect();
+    } else {
+      transformControls.setMode(
+        toolState.actors.transformMode || "translate",
+      );
+    }
     if (toolState.mode !== "decals") {
       decalSystem.deselect();
     } else {
@@ -1412,11 +1448,16 @@ export async function startV2App(opts = {}) {
     if (toolState.mode === "play") {
       const immersive = _pendingPlayImmersive === true;
       _pendingPlayImmersive = false;
+      actorSystem.deselect();
+      actorSystem.enterPlayMode();
       playMode.enter({ editorRelaxedPointer: !immersive });
+      dialogueRunner.end();
       collectibleRuntime.start();
       syncPlayEditorChrome(immersive);
       document.getElementById("play-stop-bar")?.classList.add("visible");
     } else if (playMode.active) {
+      dialogueRunner.end();
+      actorSystem.exitPlayMode();
       playMode.exit();
       collectibleRuntime.stop();
       syncPlayEditorChrome(false);
@@ -1491,6 +1532,14 @@ export async function startV2App(opts = {}) {
     _deleteSelectedWater,
     _clearAllWater;
   let _waterfallChanged, _deleteSelectedWaterfall, _clearAllWaterfalls;
+  let _actorsChanged,
+    _deleteSelectedActor,
+    _clearAllActors,
+    _clearNpcs,
+    _clearEnemies,
+    _snapSelectedToTerrain,
+    _actorsTransformModeChanged,
+    _refreshActorsPanel;
   let _decalLoadImage,
     _decalOpacityChanged,
     _decalAlignChanged,
@@ -2522,6 +2571,50 @@ export async function startV2App(opts = {}) {
       waterfallSystem.clearAll();
       ui?.pane.refresh();
     }),
+    actorSystem,
+    onActorsChanged: (_actorsChanged = () => {
+      actorSystem.syncMaterials();
+      actorSystem.refreshCapsuleGeometry();
+      ui?.refreshActorCounts?.();
+      _refreshActorsPanel?.();
+      ui?.pane.refresh();
+    }),
+    onDeleteSelectedActor: (_deleteSelectedActor = () => {
+      actorSystem.deleteSelected();
+      ui?.refreshActorCounts?.();
+      _refreshActorsPanel?.();
+      ui?.pane.refresh();
+    }),
+    onClearAllActors: (_clearAllActors = () => {
+      actorSystem.clearAll();
+      ui?.refreshActorCounts?.();
+      _refreshActorsPanel?.();
+      ui?.pane.refresh();
+    }),
+    onClearNpcs: (_clearNpcs = () => {
+      actorSystem.clearByRole("npc");
+      ui?.refreshActorCounts?.();
+      _refreshActorsPanel?.();
+      ui?.pane.refresh();
+    }),
+    onClearEnemies: (_clearEnemies = () => {
+      actorSystem.clearByRole("enemy");
+      ui?.refreshActorCounts?.();
+      _refreshActorsPanel?.();
+      ui?.pane.refresh();
+    }),
+    onSnapSelectedToTerrain: (_snapSelectedToTerrain = () => {
+      if (actorSystem.selected?.mesh) {
+        actorSystem.snapMeshToTerrain(actorSystem.selected.mesh);
+      }
+      _refreshActorsPanel?.();
+    }),
+    onActorsTransformModeChanged: (_actorsTransformModeChanged = () => {
+      if (toolState.mode === "actors") {
+        transformControls.setMode(toolState.actors.transformMode || "translate");
+      }
+      ui?.pane.refresh();
+    }),
     onDecalLoadImage: (_decalLoadImage = () => decalSystem.openImagePicker()),
     onDecalOpacityChanged: (_decalOpacityChanged = () => {
       decalSystem.applyOpacityToSelected();
@@ -2642,6 +2735,7 @@ export async function startV2App(opts = {}) {
       toolState._propExportData = () => propStore.exportData();
       toolState._waterExportData = () => waterStore.exportData();
       toolState._waterfallExportData = () => waterfallSystem.exportData();
+      toolState._actorExportData = () => actorSystem.exportData();
       toolState._barrierExportData = () => barrierStore.exportData();
       toolState._holeExportData = () => holeStore.exportData();
       toolState._caveExportData = () => caveStore.serialize();
@@ -2670,6 +2764,7 @@ export async function startV2App(opts = {}) {
       delete toolState._propExportData;
       delete toolState._waterExportData;
       delete toolState._waterfallExportData;
+      delete toolState._actorExportData;
       delete toolState._barrierExportData;
       delete toolState._holeExportData;
       delete toolState._caveExportData;
@@ -2843,6 +2938,14 @@ export async function startV2App(opts = {}) {
         } else {
           waterfallSystem.clearAll();
         }
+        actorSystem.syncMaterials();
+        if (project.settings?.actorSpawns) {
+          actorSystem.importData(project.settings.actorSpawns);
+        } else {
+          actorSystem.clearAll();
+        }
+        ui?.refreshActorCounts?.();
+        _refreshActorsPanel?.();
         if (
           project.settings?.decals &&
           Array.isArray(project.settings.decals)
@@ -3084,6 +3187,8 @@ export async function startV2App(opts = {}) {
 
   playMode.onExit = () => {
     toolState.mode = "view";
+    dialogueRunner.end();
+    actorSystem.exitPlayMode();
     playMode.exit();
     collectibleRuntime.stop();
     syncPlayEditorChrome(false);
@@ -3499,6 +3604,23 @@ export async function startV2App(opts = {}) {
         hit?.point,
       );
       if (consumed) ui?.pane.refresh();
+      return;
+    }
+    if (toolState.mode === "actors" && event.button === 0) {
+      if (transformControls.dragging) return;
+      event.preventDefault();
+      updatePointer(event);
+      const hit = pickTerrain(event);
+      const consumed = actorSystem.handlePointerDown(
+        pointerNdc,
+        camera,
+        hit ? { point: hit.point } : null,
+      );
+      if (consumed) {
+        ui?.refreshActorCounts?.();
+        _refreshActorsPanel?.();
+        ui?.pane.refresh();
+      }
       return;
     }
     if (toolState.mode === "decals" && event.button === 0) {
@@ -3997,6 +4119,7 @@ export async function startV2App(opts = {}) {
     if (toolState.mode === "props") return propSystem;
     if (toolState.mode === "water") return waterSystem;
     if (toolState.mode === "waterfall") return waterfallSystem;
+    if (toolState.mode === "actors") return actorSystem;
     if (toolState.mode === "decals") return decalSystem;
     if (toolState.mode === "barrier") return barrierSystem;
     if (toolState.mode === "hole") return holeSystem;
@@ -4065,6 +4188,7 @@ export async function startV2App(opts = {}) {
       toolState.mode !== "props" &&
       toolState.mode !== "water" &&
       toolState.mode !== "waterfall" &&
+      toolState.mode !== "actors" &&
       toolState.mode !== "decals" &&
       toolState.mode !== "play"
     ) {
@@ -4082,6 +4206,12 @@ export async function startV2App(opts = {}) {
     } else if (event.code === "Delete" && toolState.mode === "waterfall") {
       event.preventDefault();
       waterfallSystem.deleteSelected();
+      ui?.pane.refresh();
+    } else if (event.code === "Delete" && toolState.mode === "actors") {
+      event.preventDefault();
+      actorSystem.deleteSelected();
+      ui?.refreshActorCounts?.();
+      _refreshActorsPanel?.();
       ui?.pane.refresh();
     } else if (event.code === "Delete" && toolState.mode === "decals") {
       event.preventDefault();
@@ -4115,6 +4245,11 @@ export async function startV2App(opts = {}) {
       event.preventDefault();
       toolState.mode = toolState.mode === "waterfall" ? "view" : "waterfall";
       applyModeChangedEffects();
+    } else if (event.code === "KeyN" && !ctrl && !playMode.active) {
+      event.preventDefault();
+      toolState.mode = toolState.mode === "actors" ? "view" : "actors";
+      applyModeChangedEffects();
+      ui?.pane.refresh();
     } else if (toolState.mode === "decals" && !ctrl) {
       if (event.code === "KeyW") {
         event.preventDefault();
@@ -4143,6 +4278,23 @@ export async function startV2App(opts = {}) {
       } else if (event.code === "KeyR") {
         event.preventDefault();
         toolState.waterfall.transformMode = "scale";
+        transformControls.setMode("scale");
+        ui?.pane.refresh();
+      }
+    } else if (toolState.mode === "actors" && !ctrl) {
+      if (event.code === "KeyW") {
+        event.preventDefault();
+        toolState.actors.transformMode = "translate";
+        transformControls.setMode("translate");
+        ui?.pane.refresh();
+      } else if (event.code === "KeyE") {
+        event.preventDefault();
+        toolState.actors.transformMode = "rotate";
+        transformControls.setMode("rotate");
+        ui?.pane.refresh();
+      } else if (event.code === "KeyR") {
+        event.preventDefault();
+        toolState.actors.transformMode = "scale";
         transformControls.setMode("scale");
         ui?.pane.refresh();
       }
@@ -4287,6 +4439,10 @@ export async function startV2App(opts = {}) {
     if (!playMode.active) controls.update();
     const dtSec = dtMs * 0.001;
     playMode.update(dtSec);
+    if (playMode.active) {
+      actorSystem.updatePlay(dtSec, playMode.playerPos);
+      dialogueRunner.update(playMode.playerPos);
+    }
     audioSystem.update(dtSec);
     camera.updateMatrixWorld();
     const focusPos = playMode.active ? playMode.playerPos : camera.position;
@@ -4535,6 +4691,9 @@ export async function startV2App(opts = {}) {
     propStore,
     decalSystem,
     waterfallSystem,
+    actorSystem,
+    dialogueRunner,
+    listDialogueGraphIds,
     setMode(mode, opts = {}) {
       if (mode === "play") {
         _pendingPlayImmersive = opts.immersive === true;
@@ -4843,6 +5002,30 @@ export async function startV2App(opts = {}) {
     clearAllWaterfalls() {
       _clearAllWaterfalls();
     },
+    actorsChanged() {
+      _actorsChanged();
+    },
+    deleteSelectedActor() {
+      _deleteSelectedActor();
+    },
+    clearAllActors() {
+      _clearAllActors();
+    },
+    clearNpcs() {
+      _clearNpcs();
+    },
+    clearEnemies() {
+      _clearEnemies();
+    },
+    snapSelectedActorToTerrain() {
+      _snapSelectedToTerrain();
+    },
+    actorsTransformModeChanged() {
+      _actorsTransformModeChanged();
+    },
+    setActorsPanelRefresh(fn) {
+      _refreshActorsPanel = typeof fn === "function" ? fn : null;
+    },
     decalLoadImage() {
       _decalLoadImage();
     },
@@ -5148,6 +5331,8 @@ export async function startV2App(opts = {}) {
       roadReflection.dispose();
       waterMaterials.dispose();
       waterfallSystem.dispose();
+      dialogueRunner.dispose();
+      actorSystem.dispose();
       playMode.dispose();
       audioSystem.dispose();
       tileTerrainMaterial.dispose();

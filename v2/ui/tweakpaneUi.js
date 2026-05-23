@@ -16,6 +16,7 @@ import { addRiverFolder } from "./riverTweakpane.js";
 import { addSplineFolder } from "./splineTweakpane.js";
 import { addWaterFolder } from "./waterTweakpane.js";
 import { addWaterfallFolder } from "./waterfallTweakpane.js";
+import { addActorsFolder } from "./actorsTweakpane.js";
 import { addDecalFolder } from "./decalTweakpane.js";
 import { addBarrierFolder } from "./barrierTweakpane.js";
 import { addHoleFolder } from "./holeTweakpane.js";
@@ -155,6 +156,14 @@ export function createTweakpaneUi({
   onWaterfallChanged,
   onDeleteSelectedWaterfall,
   onClearAllWaterfalls,
+  onActorsChanged,
+  onDeleteSelectedActor,
+  onClearAllActors,
+  onClearNpcs,
+  onClearEnemies,
+  onSnapSelectedToTerrain,
+  onActorsTransformModeChanged,
+  actorSystem,
   onDecalLoadImage,
   onDecalOpacityChanged,
   onDecalAlignChanged,
@@ -207,6 +216,7 @@ export function createTweakpaneUi({
         "Props (I)": "props",
         "Water (W)": "water",
         "Waterfall (H)": "waterfall",
+        "Actors (N)": "actors",
         "Decals (D)": "decals",
         "Flowers (M)": "fleurs",
         "Ambient FX (X)": "ambientfx",
@@ -532,6 +542,17 @@ export function createTweakpaneUi({
     onWaterfallChanged,
     onDeleteSelectedWaterfall,
     onClearAllWaterfalls,
+  });
+
+  const actorsFolderPack = addActorsFolder(pane, toolState, {
+    actorSystem,
+    onActorsChanged,
+    onDeleteSelectedActor,
+    onClearAllActors,
+    onClearNpcs,
+    onClearEnemies,
+    onSnapSelectedToTerrain,
+    onTransformModeChanged: onActorsTransformModeChanged,
   });
 
   const decalFolder = addDecalFolder(pane, toolState, {
@@ -1354,6 +1375,8 @@ export function createTweakpaneUi({
     refreshCaveCount: caveFolderPack.refreshCount,
     fleurFolder,
     ambientFxFolder,
+    actorsFolder: actorsFolderPack.folder,
+    refreshActorCounts: actorsFolderPack.refreshCounts,
     /** Call after hotkey / wheel edits to `toolState.brush` so bindings stay in sync. */
     refreshBrush() {
       pane.refresh();
