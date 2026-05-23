@@ -216,21 +216,25 @@
         const sy = 1 + (rnd() - 0.5) * irreg;
         const sz = 1 + (rnd() - 0.5) * irreg;
 
-        geo.computeVertexNormals();
         const pos = geo.attributes.position;
+        if (irreg > 1e-5) {
+          for (let i = 0; i < pos.count; i++) {
+            pos.setXYZ(
+              i,
+              pos.getX(i) * sx,
+              pos.getY(i) * sy,
+              pos.getZ(i) * sz,
+            );
+          }
+        }
+
+        geo.computeVertexNormals();
         const norm = geo.attributes.normal;
         const p = new THREE.Vector3();
         const n = new THREE.Vector3();
-        const center = new THREE.Vector3();
 
         for (let i = 0; i < pos.count; i++) {
           p.set(pos.getX(i), pos.getY(i), pos.getZ(i));
-          if (irreg > 1e-5) {
-            p.x *= sx;
-            p.y *= sy;
-            p.z *= sz;
-          }
-
           n.set(norm.getX(i), norm.getY(i), norm.getZ(i));
 
           const nx = p.x / hw;
@@ -259,11 +263,8 @@
           let disp = sculpt * unit * noise * faceKeep;
           disp += wear * unit * cornerW * (0.55 + 0.45 * noise);
           disp += wear * unit * edgeW * 0.35 * Math.abs(noise);
-
-          if (cornerW > 0.55 && noise < -0.15) {
-            center.copy(p).multiplyScalar(0.92);
-            p.lerp(center, wear * cornerW * 0.55);
-            n.set(norm.getX(i), norm.getY(i), norm.getZ(i));
+          if (cornerW > 0.5 && noise < -0.12) {
+            disp -= wear * unit * cornerW * 0.45;
           }
 
           p.addScaledVector(n, disp);
