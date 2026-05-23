@@ -275,7 +275,7 @@ export const V2_CONFIG = {
    * Uses scene.fogNode + scaled hemisphere/IBL — not shadow-map dependent.
    */
   interior: {
-    enabled: true,
+    enabled: false,
     strength: 0.88,
     color: "#0c0e14",
     /** Scale for hemisphere + env when deep inside (0 = black fill, 1 = no change). */

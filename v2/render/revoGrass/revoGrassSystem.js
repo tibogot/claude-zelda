@@ -448,7 +448,17 @@ export class RevoGrassSystem {
       this._geminiDensityTex,
     );
     this._initialized = true;
-    await this.rebuild(toolState.revoGrass, sunDir);
+    this.setEnabled(toolState.revoGrass?.enabled);
+    if (toolState.revoGrass?.enabled) {
+      await this.rebuild(toolState.revoGrass, sunDir);
+    }
+  }
+
+  /** Build GPU mesh on first enable — avoids ~1M instances allocated while Revo is off. */
+  async ensureBuilt(rp, sunDir) {
+    if (!this._initialized || !this._heightTex) return;
+    if (this._mesh) return;
+    await this.rebuild(rp, sunDir);
   }
 
   async rebuild(rp, sunDir) {
@@ -465,6 +475,11 @@ export class RevoGrassSystem {
     );
     this._revoConfig = getRevoGrassConfig(rp);
     const cfg = this._revoConfig;
+    if (cfg.count >= 500_000) {
+      console.warn(
+        `[RevoGrass] ${cfg.count.toLocaleString()} instances — expect low FPS. Use Quality Balanced/High or lower Grid side.`,
+      );
+    }
     this._uniforms = buildUniforms(rp);
     const u = this._uniforms;
     u.uTerrainSize.value = this.config.world.size;
@@ -481,7 +496,7 @@ export class RevoGrassSystem {
     const mat = createMaterial(this._ssbo, u);
     this._mesh = new THREE.InstancedMesh(geom, mat, cfg.count);
     this._mesh.frustumCulled = false;
-    this._mesh.receiveShadow = true;
+    this._mesh.receiveShadow = rp.receiveShadow === true;
     this._mesh.castShadow = false;
     this.group.add(this._mesh);
 
@@ -508,7 +523,12 @@ export class RevoGrassSystem {
 
   setEnabled(on) {
     this._enabled = !!on;
-    this.group.visible = this._enabled;
+    if (!on) {
+      this.disposeMesh();
+      this.group.visible = false;
+      return;
+    }
+    this.group.visible = !!this._mesh;
   }
 
   syncFromState(rp, sunDir) {
@@ -567,13 +587,6 @@ export class RevoGrassSystem {
     if (!this._initialized || !this._enabled || !this._mesh || !this._ssbo)
       return;
 
-    const minInterval = rp.computeMinIntervalMs ?? 0;
-    if (minInterval > 0) {
-      const now = performance.now();
-      if (now - this._lastComputeMs < minInterval) return;
-      this._lastComputeMs = now;
-    }
-
     const u = this._uniforms;
     if (opts.playMode && rp.useGlobalWindInPlay !== false) {
       u.uWindIntensity.value =
@@ -583,8 +596,10 @@ export class RevoGrassSystem {
         u.uWindDir.value.set(Math.cos(wr), Math.sin(wr));
       }
     }
+
     const dx = anchorPos.x - this._lastAnchor.x;
     const dz = anchorPos.z - this._lastAnchor.z;
+    const moved = Math.abs(dx) + Math.abs(dz) > 0.02;
     this._anchorDelta.set(dx, dz);
     u.uAnchorDeltaXZ.value.copy(this._anchorDelta);
     u.uAnchorPosition.value.copy(anchorPos);
@@ -604,7 +619,15 @@ export class RevoGrassSystem {
 
     this._lastAnchor.copy(anchorPos);
 
+    const minInterval = Math.max(16, rp.computeMinIntervalMs ?? 33);
+    const now = performance.now();
+    const sinceCompute = now - this._lastComputeMs;
+    const moveInterval = Math.min(16, minInterval);
+    const requiredInterval = moved ? moveInterval : minInterval;
+    if (sinceCompute < requiredInterval) return;
+
     if (this._computeBusy) return;
+    this._lastComputeMs = now;
     this._computeBusy = true;
     this._renderer
       .computeAsync(this._ssbo.computeUpdate)

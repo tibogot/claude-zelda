@@ -13,6 +13,7 @@ import {
   min,
   mix,
   Loop,
+  If,
 } from "three/tsl";
 import {
   INTERIOR_MAX_BOXES,
@@ -120,9 +121,13 @@ export function createInteriorLightingNodes(registry) {
     return clamp(factor, float(0), float(1));
   })();
 
+  // When disabled, skip capsule/box loops entirely (was running 192+ iters per pixel × all fog materials).
   const interiorFogFactorNode = Fn(() => {
-    const raw = interiorFactorNode;
-    return raw.mul(uEnabled).mul(uStrength);
+    const out = float(0).toVar("interiorFogOut");
+    If(uEnabled.greaterThan(0.5), () => {
+      out.assign(interiorFactorNode.mul(uStrength));
+    });
+    return out;
   })();
 
   function syncFromRegistry(registryRef, interior) {

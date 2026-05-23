@@ -1056,9 +1056,11 @@ export function createToolState() {
     /** Revo-style fluffy tile (follows player / camera) — separate from Gemini G and billboard U. */
     revoGrass: {
       enabled: false,
+      qualityPreset: "ultra",
       tileSize: 130,
       bladesPerSide: 1088,
       segments: 4,
+      receiveShadow: false,
       bladeHeight: 1.75,
       bladeWidth: 0.06,
       bladeMinScale: 0.75,
@@ -1096,7 +1098,7 @@ export function createToolState() {
       exclusionEnabled: false,
       exclusionSource: "mask",
       exclusionThreshold: 0.25,
-      computeMinIntervalMs: 0,
+      computeMinIntervalMs: 33,
       useGlobalWindInPlay: true,
       colorBrightness: 1,
     },

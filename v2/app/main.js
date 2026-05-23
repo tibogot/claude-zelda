@@ -1338,7 +1338,7 @@ export async function startV2App(opts = {}) {
       grassManager.syncUniforms(toolState.grass, sunDir);
       ui?.pane.refresh();
     }
-    if (toolState.mode === "revoGrass") {
+    if (toolState.mode === "revoGrass" && toolState.revoGrass.enabled) {
       revoGrassSystem.syncFromState(toolState.revoGrass, sunDir);
     }
     if (toolState.mode !== "cliffs") {
@@ -1928,12 +1928,22 @@ export async function startV2App(opts = {}) {
         ui?.pane.refresh();
       }
     }),
-    onRevoGrassChanged: (_revoGrassChanged = () => {
-      revoGrassSystem.syncFromState(toolState.revoGrass, sunDir);
+    onRevoGrassChanged: (_revoGrassChanged = async () => {
+      const rp = toolState.revoGrass;
+      if (rp.enabled) {
+        await revoGrassSystem.ensureBuilt(rp, sunDir);
+        revoGrassSystem.syncFromState(rp, sunDir);
+        await revoGrassSystem.precompile(renderer, camera);
+      } else {
+        revoGrassSystem.setEnabled(false);
+      }
     }),
     onRevoGrassRebuild: (_revoGrassRebuild = async () => {
-      await revoGrassSystem.rebuild(toolState.revoGrass, sunDir);
-      revoGrassSystem.precompile(renderer, camera);
+      const rp = toolState.revoGrass;
+      if (!rp.enabled) return;
+      await revoGrassSystem.rebuild(rp, sunDir);
+      revoGrassSystem.syncFromState(rp, sunDir);
+      await revoGrassSystem.precompile(renderer, camera);
     }),
     onTreeCastShadowChanged: (_treeCastShadowChanged = () => {
       for (let i = 0; i < toolState.treeSlots.length; i++) {
@@ -2713,10 +2723,12 @@ export async function startV2App(opts = {}) {
         if (project.settings?.revoGrassMask) {
           revoGrassSystem.mask.importData(project.settings.revoGrassMask);
         }
-        if (project.settings?.revoGrass) {
+        if (project.settings?.revoGrass && toolState.revoGrass.enabled) {
           await revoGrassSystem.rebuild(toolState.revoGrass, sunDir);
           revoGrassSystem.syncFromState(toolState.revoGrass, sunDir);
-          revoGrassSystem.precompile(renderer, camera);
+          await revoGrassSystem.precompile(renderer, camera);
+        } else {
+          revoGrassSystem.setEnabled(false);
         }
         propTextureLibrary.applyOverrides(toolState.propMaterialOverrides);
         riverSystem.syncMaterial();
@@ -3219,7 +3231,9 @@ export async function startV2App(opts = {}) {
   await revoGrassSystem.init(renderer, globalHeightTex, sunDir, toolState, {
     geminiDensityTex: grassManager.densityTex,
   });
-  revoGrassSystem.precompile(renderer, camera);
+  if (toolState.revoGrass.enabled) {
+    await revoGrassSystem.precompile(renderer, camera);
+  }
 
   // Pre-compile terrain pipelines for all LOD segment counts to avoid hitches
   {
@@ -4288,7 +4302,9 @@ export async function startV2App(opts = {}) {
       updateSunSky();
       if (grassManager.uniforms)
         grassManager.uniforms.uSunDir.value.copy(sunDir);
-      revoGrassSystem.syncFromState(toolState.revoGrass, sunDir);
+      if (toolState.revoGrass.enabled) {
+        revoGrassSystem.syncFromState(toolState.revoGrass, sunDir);
+      }
       foliageLodRenderer.updateSunDirection(sunDir);
       billboardRenderer.updateSunDirection(sunDir);
       billboardGrassRenderer.updateSunDirection(sunDir);
@@ -4301,16 +4317,19 @@ export async function startV2App(opts = {}) {
       _lastInteriorSnap = interiorSnap;
       syncInteriorUniforms();
     }
-    _interiorFocusPos.copy(focusPos);
-    const interiorAmb = interiorRegistry.sampleFactorAt(
-      _interiorFocusPos,
-      Int,
-    );
-    const fillScale = THREE.MathUtils.lerp(
-      1,
-      Int.ambientScale ?? 0.22,
-      interiorAmb,
-    );
+    let fillScale = 1;
+    if (Int.enabled) {
+      _interiorFocusPos.copy(focusPos);
+      const interiorAmb = interiorRegistry.sampleFactorAt(
+        _interiorFocusPos,
+        Int,
+      );
+      fillScale = THREE.MathUtils.lerp(
+        1,
+        Int.ambientScale ?? 0.22,
+        interiorAmb,
+      );
+    }
     hemi.intensity = Li.hemiIntensity * fillScale;
     if (toolState.skyMode === "physical") {
       scene.environmentIntensity = Li.envIntensity * fillScale;
@@ -4385,15 +4404,17 @@ export async function startV2App(opts = {}) {
       toolState.grass,
       playMode.active ? playMode.playerPos : null,
     );
-    const afxWind = toolState.ambientFx;
-    revoGrassSystem.setPlayWind({
-      intensityMul: afxWind.windStrength ?? 1,
-      angleDeg:
-        (Math.atan2(afxWind.windZ ?? 0, afxWind.windX ?? 1) * 180) / Math.PI,
-    });
-    revoGrassSystem.update(toolState.revoGrass, focusPos, camera, {
-      playMode: playMode.active,
-    });
+    if (toolState.revoGrass.enabled) {
+      const afxWind = toolState.ambientFx;
+      revoGrassSystem.setPlayWind({
+        intensityMul: afxWind.windStrength ?? 1,
+        angleDeg:
+          (Math.atan2(afxWind.windZ ?? 0, afxWind.windX ?? 1) * 180) / Math.PI,
+      });
+      revoGrassSystem.update(toolState.revoGrass, focusPos, camera, {
+        playMode: playMode.active,
+      });
+    }
 
     fleurSystem.update(
       playMode.active ? playMode.playerPos : focusPos,
@@ -4433,13 +4454,17 @@ export async function startV2App(opts = {}) {
           toolState.water.reflectionScale,
           toolState.water.reflectionEveryN,
         );
+        const reflExclude = [grassManager.group];
+        if (toolState.revoGrass.enabled && revoGrassSystem.group.children.length > 0) {
+          reflExclude.push(revoGrassSystem.group);
+        }
         waterMaterials.renderLakeReflection(
           camera,
           renderer,
           scene,
           waterStore.bodies,
           waterStore.lakeBodies,
-          [grassManager.group, revoGrassSystem.group],
+          reflExclude,
         );
       } else {
         waterMaterials.lakeShader.uniforms.reflectEnabled.value = 0;
