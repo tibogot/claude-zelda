@@ -785,13 +785,14 @@ function clearBullets(pool) {
   }
 }
 
-const MODE_ORDER = ["capsule", "char", "fly", "car", "lotus"];
+const MODE_ORDER = ["capsule", "char", "fly", "car", "lotus", "rts"];
 const MODE_META = {
   capsule: { label: "Capsule", icon: "◉", digit: "1" },
   char:    { label: "Character", icon: "🧝", digit: "2" },
   fly:     { label: "Flight", icon: "✈", digit: "3" },
   car:     { label: "Bruno", icon: "🚙", digit: "4" },
   lotus:   { label: "Lotus", icon: "🏎", digit: "5" },
+  rts:     { label: "Director", icon: "🎬", digit: "6" },
 };
 
 export class PlayMode {
@@ -812,6 +813,7 @@ export class PlayMode {
     cameraCollisionSettings,
     audioSystem,
     excludeFromReflection,
+    onSpawnChanged,
   }) {
     this.scene = scene;
     this.camera = camera;
@@ -826,6 +828,7 @@ export class PlayMode {
     this.carAudioSettings = carAudioSettings || {};
     this._excludeFromReflection = excludeFromReflection || null;
     this.spawnSettings = spawnSettings || null;
+    this._onSpawnChanged = typeof onSpawnChanged === "function" ? onSpawnChanged : null;
     this.cameraCollisionSettings = cameraCollisionSettings || null;
     /** @type {object | null} */
     this._audioSystem = audioSystem || null;
@@ -855,6 +858,14 @@ export class PlayMode {
     /** Editor windowed play: no pointer lock; RMB drag to look; pointer unlock does not exit play. */
     this._editorRelaxedPointer = false;
     this._rmbLookActive = false;
+
+    // RTS / Director camera state (no pawn — pure top-down free camera)
+    this.rtsFocusX = 0;
+    this.rtsFocusZ = 0;
+    this.rtsYaw = 0;
+    this.rtsRmbDrag = false;
+    this._rtsMouseX = 0;
+    this._rtsMouseY = 0;
 
     // Fly state
     this.flyHeading = 0;
@@ -902,6 +913,9 @@ export class PlayMode {
     this._onRelaxedPointerDown = this._onRelaxedPointerDown.bind(this);
     this._onRelaxedPointerUp = this._onRelaxedPointerUp.bind(this);
     this._onRelaxedContextMenu = this._onRelaxedContextMenu.bind(this);
+    this._onRtsPointerDown = this._onRtsPointerDown.bind(this);
+    this._onRtsPointerUp = this._onRtsPointerUp.bind(this);
+    this._onRtsContextMenu = this._onRtsContextMenu.bind(this);
     this._moveTarget = null;
 
     this._raycaster = new THREE.Raycaster();
@@ -1090,6 +1104,7 @@ export class PlayMode {
       car:     { fov: 60 },   // car uses carSettings for the rest
       lotus:   { fov: this.lotusCam.fov }, // mirror; lotusCam.fov stays authoritative
       iso:     { fov: 60, pitch: ISO_PITCH },
+      rts:     { fov: 50, distance: 60, pitch: 0.95, panSpeed: 40, rotateSens: 0.003, edgePan: false, edgePanZone: 24, edgePanSpeed: 30 },
     };
     this._loadCameraTuning();
     this._cameraTuningGui = null;
@@ -1104,6 +1119,12 @@ export class PlayMode {
     this._pauseBadge = null;
     this._pauseBadgeLabel = null;
     this._createPauseBadge();
+
+    // Transient toast (respawn / bookmark feedback)
+    this._toastEl = null;
+    this._toastInner = null;
+    this._toastTimer = null;
+    this._createToast();
   }
 
   _createModePill() {
@@ -1149,16 +1170,21 @@ export class PlayMode {
     if (this._modePillLabel) this._modePillLabel.textContent = meta.label;
     if (this._modePillKey) this._modePillKey.textContent = `${meta.digit} · G wheel · F free cam`;
     if (this._modePillView) {
-      const isIso = this.camView === "iso";
-      this._modePillView.textContent = isIso ? "ISO" : "TPS";
-      // Amber tint for iso to draw the eye when toggled
-      this._modePillView.style.color = isIso ? "#ffd9a0" : "rgba(180,210,230,0.85)";
-      this._modePillView.style.background = isIso
-        ? "rgba(195,145,75,0.22)"
-        : "rgba(110,150,180,0.18)";
-      this._modePillView.style.borderColor = isIso
-        ? "rgba(225,170,90,0.4)"
-        : "rgba(140,175,200,0.25)";
+      if (this.moveMode === "rts") {
+        // RTS has its own camera scheme; TPS/ISO badge doesn't apply.
+        this._modePillView.style.display = "none";
+      } else {
+        this._modePillView.style.display = "";
+        const isIso = this.camView === "iso";
+        this._modePillView.textContent = isIso ? "ISO" : "TPS";
+        this._modePillView.style.color = isIso ? "#ffd9a0" : "rgba(180,210,230,0.85)";
+        this._modePillView.style.background = isIso
+          ? "rgba(195,145,75,0.22)"
+          : "rgba(110,150,180,0.18)";
+        this._modePillView.style.borderColor = isIso
+          ? "rgba(225,170,90,0.4)"
+          : "rgba(140,175,200,0.25)";
+      }
     }
   }
 
@@ -1567,6 +1593,15 @@ export class PlayMode {
       const t = this.cameraTuning.iso;
       folder.add(t, "fov", 30, 90, 1).name("FOV").onChange(onAny);
       folder.add(t, "pitch", 0.4, 1.4, 0.01).name("Pitch (rad)").onChange(this._saveCameraTuning.bind(this));
+    } else if (mode === "rts") {
+      const t = this.cameraTuning.rts;
+      folder.add(t, "fov", 30, 90, 1).name("FOV").onChange(onAny);
+      folder.add(t, "distance", 6, 400, 1).name("Distance").onChange(this._saveCameraTuning.bind(this));
+      folder.add(t, "pitch", 0.4, Math.PI / 2 - 0.05, 0.01).name("Pitch (rad)").onChange(this._saveCameraTuning.bind(this));
+      folder.add(t, "panSpeed", 5, 200, 1).name("Pan speed").onChange(this._saveCameraTuning.bind(this));
+      folder.add(t, "rotateSens", 0.0005, 0.01, 0.0005).name("Rotate sens").onChange(this._saveCameraTuning.bind(this));
+      folder.add(t, "edgePan").name("Edge pan").onChange(this._saveCameraTuning.bind(this));
+      folder.add(t, "edgePanZone", 8, 80, 1).name("Edge zone (px)").onChange(this._saveCameraTuning.bind(this));
     } else {
       // capsule / char
       const t = this.cameraTuning[mode];
@@ -1585,6 +1620,7 @@ export class PlayMode {
           car:     { fov: 60 },
           lotus:   { fov: 70 },
           iso:     { fov: 60, pitch: ISO_PITCH },
+          rts:     { fov: 50, distance: 60, pitch: 0.95, panSpeed: 40, rotateSens: 0.003, edgePan: false, edgePanZone: 24, edgePanSpeed: 30 },
         }[mode];
         if (!defaults) return;
         Object.assign(this.cameraTuning[mode], defaults);
@@ -1668,6 +1704,123 @@ export class PlayMode {
   _stepOneFrame() {
     if (!this.active || !this.paused) return;
     this._frameStepPending = 1;
+  }
+
+  _createToast() {
+    const el = document.createElement("div");
+    el.id = "play-toast";
+    el.style.cssText = [
+      "position:fixed",
+      "top:70px",
+      "left:50%",
+      "transform:translateX(-50%)",
+      "z-index:8",
+      "opacity:0",
+      "pointer-events:none",
+      "transition:opacity 180ms ease",
+      "font-family:system-ui,-apple-system,Segoe UI,Roboto,Ubuntu,sans-serif",
+      "-webkit-font-smoothing:antialiased",
+      "filter:drop-shadow(0 12px 32px rgba(0,0,0,0.55))",
+    ].join(";");
+    el.innerHTML = `<div id="play-toast-inner" style="padding:9px 18px;border-radius:999px;background:rgba(8,14,10,0.82);backdrop-filter:blur(14px) saturate(1.2);-webkit-backdrop-filter:blur(14px) saturate(1.2);border:1px solid rgba(140,220,160,0.45);box-shadow:inset 0 1px 0 rgba(255,255,255,0.06),0 8px 22px rgba(0,0,0,0.4),0 0 24px rgba(120,200,140,0.22);font-size:11px;font-weight:700;letter-spacing:0.18em;color:#c8f5d4;text-transform:uppercase;">message</div>`;
+    document.body.appendChild(el);
+    this._toastEl = el;
+    this._toastInner = el.querySelector("#play-toast-inner");
+    this._toastTimer = null;
+  }
+
+  _showToast(text, accent = "green") {
+    if (!this._toastEl) return;
+    const palette = accent === "amber"
+      ? { bg: "rgba(14,10,8,0.82)", border: "rgba(225,170,90,0.45)", color: "#ffd9a0", glow: "rgba(225,170,90,0.22)" }
+      : { bg: "rgba(8,14,10,0.82)", border: "rgba(140,220,160,0.45)", color: "#c8f5d4", glow: "rgba(120,200,140,0.22)" };
+    this._toastInner.textContent = text;
+    this._toastInner.style.background = palette.bg;
+    this._toastInner.style.borderColor = palette.border;
+    this._toastInner.style.color = palette.color;
+    this._toastInner.style.boxShadow = `inset 0 1px 0 rgba(255,255,255,0.06),0 8px 22px rgba(0,0,0,0.4),0 0 24px ${palette.glow}`;
+    this._toastEl.style.opacity = "1";
+    if (this._toastTimer) clearTimeout(this._toastTimer);
+    this._toastTimer = setTimeout(() => {
+      if (this._toastEl) this._toastEl.style.opacity = "0";
+      this._toastTimer = null;
+    }, 1400);
+  }
+
+  _bookmarkSpawn() {
+    if (!this.active) return;
+    if (!this.spawnSettings) {
+      this._showToast("⚠ Spawn settings unavailable", "amber");
+      return;
+    }
+    const spawn = this.spawnSettings;
+    spawn.enabled = true;
+    spawn.x = this.playerPos.x;
+    spawn.y = this.playerPos.y;
+    spawn.z = this.playerPos.z;
+    spawn.yawDeg = THREE.MathUtils.radToDeg(this._currentYaw());
+    if (this._onSpawnChanged) this._onSpawnChanged();
+    this._showToast("📍 Spawn bookmarked");
+  }
+
+  _updateRtsCamera(dtSec) {
+    const t = this.cameraTuning.rts;
+    const keys = this.keysHeld;
+    const sprint = keys.ShiftLeft || keys.ShiftRight ? 2.5 : 1;
+    // Pan speed scales with zoom — closer = slower, like Google Maps.
+    const distScale = Math.max(0.25, t.distance / 60);
+    const panSpeed = t.panSpeed * sprint * distScale;
+
+    // WASD / arrows pan in camera-aligned screen space.
+    let panX = 0, panZ = 0;
+    if (keys.KeyW || keys.ArrowUp) panZ -= 1;
+    if (keys.KeyS || keys.ArrowDown) panZ += 1;
+    if (keys.KeyA || keys.ArrowLeft) panX -= 1;
+    if (keys.KeyD || keys.ArrowRight) panX += 1;
+
+    // Edge pan (opt-in)
+    if (t.edgePan && document.hasFocus()) {
+      const w = window.innerWidth, h = window.innerHeight;
+      const z = t.edgePanZone;
+      if (this._rtsMouseX < z) panX -= 1;
+      else if (this._rtsMouseX > w - z) panX += 1;
+      if (this._rtsMouseY < z) panZ -= 1;
+      else if (this._rtsMouseY > h - z) panZ += 1;
+    }
+
+    // Normalize so diagonal isn't faster
+    const mlen = Math.hypot(panX, panZ);
+    if (mlen > 0) { panX /= mlen; panZ /= mlen; }
+
+    // Rotate pan vector by RTS yaw → world-space pan
+    const sinY = Math.sin(this.rtsYaw);
+    const cosY = Math.cos(this.rtsYaw);
+    const worldDx = (panX * cosY - panZ * sinY) * panSpeed * dtSec;
+    const worldDz = (panX * sinY + panZ * cosY) * panSpeed * dtSec;
+    if (worldDx !== 0 || worldDz !== 0) {
+      this.rtsFocusX += worldDx;
+      this.rtsFocusZ += worldDz;
+      const half = this.worldHalf || Infinity;
+      this.rtsFocusX = THREE.MathUtils.clamp(this.rtsFocusX, -half, half);
+      this.rtsFocusZ = THREE.MathUtils.clamp(this.rtsFocusZ, -half, half);
+    }
+
+    // Q / E rotate yaw
+    if (keys.KeyQ) this.rtsYaw += 1.4 * dtSec;
+    if (keys.KeyE) this.rtsYaw -= 1.4 * dtSec;
+
+    // Compose camera from focus + yaw/pitch/distance
+    const pitch = THREE.MathUtils.clamp(t.pitch, 0.25, Math.PI / 2 - 0.05);
+    const dist = Math.max(2, t.distance);
+    const focusY = this.getWorldHeight(this.rtsFocusX, this.rtsFocusZ);
+    const hOff = Math.cos(pitch) * dist;
+    const vOff = Math.sin(pitch) * dist;
+    const camX = this.rtsFocusX - Math.sin(this.rtsYaw) * hOff;
+    const camZ = this.rtsFocusZ - Math.cos(this.rtsYaw) * hOff;
+    const camY = focusY + vOff;
+    this.camera.up.set(0, 1, 0);
+    this.camera.position.set(camX, camY, camZ);
+    this.camera.lookAt(this.rtsFocusX, focusY, this.rtsFocusZ);
   }
 
   _createFlyHud() {
@@ -3176,6 +3329,9 @@ export class PlayMode {
     this.renderer.domElement.addEventListener("wheel", this._onIsoWheel, {
       passive: false,
     });
+    this.renderer.domElement.addEventListener("pointerdown", this._onRtsPointerDown);
+    this.renderer.domElement.addEventListener("pointerup", this._onRtsPointerUp);
+    this.renderer.domElement.addEventListener("contextmenu", this._onRtsContextMenu);
 
     this._editorRelaxedPointer = !!opts.editorRelaxedPointer;
     this._rmbLookActive = false;
@@ -3263,6 +3419,28 @@ export class PlayMode {
     e.preventDefault();
   }
 
+  _onRtsPointerDown(e) {
+    if (!this.active || this.moveMode !== "rts" || this.detached) return;
+    if (e.button === 2) {
+      e.preventDefault();
+      this.rtsRmbDrag = true;
+      try { e.currentTarget.setPointerCapture(e.pointerId); } catch (_) { /* ignore */ }
+    }
+  }
+
+  _onRtsPointerUp(e) {
+    if (!this.active) return;
+    if (e.button === 2 && this.rtsRmbDrag) {
+      this.rtsRmbDrag = false;
+      try { e.currentTarget.releasePointerCapture(e.pointerId); } catch (_) { /* ignore */ }
+    }
+  }
+
+  _onRtsContextMenu(e) {
+    if (!this.active || this.moveMode !== "rts") return;
+    e.preventDefault();
+  }
+
   exit() {
     if (!this.active) return;
     if (this.detached) this._exitDetached();
@@ -3335,6 +3513,9 @@ export class PlayMode {
       this._onIsoPointerMove,
     );
     this.renderer.domElement.removeEventListener("wheel", this._onIsoWheel);
+    this.renderer.domElement.removeEventListener("pointerdown", this._onRtsPointerDown);
+    this.renderer.domElement.removeEventListener("pointerup", this._onRtsPointerUp);
+    this.renderer.domElement.removeEventListener("contextmenu", this._onRtsContextMenu);
 
     this._detachRelaxedPointerListeners();
     this._editorRelaxedPointer = false;
@@ -3411,6 +3592,12 @@ export class PlayMode {
     // spawn. Flying players are exempt — pilots may legitimately fly low.
     if (!this.flying && this.playerPos.y < KILLPLANE_Y) {
       this._respawnToSpawn();
+    }
+
+    // RTS / Director mode — pure top-down free camera, no pawn updates.
+    if (this.moveMode === "rts" && !this.detached) {
+      this._updateRtsCamera(dtSec);
+      return;
     }
 
     const iso = this.camView === "iso";
@@ -5239,6 +5426,7 @@ export class PlayMode {
       case "fly": return this.flyHeading;
       case "car":
       case "lotus": return this.carHeading;
+      case "rts": return this.rtsYaw;
       case "capsule":
       default: return this.capsule ? this.capsule.rotation.y : 0;
     }
@@ -5253,6 +5441,7 @@ export class PlayMode {
   _setMoveMode(target) {
     if (!MODE_META[target] || target === this.moveMode) return;
     const yaw = this._currentYaw();
+    const wasRts = this.moveMode === "rts";
     this._moveTarget = null;
     this.isoHoverRing.visible = false;
     this.isoTargetRing.visible = false;
@@ -5330,6 +5519,25 @@ export class PlayMode {
       this._lotusPhysics._driftBoostActive = false;
       this.driftMarks.reset();
       this.driftSmoke.reset();
+    } else if (target === "rts") {
+      this.moveMode = "rts";
+      // Seed focus point on the pawn so the camera arrives where it makes sense.
+      this.rtsFocusX = this.playerPos.x;
+      this.rtsFocusZ = this.playerPos.z;
+      this.rtsYaw = yaw;
+      this.carVx = 0;
+      this.carVz = 0;
+      this.rtsRmbDrag = false;
+      // Hide all pawn visuals (per-frame visibility logic is skipped by the RTS early-return)
+      if (this.capsule) this.capsule.visible = false;
+      if (this.charRoot) this.charRoot.visible = false;
+      if (this.carRoot) this.carRoot.visible = false;
+      if (this.lotusRoot) this.lotusRoot.visible = false;
+      if (this.planeRoot) this.planeRoot.visible = false;
+      // Release pointer lock so cursor is visible for edge-pan / RMB drag
+      if (document.pointerLockElement) document.exitPointerLock();
+      this.renderer.domElement.style.cursor = "";
+      this._rmbLookActive = false;
     } else {
       this.moveMode = "capsule";
       if (this.capsule) this.capsule.rotation.y = yaw;
@@ -5354,6 +5562,11 @@ export class PlayMode {
     this._applyCameraFov();
     if (this._cameraTuningGuiModeShown !== this.moveMode) {
       this._rebuildCameraTuningGui();
+    }
+    // Leaving RTS back to a pawn mode → re-acquire pointer lock (immersive only)
+    if (wasRts && target !== "rts" && this.camView !== "iso" && !this._editorRelaxedPointer) {
+      this.renderer.domElement.style.cursor = "none";
+      try { this.renderer.domElement.requestPointerLock(); } catch (_) { /* ignore */ }
     }
   }
 
@@ -5400,6 +5613,17 @@ export class PlayMode {
     if (!event.repeat && event.code === "KeyN" && this.paused) {
       event.preventDefault();
       this._stepOneFrame();
+      return;
+    }
+
+    if (!event.repeat && event.code === "Home") {
+      event.preventDefault();
+      if (event.shiftKey) {
+        this._bookmarkSpawn();
+      } else {
+        this._respawnToSpawn();
+        this._showToast("📍 Respawned", "amber");
+      }
       return;
     }
 
@@ -5602,6 +5826,16 @@ export class PlayMode {
       return;
     }
     if (this.detached) return; // OrbitControls handles mouse during detach
+    if (this.moveMode === "rts") {
+      // Track absolute screen pos for edge-pan
+      this._rtsMouseX = event.clientX || 0;
+      this._rtsMouseY = event.clientY || 0;
+      if (this.rtsRmbDrag) {
+        const t = this.cameraTuning.rts;
+        this.rtsYaw -= (event.movementX || 0) * (t?.rotateSens ?? 0.003);
+      }
+      return;
+    }
     const locked = !!document.pointerLockElement;
     const relaxedLook =
       this._editorRelaxedPointer && this._rmbLookActive && !locked;
@@ -5650,6 +5884,7 @@ export class PlayMode {
   _onPointerLockChange() {
     if (this._editorRelaxedPointer) return;
     if (this.detached) return;
+    if (this.moveMode === "rts") return;
     if (!document.pointerLockElement && this.active && this.camView !== "iso") {
       this._exitCallback?.();
     }
@@ -5755,7 +5990,19 @@ export class PlayMode {
   }
 
   _onIsoWheel(event) {
-    if (!this.active || this.camView !== "iso" || this.detached) return;
+    if (!this.active || this.detached) return;
+    // RTS zoom
+    if (this.moveMode === "rts") {
+      event.preventDefault();
+      const t = this.cameraTuning.rts;
+      const dir = event.deltaY < 0 ? -1 : 1;
+      // Logarithmic zoom feel: smaller step when closer
+      const step = Math.max(2, t.distance * 0.12) * dir;
+      t.distance = THREE.MathUtils.clamp(t.distance + step, 6, 400);
+      this._saveCameraTuning();
+      return;
+    }
+    if (this.camView !== "iso") return;
     event.preventDefault();
     const dir = event.deltaY < 0 ? -1 : 1;
     this.isoDist = THREE.MathUtils.clamp(
@@ -5873,6 +6120,14 @@ export class PlayMode {
     if (this._pauseBadge) {
       this._pauseBadge.remove();
       this._pauseBadge = null;
+    }
+    if (this._toastTimer) {
+      clearTimeout(this._toastTimer);
+      this._toastTimer = null;
+    }
+    if (this._toastEl) {
+      this._toastEl.remove();
+      this._toastEl = null;
     }
     if (this._lotusCamGui) {
       this._lotusCamGui.destroy();

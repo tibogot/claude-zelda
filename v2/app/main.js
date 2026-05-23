@@ -1292,6 +1292,7 @@ export async function startV2App(opts = {}) {
     cameraCollisionSettings: toolState.playCamera,
     audioSystem,
     excludeFromReflection: (obj) => roadReflection.excludeFromReflection(obj),
+    onSpawnChanged: () => _playSpawnChanged?.(),
   });
   const gestureAudioUnlock = () => {
     audioSystem.unlock();
