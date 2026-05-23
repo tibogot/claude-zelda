@@ -1096,6 +1096,14 @@ export class PlayMode {
     this._cameraTuningGuiFolder = null;
     this._cameraTuningGuiModeShown = null;
     this._initCameraTuningGui();
+
+    // Pause / time-scale controls (P = pause toggle, \ = cycle slow-mo, N = frame step)
+    this.paused = false;
+    this.timeScale = 1;
+    this._frameStepPending = 0;
+    this._pauseBadge = null;
+    this._pauseBadgeLabel = null;
+    this._createPauseBadge();
   }
 
   _createModePill() {
@@ -1120,6 +1128,7 @@ export class PlayMode {
           <div style="font-size:8px;font-weight:600;letter-spacing:0.2em;color:rgba(140,175,195,0.7);text-transform:uppercase;">Play mode</div>
           <div style="display:flex;align-items:baseline;gap:8px;">
             <span id="play-mode-pill-label" style="font-size:14px;font-weight:700;color:#f2f8fc;letter-spacing:-0.01em;">Capsule</span>
+            <span id="play-mode-pill-view" style="font-size:8px;font-weight:700;letter-spacing:0.16em;color:rgba(180,210,230,0.85);text-transform:uppercase;padding:2px 6px;border-radius:999px;background:rgba(110,150,180,0.18);border:1px solid rgba(140,175,200,0.25);">TPS</span>
             <span id="play-mode-pill-key" style="font-size:9px;font-weight:600;letter-spacing:0.16em;color:rgba(140,175,195,0.7);text-transform:uppercase;">1 · hold G</span>
           </div>
         </div>
@@ -1129,6 +1138,7 @@ export class PlayMode {
     this._modePillIcon = el.querySelector("#play-mode-pill-icon");
     this._modePillLabel = el.querySelector("#play-mode-pill-label");
     this._modePillKey = el.querySelector("#play-mode-pill-key");
+    this._modePillView = el.querySelector("#play-mode-pill-view");
   }
 
   _updateModePill() {
@@ -1138,6 +1148,18 @@ export class PlayMode {
     if (this._modePillIcon) this._modePillIcon.textContent = meta.icon;
     if (this._modePillLabel) this._modePillLabel.textContent = meta.label;
     if (this._modePillKey) this._modePillKey.textContent = `${meta.digit} · G wheel · F free cam`;
+    if (this._modePillView) {
+      const isIso = this.camView === "iso";
+      this._modePillView.textContent = isIso ? "ISO" : "TPS";
+      // Amber tint for iso to draw the eye when toggled
+      this._modePillView.style.color = isIso ? "#ffd9a0" : "rgba(180,210,230,0.85)";
+      this._modePillView.style.background = isIso
+        ? "rgba(195,145,75,0.22)"
+        : "rgba(110,150,180,0.18)";
+      this._modePillView.style.borderColor = isIso
+        ? "rgba(225,170,90,0.4)"
+        : "rgba(140,175,200,0.25)";
+    }
   }
 
   _createModeWheel() {
@@ -1403,6 +1425,16 @@ export class PlayMode {
     if (document.pointerLockElement) document.exitPointerLock();
     this.renderer.domElement.style.cursor = "";
     this._rmbLookActive = false;
+    // Save and relax OrbitControls limits — the editor caps min distance at 15
+    // and polar at ~88° for terrain work; for pawn inspection we want close-up and underside.
+    this._detachSavedMinDist = this.controls.minDistance;
+    this._detachSavedMaxDist = this.controls.maxDistance;
+    this._detachSavedMaxPolar = this.controls.maxPolarAngle;
+    this._detachSavedMinPolar = this.controls.minPolarAngle;
+    this.controls.minDistance = 0.5;
+    this.controls.maxDistance = 200;
+    this.controls.maxPolarAngle = Math.PI;
+    this.controls.minPolarAngle = 0;
     // Seed orbit target on current pawn so the initial orbit feels natural.
     const ty = this.playerPos.y + 1.0;
     this.controls.target.set(this.playerPos.x, ty, this.playerPos.z);
@@ -1414,6 +1446,11 @@ export class PlayMode {
     if (!this.detached) return;
     this.detached = false;
     this.controls.enabled = false;
+    // Restore saved OrbitControls limits
+    if (this._detachSavedMinDist !== undefined) this.controls.minDistance = this._detachSavedMinDist;
+    if (this._detachSavedMaxDist !== undefined) this.controls.maxDistance = this._detachSavedMaxDist;
+    if (this._detachSavedMaxPolar !== undefined) this.controls.maxPolarAngle = this._detachSavedMaxPolar;
+    if (this._detachSavedMinPolar !== undefined) this.controls.minPolarAngle = this._detachSavedMinPolar;
     if (this._detachBadge) this._detachBadge.style.display = "none";
     if (!this.active) return;
     if (this._editorRelaxedPointer) {
@@ -1563,6 +1600,74 @@ export class PlayMode {
   _refreshCameraTuningGuiVisible() {
     if (!this._cameraTuningGui) return;
     this._cameraTuningGui.domElement.style.display = this.active ? "" : "none";
+  }
+
+  _createPauseBadge() {
+    const el = document.createElement("div");
+    el.id = "play-pause-badge";
+    el.style.cssText = [
+      "position:fixed",
+      "top:20px",
+      "right:20px",
+      "z-index:7",
+      "display:none",
+      "pointer-events:none",
+      "font-family:system-ui,-apple-system,Segoe UI,Roboto,Ubuntu,sans-serif",
+      "-webkit-font-smoothing:antialiased",
+      "filter:drop-shadow(0 12px 32px rgba(0,0,0,0.55))",
+    ].join(";");
+    el.innerHTML = `
+      <div style="display:flex;align-items:center;gap:10px;padding:8px 16px;border-radius:999px;background:rgba(4,10,18,0.78);backdrop-filter:blur(14px) saturate(1.2);-webkit-backdrop-filter:blur(14px) saturate(1.2);border:1px solid rgba(110,180,240,0.45);box-shadow:inset 0 1px 0 rgba(255,255,255,0.06),0 0 0 1px rgba(0,0,0,0.35),0 8px 22px rgba(0,0,0,0.4),0 0 24px rgba(80,160,240,0.16);">
+        <div id="play-pause-badge-icon" style="display:flex;align-items:center;justify-content:center;width:22px;height:22px;border-radius:50%;background:linear-gradient(145deg,rgba(120,180,255,0.5),rgba(30,80,160,0.6));color:#e8f4ff;font-size:12px;line-height:1;">⏸</div>
+        <div style="display:flex;align-items:baseline;gap:10px;">
+          <span id="play-pause-badge-label" style="font-size:11px;font-weight:700;letter-spacing:0.22em;color:#a8d4ff;text-transform:uppercase;">Paused</span>
+          <span style="font-size:9px;font-weight:600;letter-spacing:0.16em;color:rgba(168,212,255,0.65);text-transform:uppercase;">P · \\ · N step</span>
+        </div>
+      </div>`;
+    document.body.appendChild(el);
+    this._pauseBadge = el;
+    this._pauseBadgeLabel = el.querySelector("#play-pause-badge-label");
+    this._pauseBadgeIcon = el.querySelector("#play-pause-badge-icon");
+  }
+
+  _updatePauseBadge() {
+    if (!this._pauseBadge) return;
+    const showSlowMo = !this.paused && this.timeScale !== 1;
+    const show = this.active && (this.paused || showSlowMo);
+    this._pauseBadge.style.display = show ? "block" : "none";
+    if (!show) return;
+    if (this.paused) {
+      this._pauseBadgeIcon.textContent = "⏸";
+      this._pauseBadgeLabel.textContent = "Paused";
+    } else {
+      this._pauseBadgeIcon.textContent = "⏵";
+      this._pauseBadgeLabel.textContent = `${this.timeScale}× slow-mo`;
+    }
+  }
+
+  _togglePause() {
+    if (!this.active) return;
+    this.paused = !this.paused;
+    // Clear held movement keys on pause so user doesn't accelerate on resume
+    if (this.paused) {
+      for (const k of ["KeyW", "KeyA", "KeyS", "KeyD", "ArrowUp", "ArrowDown", "ArrowLeft", "ArrowRight", "Space", "ShiftLeft", "ShiftRight"]) {
+        delete this.keysHeld[k];
+      }
+    }
+    this._updatePauseBadge();
+  }
+
+  _cycleSlowMo() {
+    if (!this.active) return;
+    const order = [1, 0.5, 0.25, 0.1];
+    const i = order.indexOf(this.timeScale);
+    this.timeScale = order[(i + 1) % order.length];
+    this._updatePauseBadge();
+  }
+
+  _stepOneFrame() {
+    if (!this.active || !this.paused) return;
+    this._frameStepPending = 1;
   }
 
   _createFlyHud() {
@@ -3089,6 +3194,10 @@ export class PlayMode {
       this._rebuildCameraTuningGui();
     }
     this._refreshCameraTuningGuiVisible();
+    this.paused = false;
+    this.timeScale = 1;
+    this._frameStepPending = 0;
+    this._updatePauseBadge();
   }
 
   _attachRelaxedPointerListeners() {
@@ -3174,6 +3283,10 @@ export class PlayMode {
     if (this._modePill) this._modePill.style.display = "none";
     this._closeModeWheel(false);
     this._refreshCameraTuningGuiVisible();
+    this.paused = false;
+    this.timeScale = 1;
+    this._frameStepPending = 0;
+    if (this._pauseBadge) this._pauseBadge.style.display = "none";
     if (this.camera.fov !== 60) {
       this.camera.fov = 60;
       this.camera.updateProjectionMatrix();
@@ -3281,6 +3394,17 @@ export class PlayMode {
   update(dtSec) {
     if (!this.active) return;
     dtSec = Math.min(dtSec, 0.05);
+    // Time controls: paused → dt=0 (unless single frame-step requested), slow-mo → dt scaled.
+    if (this.paused) {
+      if (this._frameStepPending > 0) {
+        dtSec = 1 / 60;
+        this._frameStepPending--;
+      } else {
+        dtSec = 0;
+      }
+    } else if (this.timeScale !== 1) {
+      dtSec *= this.timeScale;
+    }
 
     // Killplane: if the player has dropped well below the world (e.g. fell
     // into a terrain hole with no cave under it), teleport them back to
@@ -5263,6 +5387,22 @@ export class PlayMode {
       }
     }
 
+    if (!event.repeat && event.code === "KeyP") {
+      event.preventDefault();
+      this._togglePause();
+      return;
+    }
+    if (!event.repeat && event.code === "Backslash") {
+      event.preventDefault();
+      this._cycleSlowMo();
+      return;
+    }
+    if (!event.repeat && event.code === "KeyN" && this.paused) {
+      event.preventDefault();
+      this._stepOneFrame();
+      return;
+    }
+
     if (!event.repeat && event.code && !this.detached) {
       let digit = null;
       if (event.code.startsWith("Digit")) digit = event.code.slice(5);
@@ -5431,6 +5571,7 @@ export class PlayMode {
           this.renderer.domElement.requestPointerLock();
         }
       }
+      this._updateModePill();
     }
 
     if (event.code.startsWith("Arrow")) event.preventDefault();
@@ -5728,6 +5869,10 @@ export class PlayMode {
       this._cameraTuningGui.destroy();
       this._cameraTuningGui = null;
       this._cameraTuningGuiFolder = null;
+    }
+    if (this._pauseBadge) {
+      this._pauseBadge.remove();
+      this._pauseBadge = null;
     }
     if (this._lotusCamGui) {
       this._lotusCamGui.destroy();

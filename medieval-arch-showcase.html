@@ -605,9 +605,11 @@
           /** Decorative gravel: max instanced pieces. */
           erosionRubbleMax: 720,
 
-          /** Directional sun (shadows). Hemisphere sky/ground fill — same idea as bricks-castle3.html */
-          sunIntensity: 2.35,
-          ambientIntensity: 0.55,
+          /** Lighting — matches brick-material-lab.html */
+          sunIntensity: 4.5,
+          ambientIntensity: 1.05,
+          fillIntensity: 1.25,
+          exposure: 1.45,
         };
 
         /** bricks-castle.html–style per-brick layout noise (uses `params`, `rnd` from builders). */
@@ -644,13 +646,14 @@
         renderer.shadowMap.enabled = true;
         renderer.shadowMap.type = THREE.PCFSoftShadowMap;
         renderer.toneMapping = THREE.ACESFilmicToneMapping;
-        renderer.toneMappingExposure = 1.12;
+        renderer.toneMappingExposure = params.exposure;
         renderer.outputColorSpace = THREE.SRGBColorSpace;
         document.body.appendChild(renderer.domElement);
         await renderer.init();
 
         const scene = new THREE.Scene();
-        scene.background = new THREE.Color(0x2a3140);
+        scene.background = new THREE.Color(0x8a9aad);
+        scene.fog = new THREE.Fog(0x8a9aad, 28, 55);
 
         const camera = new THREE.PerspectiveCamera(
           42,
@@ -700,16 +703,20 @@
         });
 
         const hemi = new THREE.HemisphereLight(
-          0xc9dce8,
-          0x5e5648,
+          0xd8e4f5,
+          0x6a6258,
           params.ambientIntensity,
         );
         hemi.name = "hemi";
         scene.add(hemi);
 
-        const sun = new THREE.DirectionalLight(0xfff8f0, params.sunIntensity);
+        const ambient = new THREE.AmbientLight(0xe8eef5, 0.35);
+        ambient.name = "ambient";
+        scene.add(ambient);
+
+        const sun = new THREE.DirectionalLight(0xfff8ee, params.sunIntensity);
         sun.name = "sun";
-        sun.position.set(14, 24, 11);
+        sun.position.set(6, 12, 8);
         sun.castShadow = true;
         sun.shadow.mapSize.set(2048, 2048);
         sun.shadow.camera.near = 0.5;
@@ -718,20 +725,36 @@
         sun.shadow.camera.right = 22;
         sun.shadow.camera.top = 22;
         sun.shadow.camera.bottom = -22;
-        sun.shadow.bias = -0.00006;
-        sun.shadow.normalBias = 0.028;
+        sun.shadow.bias = -0.00012;
+        sun.shadow.normalBias = 0.02;
         sun.shadow.radius = 4;
         sun.shadow.camera.updateProjectionMatrix();
         scene.add(sun);
+        scene.add(sun.target);
+        sun.target.position.set(0, 2.2, 0);
+
+        const fill = new THREE.DirectionalLight(0xc5d4ec, params.fillIntensity);
+        fill.name = "fill";
+        fill.position.set(-7, 6, -5);
+        scene.add(fill);
+
+        const _sunDirVec = new THREE.Vector3();
+        const sunDirUniform = uniform(new THREE.Vector3());
+
+        function syncSunDirectionUniform() {
+          _sunDirVec.copy(sun.target.position).sub(sun.position).normalize();
+          sunDirUniform.value.copy(_sunDirVec);
+        }
 
         function applyLightsFromParams() {
           sun.intensity = params.sunIntensity;
           hemi.intensity = params.ambientIntensity;
+          fill.intensity = params.fillIntensity;
+          renderer.toneMappingExposure = params.exposure;
+          syncSunDirectionUniform();
         }
 
         applyLightsFromParams();
-
-        const sunDirUniform = uniform(new THREE.Vector3());
 
         const groundMat = new THREE.MeshStandardNodeMaterial({
           roughness: 0.95,
@@ -745,8 +768,8 @@
             .add(0.5)
             .mul(0.22)
             .add(sin(xz.y.mul(1.6)).mul(0.5).add(0.5).mul(0.16));
-          const c0 = color(0x3a3d42);
-          const c1 = color(0x4f5258);
+          const c0 = color(0x4a4e54);
+          const c1 = color(0x5c636e);
           return mul(mix(c0, c1, smoothstep(0.15, 0.9, n)), float(1.05));
         })();
         groundMat.emissiveNode = Fn(() => {
@@ -2509,9 +2532,9 @@
               const baseCol = mul(body3, sub(float(1), freckle));
               const nd = clamp(dot(normalWorld, sunDirUniform), 0, 1);
               const coolShade = mix(
-                float(0.66),
-                float(1.06),
-                nd.mul(0.6).add(0.4),
+                float(0.88),
+                float(1.14),
+                nd.mul(0.55).add(0.45),
               );
               const ax = abs(normalWorld.x);
               const ay = abs(normalWorld.y);
@@ -2636,7 +2659,7 @@
             const c2 = color(0x5d4633);
             const c = mix(mix(c0, c1, ring), c2, grain.mul(0.38));
             const nd = clamp(dot(normalWorld, sunDirUniform), 0, 1);
-            return mul(c, mix(float(0.7), float(1.04), nd.mul(0.6).add(0.2)));
+            return mul(c, mix(float(0.88), float(1.12), nd.mul(0.55).add(0.45)));
           })();
         }
 
@@ -5693,11 +5716,27 @@
           })
           .on("change", applyL);
         fLight
+          .addBinding(params, "fillIntensity", {
+            min: 0,
+            max: 4,
+            step: 0.05,
+            label: "Fill (directional)",
+          })
+          .on("change", applyL);
+        fLight
           .addBinding(params, "ambientIntensity", {
             min: 0,
             max: 2.5,
             step: 0.02,
-            label: "Ambient (hemisphere)",
+            label: "Sky fill (hemisphere)",
+          })
+          .on("change", applyL);
+        fLight
+          .addBinding(params, "exposure", {
+            min: 0.6,
+            max: 2.5,
+            step: 0.05,
+            label: "Exposure",
           })
           .on("change", applyL);
 
@@ -6112,7 +6151,7 @@
         window.addEventListener("resize", onResize);
 
         renderer.setAnimationLoop((time) => {
-          sunDirUniform.value.copy(sun.position).normalize();
+          syncSunDirectionUniform();
           destructTimer.update(time);
           const dt = destructTimer.getDelta();
           if (params.destructionEnabled && destructBricks.length) {

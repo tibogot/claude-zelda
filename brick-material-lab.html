@@ -177,8 +177,8 @@
       const uRoughMicro = uniform(params.roughnessMicro);
 
       /**
-       * Subdivided box with carved corners (missing chunks) and lighter edge chips.
-       * Vertices near each corner pull toward the brick center — reads as broken stone, not a rounded box.
+       * Watertight chamfered box: one indexed mesh, shared vertices on every edge
+       * (6 faces + 12 edge bevels + 8 corner triangles). No BoxGeometry duplicates.
        */
       function createChippedBrickGeometry(w, h, d, opts) {
         const {
@@ -188,105 +188,216 @@
           cornerChip,
           cornerChipVar,
           edgeChip,
-          faceNoise,
           seed,
         } = opts;
 
-        const geo = new THREE.BoxGeometry(
-          w,
-          h,
-          d,
-          Math.max(1, segmentsX | 0),
-          Math.max(1, segmentsY | 0),
-          Math.max(1, segmentsZ | 0),
-        );
-        const pos = geo.attributes.position;
         const hw = w * 0.5;
         const hh = h * 0.5;
         const hd = d * 0.5;
+        const unit = Math.min(hw, hh, hd);
         const rnd = mulberry32(seed | 0);
         const cornerSeeds = Array.from({ length: 8 }, () => 0.25 + rnd() * 0.75);
 
-        const tmp = new THREE.Vector3();
-
-        for (let i = 0; i < pos.count; i++) {
-          let x = pos.getX(i);
-          let y = pos.getY(i);
-          let z = pos.getZ(i);
-
-          const nx = x / hw;
-          const ny = y / hh;
-          const nz = z / hd;
-
-          const ci =
-            (nx >= 0 ? 1 : 0) +
-            (ny >= 0 ? 2 : 0) +
-            (nz >= 0 ? 4 : 0);
-          const cSeed = cornerSeeds[ci];
-
-          const fx = 1 - Math.abs(nx);
-          const fy = 1 - Math.abs(ny);
-          const fz = 1 - Math.abs(nz);
-          const distCorner = Math.sqrt(fx * fx + fy * fy + fz * fz);
-
-          const chipR =
-            cornerChip * (0.5 + cSeed * Math.max(0, cornerChipVar));
-          if (cornerChip > 0.001 && distCorner < chipR) {
-            const t = 1 - distCorner / Math.max(chipR, 1e-5);
-            const ease = t * t * (3 - 2 * t);
-            const scale = Math.min(hw, hh, hd);
-            const pull = ease * cornerChip * scale * (0.85 + cSeed * 0.35);
-            tmp.set(x, y, z);
-            const len = Math.max(tmp.length(), 1e-5);
-            tmp.multiplyScalar(1 - pull / len);
-            x = tmp.x;
-            y = tmp.y;
-            z = tmp.z;
-          }
-
-          if (edgeChip > 0.001) {
-            const ax = Math.abs(nx);
-            const ay = Math.abs(ny);
-            const az = Math.abs(nz);
-            const onEdge =
-              (ax > 0.88 && ay > 0.88) ||
-              (ax > 0.88 && az > 0.88) ||
-              (ay > 0.88 && az > 0.88);
-            if (onEdge) {
-              const edgeDist = Math.min(
-                Math.abs(ax - 1) + Math.abs(ay - 1),
-                Math.abs(ax - 1) + Math.abs(az - 1),
-                Math.abs(ay - 1) + Math.abs(az - 1),
-              );
-              const edgeR = edgeChip * 1.35;
-              if (edgeDist < edgeR) {
-                const t = 1 - edgeDist / Math.max(edgeR, 1e-5);
-                const ease = t * t;
-                const pull = ease * edgeChip * Math.min(hw, hh, hd) * 0.55;
-                tmp.set(x, y, z);
-                const len = Math.max(tmp.length(), 1e-5);
-                tmp.multiplyScalar(1 - pull / len);
-                x = tmp.x;
-                y = tmp.y;
-                z = tmp.z;
-              }
-            }
-          }
-
-          if (faceNoise > 0.001) {
-            const n =
-              Math.sin(x * 17.3 + y * 23.1 + z * 31.7 + seed * 0.01) *
-              faceNoise *
-              Math.min(hw, hh, hd);
-            tmp.set(x, y, z).normalize();
-            x += tmp.x * n;
-            y += tmp.y * n;
-            z += tmp.z * n;
-          }
-
-          pos.setXYZ(i, x, y, z);
+        const cuts = new Array(8);
+        for (let ci = 0; ci < 8; ci++) {
+          const s = cornerSeeds[ci];
+          const base =
+            cornerChip * unit * (0.85 + s * Math.max(0, cornerChipVar) * 0.35);
+          const edge = edgeChip * unit * 0.45;
+          const c = Math.max(0, Math.min(base + edge, unit * 0.42));
+          cuts[ci] = { x: c, y: c, z: c };
         }
 
+        const sx = (ci) => (ci & 1 ? 1 : -1);
+        const sy = (ci) => (ci & 2 ? 1 : -1);
+        const sz = (ci) => (ci & 4 ? 1 : -1);
+
+        const positions = [];
+        const indices = [];
+        const vMap = new Map();
+
+        const vkey = (x, y, z) =>
+          `${x.toFixed(7)},${y.toFixed(7)},${z.toFixed(7)}`;
+
+        function addV(x, y, z) {
+          const k = vkey(x, y, z);
+          if (vMap.has(k)) return vMap.get(k);
+          const i = positions.length / 3;
+          positions.push(x, y, z);
+          vMap.set(k, i);
+          return i;
+        }
+
+        function addTri(i0, i1, i2) {
+          indices.push(i0, i1, i2);
+        }
+
+        function addQuadCCW(i0, i1, i2, i3) {
+          addTri(i0, i1, i2);
+          addTri(i0, i2, i3);
+        }
+
+        /** Bilinear quad — edge vertices match on shared face boundaries. */
+        function subdivideQuad(p00, p10, p11, p01, segU, segV) {
+          const su = Math.max(1, segU | 0);
+          const sv = Math.max(1, segV | 0);
+          const grid = [];
+          const lerp3 = (a, b, t, out) => {
+            out.x = a.x + (b.x - a.x) * t;
+            out.y = a.y + (b.y - a.y) * t;
+            out.z = a.z + (b.z - a.z) * t;
+            return out;
+          };
+          const tmpA = new THREE.Vector3();
+          const tmpB = new THREE.Vector3();
+          const tmpC = new THREE.Vector3();
+          const tmpD = new THREE.Vector3();
+          const pt = new THREE.Vector3();
+
+          for (let j = 0; j <= sv; j++) {
+            const v = j / sv;
+            lerp3(p01, p11, v, tmpA);
+            lerp3(p00, p10, v, tmpB);
+            for (let i = 0; i <= su; i++) {
+              const u = i / su;
+              lerp3(tmpB, tmpA, u, pt);
+              grid[j * (su + 1) + i] = addV(pt.x, pt.y, pt.z);
+            }
+          }
+          for (let j = 0; j < sv; j++) {
+            for (let i = 0; i < su; i++) {
+              const a = grid[j * (su + 1) + i];
+              const b = grid[j * (su + 1) + i + 1];
+              const c = grid[(j + 1) * (su + 1) + i + 1];
+              const d = grid[(j + 1) * (su + 1) + i];
+              addQuadCCW(a, b, c, d);
+            }
+          }
+        }
+
+        function cornerPoint(ci, axis) {
+          const c = cuts[ci];
+          const x = sx(ci) * (hw - (axis === "x" ? c.x : 0));
+          const y = sy(ci) * (hh - (axis === "y" ? c.y : 0));
+          const z = sz(ci) * (hd - (axis === "z" ? c.z : 0));
+          if (axis === "x") return addV(sx(ci) * (hw - c.x), sy(ci) * hh, sz(ci) * hd);
+          if (axis === "y") return addV(sx(ci) * hw, sy(ci) * (hh - c.y), sz(ci) * hd);
+          return addV(sx(ci) * hw, sy(ci) * hh, sz(ci) * (hd - c.z));
+        }
+
+        function faceCorner(ci) {
+          const c = cuts[ci];
+          return addV(
+            sx(ci) * (hw - c.x),
+            sy(ci) * (hh - c.y),
+            sz(ci) * (hd - c.z),
+          );
+        }
+
+        /** Corner on a face plane (only two axes chamfered, third on full plane). */
+        function yPlaneCorner(ci) {
+          const c = cuts[ci];
+          return addV(
+            sx(ci) * (hw - c.x),
+            sy(ci) * hh,
+            sz(ci) * (hd - c.z),
+          );
+        }
+
+        function zPlaneCorner(ci) {
+          const c = cuts[ci];
+          return addV(
+            sx(ci) * (hw - c.x),
+            sy(ci) * (hh - c.y),
+            sz(ci) * hd,
+          );
+        }
+
+        function xPlaneCorner(ci) {
+          const c = cuts[ci];
+          return addV(
+            sx(ci) * hw,
+            sy(ci) * (hh - c.y),
+            sz(ci) * (hd - c.z),
+          );
+        }
+
+        const segX = Math.max(1, segmentsX | 0);
+        const segY = Math.max(1, segmentsY | 0);
+        const segZ = Math.max(1, segmentsZ | 0);
+
+        const faceDefs = [
+          { corners: [2, 3, 7, 6], su: segX, sv: segZ },
+          { corners: [0, 1, 5, 4], su: segX, sv: segZ },
+          { corners: [1, 3, 7, 5], su: segY, sv: segZ },
+          { corners: [0, 2, 6, 4], su: segY, sv: segZ },
+          { corners: [4, 5, 7, 6], su: segX, sv: segY },
+          { corners: [0, 1, 3, 2], su: segX, sv: segY },
+        ];
+
+        const cornerPts = new Array(8);
+        for (let ci = 0; ci < 8; ci++) {
+          cornerPts[ci] = {
+            x: cornerPoint(ci, "x"),
+            y: cornerPoint(ci, "y"),
+            z: cornerPoint(ci, "z"),
+            face: faceCorner(ci),
+            yPlane: yPlaneCorner(ci),
+            zPlane: zPlaneCorner(ci),
+            xPlane: xPlaneCorner(ci),
+          };
+        }
+
+        const pVec = (idx) => {
+          const i = idx * 3;
+          return new THREE.Vector3(
+            positions[i],
+            positions[i + 1],
+            positions[i + 2],
+          );
+        };
+
+        for (const f of faceDefs) {
+          const [c0, c1, c2, c3] = f.corners;
+          subdivideQuad(
+            pVec(cornerPts[c0].face),
+            pVec(cornerPts[c1].face),
+            pVec(cornerPts[c2].face),
+            pVec(cornerPts[c3].face),
+            f.su,
+            f.sv,
+          );
+        }
+
+        const bevel = (i0, i1, i2, i3, along) => {
+          subdivideQuad(pVec(i0), pVec(i1), pVec(i2), pVec(i3), along, 1);
+        };
+
+        const p = cornerPts;
+        bevel(p[6].yPlane, p[7].yPlane, p[7].y, p[6].y, segX);
+        bevel(p[2].yPlane, p[3].yPlane, p[3].y, p[2].y, segX);
+        bevel(p[4].yPlane, p[5].yPlane, p[5].zPlane, p[4].zPlane, segX);
+        bevel(p[0].yPlane, p[1].yPlane, p[1].zPlane, p[0].zPlane, segX);
+        bevel(p[6].yPlane, p[2].yPlane, p[2].xPlane, p[6].xPlane, segZ);
+        bevel(p[7].yPlane, p[3].yPlane, p[3].xPlane, p[7].xPlane, segZ);
+        bevel(p[4].yPlane, p[0].yPlane, p[0].xPlane, p[4].xPlane, segZ);
+        bevel(p[5].yPlane, p[1].yPlane, p[1].xPlane, p[5].xPlane, segZ);
+        bevel(p[5].xPlane, p[7].xPlane, p[7].y, p[5].y, segY);
+        bevel(p[1].xPlane, p[3].xPlane, p[3].y, p[1].y, segY);
+        bevel(p[4].xPlane, p[6].xPlane, p[6].y, p[4].y, segY);
+        bevel(p[0].xPlane, p[2].xPlane, p[2].y, p[0].y, segY);
+
+        for (let ci = 0; ci < 8; ci++) {
+          const p = cornerPts[ci];
+          addTri(p.x, p.y, p.z);
+        }
+
+        const geo = new THREE.BufferGeometry();
+        geo.setAttribute(
+          "position",
+          new THREE.Float32BufferAttribute(positions, 3),
+        );
+        geo.setIndex(indices);
         geo.computeVertexNormals();
         return geo;
       }
@@ -505,6 +616,7 @@
           const mn = min(ax, min(ay, az));
           const mx = max(ax, max(ay, az));
           const edgeShell = smoothstep(float(0.14), float(0.44), mx);
+          const seamGuard = smoothstep(float(0.03), float(0.14), mn);
           const cornerBand = smoothstep(float(0.022), float(0.095), mn).mul(
             smoothstep(float(0.33), float(0.48), mx),
           );
@@ -523,6 +635,7 @@
             .add(0.5);
           const amp = float(0.017)
             .mul(edgeShell)
+            .mul(seamGuard)
             .mul(wv)
             .mul(mix(float(0.65), float(1.15), bump))
             .mul(cenW)
@@ -534,6 +647,7 @@
           const chipMask = smoothstep(float(0.84), float(0.96), chipPick)
             .mul(cornerBand)
             .mul(edgeShell)
+            .mul(seamGuard)
             .mul(cenW);
           const chipMag = float(0.012)
             .mul(chipMask)
