@@ -139,6 +139,8 @@ import { HoleStore } from "../core/hole/holeStore.js";
 import { HoleSystem } from "../tools/hole/holeSystem.js";
 import { HoleOverlay } from "../render/hole/holeOverlay.js";
 import { CaveStore } from "../core/cave/caveStore.js";
+import { InteriorVolumeRegistry } from "../render/lighting/interiorVolumeRegistry.js";
+import { createInteriorLightingNodes } from "../render/lighting/interiorLightingTsl.js";
 import { CaveSystem } from "../tools/cave/caveSystem.js";
 import {
   createFleurSystem,
@@ -312,9 +314,18 @@ export async function startV2App(opts = {}) {
     uHFogEnabled,
   );
   const _dFactor = densityFogFactor(uDFogDensity).mul(uDFogEnabled);
-  const _combinedFactor = clamp(_hFactor.add(_dFactor), 0, 1);
-  const _totalW = _hFactor.add(_dFactor).add(0.0001);
-  const _blendedFogColor = mix(uHFogColor, uDFogColor, _dFactor.div(_totalW));
+  const interiorRegistry = new InteriorVolumeRegistry();
+  const interiorNodes = createInteriorLightingNodes(interiorRegistry);
+  const _iFactor = interiorNodes.interiorFogFactorNode;
+  const _weatherFactor = clamp(_hFactor.add(_dFactor), 0, 1);
+  const _combinedFactor = clamp(_weatherFactor.add(_iFactor), 0, 1);
+  const _weatherW = _hFactor.add(_dFactor).add(0.0001);
+  const _weatherFogColor = mix(uHFogColor, uDFogColor, _dFactor.div(_weatherW));
+  const _blendedFogColor = mix(
+    _weatherFogColor,
+    interiorNodes.uColor,
+    clamp(_iFactor.div(_combinedFactor.add(0.0001)), 0, 1),
+  );
   const _combinedFogNode = fog(_blendedFogColor, _combinedFactor);
 
   // Same as splatmap-chunks.html: assign fogNode ONCE — toggling scene.fogNode at runtime
@@ -329,7 +340,11 @@ export async function startV2App(opts = {}) {
     uDFogColor.value.set(F.distance.color).convertSRGBToLinear();
     uDFogDensity.value = F.distance.density;
   }
+  function syncInteriorUniforms() {
+    interiorNodes.syncFromRegistry(interiorRegistry, toolState.interior);
+  }
   syncFog();
+  syncInteriorUniforms();
 
   let pmremGenerator = null;
   let disposeSkyEnv = null;
@@ -971,7 +986,14 @@ export async function startV2App(opts = {}) {
     propStore,
     getWorldHeight: (x, z) => terrainStore.getWorldHeight(x, z),
     getRoadSegments: () => roadSystem.getSegmentsSnapshot(),
+    onVolumesChange: () => rebuildInteriorVolumes(),
   });
+  function rebuildInteriorVolumes() {
+    interiorRegistry.rebuild(splineSystem, caveStore, toolState.interior);
+    syncInteriorUniforms();
+  }
+  caveStore.onChange(() => rebuildInteriorVolumes());
+  rebuildInteriorVolumes();
   let propUiCallbacks = {};
 
   const dummyCliffPaintTex = (() => {
@@ -1527,6 +1549,10 @@ export async function startV2App(opts = {}) {
     onImportHdr: importHdr,
     onCsmEnabledChange: setCsmEnabled,
     onFogChange: syncFog,
+    onInteriorChange: () => {
+      syncInteriorUniforms();
+      rebuildInteriorVolumes();
+    },
     onGenerateProceduralTerrain: () => {
       sculptSystem.applyProceduralTerrainAllChunks();
       if (toolState.borderMountains.enabled) rebuildBorderMountains();
@@ -2710,6 +2736,7 @@ export async function startV2App(opts = {}) {
         if (project.settings?.splinePath)
           splineSystem.importData(project.settings.splinePath);
         else splineSystem.importData({ points: [] });
+        rebuildInteriorVolumes();
         // Restore cliff instances (types must be re-imported by user)
         if (project.settings?.cliffInstances) {
           const typeNameToIdx = {};
@@ -4234,6 +4261,8 @@ export async function startV2App(opts = {}) {
 
   let last = performance.now();
   let _lastLightSnap = "";
+  let _lastInteriorSnap = "";
+  const _interiorFocusPos = new THREE.Vector3();
   renderer.setAnimationLoop(() => {
     const now = performance.now();
     const dtMs = now - last;
@@ -4265,6 +4294,29 @@ export async function startV2App(opts = {}) {
       billboardGrassRenderer.updateSunDirection(sunDir);
     }
     lensFlare.update();
+
+    const Int = toolState.interior;
+    const interiorSnap = `${Int.enabled},${Int.strength},${Int.color},${Int.ambientScale},${Int.tunnelRadiusScale},${Int.segmentStep},${Int.edgeSoftness},${Int.openingLength},${Int.boxEdgeSoftness},${Int.caveShrink},${splineSystem.tunnels.length}`;
+    if (interiorSnap !== _lastInteriorSnap) {
+      _lastInteriorSnap = interiorSnap;
+      syncInteriorUniforms();
+    }
+    _interiorFocusPos.copy(focusPos);
+    const interiorAmb = interiorRegistry.sampleFactorAt(
+      _interiorFocusPos,
+      Int,
+    );
+    const fillScale = THREE.MathUtils.lerp(
+      1,
+      Int.ambientScale ?? 0.22,
+      interiorAmb,
+    );
+    hemi.intensity = Li.hemiIntensity * fillScale;
+    if (toolState.skyMode === "physical") {
+      scene.environmentIntensity = Li.envIntensity * fillScale;
+    } else if (toolState.skyMode === "hdr") {
+      scene.environmentIntensity = Li.hdrEnvIntensity * fillScale;
+    }
 
     shadowTarget.position.set(focusPos.x, 0, focusPos.z);
     const csmCfg = toolState.csm;
@@ -4499,6 +4551,8 @@ export async function startV2App(opts = {}) {
     },
     config,
     syncFog,
+    syncInteriorUniforms,
+    rebuildInteriorVolumes,
     setCsmEnabled,
     rebuildSkyEnv,
     applySkyMode,

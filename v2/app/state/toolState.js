@@ -115,6 +115,7 @@ export function createToolState() {
       height: { ...V2_CONFIG.fog.height },
       distance: { ...V2_CONFIG.fog.distance },
     },
+    interior: { ...V2_CONFIG.interior, manualBoxes: [] },
     volumetricCloud: {
       ...V2_CONFIG.volumetricCloud,
       seed: Math.random() * 1000,
@@ -985,6 +986,9 @@ export function createToolState() {
       tunnelRadialSegments: 20,
       tunnelPathSegments: 220,
       tunnelColor: "#6c727a",
+      /** Seal start/end for interior darkness (block outside light at that mouth). */
+      tunnelCapStart: false,
+      tunnelCapEnd: false,
       guardrailHeight: 2.3,
       guardrailThickness: 0.1,
       guardrailDepth: 1.1,

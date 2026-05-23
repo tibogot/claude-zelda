@@ -271,6 +271,25 @@ export const V2_CONFIG = {
     },
   },
   /**
+   * World-stable enclosed-space lighting (spline tunnels, caves, manual boxes).
+   * Uses scene.fogNode + scaled hemisphere/IBL — not shadow-map dependent.
+   */
+  interior: {
+    enabled: true,
+    strength: 0.88,
+    color: "#0c0e14",
+    /** Scale for hemisphere + env when deep inside (0 = black fill, 1 = no change). */
+    ambientScale: 0.22,
+    tunnelRadiusScale: 0.92,
+    /** Target spacing along tunnel centerline (m); stretches if the path needs more than 192 segments. */
+    segmentStep: 4,
+    edgeSoftness: 0.35,
+    openingLength: 10,
+    boxEdgeSoftness: 0.28,
+    caveShrink: 0.94,
+    manualBoxes: [],
+  },
+  /**
    * Ray-marched volumetric cloud box (`v2/render/clouds/volumetricCloudSystem.js`).
    * Off by default; enable from editor World tab.
    */

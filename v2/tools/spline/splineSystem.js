@@ -53,7 +53,9 @@ export class SplineSystem {
     propStore,
     getWorldHeight,
     getRoadSegments,
+    onVolumesChange,
   }) {
+    this.onVolumesChange = onVolumesChange || (() => {});
     this.scene = scene;
     this.toolState = toolState;
     this.config = config;
@@ -1366,10 +1368,13 @@ export class SplineSystem {
       radialSegs,
       pathSegs,
       color: s.tunnelColor,
+      capStart: !!s.tunnelCapStart,
+      capEnd: !!s.tunnelCapEnd,
       mesh: null,
     };
     this._buildTunnelMesh(tunnel);
     this.tunnels.push(tunnel);
+    this.onVolumesChange();
     return true;
   }
 
@@ -1702,6 +1707,8 @@ export class SplineSystem {
         radialSegs: t.radialSegs,
         pathSegs: t.pathSegs,
         color: t.color ?? "#6c727a",
+        capStart: !!t.capStart,
+        capEnd: !!t.capEnd,
       })),
       guardrails: this.guardrails.map((g) => ({
         points: g.points.map((p) => ({ x: p.x, y: p.y, z: p.z })),
@@ -1796,11 +1803,14 @@ export class SplineSystem {
         radialSegs: Math.max(6, t.radialSegs ?? 20),
         pathSegs: Math.max(40, t.pathSegs ?? 220),
         color: t.color ?? "#6c727a",
+        capStart: !!t.capStart,
+        capEnd: !!t.capEnd,
         mesh: null,
       };
       this._buildTunnelMesh(tunnel);
       this.tunnels.push(tunnel);
     }
+    this.onVolumesChange();
     const guardrails = Array.isArray(data?.guardrails) ? data.guardrails : [];
     for (const g of guardrails) {
       if (!Array.isArray(g.points) || g.points.length < 2) continue;
@@ -1928,6 +1938,7 @@ export class SplineSystem {
       }
     }
     this.tunnels.length = 0;
+    this.onVolumesChange();
   }
 
   clearGuardrails() {

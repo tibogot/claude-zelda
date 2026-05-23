@@ -437,6 +437,10 @@ function extractSerializableSettings(toolState) {
       height: { ...toolState.fog.height },
       distance: { ...toolState.fog.distance },
     },
+    interior: {
+      ...toolState.interior,
+      manualBoxes: (toolState.interior.manualBoxes ?? []).map((b) => ({ ...b })),
+    },
     volumetricCloud: { ...toolState.volumetricCloud },
     volumetricCloudOptimized: { ...toolState.volumetricCloudOptimized },
     borderMountains: { ...toolState.borderMountains },
@@ -561,6 +565,13 @@ export function applySettings(toolState, settings) {
   if (settings.fog) {
     if (settings.fog.height) Object.assign(toolState.fog.height, settings.fog.height);
     if (settings.fog.distance) Object.assign(toolState.fog.distance, settings.fog.distance);
+  }
+  if (settings.interior) {
+    const boxes = settings.interior.manualBoxes;
+    Object.assign(toolState.interior, settings.interior);
+    toolState.interior.manualBoxes = Array.isArray(boxes)
+      ? boxes.map((b) => ({ ...b }))
+      : [];
   }
   if (settings.volumetricCloud) {
     Object.assign(toolState.volumetricCloud, settings.volumetricCloud);

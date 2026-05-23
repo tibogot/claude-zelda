@@ -36,6 +36,7 @@ export function createTweakpaneUi({
   onImportHdr,
   onCsmEnabledChange,
   onFogChange,
+  onInteriorChange,
   onGenerateProceduralTerrain,
   onRunGlobalErosion,
   onBorderMountainsRebuild,
@@ -884,6 +885,50 @@ export function createTweakpaneUi({
       step: 0.0001,
     })
     .on("change", onFogChange);
+
+  const intCb = () => onInteriorChange?.();
+  const interiorFolder = fogFolder.addFolder({
+    title: "Interior lighting",
+    expanded: false,
+  });
+  interiorFolder
+    .addBinding(toolState.interior, "enabled", { label: "Enabled" })
+    .on("change", intCb);
+  interiorFolder
+    .addBinding(toolState.interior, "strength", {
+      label: "Darken strength",
+      min: 0,
+      max: 1,
+      step: 0.02,
+    })
+    .on("change", intCb);
+  interiorFolder
+    .addBinding(toolState.interior, "color", { label: "Tint", view: "color" })
+    .on("change", intCb);
+  interiorFolder
+    .addBinding(toolState.interior, "ambientScale", {
+      label: "Sky/hemi inside",
+      min: 0,
+      max: 1,
+      step: 0.02,
+    })
+    .on("change", intCb);
+  interiorFolder
+    .addBinding(toolState.interior, "openingLength", {
+      label: "Open end fade (m)",
+      min: 0,
+      max: 40,
+      step: 0.5,
+    })
+    .on("change", intCb);
+  interiorFolder
+    .addBinding(toolState.interior, "segmentStep", {
+      label: "Centerline step (m)",
+      min: 2,
+      max: 24,
+      step: 0.5,
+    })
+    .on("change", intCb);
 
   const sculptFolder = pane.addFolder({ title: "Sculpt", expanded: false });
   sculptFolder
