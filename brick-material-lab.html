@@ -1,0 +1,968 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Stone brick material lab — WebGPU + TSL</title>
+    <style>
+      body {
+        margin: 0;
+        overflow: hidden;
+        background: #1a1d24;
+        font-family: system-ui, sans-serif;
+      }
+      canvas {
+        display: block;
+        width: 100%;
+        height: 100vh;
+      }
+      #tweak-root {
+        position: fixed;
+        top: 8px;
+        right: 8px;
+        z-index: 50;
+        width: min(360px, calc(100vw - 16px));
+        max-height: calc(100vh - 16px);
+        overflow-x: hidden;
+        overflow-y: auto;
+        overscroll-behavior: contain;
+        pointer-events: auto;
+      }
+      #hint {
+        position: fixed;
+        left: 12px;
+        bottom: 12px;
+        z-index: 40;
+        max-width: min(420px, calc(100vw - 24px));
+        color: rgba(255, 255, 255, 0.72);
+        font-size: 12px;
+        line-height: 1.45;
+        pointer-events: none;
+      }
+      #export-snippet {
+        position: fixed;
+        left: 12px;
+        top: 12px;
+        z-index: 40;
+        max-width: min(480px, calc(100vw - 380px));
+        padding: 8px 10px;
+        background: rgba(0, 0, 0, 0.45);
+        border: 1px solid rgba(255, 255, 255, 0.12);
+        border-radius: 6px;
+        color: rgba(200, 210, 220, 0.9);
+        font-size: 11px;
+        font-family: ui-monospace, monospace;
+        line-height: 1.35;
+        white-space: pre-wrap;
+        word-break: break-all;
+        pointer-events: none;
+      }
+    </style>
+  </head>
+  <body>
+    <div id="tweak-root" aria-label="Brick lab settings"></div>
+    <pre id="export-snippet" aria-hidden="true"></pre>
+    <div id="hint">
+      Tune chipped stone bricks here — copy values into
+      <code>medieval-arch-showcase.html</code> when ready. Orbit: drag · Zoom: wheel.
+    </div>
+
+    <script type="importmap">
+      {
+        "imports": {
+          "three": "https://cdn.jsdelivr.net/npm/three@0.183.1/build/three.webgpu.js",
+          "three/webgpu": "https://cdn.jsdelivr.net/npm/three@0.183.1/build/three.webgpu.js",
+          "three/tsl": "https://cdn.jsdelivr.net/npm/three@0.183.1/build/three.tsl.js",
+          "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.183.1/examples/jsm/",
+          "tweakpane": "https://cdn.jsdelivr.net/npm/tweakpane@4.0.3/dist/tweakpane.min.js"
+        }
+      }
+    </script>
+
+    <script type="module">
+      import * as THREE from "three/webgpu";
+      import { OrbitControls } from "three/addons/controls/OrbitControls.js";
+      import { Pane } from "tweakpane";
+      import {
+        Fn,
+        float,
+        color,
+        vec2,
+        vec3,
+        sin,
+        mix,
+        smoothstep,
+        mul,
+        sub,
+        add,
+        abs,
+        max,
+        min,
+        floor,
+        fract,
+        length,
+        normalize,
+        div,
+        normalWorld,
+        normalLocal,
+        positionLocal,
+        positionWorld,
+        dot,
+        pow,
+        clamp,
+        uniform,
+        attribute,
+      } from "three/tsl";
+
+      function mulberry32(seed) {
+        let a = seed >>> 0;
+        return function () {
+          a |= 0;
+          a = (a + 0x6d2b79f5) | 0;
+          let t = Math.imul(a ^ (a >>> 15), 1 | a);
+          t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t;
+          return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+        };
+      }
+
+      /** Same defaults as medieval-arch-showcase masonry. */
+      const params = {
+        brickW: 0.52,
+        brickH: 0.38,
+        brickD: 0.55,
+        segmentsX: 3,
+        segmentsY: 2,
+        segmentsZ: 3,
+        cornerChip: 0.28,
+        cornerChipVar: 0.5,
+        edgeChip: 0.09,
+        faceNoise: 0.014,
+        geometrySeed: 31415,
+        brickScaleRandomness: 0.26,
+        brickRotationVariation: 0.05,
+        brickVerticalVariation: 0.065,
+        brickPlanarSlop: 0.02,
+        colorSeed: 31415,
+        previewCols: 7,
+        previewRows: 9,
+        previewBond: true,
+        showHeroBrick: true,
+        showWall: true,
+        mossStrength: 1,
+        stainStrength: 1,
+        warmStreak: 0.07,
+        freckle: 0.11,
+        shaderWarp: 1,
+        shaderBump: 1,
+        shaderChip: 1,
+        roughnessBase: 0.82,
+        roughnessMicro: 0.07,
+        sunIntensity: 4.5,
+        ambientIntensity: 1.05,
+        fillIntensity: 1.25,
+        exposure: 1.45,
+      };
+
+      const sunDirUniform = uniform(new THREE.Vector3(-0.38, -0.82, -0.42));
+      const _sunDirVec = new THREE.Vector3();
+
+      const uMoss = uniform(params.mossStrength);
+      const uStain = uniform(params.stainStrength);
+      const uWarm = uniform(params.warmStreak);
+      const uFreckle = uniform(params.freckle);
+      const uShaderWarp = uniform(params.shaderWarp);
+      const uShaderBump = uniform(params.shaderBump);
+      const uShaderChip = uniform(params.shaderChip);
+      const uRoughBase = uniform(params.roughnessBase);
+      const uRoughMicro = uniform(params.roughnessMicro);
+
+      /**
+       * Subdivided box with carved corners (missing chunks) and lighter edge chips.
+       * Vertices near each corner pull toward the brick center — reads as broken stone, not a rounded box.
+       */
+      function createChippedBrickGeometry(w, h, d, opts) {
+        const {
+          segmentsX,
+          segmentsY,
+          segmentsZ,
+          cornerChip,
+          cornerChipVar,
+          edgeChip,
+          faceNoise,
+          seed,
+        } = opts;
+
+        const geo = new THREE.BoxGeometry(
+          w,
+          h,
+          d,
+          Math.max(1, segmentsX | 0),
+          Math.max(1, segmentsY | 0),
+          Math.max(1, segmentsZ | 0),
+        );
+        const pos = geo.attributes.position;
+        const hw = w * 0.5;
+        const hh = h * 0.5;
+        const hd = d * 0.5;
+        const rnd = mulberry32(seed | 0);
+        const cornerSeeds = Array.from({ length: 8 }, () => 0.25 + rnd() * 0.75);
+
+        const tmp = new THREE.Vector3();
+
+        for (let i = 0; i < pos.count; i++) {
+          let x = pos.getX(i);
+          let y = pos.getY(i);
+          let z = pos.getZ(i);
+
+          const nx = x / hw;
+          const ny = y / hh;
+          const nz = z / hd;
+
+          const ci =
+            (nx >= 0 ? 1 : 0) +
+            (ny >= 0 ? 2 : 0) +
+            (nz >= 0 ? 4 : 0);
+          const cSeed = cornerSeeds[ci];
+
+          const fx = 1 - Math.abs(nx);
+          const fy = 1 - Math.abs(ny);
+          const fz = 1 - Math.abs(nz);
+          const distCorner = Math.sqrt(fx * fx + fy * fy + fz * fz);
+
+          const chipR =
+            cornerChip * (0.5 + cSeed * Math.max(0, cornerChipVar));
+          if (cornerChip > 0.001 && distCorner < chipR) {
+            const t = 1 - distCorner / Math.max(chipR, 1e-5);
+            const ease = t * t * (3 - 2 * t);
+            const scale = Math.min(hw, hh, hd);
+            const pull = ease * cornerChip * scale * (0.85 + cSeed * 0.35);
+            tmp.set(x, y, z);
+            const len = Math.max(tmp.length(), 1e-5);
+            tmp.multiplyScalar(1 - pull / len);
+            x = tmp.x;
+            y = tmp.y;
+            z = tmp.z;
+          }
+
+          if (edgeChip > 0.001) {
+            const ax = Math.abs(nx);
+            const ay = Math.abs(ny);
+            const az = Math.abs(nz);
+            const onEdge =
+              (ax > 0.88 && ay > 0.88) ||
+              (ax > 0.88 && az > 0.88) ||
+              (ay > 0.88 && az > 0.88);
+            if (onEdge) {
+              const edgeDist = Math.min(
+                Math.abs(ax - 1) + Math.abs(ay - 1),
+                Math.abs(ax - 1) + Math.abs(az - 1),
+                Math.abs(ay - 1) + Math.abs(az - 1),
+              );
+              const edgeR = edgeChip * 1.35;
+              if (edgeDist < edgeR) {
+                const t = 1 - edgeDist / Math.max(edgeR, 1e-5);
+                const ease = t * t;
+                const pull = ease * edgeChip * Math.min(hw, hh, hd) * 0.55;
+                tmp.set(x, y, z);
+                const len = Math.max(tmp.length(), 1e-5);
+                tmp.multiplyScalar(1 - pull / len);
+                x = tmp.x;
+                y = tmp.y;
+                z = tmp.z;
+              }
+            }
+          }
+
+          if (faceNoise > 0.001) {
+            const n =
+              Math.sin(x * 17.3 + y * 23.1 + z * 31.7 + seed * 0.01) *
+              faceNoise *
+              Math.min(hw, hh, hd);
+            tmp.set(x, y, z).normalize();
+            x += tmp.x * n;
+            y += tmp.y * n;
+            z += tmp.z * n;
+          }
+
+          pos.setXYZ(i, x, y, z);
+        }
+
+        geo.computeVertexNormals();
+        return geo;
+      }
+
+      function geometrySignature() {
+        return [
+          params.brickW,
+          params.brickH,
+          params.brickD,
+          params.segmentsX,
+          params.segmentsY,
+          params.segmentsZ,
+          params.cornerChip,
+          params.cornerChipVar,
+          params.edgeChip,
+          params.faceNoise,
+          params.geometrySeed,
+        ].join(",");
+      }
+
+      function applyBrickLayoutNoise(rnd, sx, sy, sz) {
+        const r = params.brickScaleRandomness || 0;
+        const t = 1;
+        sx *= 1 + (rnd() - 0.5) * r * t;
+        sy *= 1 + (rnd() - 0.5) * r * t;
+        sz *= 1 + (rnd() - 0.5) * r * t;
+        const rv = (params.brickRotationVariation || 0) * t;
+        const rx = (rnd() - 0.5) * rv;
+        const ry = (rnd() - 0.5) * rv;
+        const rz = (rnd() - 0.5) * rv;
+        const vy = (params.brickVerticalVariation || 0) * t;
+        const py = (rnd() - 0.5) * vy;
+        const ps = (params.brickPlanarSlop || 0) * t;
+        const px = (rnd() - 0.5) * ps;
+        const pz = (rnd() - 0.5) * ps;
+        return { sx, sy, sz, rx, ry, rz, px, py, pz };
+      }
+
+      function pickBrickVariation(rnd) {
+        let shapeMix = 0.46;
+        let warp = 0.3;
+        let grey = 0.4;
+        const grain = rnd();
+        const u = rnd();
+        if (u < 0.12) {
+          shapeMix = 0.38;
+        } else if (u < 0.22) {
+          shapeMix = 0.3;
+        } else {
+          shapeMix = 0.46 + rnd() * 0.18;
+        }
+        warp = 0.22 + rnd() * 0.38;
+        grey = 0.3 + rnd() * 0.42;
+        return { shapeMix, warp, grey, grain };
+      }
+
+      function createInstancedBrickGeometry(baseGeo, capacity) {
+        const g = baseGeo.clone();
+        const arr = new Float32Array(capacity * 4);
+        const att = new THREE.InstancedBufferAttribute(arr, 4);
+        g.setAttribute("brickVar", att);
+        return g;
+      }
+
+      function setBrickVarAt(mesh, index, shapeMix, warp, grey, grain) {
+        const att = mesh.geometry.getAttribute("brickVar");
+        if (!att) return;
+        const a = att.array;
+        const o = index * 4;
+        a[o] = shapeMix;
+        a[o + 1] = warp;
+        a[o + 2] = grey;
+        a[o + 3] = grain;
+      }
+
+      function createBrickMaterial() {
+        const brickVarA = attribute("brickVar", "vec4");
+        const shapeM = brickVarA.x;
+        const warpS = brickVarA.y;
+        const greyK = brickVarA.z;
+        const grain = brickVarA.w;
+
+        const mat = new THREE.MeshStandardNodeMaterial({
+          metalness: 0.015,
+        });
+
+        mat.colorNode = Fn(() => {
+          const pw = positionWorld;
+          const seed = grain.mul(6.283).add(greyK.mul(12.7));
+          const p1 = pw
+            .mul(1.05)
+            .add(vec3(seed, seed.mul(0.71), seed.mul(0.53)));
+          const p2 = pw
+            .mul(2.35)
+            .add(vec3(seed.mul(1.3), seed.mul(0.9), seed.mul(1.1)));
+          const p3 = pw
+            .mul(5.1)
+            .add(vec3(seed.mul(2.1), seed, seed.mul(1.7)));
+          const w1 = sin(dot(p1, vec3(1.7, 2.3, 1.9)))
+            .mul(0.5)
+            .add(0.5);
+          const w2 = sin(dot(p2, vec3(2.2, 1.4, 2.6)))
+            .mul(0.5)
+            .add(0.5);
+          const w3 = sin(dot(p3, vec3(1.5, 2.8, 2.1)))
+            .mul(0.5)
+            .add(0.5);
+          const fbm = w1.mul(0.52).add(w2.mul(0.32)).add(w3.mul(0.16));
+          const streak = sin(
+            pw.x
+              .mul(2.8)
+              .add(pw.y.mul(4.2))
+              .add(pw.z.mul(1.6))
+              .add(grain.mul(24)),
+          )
+            .mul(0.5)
+            .add(0.5);
+
+          const dark = mix(color(0x1a1c20), color(0x2e3138), greyK);
+          const mid = mix(
+            color(0x42454c),
+            color(0x565a62),
+            pow(greyK, float(0.9)),
+          );
+          const light = mix(
+            color(0x65696f),
+            color(0x82868e),
+            smoothstep(0.1, 0.9, greyK),
+          );
+          const body0 = mix(dark, mix(mid, light, greyK), float(0.58));
+          const stain = smoothstep(float(0.22), float(0.78), fbm);
+          const body1 = mul(
+            body0,
+            mix(float(0.86), float(1.06), stain.mul(uStain)),
+          );
+          const warm = mix(color(0x5c5248), color(0x6a6056), streak);
+          const body2 = mix(
+            body1,
+            mul(body1, warm),
+            uWarm.mul(smoothstep(0.35, 0.72, streak)),
+          );
+          const moss = smoothstep(float(0.62), float(0.94), w2.mul(w3));
+          const body3 = mix(
+            body2,
+            mul(body2, color(0x9aa898)),
+            moss.mul(0.045).mul(warpS.mul(0.4).add(0.6)).mul(uMoss),
+          );
+
+          const speck = fract(
+            sin(dot(pw.xz, vec2(12.9898, 78.233))).mul(43758.5453),
+          );
+          const freckle = smoothstep(float(0.72), float(0.96), speck).mul(
+            uFreckle,
+          );
+          const baseCol = mul(body3, sub(float(1), freckle));
+          const nd = clamp(dot(normalWorld, sunDirUniform), 0, 1);
+          const coolShade = mix(float(0.88), float(1.14), nd.mul(0.55).add(0.45));
+          const ax = abs(normalWorld.x);
+          const ay = abs(normalWorld.y);
+          const az = abs(normalWorld.z);
+          const edgeFac = pow(max(ax, max(ay, az)), float(2.35));
+          const edgeLift = mix(float(1), float(1.1), edgeFac.mul(0.38));
+          const edgeCool = mix(float(1), float(0.94), edgeFac.mul(0.12));
+          const shapeTone = mix(
+            float(0.96),
+            float(1.04),
+            shapeM.mul(0.35).add(0.65),
+          );
+          return mul(
+            mul(mul(mul(baseCol, coolShade), edgeLift), edgeCool),
+            shapeTone,
+          );
+        })();
+
+        mat.roughnessNode = Fn(() => {
+          const pw = positionWorld
+            .mul(2.4)
+            .add(vec3(grain.mul(9), greyK.mul(6), shapeM.mul(3)));
+          const pit = sin(dot(pw, vec3(2.1, 1.7, 2.4)))
+            .mul(0.5)
+            .add(0.5);
+          const pit2 = sin(dot(pw.mul(1.7), vec3(1.6, 2.2, 1.9)))
+            .mul(0.5)
+            .add(0.5);
+          const microRough = pit.mul(0.55).add(pit2.mul(0.45));
+          const baseR = mix(
+            uRoughBase,
+            float(0.97),
+            greyK.mul(0.38).add(grain.mul(0.24)),
+          );
+          return clamp(
+            baseR.add(microRough.mul(uRoughMicro)),
+            float(0.44),
+            float(0.995),
+          );
+        })();
+
+        mat.emissiveNode = Fn(() => {
+          const nd = clamp(dot(normalWorld, sunDirUniform), 0, 1);
+          const rim = pow(
+            sub(float(1), abs(dot(normalWorld, vec3(0, 1, 0)))),
+            float(2.15),
+          );
+          const g0 = mix(color(0x4a4d52), color(0x686c72), nd);
+          return mul(g0, mul(rim, float(0.032))).mul(
+            warpS.mul(0.55).add(0.45),
+          );
+        })();
+
+        mat.positionNode = Fn(() => {
+          const pl = positionLocal;
+          const nl = normalLocal;
+          const ax = abs(pl.x);
+          const ay = abs(pl.y);
+          const az = abs(pl.z);
+          const mn = min(ax, min(ay, az));
+          const mx = max(ax, max(ay, az));
+          const edgeShell = smoothstep(float(0.14), float(0.44), mx);
+          const cornerBand = smoothstep(float(0.022), float(0.095), mn).mul(
+            smoothstep(float(0.33), float(0.48), mx),
+          );
+          const plLen = length(pl);
+          const cenW = smoothstep(float(0.01), float(0.05), plLen);
+
+          const wv = warpS.mul(shapeM.mul(0.55).add(0.45)).mul(uShaderWarp);
+          const bump = sin(
+            pl.x
+              .mul(11)
+              .add(pl.y.mul(9))
+              .add(pl.z.mul(7))
+              .add(grain.mul(40)),
+          )
+            .mul(0.5)
+            .add(0.5);
+          const amp = float(0.017)
+            .mul(edgeShell)
+            .mul(wv)
+            .mul(mix(float(0.65), float(1.15), bump))
+            .mul(cenW)
+            .mul(uShaderBump);
+
+          const chipPick = fract(
+            grain.mul(47.13).add(greyK.mul(91.7)).add(shapeM.mul(23.1)),
+          );
+          const chipMask = smoothstep(float(0.84), float(0.96), chipPick)
+            .mul(cornerBand)
+            .mul(edgeShell)
+            .mul(cenW);
+          const chipMag = float(0.012)
+            .mul(chipMask)
+            .mul(warpS.mul(0.42).add(0.58))
+            .mul(uShaderChip);
+          const rlen = max(length(pl), float(1e-5));
+          const radial = normalize(div(pl, rlen));
+          const chip = mul(radial, float(-1)).mul(chipMag);
+
+          return positionLocal.add(nl.mul(amp)).add(chip);
+        })();
+
+        return mat;
+      }
+
+      const tmpObj = new THREE.Object3D();
+      let brickGeo = null;
+      let brickMat = null;
+      let lastGeoSig = "";
+      let heroMesh = null;
+      let wallMesh = null;
+      let groundMesh = null;
+
+      const scene = new THREE.Scene();
+      scene.background = new THREE.Color(0x8a9aad);
+      scene.fog = new THREE.Fog(0x8a9aad, 28, 55);
+
+      const camera = new THREE.PerspectiveCamera(
+        50,
+        window.innerWidth / window.innerHeight,
+        0.05,
+        120,
+      );
+      camera.position.set(3.2, 2.1, 4.8);
+
+      const renderer = new THREE.WebGPURenderer({ antialias: true });
+      renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+      renderer.setSize(window.innerWidth, window.innerHeight);
+      renderer.shadowMap.enabled = true;
+      renderer.shadowMap.type = THREE.PCFSoftShadowMap;
+      renderer.toneMapping = THREE.ACESFilmicToneMapping;
+      renderer.toneMappingExposure = params.exposure;
+      document.body.appendChild(renderer.domElement);
+
+      const controls = new OrbitControls(camera, renderer.domElement);
+      controls.enableDamping = true;
+      controls.target.set(0, 1.4, 0);
+
+      const hemi = new THREE.HemisphereLight(0xd8e4f5, 0x6a6258, params.ambientIntensity);
+      scene.add(hemi);
+
+      const ambient = new THREE.AmbientLight(0xe8eef5, 0.35);
+      scene.add(ambient);
+
+      const sun = new THREE.DirectionalLight(0xfff8ee, params.sunIntensity);
+      sun.position.set(6, 12, 8);
+      sun.castShadow = true;
+      sun.shadow.mapSize.set(2048, 2048);
+      sun.shadow.camera.near = 0.5;
+      sun.shadow.camera.far = 40;
+      sun.shadow.camera.left = -8;
+      sun.shadow.camera.right = 8;
+      sun.shadow.camera.top = 8;
+      sun.shadow.camera.bottom = -8;
+      sun.shadow.bias = -0.00012;
+      sun.shadow.normalBias = 0.02;
+      scene.add(sun);
+      scene.add(sun.target);
+      sun.target.position.set(0.2, 1.2, 0);
+
+      const fill = new THREE.DirectionalLight(0xc5d4ec, params.fillIntensity);
+      fill.position.set(-7, 6, -5);
+      scene.add(fill);
+
+      function ensureBrickGeometry(force) {
+        const sig = geometrySignature();
+        if (!force && brickGeo && sig === lastGeoSig) return;
+        if (brickGeo) brickGeo.dispose();
+        brickGeo = createChippedBrickGeometry(
+          params.brickW,
+          params.brickH,
+          params.brickD,
+          {
+            segmentsX: params.segmentsX,
+            segmentsY: params.segmentsY,
+            segmentsZ: params.segmentsZ,
+            cornerChip: params.cornerChip,
+            cornerChipVar: params.cornerChipVar,
+            edgeChip: params.edgeChip,
+            faceNoise: params.faceNoise,
+            seed: params.geometrySeed,
+          },
+        );
+        lastGeoSig = sig;
+      }
+
+      function disposePreviewMeshes() {
+        if (heroMesh) {
+          scene.remove(heroMesh);
+          if (heroMesh.geometry) heroMesh.geometry.dispose();
+          heroMesh = null;
+        }
+        if (wallMesh) {
+          scene.remove(wallMesh);
+          if (wallMesh.geometry) wallMesh.geometry.dispose();
+          wallMesh = null;
+        }
+      }
+
+      function buildPreview() {
+        disposePreviewMeshes();
+        ensureBrickGeometry(true);
+        if (!brickMat) brickMat = createBrickMaterial();
+
+        const mortar = 0.012;
+        const gapX = params.brickW * 1.02 + mortar;
+        const gapY = params.brickH * 1.02 + mortar;
+        const gapZ = params.brickD * 1.02 + mortar;
+
+        if (params.showHeroBrick) {
+          heroMesh = new THREE.Mesh(brickGeo, brickMat);
+          heroMesh.castShadow = true;
+          heroMesh.receiveShadow = true;
+          heroMesh.position.set(-1.55, params.brickH * 0.5 + 0.02, 0.35);
+          heroMesh.rotation.y = 0.35;
+          const hv = heroMesh.geometry.getAttribute("brickVar");
+          if (!hv) {
+            const arr = new Float32Array(4);
+            arr[0] = 0.52;
+            arr[1] = 0.32;
+            arr[2] = 0.48;
+            arr[3] = 0.37;
+            heroMesh.geometry.setAttribute(
+              "brickVar",
+              new THREE.BufferAttribute(arr, 4),
+            );
+          }
+          scene.add(heroMesh);
+        }
+
+        if (params.showWall) {
+          const cols = Math.max(1, params.previewCols | 0);
+          const rows = Math.max(1, params.previewRows | 0);
+          const count = cols * rows;
+          const g = createInstancedBrickGeometry(brickGeo, count);
+          wallMesh = new THREE.InstancedMesh(g, brickMat, count);
+          wallMesh.castShadow = true;
+          wallMesh.receiveShadow = true;
+
+          const rnd = mulberry32(params.colorSeed | 0);
+          const originX = -((cols - 1) * gapX) * 0.5;
+          const baseY = params.brickH * 0.5 + 0.02;
+          let idx = 0;
+
+          for (let row = 0; row < rows; row++) {
+            const stagger = params.previewBond && row % 2 === 1 ? gapX * 0.5 : 0;
+            for (let col = 0; col < cols; col++) {
+              const v = pickBrickVariation(rnd);
+              let { sx, sy, sz, rx, ry, rz, px, py, pz } = applyBrickLayoutNoise(
+                rnd,
+                1,
+                1,
+                1,
+              );
+              tmpObj.position.set(
+                originX + col * gapX + stagger,
+                baseY + row * gapY + py,
+                pz * 0.15,
+              );
+              tmpObj.rotation.set(rx, ry, rz);
+              tmpObj.scale.set(sx, sy, sz);
+              tmpObj.updateMatrix();
+              wallMesh.setMatrixAt(idx, tmpObj.matrix);
+              setBrickVarAt(
+                wallMesh,
+                idx,
+                v.shapeMix,
+                v.warp,
+                v.grey,
+                v.grain,
+              );
+              idx++;
+            }
+          }
+
+          wallMesh.instanceMatrix.needsUpdate = true;
+          const bv = wallMesh.geometry.getAttribute("brickVar");
+          if (bv) bv.needsUpdate = true;
+          wallMesh.position.set(0.85, 0, 0);
+          scene.add(wallMesh);
+        }
+
+        updateExportSnippet();
+      }
+
+      function updateExportSnippet() {
+        const el = document.getElementById("export-snippet");
+        const snippet = {
+          brickW: +params.brickW.toFixed(3),
+          brickH: +params.brickH.toFixed(3),
+          brickD: +params.brickD.toFixed(3),
+          brickRound: 0,
+          note: "Use chipped geo in lab; medieval uses RoundedBoxGeometry — replace with chipped builder or port cornerChip values",
+          cornerChip: +params.cornerChip.toFixed(3),
+          cornerChipVar: +params.cornerChipVar.toFixed(3),
+          edgeChip: +params.edgeChip.toFixed(3),
+          faceNoise: +params.faceNoise.toFixed(4),
+          segments: [params.segmentsX, params.segmentsY, params.segmentsZ],
+          brickScaleRandomness: +params.brickScaleRandomness.toFixed(3),
+          brickRotationVariation: +params.brickRotationVariation.toFixed(3),
+          brickVerticalVariation: +params.brickVerticalVariation.toFixed(3),
+          brickPlanarSlop: +params.brickPlanarSlop.toFixed(3),
+          colorSeed: params.colorSeed | 0,
+        };
+        el.textContent = JSON.stringify(snippet, null, 2);
+      }
+
+      function ensureGround() {
+        if (groundMesh) return;
+        groundMesh = new THREE.Mesh(
+          new THREE.PlaneGeometry(24, 24),
+          new THREE.MeshStandardNodeMaterial({
+            color: 0x5c636e,
+            roughness: 0.92,
+            metalness: 0,
+          }),
+        );
+        groundMesh.rotation.x = -Math.PI / 2;
+        groundMesh.position.y = 0;
+        groundMesh.receiveShadow = true;
+        scene.add(groundMesh);
+      }
+
+      function syncSunDirectionUniform() {
+        _sunDirVec.copy(sun.target.position).sub(sun.position).normalize();
+        sunDirUniform.value.copy(_sunDirVec);
+      }
+
+      function syncLiveUniforms() {
+        uMoss.value = params.mossStrength;
+        uStain.value = params.stainStrength;
+        uWarm.value = params.warmStreak;
+        uFreckle.value = params.freckle;
+        uShaderWarp.value = params.shaderWarp;
+        uShaderBump.value = params.shaderBump;
+        uShaderChip.value = params.shaderChip;
+        uRoughBase.value = params.roughnessBase;
+        uRoughMicro.value = params.roughnessMicro;
+        sun.intensity = params.sunIntensity;
+        hemi.intensity = params.ambientIntensity;
+        fill.intensity = params.fillIntensity;
+        renderer.toneMappingExposure = params.exposure;
+        syncSunDirectionUniform();
+      }
+
+      let rebuildTimer = 0;
+      function scheduleRebuild(geometry) {
+        clearTimeout(rebuildTimer);
+        rebuildTimer = setTimeout(() => {
+          if (geometry) ensureBrickGeometry(true);
+          else ensureBrickGeometry(false);
+          buildPreview();
+        }, geometry ? 120 : 40);
+      }
+
+      const pane = new Pane({ container: document.getElementById("tweak-root") });
+
+      const fSize = pane.addFolder({ title: "Brick size", expanded: true });
+      fSize.addBinding(params, "brickW", { min: 0.2, max: 1.2, step: 0.01 });
+      fSize.addBinding(params, "brickH", { min: 0.15, max: 0.8, step: 0.01 });
+      fSize.addBinding(params, "brickD", { min: 0.2, max: 1.2, step: 0.01 });
+
+      const fShape = pane.addFolder({ title: "Shape — chipped stone", expanded: true });
+      fShape.addBinding(params, "cornerChip", {
+        label: "corner cut",
+        min: 0,
+        max: 0.55,
+        step: 0.01,
+      });
+      fShape.addBinding(params, "cornerChipVar", {
+        label: "corner var",
+        min: 0,
+        max: 1,
+        step: 0.02,
+      });
+      fShape.addBinding(params, "edgeChip", {
+        label: "edge chip",
+        min: 0,
+        max: 0.25,
+        step: 0.005,
+      });
+      fShape.addBinding(params, "faceNoise", {
+        label: "face noise",
+        min: 0,
+        max: 0.05,
+        step: 0.001,
+      });
+      fShape.addBinding(params, "segmentsX", { min: 1, max: 6, step: 1 });
+      fShape.addBinding(params, "segmentsY", { min: 1, max: 6, step: 1 });
+      fShape.addBinding(params, "segmentsZ", { min: 1, max: 6, step: 1 });
+      fShape.addBinding(params, "geometrySeed", { min: 1, max: 999999, step: 1 });
+
+      const fLayout = pane.addFolder({ title: "Course layout noise", expanded: false });
+      fLayout.addBinding(params, "brickScaleRandomness", {
+        min: 0,
+        max: 0.5,
+        step: 0.01,
+      });
+      fLayout.addBinding(params, "brickRotationVariation", {
+        min: 0,
+        max: 0.15,
+        step: 0.005,
+      });
+      fLayout.addBinding(params, "brickVerticalVariation", {
+        min: 0,
+        max: 0.15,
+        step: 0.005,
+      });
+      fLayout.addBinding(params, "brickPlanarSlop", {
+        min: 0,
+        max: 0.08,
+        step: 0.002,
+      });
+      fLayout.addBinding(params, "colorSeed", { min: 1, max: 999999, step: 1 });
+
+      const fShader = pane.addFolder({ title: "TSL surface detail", expanded: true });
+      fShader.addBinding(params, "shaderWarp", { min: 0, max: 2, step: 0.05 });
+      fShader.addBinding(params, "shaderBump", { min: 0, max: 2, step: 0.05 });
+      fShader.addBinding(params, "shaderChip", { min: 0, max: 2, step: 0.05 });
+      fShader.addBinding(params, "mossStrength", { min: 0, max: 2, step: 0.05 });
+      fShader.addBinding(params, "stainStrength", { min: 0, max: 2, step: 0.05 });
+      fShader.addBinding(params, "warmStreak", { min: 0, max: 0.25, step: 0.01 });
+      fShader.addBinding(params, "freckle", { min: 0, max: 0.3, step: 0.01 });
+      fShader.addBinding(params, "roughnessBase", {
+        min: 0.4,
+        max: 1,
+        step: 0.01,
+      });
+      fShader.addBinding(params, "roughnessMicro", {
+        min: 0,
+        max: 0.2,
+        step: 0.005,
+      });
+
+      const fPrev = pane.addFolder({ title: "Preview", expanded: false });
+      fPrev.addBinding(params, "previewCols", { min: 3, max: 14, step: 1 });
+      fPrev.addBinding(params, "previewRows", { min: 3, max: 16, step: 1 });
+      fPrev.addBinding(params, "previewBond");
+      fPrev.addBinding(params, "showHeroBrick");
+      fPrev.addBinding(params, "showWall");
+
+      const fLight = pane.addFolder({ title: "Lighting", expanded: true });
+      fLight.addBinding(params, "sunIntensity", { min: 0.5, max: 8, step: 0.1 });
+      fLight.addBinding(params, "fillIntensity", {
+        label: "fill",
+        min: 0,
+        max: 4,
+        step: 0.05,
+      });
+      fLight.addBinding(params, "ambientIntensity", {
+        label: "sky fill",
+        min: 0,
+        max: 2.5,
+        step: 0.02,
+      });
+      fLight.addBinding(params, "exposure", { min: 0.6, max: 2.5, step: 0.05 });
+      fLight.addButton({ title: "Frame preview" }).on("click", () => {
+        controls.target.set(0.15, 1.35, 0);
+        camera.position.set(3.2, 2.1, 4.8);
+        controls.update();
+      });
+
+      const geoKeys = new Set([
+        "brickW",
+        "brickH",
+        "brickD",
+        "cornerChip",
+        "cornerChipVar",
+        "edgeChip",
+        "faceNoise",
+        "segmentsX",
+        "segmentsY",
+        "segmentsZ",
+        "geometrySeed",
+      ]);
+      const layoutKeys = new Set([
+        "previewCols",
+        "previewRows",
+        "previewBond",
+        "showHeroBrick",
+        "showWall",
+        "brickScaleRandomness",
+        "brickRotationVariation",
+        "brickVerticalVariation",
+        "brickPlanarSlop",
+        "colorSeed",
+      ]);
+
+      pane.on("change", (ev) => {
+        syncLiveUniforms();
+        updateExportSnippet();
+        const key = ev.target?.key;
+        if (geoKeys.has(key) || layoutKeys.has(key)) {
+          scheduleRebuild(geoKeys.has(key));
+        }
+      });
+
+      pane.addButton({ title: "Rebuild preview" }).on("click", () => {
+        scheduleRebuild(true);
+      });
+
+      ensureGround();
+      buildPreview();
+      syncLiveUniforms();
+
+      await renderer.init();
+
+      function animate() {
+        requestAnimationFrame(animate);
+        controls.update();
+        renderer.render(scene, camera);
+      }
+      animate();
+
+      window.addEventListener("resize", () => {
+        camera.aspect = window.innerWidth / window.innerHeight;
+        camera.updateProjectionMatrix();
+        renderer.setSize(window.innerWidth, window.innerHeight);
+      });
+    </script>
+  </body>
+</html>

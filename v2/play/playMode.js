@@ -1079,6 +1079,23 @@ export class PlayMode {
     this._detachWasPointerLocked = false;
     this._detachBadge = null;
     this._createDetachBadge();
+
+    // Per-mode camera tuning (FOV + chase distance + mouse sens).
+    // Lotus / Bruno keep their richer dedicated GUIs and read from their own settings objects;
+    // this object covers the modes that previously had no UI (capsule / char / fly / iso).
+    this.cameraTuning = {
+      capsule: { fov: 60, distance: CAM_DIST, sensX: CAM_SENS_X, sensY: CAM_SENS_Y },
+      char:    { fov: 60, distance: CAM_DIST, sensX: CAM_SENS_X, sensY: CAM_SENS_Y },
+      fly:     { fov: 60, distance: CAM_DIST, sensX: FLY_MOUSE_SENS_X, sensY: FLY_MOUSE_SENS_Y },
+      car:     { fov: 60 },   // car uses carSettings for the rest
+      lotus:   { fov: this.lotusCam.fov }, // mirror; lotusCam.fov stays authoritative
+      iso:     { fov: 60, pitch: ISO_PITCH },
+    };
+    this._loadCameraTuning();
+    this._cameraTuningGui = null;
+    this._cameraTuningGuiFolder = null;
+    this._cameraTuningGuiModeShown = null;
+    this._initCameraTuningGui();
   }
 
   _createModePill() {
@@ -1415,6 +1432,137 @@ export class PlayMode {
   _toggleDetached() {
     if (this.detached) this._exitDetached();
     else this._enterDetached();
+  }
+
+  _loadCameraTuning() {
+    try {
+      const raw = localStorage.getItem("v2.playCameraTuning");
+      if (!raw) return;
+      const parsed = JSON.parse(raw);
+      for (const mode of Object.keys(this.cameraTuning)) {
+        if (!parsed[mode]) continue;
+        for (const k of Object.keys(this.cameraTuning[mode])) {
+          if (typeof parsed[mode][k] === "number" && Number.isFinite(parsed[mode][k])) {
+            this.cameraTuning[mode][k] = parsed[mode][k];
+          }
+        }
+      }
+      // Keep lotusCam.fov in sync with persisted value
+      if (this.lotusCam && typeof parsed.lotus?.fov === "number") {
+        this.lotusCam.fov = parsed.lotus.fov;
+      }
+    } catch (_) { /* ignore */ }
+  }
+
+  _saveCameraTuning() {
+    try {
+      // Lotus FOV authoritative source is this.lotusCam; mirror before persisting.
+      if (this.lotusCam && this.cameraTuning.lotus) {
+        this.cameraTuning.lotus.fov = this.lotusCam.fov;
+      }
+      localStorage.setItem("v2.playCameraTuning", JSON.stringify(this.cameraTuning));
+    } catch (_) { /* ignore quota */ }
+  }
+
+  _applyCameraFov() {
+    let fov;
+    if (this.moveMode === "lotus") fov = this.lotusCam.fov;
+    else fov = this.cameraTuning[this.moveMode]?.fov ?? 60;
+    if (this.camera.fov !== fov) {
+      this.camera.fov = fov;
+      this.camera.updateProjectionMatrix();
+    }
+  }
+
+  async _initCameraTuningGui() {
+    try {
+      const { GUI } =
+        await import("https://cdn.jsdelivr.net/npm/lil-gui@0.20.0/dist/lil-gui.esm.min.js");
+      const gui = new GUI({ title: "Play Camera", width: 280 });
+      gui.domElement.style.position = "fixed";
+      gui.domElement.style.top = "10px";
+      gui.domElement.style.left = "10px";
+      gui.domElement.style.display = "none"; // hidden until play active
+      this._cameraTuningGui = gui;
+      this._rebuildCameraTuningGui();
+    } catch (_) { /* offline / blocked */ }
+  }
+
+  _rebuildCameraTuningGui() {
+    const gui = this._cameraTuningGui;
+    if (!gui) return;
+    if (this._cameraTuningGuiFolder) {
+      this._cameraTuningGuiFolder.destroy();
+      this._cameraTuningGuiFolder = null;
+    }
+    const mode = this.moveMode;
+    const meta = MODE_META[mode];
+    const title = meta ? `${meta.icon}  ${meta.label}` : mode;
+    const folder = gui.addFolder(title);
+    this._cameraTuningGuiFolder = folder;
+    this._cameraTuningGuiModeShown = mode;
+
+    const onAny = () => {
+      this._applyCameraFov();
+      this._saveCameraTuning();
+    };
+
+    if (mode === "lotus") {
+      // Lotus's full panel lives in the lil-gui created by _initLotusCamGui; just expose FOV here.
+      folder.add(this.lotusCam, "fov", 40, 110, 1).name("FOV").onChange(onAny);
+      folder.add({ open: () => this._lotusCamGui && (this._lotusCamGui.domElement.style.display = "") }, "open").name("Open Lotus panel ↗");
+    } else if (mode === "car") {
+      const t = this.cameraTuning.car;
+      folder.add(t, "fov", 40, 110, 1).name("FOV").onChange(onAny);
+      if (this.carSettings) {
+        folder.add(this.carSettings, "cameraDistance", 4, 24, 0.25).name("Distance").onChange(onAny);
+        folder.add(this.carSettings, "cameraHeight", 1, 10, 0.1).name("Height").onChange(onAny);
+        folder.add(this.carSettings, "cameraChaseSpeed", 0.5, 12, 0.1).name("Chase speed").onChange(onAny);
+        folder.add(this.carSettings, "cameraDriftLag", 0, 5, 0.1).name("Drift lag").onChange(onAny);
+      }
+    } else if (mode === "fly") {
+      const t = this.cameraTuning.fly;
+      folder.add(t, "fov", 40, 110, 1).name("FOV").onChange(onAny);
+      folder.add(t, "distance", 3, 24, 0.25).name("Chase distance").onChange(onAny);
+      folder.add(t, "sensX", 0.0005, 0.01, 0.0001).name("Mouse sens X").onChange(this._saveCameraTuning.bind(this));
+      folder.add(t, "sensY", 0.0005, 0.01, 0.0001).name("Mouse sens Y").onChange(this._saveCameraTuning.bind(this));
+    } else if (mode === "iso") {
+      const t = this.cameraTuning.iso;
+      folder.add(t, "fov", 30, 90, 1).name("FOV").onChange(onAny);
+      folder.add(t, "pitch", 0.4, 1.4, 0.01).name("Pitch (rad)").onChange(this._saveCameraTuning.bind(this));
+    } else {
+      // capsule / char
+      const t = this.cameraTuning[mode];
+      folder.add(t, "fov", 40, 110, 1).name("FOV").onChange(onAny);
+      folder.add(t, "distance", 3, 24, 0.25).name("Chase distance").onChange(onAny);
+      folder.add(t, "sensX", 0.0005, 0.01, 0.0001).name("Mouse sens X").onChange(this._saveCameraTuning.bind(this));
+      folder.add(t, "sensY", 0.0005, 0.01, 0.0001).name("Mouse sens Y").onChange(this._saveCameraTuning.bind(this));
+    }
+
+    folder.add({
+      reset: () => {
+        const defaults = {
+          capsule: { fov: 60, distance: CAM_DIST, sensX: CAM_SENS_X, sensY: CAM_SENS_Y },
+          char:    { fov: 60, distance: CAM_DIST, sensX: CAM_SENS_X, sensY: CAM_SENS_Y },
+          fly:     { fov: 60, distance: CAM_DIST, sensX: FLY_MOUSE_SENS_X, sensY: FLY_MOUSE_SENS_Y },
+          car:     { fov: 60 },
+          lotus:   { fov: 70 },
+          iso:     { fov: 60, pitch: ISO_PITCH },
+        }[mode];
+        if (!defaults) return;
+        Object.assign(this.cameraTuning[mode], defaults);
+        if (mode === "lotus") this.lotusCam.fov = defaults.fov;
+        this._applyCameraFov();
+        this._saveCameraTuning();
+        this._rebuildCameraTuningGui();
+      },
+    }, "reset").name("↺ Reset to defaults");
+    folder.open();
+  }
+
+  _refreshCameraTuningGuiVisible() {
+    if (!this._cameraTuningGui) return;
+    this._cameraTuningGui.domElement.style.display = this.active ? "" : "none";
   }
 
   _createFlyHud() {
@@ -2936,6 +3084,11 @@ export class PlayMode {
 
     if (this._modePill) this._modePill.style.display = "block";
     this._updateModePill();
+    this._applyCameraFov();
+    if (this._cameraTuningGuiModeShown !== this.moveMode) {
+      this._rebuildCameraTuningGui();
+    }
+    this._refreshCameraTuningGuiVisible();
   }
 
   _attachRelaxedPointerListeners() {
@@ -3020,6 +3173,11 @@ export class PlayMode {
     if (this._carSpeedometer) this._carSpeedometer.style.display = "none";
     if (this._modePill) this._modePill.style.display = "none";
     this._closeModeWheel(false);
+    this._refreshCameraTuningGuiVisible();
+    if (this.camera.fov !== 60) {
+      this.camera.fov = 60;
+      this.camera.updateProjectionMatrix();
+    }
     if (this._lotusCamGui) this._lotusCamGui.domElement.style.display = "none";
     if (this._jeepTuningGui) this._jeepTuningGui.domElement.style.display = "none";
     this.planeSpeed = 0;
@@ -4848,8 +5006,9 @@ export class PlayMode {
           yawDelta *
           (1 - Math.exp(-ISO_FLY_CHASE_SMOOTH * Math.min(dtSec, 0.1)));
       }
-      const hDist = this.isoDist * Math.cos(ISO_PITCH);
-      const vDist = this.isoDist * Math.sin(ISO_PITCH);
+      const isoPitch = this.cameraTuning.iso?.pitch ?? ISO_PITCH;
+      const hDist = this.isoDist * Math.cos(isoPitch);
+      const vDist = this.isoDist * Math.sin(isoPitch);
       this.camera.position.set(
         this.playerPos.x + Math.sin(this.isoYaw) * hDist,
         lookAtY + vDist,
@@ -4860,8 +5019,9 @@ export class PlayMode {
       const camOrbitYaw = flying
         ? this.flyHeading + this.flyGroundCamYawOff
         : this.camYaw;
-      const hDist = CAM_DIST * Math.cos(this.camPitch);
-      const vDist = CAM_DIST * Math.sin(this.camPitch);
+      const followDist = this.cameraTuning[this.moveMode]?.distance ?? CAM_DIST;
+      const hDist = followDist * Math.cos(this.camPitch);
+      const vDist = followDist * Math.sin(this.camPitch);
       const sinH = Math.sin(camOrbitYaw);
       const cosH = Math.cos(camOrbitYaw);
       const a = flying ? this.flyAileronAngle : 0;
@@ -5067,6 +5227,10 @@ export class PlayMode {
       this.driftSmoke.reset();
     }
     this._updateModePill();
+    this._applyCameraFov();
+    if (this._cameraTuningGuiModeShown !== this.moveMode) {
+      this._rebuildCameraTuningGui();
+    }
   }
 
   _onKeyDown(event) {
@@ -5305,18 +5469,21 @@ export class PlayMode {
     if (this.flying) {
       const mx = event.movementX;
       const my = event.movementY;
+      const flyT = this.cameraTuning.fly;
+      const fSensX = flyT?.sensX ?? FLY_MOUSE_SENS_X;
+      const fSensY = flyT?.sensY ?? FLY_MOUSE_SENS_Y;
       const agl =
         this.flyHeight -
         this.getWorldHeight(this.playerPos.x, this.playerPos.z);
       const spd = Math.abs(this.planeSpeed);
       const onDeck = agl < FLY_SURFACE_ALT && spd < FLY_SURFACE_SPEED;
       if (onDeck) {
-        this.flyGroundCamYawOff -= mx * FLY_MOUSE_SENS_X;
+        this.flyGroundCamYawOff -= mx * fSensX;
       } else {
         this.flyGroundCamYawOff = 0;
-        this.flyHeading -= mx * FLY_MOUSE_SENS_X;
+        this.flyHeading -= mx * fSensX;
         this.flyPitch = THREE.MathUtils.clamp(
-          this.flyPitch + my * FLY_MOUSE_SENS_Y,
+          this.flyPitch + my * fSensY,
           FLY_PITCH_MIN,
           FLY_PITCH_MAX,
         );
@@ -5331,8 +5498,11 @@ export class PlayMode {
 
     if (this.carMode) return;
 
-    this.camYaw -= event.movementX * CAM_SENS_X;
-    this.camPitch += event.movementY * CAM_SENS_Y;
+    const t = this.cameraTuning[this.moveMode];
+    const sx = t?.sensX ?? CAM_SENS_X;
+    const sy = t?.sensY ?? CAM_SENS_Y;
+    this.camYaw -= event.movementX * sx;
+    this.camPitch += event.movementY * sy;
     this.camPitch = Math.max(0.05, Math.min(Math.PI * 0.45, this.camPitch));
   }
 
@@ -5553,6 +5723,11 @@ export class PlayMode {
     if (this._detachBadge) {
       this._detachBadge.remove();
       this._detachBadge = null;
+    }
+    if (this._cameraTuningGui) {
+      this._cameraTuningGui.destroy();
+      this._cameraTuningGui = null;
+      this._cameraTuningGuiFolder = null;
     }
     if (this._lotusCamGui) {
       this._lotusCamGui.destroy();
