@@ -75,11 +75,11 @@
     <div id="badge">VVV pattern · rigid body</div>
     <div id="hud">Loading…</div>
     <div id="ui">
-      Pure <strong>Very Very Valet</strong> car physics: single rigid body box +
-      4 wheel raycast probes, each contributing 3 forces (suspension / steering
-      / acceleration). No wall collision in V1 — drive around the red wall.<br />
+      <strong>VVV physics test track</strong> — rigid body + 4 wheel probes.<br />
+      <strong>N</strong>orth: slope lab (10°→55°) · <strong>S</strong>outh: steps + jump kicker + bump strip ·
+      <strong>E</strong>ast: banked turn · <strong>W</strong>est: wall corridor<br />
       <kbd>WASD</kbd> drive · <kbd>Space</kbd> handbrake · <kbd>R</kbd> respawn ·
-      <kbd>Tab</kbd> toggle orbit camera · <kbd>F</kbd> toggle force arrows
+      <kbd>Tab</kbd> orbit camera · <kbd>F</kbd> force arrows
     </div>
     <script type="module">
       import * as THREE from "three/webgpu";
@@ -128,6 +128,11 @@
          *  step before the hub physically reaches it — kills the clip-into-
          *  ramp-face artifact a single down-ray produces. 0 = single ray. */
         rayForwardBias:  0.6,
+        /** Left/right ray bias as a multiplier of HALF tire thickness. Adds
+         *  2 more parallel down-rays at ±latBias along the wheel's lateral
+         *  axis, sampling the tire's contact-patch *width*. Catches kerbs and
+         *  surface edges that only one side of the tire touches. 0 = disabled. */
+        rayLateralBias:  1.0,
         /** Visual smoothing rate (1/s) for the wheel's vertical position. Eases
          *  the transition between grounded distance and full droop, killing the
          *  takeoff/landing "snap". Higher = snappier. 0 = no smoothing. */
@@ -139,6 +144,13 @@
         springStrength:  65000,
         /** Damper coefficient (N·s/m). Roughly critical-damping for the new k. */
         damper:          6500,
+        /** Bottom-out threshold as a fraction of restLength. When compression
+         *  exceeds this, a strong QUADRATIC spring augmentation kicks in to
+         *  simulate the suspension hitting its hard stop. This is what stops
+         *  the chassis tunneling deep into ramps at high speed. */
+        bottomOutThresh: 0.7,
+        /** Bottom-out quadratic stiffness multiplier (× springStrength). */
+        bottomOutMult:   8,
         /** Lateral grip: 1 = perfect grip (kills all lateral velocity in 1 step),
          *  0 = ice. Handbrake drops rear to gripHandbrake. */
         gripFront:       1.0,
@@ -389,6 +401,31 @@
             }
           }
 
+          // Lateral samples: ±latBias along the wheel's right axis. Catches
+          // kerbs/edges that only the left or right side of the tire touches
+          // (the "5-ray contact patch" model from AAA racing engines).
+          const latBias = TIRE.rayLateralBias * WHEEL.thickness * 0.5;
+          if (latBias > 1e-4) {
+            // Right side
+            raycaster.ray.origin.copy(this.worldPos)
+              .addScaledVector(this._up, pad)
+              .addScaledVector(this._wheelRight,  latBias);
+            const hitsRt = raycaster.intersectObjects(collidables, false);
+            if (hitsRt.length > 0 && hitsRt[0].distance < bestDist) {
+              bestDist = hitsRt[0].distance;
+              bestPoint = hitsRt[0].point;
+            }
+            // Left side
+            raycaster.ray.origin.copy(this.worldPos)
+              .addScaledVector(this._up, pad)
+              .addScaledVector(this._wheelRight, -latBias);
+            const hitsLt = raycaster.intersectObjects(collidables, false);
+            if (hitsLt.length > 0 && hitsLt[0].distance < bestDist) {
+              bestDist = hitsLt[0].distance;
+              bestPoint = hitsLt[0].point;
+            }
+          }
+
           this.lastSuspension.set(0, 0, 0);
           this.lastSteering.set(0, 0, 0);
           this.lastAccel.set(0, 0, 0);
@@ -414,8 +451,16 @@
 
           // ---- 1) SUSPENSION FORCE (vertical) ----
           // F_susp = (offset · k − v·up · c) · up   (clamped ≥ 0 = no pull)
+          //   + quadratic bottom-out when compression > bottomOutThresh × restLength.
+          // The quadratic term is what stops the chassis tunneling through ramps
+          // at high speed: when penetration grows, force grows quadratically, so
+          // the chassis snaps back to the surface within a few substeps.
           const upVel = this._tireVel.dot(this._up);
-          const springMag = this.compression * TIRE.springStrength;
+          let springMag = this.compression * TIRE.springStrength;
+          const ovr = this.compression - TIRE.restLength * TIRE.bottomOutThresh;
+          if (ovr > 0) {
+            springMag += ovr * ovr * TIRE.springStrength * TIRE.bottomOutMult;
+          }
           const dampMag = upVel * TIRE.damper;
           const suspMag = Math.max(0, springMag - dampMag);
           this._F.copy(this._up).multiplyScalar(suspMag);
@@ -555,9 +600,13 @@
       scene.add(fill);
 
       // ============================================================
-      // === ENVIRONMENT — ground + ramp + wall (collidables)
+      // === ENVIRONMENT — ground + test track
       // ============================================================
+      /** Meshes the WHEEL probes treat as ground (drive on top). */
       const collidables = [];
+      /** Meshes the CHASSIS lateral probes treat as walls. Kept separate so
+       *  wheels don't try to ride up the sides of walls. */
+      const wallColliders = [];
 
       const ground = new THREE.Mesh(
         new THREE.PlaneGeometry(400, 400),
@@ -573,56 +622,106 @@
       grid.position.y = 0.01;
       scene.add(grid);
 
-      // Ramp — tilted slab, 20°, oriented so the low edge is at z = +15
-      const RAMP_ANGLE = Math.PI / 9; // ~20°
-      const RAMP_LEN = 14;
-      const RAMP_THICK = 0.4;
-      const ramp = new THREE.Mesh(
-        new THREE.BoxGeometry(8, RAMP_THICK, RAMP_LEN),
-        new THREE.MeshStandardMaterial({ color: 0x6a5436, roughness: 0.85 }),
-      );
-      // Position so the low edge sits at z = +15, y = 0.
-      // After rotating around X by RAMP_ANGLE the box center rises by sin(a)·len/2.
-      ramp.rotation.x = -RAMP_ANGLE;
-      ramp.position.set(
-        0,
-        Math.sin(RAMP_ANGLE) * RAMP_LEN / 2,
-        15 + Math.cos(RAMP_ANGLE) * RAMP_LEN / 2,
-      );
-      ramp.castShadow = true;
-      ramp.receiveShadow = true;
-      scene.add(ramp);
-      collidables.push(ramp);
+      // ---- Track-piece helpers ----
+      // Every collidable surface uses DoubleSide so chassis probes still detect
+      // a wall surface from inside (after a tunneling frame).
+      const _matRamp = (color) => new THREE.MeshStandardMaterial({
+        color, roughness: 0.85, side: THREE.DoubleSide,
+      });
+      const _matWall = (color) => new THREE.MeshStandardMaterial({
+        color, roughness: 0.7, side: THREE.DoubleSide,
+      });
 
-      // Wall — detected by chassis lateral probes (NOT in `collidables` so
-      // wheel raycasts don't try to drive on top of it).
-      const wall = new THREE.Mesh(
-        new THREE.BoxGeometry(18, 4, 0.8),
-        new THREE.MeshStandardMaterial({ color: 0x803a3a, roughness: 0.7 }),
-      );
-      wall.position.set(-15, 2, 8);
-      wall.castShadow = true;
-      wall.receiveShadow = true;
-      scene.add(wall);
+      /** Pitched ramp. Low edge sits at (x, 0, z); ramp tilts up in +Z. */
+      function addRamp({ x, z, w = 5, l = 8, angleDeg = 20, yawDeg = 0, color = 0x6a5436 }) {
+        const angle = THREE.MathUtils.degToRad(angleDeg);
+        const yaw = THREE.MathUtils.degToRad(yawDeg);
+        const m = new THREE.Mesh(new THREE.BoxGeometry(w, 0.4, l), _matRamp(color));
+        m.rotation.order = "YXZ";
+        m.rotation.y = yaw;
+        m.rotation.x = -angle;
+        // After tilting, the box center is sin(a)·l/2 higher and cos(a)·l/2 forward
+        // of the low edge.
+        m.position.set(x, Math.sin(angle) * l / 2, z + Math.cos(angle) * l / 2);
+        m.castShadow = true;
+        m.receiveShadow = true;
+        scene.add(m);
+        collidables.push(m);
+        return m;
+      }
 
-      // Second wall — perpendicular to first so you can ping-pong test corner hits.
-      const wall2 = new THREE.Mesh(
-        new THREE.BoxGeometry(0.8, 4, 12),
-        new THREE.MeshStandardMaterial({ color: 0x803a3a, roughness: 0.7 }),
-      );
-      wall2.position.set(12, 2, 2);
-      wall2.castShadow = true;
-      wall2.receiveShadow = true;
-      scene.add(wall2);
+      /** Axis-aligned rectangular slab sitting on the ground. */
+      function addStep({ x, z, w, h, l, color = 0x5e7a48 }) {
+        const m = new THREE.Mesh(new THREE.BoxGeometry(w, h, l), _matRamp(color));
+        m.position.set(x, h / 2, z);
+        m.castShadow = true;
+        m.receiveShadow = true;
+        scene.add(m);
+        collidables.push(m);
+        return m;
+      }
 
-      /** Meshes hit by the chassis lateral probes (walls / obstacles).
-       *  Distinct from `collidables` so wheel rays don't see them as ground. */
-      const wallColliders = [wall, wall2];
+      /** Vertical wall — chassis probes only (not in `collidables`). */
+      function addWall({ x, z, w, h, l, color = 0x803a3a }) {
+        const m = new THREE.Mesh(new THREE.BoxGeometry(w, h, l), _matWall(color));
+        m.position.set(x, h / 2, z);
+        m.castShadow = true;
+        m.receiveShadow = true;
+        scene.add(m);
+        wallColliders.push(m);
+        return m;
+      }
+
+      /** Laterally-tilted slope (banked turn). +X side is the low edge at y=0. */
+      function addBank({ x, z, w, l, bankDeg, color = 0x3a5060 }) {
+        const bank = THREE.MathUtils.degToRad(bankDeg);
+        const m = new THREE.Mesh(new THREE.BoxGeometry(w, 0.4, l), _matRamp(color));
+        m.rotation.z = -bank;
+        // Low edge (+X side) at world y=0 → mesh center at y = sin(bank)·w/2.
+        m.position.set(x, Math.sin(bank) * w / 2, z);
+        m.castShadow = true;
+        m.receiveShadow = true;
+        scene.add(m);
+        collidables.push(m);
+        return m;
+      }
+
+      // ---- Build the test track ----
+      // === SLOPE LAB (N) — 5 ramps at 10°/20°/30°/40°/55°, lighter→darker ===
+      const slopeAngles = [10, 20, 30, 40, 55];
+      for (let i = 0; i < slopeAngles.length; i++) {
+        const tint = 0.50 - i * 0.06;
+        const color = new THREE.Color().setHSL(0.085, 0.40, tint).getHex();
+        addRamp({ x: -10 + i * 5, z: 8, w: 4, l: 8, angleDeg: slopeAngles[i], color });
+      }
+
+      // === STEPS / CURBS (S, easy) ===
+      addStep({ x: 0, z: -10, w: 8, h: 0.18, l: 1.2, color: 0x4a6038 });
+      addStep({ x: 0, z: -13, w: 8, h: 0.35, l: 1.5, color: 0x3a5028 });
+
+      // === JUMP KICKER (S, dramatic) ===
+      addRamp({ x: 0, z: -20, w: 5, l: 5, angleDeg: 35, color: 0xd97a3a });
+
+      // === BUMPY STRIP (far S) — high-frequency suspension chatter ===
+      for (let i = 0; i < 6; i++) {
+        addStep({ x: 0, z: -30 - i * 1.4, w: 6, h: 0.14, l: 0.55, color: 0x6e8050 });
+      }
+
+      // === BANKED TURN (E) — lateral grip + friction circle ===
+      addBank({ x: 20, z: 0, w: 10, l: 16, bankDeg: 25, color: 0x3a5060 });
+
+      // === WALL CORRIDOR (W) — drive between two walls, dead-end at the north ===
+      addWall({ x: -22, z: 0, w: 0.5, h: 2.5, l: 12, color: 0x803a3a }); // outer
+      addWall({ x: -16, z: 0, w: 0.5, h: 2.5, l: 12, color: 0x803a3a }); // inner
+      addWall({ x: -19, z: 6.5, w: 6.5, h: 2.5, l: 0.5, color: 0xc04444 }); // dead-end
+
+      // === SINGLE WALL near spawn — quick collision sanity check ===
+      addWall({ x: 6, z: 5, w: 0.5, h: 2, l: 4, color: 0xa05030 });
 
       // ============================================================
       // === CHASSIS (visible box) + RIGID BODY
       // ============================================================
-      const SPAWN = { x: 0, y: 0.65, z: -8 };
+      const SPAWN = { x: 0, y: 0.65, z: 0 };
 
       const chassisMesh = new THREE.Mesh(
         new THREE.BoxGeometry(CHASSIS.width, CHASSIS.height, CHASSIS.length),
@@ -885,12 +984,19 @@
         { name: "left",  pos: new THREE.Vector3(-_hw, 0,   0), dir: new THREE.Vector3(-1, 0,  0) },
       ];
       const WALL = {
-        /** Feeler reach beyond the chassis face (m). Wall detected when within. */
-        probeRange: 0.5,
-        /** Repulsion spring stiffness (N/m of penetration). */
-        stiffness:  90000,
+        /** Feeler reach beyond the chassis face (m). Must exceed expected
+         *  wall thickness so a probe inside the wall can still reach the far
+         *  face (with DoubleSide material). */
+        probeRange: 0.9,
+        /** Repulsion spring stiffness (N/m). High enough to actually stop a
+         *  1400kg car at moderate speed within a few cm of penetration. */
+        stiffness:  300000,
         /** Damper coefficient — opposes inward velocity (N·s/m). */
-        damper:     5000,
+        damper:     14000,
+        /** Penetration fraction (0..1) above which we hard-clamp the body's
+         *  velocity toward the wall to zero. Keeps things stable when the
+         *  spring alone can't stop the car. */
+        clampPenFrac: 0.4,
       };
 
       const _probeOrigin = new THREE.Vector3();
@@ -929,8 +1035,60 @@
           _probeF.copy(_probeDirW).multiplyScalar(-forceMag);
           body.addForceAtPoint(_probeF, hit.point);
 
+          // Hard velocity clamp when penetration is deep — kills the inward
+          // velocity component directly so the spring force doesn't have to
+          // overpower fast incoming momentum.
+          if (pen > WALL.probeRange * WALL.clampPenFrac) {
+            const vInto = body.vel.dot(_probeDirW);
+            if (vInto > 0) {
+              body.vel.addScaledVector(_probeDirW, -vInto);
+            }
+          }
+
           probeHits[i].hit = true;
           probeHits[i].point.copy(hit.point);
+        }
+      }
+
+      // ============================================================
+      // === AABB DEPENETRATION — last-resort wall fallback
+      // ============================================================
+      /** Pre-computed world AABBs of every wall (walls don't move so we
+       *  cache once). Saves a Box3.setFromObject call every frame. */
+      const wallBoxes = wallColliders.map((w) => {
+        const b = new THREE.Box3().setFromObject(w);
+        return b;
+      });
+      const _depenDir = new THREE.Vector3();
+
+      /** If the body CoM is inside any wall's AABB, teleport it out along
+       *  the shortest exit axis and kill velocity along that axis. This is
+       *  the "I tunneled fully through" recovery — probes can't help once
+       *  the body is past the wall, but AABB containment still catches it. */
+      function depenetrateFromWalls(body) {
+        const c = body.pos;
+        for (let i = 0; i < wallBoxes.length; i++) {
+          const box = wallBoxes[i];
+          if (c.x < box.min.x || c.x > box.max.x) continue;
+          if (c.y < box.min.y || c.y > box.max.y) continue;
+          if (c.z < box.min.z || c.z > box.max.z) continue;
+
+          // Find the smallest horizontal exit (skip Y — walls extend above
+          // ground and we'd otherwise pop the body straight up through them).
+          const dx_min = c.x - box.min.x;
+          const dx_max = box.max.x - c.x;
+          const dz_min = c.z - box.min.z;
+          const dz_max = box.max.z - c.z;
+
+          let minD = dx_min;
+          _depenDir.set(-1, 0, 0);
+          if (dx_max < minD) { minD = dx_max; _depenDir.set( 1, 0, 0); }
+          if (dz_min < minD) { minD = dz_min; _depenDir.set( 0, 0, -1); }
+          if (dz_max < minD) { minD = dz_max; _depenDir.set( 0, 0,  1); }
+
+          c.addScaledVector(_depenDir, minD + 0.05);
+          const vDot = body.vel.dot(_depenDir);
+          if (vDot < 0) body.vel.addScaledVector(_depenDir, -vDot);
         }
       }
 
@@ -1093,25 +1251,15 @@
       // === TWEAKPANE — live tuning
       // ============================================================
       const pane = new Pane({ title: "VVV physics — tune" });
-      pane.element.parentElement.style.zIndex = "100";
-
-      // Forward wheel events from the Tweakpane container to the canvas so
-      // OrbitControls / camera zoom still work when the cursor is over the
-      // panel. Skip forwarding when the target is an INPUT (Tweakpane uses
-      // wheel-on-input to adjust slider values — keep that behavior).
-      pane.element.parentElement.addEventListener("wheel", (e) => {
-        if (e.target && e.target.tagName === "INPUT") return;
-        e.preventDefault();
-        renderer.domElement.dispatchEvent(new WheelEvent("wheel", {
-          deltaX: e.deltaX,
-          deltaY: e.deltaY,
-          deltaMode: e.deltaMode,
-          clientX: e.clientX,
-          clientY: e.clientY,
-          bubbles: true,
-          cancelable: true,
-        }));
-      }, { passive: false });
+      // Make the panel itself scrollable so we can reach controls below the
+      // viewport. The default Tweakpane wrapper is `position: fixed` with no
+      // overflow, so when the content grows past viewport height the bottom
+      // sliders are unreachable.
+      const _paneWrap = pane.element.parentElement;
+      _paneWrap.style.zIndex = "100";
+      _paneWrap.style.maxHeight = "calc(100vh - 24px)";
+      _paneWrap.style.overflowY = "auto";
+      _paneWrap.style.overflowX = "hidden";
 
       const fSusp = pane.addFolder({ title: "Suspension" });
       fSusp.addBinding(TIRE, "springStrength", { min: 5000, max: 150000, step: 500, label: "Spring k (N/m)" });
@@ -1120,6 +1268,9 @@
       fSusp.addBinding(TIRE, "rayLength",      { min: 0.3,  max: 2.0,    step: 0.01,label: "Ray length" });
       fSusp.addBinding(TIRE, "rayPadAbove",    { min: 0,    max: 1.5,    step: 0.01,label: "Ray pad above" });
       fSusp.addBinding(TIRE, "rayForwardBias", { min: 0,    max: 1.0,    step: 0.05,label: "Fwd/rear bias (×R)" });
+      fSusp.addBinding(TIRE, "rayLateralBias", { min: 0,    max: 1.5,    step: 0.05,label: "Lateral bias (×W/2)" });
+      fSusp.addBinding(TIRE, "bottomOutThresh",{ min: 0.3,  max: 1.0,    step: 0.05,label: "Bottom-out start" });
+      fSusp.addBinding(TIRE, "bottomOutMult",  { min: 0,    max: 30,     step: 0.5, label: "Bottom-out mult" });
       fSusp.addBinding(TIRE, "suspVisSmooth",  { min: 0,    max: 40,     step: 0.5, label: "Susp visual smooth" });
 
       const fSteer = pane.addFolder({ title: "Steering & grip" });
@@ -1148,9 +1299,10 @@
       fVis.addBinding(renderer, "toneMappingExposure", { min: 0.3, max: 2.5, step: 0.05, label: "Exposure" });
 
       const fWall = pane.addFolder({ title: "Wall collision (chassis probes)" });
-      fWall.addBinding(WALL, "probeRange", { min: 0.05, max: 2,      step: 0.01, label: "Probe range (m)" });
-      fWall.addBinding(WALL, "stiffness",  { min: 5000, max: 300000, step: 1000, label: "Stiffness (N/m)" });
-      fWall.addBinding(WALL, "damper",     { min: 0,    max: 20000,  step: 100,  label: "Damper" });
+      fWall.addBinding(WALL, "probeRange",   { min: 0.05, max: 2.0,    step: 0.01, label: "Probe range (m)" });
+      fWall.addBinding(WALL, "stiffness",    { min: 5000, max: 800000, step: 5000, label: "Stiffness (N/m)" });
+      fWall.addBinding(WALL, "damper",       { min: 0,    max: 40000,  step: 200,  label: "Damper" });
+      fWall.addBinding(WALL, "clampPenFrac", { min: 0,    max: 1.0,    step: 0.05, label: "Vel-clamp pen frac" });
 
       const fBody = pane.addFolder({ title: "Chassis" });
       fBody.addBinding(CHASSIS, "mass",       { min: 400, max: 4000, step: 50,   label: "Mass (kg)" })
@@ -1212,6 +1364,7 @@
         const dt = Math.min(timer.getDelta(), 0.05);
         readInput(dt);
         physicsStep(dt);
+        depenetrateFromWalls(body);
         syncVisuals(dt);
         updateCamera(dt);
         updateHud();
