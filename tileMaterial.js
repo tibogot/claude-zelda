@@ -30,11 +30,20 @@ export const TILE_REFERENCE_SCALE = 400;
 export const TILE_DENSITY = TILE_REFERENCE_SCALE / TILE_REFERENCE_SIZE;
 
 let gridTextureCache = null;
+let gridTextureUrlOverride = null;
+
+/** Override grid.png path when the page is not served from repo root (e.g. `/models/`). */
+export function setGridTextureUrl(url) {
+  gridTextureUrlOverride = url;
+  gridTextureCache = null;
+}
 
 function getGridTexture() {
   if (gridTextureCache) return gridTextureCache;
   const texLoader = new THREE.TextureLoader();
-  gridTextureCache = texLoader.load("textures/grid.png");
+  gridTextureCache = texLoader.load(
+    gridTextureUrlOverride || "textures/grid.png",
+  );
   gridTextureCache.wrapS = gridTextureCache.wrapT = THREE.RepeatWrapping;
   gridTextureCache.anisotropy = 16;
   return gridTextureCache;
