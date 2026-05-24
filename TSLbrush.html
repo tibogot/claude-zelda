@@ -1,0 +1,819 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width,initial-scale=1.0"/>
+
+<title>WebGPU TSL Painterly Brush Marks</title>
+
+<style>
+
+html,body{
+    margin:0;
+    overflow:hidden;
+    background:#0f0f0f;
+    font-family:monospace;
+}
+
+canvas{
+    display:block;
+}
+
+#ui{
+    position:absolute;
+    top:0;
+    left:0;
+    width:300px;
+    height:100%;
+    overflow:auto;
+    padding:15px;
+    box-sizing:border-box;
+    background:rgba(0,0,0,.75);
+    color:white;
+    backdrop-filter:blur(10px);
+    border-right:1px solid #333;
+    z-index:10;
+}
+
+</style>
+</head>
+
+<body>
+
+<div id="ui">
+
+<h2>Square Brush Strokes</h2>
+
+<p>
+
+Full canvas of chunky square brush dabs — flat grey fills, soft noisy edges.
+<br><br>
+
+• varied dab sizes (small &amp; large)<br>
+• red undercoat — any red = not covered yet<br>
+• overlapping square dabs<br>
+• dark grey palette only — no white<br>
+
+</p>
+
+<div id="pane"></div>
+
+</div>
+
+<script type="importmap">
+{
+  "imports": {
+    "three": "https://cdn.jsdelivr.net/npm/three@0.183.1/build/three.webgpu.js",
+    "three/webgpu": "https://cdn.jsdelivr.net/npm/three@0.183.1/build/three.webgpu.js",
+    "three/tsl": "https://cdn.jsdelivr.net/npm/three@0.183.1/build/three.tsl.js",
+    "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.183.1/examples/jsm/",
+    "tweakpane": "https://cdn.jsdelivr.net/npm/tweakpane@4.0.3/dist/tweakpane.min.js"
+  }
+}
+</script>
+
+<script type="module">
+
+import * as THREE from "three/webgpu";
+
+import {
+
+    uv,
+    vec2,
+    vec3,
+    vec4,
+    float,
+
+    sin,
+    cos,
+    floor,
+    fract,
+    abs,
+    max,
+    min,
+    dot,
+    length,
+
+    mix,
+    smoothstep,
+    step,
+
+    uniform,
+
+    Fn
+
+}
+from "three/tsl";
+
+import { OrbitControls }
+from "three/addons/controls/OrbitControls.js";
+
+import { Pane }
+from "tweakpane";
+
+// =====================================================
+// CORE
+// =====================================================
+
+let renderer;
+let scene;
+let camera;
+let controls;
+let mesh;
+
+// =====================================================
+// PARAMS
+// =====================================================
+
+const params = {
+
+    brushScale:9,
+
+    sizeMin:.32,
+
+    sizeMax:.58,
+
+    edgeNoise:.18,
+
+    edgeSoftness:.06,
+
+    warpStrength:.1,
+
+    rotation:1,
+
+    jitter:.14,
+
+    color1:"#8f8a85",
+
+    color2:"#75706b",
+
+    color3:"#5c5954",
+
+    color4:"#42403d",
+
+    undercoat:"#ff0000"
+
+};
+
+const u = {
+
+    brushScale:uniform(params.brushScale),
+
+    sizeMin:uniform(params.sizeMin),
+
+    sizeMax:uniform(params.sizeMax),
+
+    edgeNoise:uniform(params.edgeNoise),
+
+    edgeSoftness:uniform(params.edgeSoftness),
+
+    warpStrength:uniform(params.warpStrength),
+
+    rotation:uniform(params.rotation),
+
+    jitter:uniform(params.jitter),
+
+    coverBoost:uniform(1.45),
+
+    color1:uniform(new THREE.Color(params.color1)),
+
+    color2:uniform(new THREE.Color(params.color2)),
+
+    color3:uniform(new THREE.Color(params.color3)),
+
+    color4:uniform(new THREE.Color(params.color4)),
+
+    undercoat:uniform(new THREE.Color(params.undercoat))
+
+};
+
+function syncUniforms(){
+
+    u.brushScale.value = params.brushScale;
+    u.sizeMin.value = params.sizeMin;
+    u.sizeMax.value = params.sizeMax;
+    u.edgeNoise.value = params.edgeNoise;
+    u.edgeSoftness.value = params.edgeSoftness;
+    u.warpStrength.value = params.warpStrength;
+    u.rotation.value = params.rotation;
+    u.jitter.value = params.jitter;
+
+}
+
+function syncColors(){
+
+    u.color1.value.set(params.color1);
+    u.color2.value.set(params.color2);
+    u.color3.value.set(params.color3);
+    u.color4.value.set(params.color4);
+    u.undercoat.value.set(params.undercoat);
+
+}
+
+// =====================================================
+// INIT
+// =====================================================
+
+init();
+
+async function init(){
+
+    renderer =
+        new THREE.WebGPURenderer({
+
+            antialias:true
+
+        });
+
+    renderer.setSize(
+        innerWidth,
+        innerHeight
+    );
+
+    document.body.appendChild(
+        renderer.domElement
+    );
+
+    await renderer.init();
+
+    scene =
+        new THREE.Scene();
+
+    camera =
+        new THREE.PerspectiveCamera(
+
+            45,
+            innerWidth / innerHeight,
+            .1,
+            100
+
+        );
+
+    camera.position.z = 4;
+
+    controls =
+        new OrbitControls(
+            camera,
+            renderer.domElement
+        );
+
+    controls.enableDamping = true;
+
+    const geo =
+        new THREE.PlaneGeometry(
+            5,
+            5
+        );
+
+    const mat =
+        new THREE.MeshBasicNodeMaterial();
+
+    mesh =
+        new THREE.Mesh(
+            geo,
+            mat
+        );
+
+    scene.add(mesh);
+
+    buildShader();
+
+    buildUI();
+
+    animate();
+
+    addEventListener(
+        "resize",
+        onResize
+    );
+
+}
+
+// =====================================================
+// HASH
+// =====================================================
+
+function hash21(p){
+
+    return fract(
+
+        sin(
+
+            dot(
+                p,
+                vec2(127.1,311.7)
+            )
+
+        )
+
+        .mul(43758.5453123)
+
+    );
+
+}
+
+// =====================================================
+// NOISE
+// =====================================================
+
+function noise(p){
+
+    const i =
+        floor(p);
+
+    const f =
+        fract(p);
+
+    const a =
+        hash21(i);
+
+    const b =
+        hash21(
+            i.add(vec2(1,0))
+        );
+
+    const c =
+        hash21(
+            i.add(vec2(0,1))
+        );
+
+    const d =
+        hash21(
+            i.add(vec2(1,1))
+        );
+
+    const u =
+        f.mul(f)
+        .mul(
+            float(3).sub(
+                f.mul(2)
+            )
+        );
+
+    return mix(a,b,u.x)
+
+        .add(
+
+            mix(c,d,u.x)
+            .sub(
+                mix(a,b,u.x)
+            )
+            .mul(u.y)
+
+        );
+
+}
+
+// =====================================================
+// FBM
+// =====================================================
+
+function fbm(p){
+
+    let v =
+        noise(p).mul(.5);
+
+    p = p.mul(2.02);
+
+    v = v.add(
+        noise(p).mul(.25)
+    );
+
+    p = p.mul(2.03);
+
+    v = v.add(
+        noise(p).mul(.125)
+    );
+
+    p = p.mul(2.01);
+
+    v = v.add(
+        noise(p).mul(.0625)
+    );
+
+    return v;
+
+}
+
+// =====================================================
+// SQUARE BRUSH DAB
+// =====================================================
+
+function squareBrush(gv,rnd,edgeFBM,hardCover){
+
+    const sizeRnd =
+        fract(
+            rnd.mul(13.7)
+        );
+
+    const brushSize =
+
+        mix(
+            u.sizeMin,
+            u.sizeMax,
+            sizeRnd
+        )
+
+        .mul(
+
+            mix(
+                float(1),
+                u.coverBoost,
+                hardCover
+            )
+
+        );
+
+    const angle =
+
+        rnd
+        .mul(6.2831)
+        .mul(u.rotation);
+
+    gv = vec2(
+
+        gv.x
+        .mul(cos(angle))
+        .sub(
+            gv.y.mul(sin(angle))
+        ),
+
+        gv.x
+        .mul(sin(angle))
+        .add(
+            gv.y.mul(cos(angle))
+        )
+
+    );
+
+    const w =
+
+        mix(
+            brushSize.mul(.85),
+            brushSize.mul(1.1),
+            rnd
+        );
+
+    const h =
+
+        mix(
+            brushSize.mul(.85),
+            brushSize.mul(1.1),
+            fract(rnd.mul(4.7))
+        );
+
+    const distort =
+
+        mix(
+            edgeFBM
+            .sub(.5)
+            .mul(u.edgeNoise),
+            float(0),
+            hardCover
+        );
+
+    const rect =
+
+        max(
+
+            abs(gv.x)
+            .sub(w.add(distort)),
+
+            abs(gv.y)
+            .sub(h.add(distort))
+
+        );
+
+    const soft =
+
+        mix(
+            u.edgeSoftness,
+            float(.002),
+            hardCover
+        );
+
+    return smoothstep(
+
+        soft,
+
+        soft.negate(),
+
+        rect
+
+    );
+
+}
+
+// =====================================================
+// GREY STONE PALETTE
+// =====================================================
+
+function stoneColor(rnd){
+
+    let col =
+
+        mix(
+            u.color1,
+            u.color2,
+            smoothstep(
+                .2,
+                .5,
+                rnd
+            )
+        );
+
+    col =
+
+        mix(
+            col,
+            u.color3,
+            smoothstep(
+                .52,
+                .75,
+                rnd
+            )
+        );
+
+    col =
+
+        mix(
+            col,
+            u.color4,
+            smoothstep(
+                .78,
+                .95,
+                rnd
+            )
+        );
+
+    return col;
+
+}
+
+// =====================================================
+// SHADER
+// =====================================================
+
+function buildShader(){
+
+    mesh.material.colorNode = Fn(()=>{
+
+        let p =
+            uv();
+
+        const warp =
+
+            fbm(
+                p.mul(3)
+            )
+
+            .sub(.5)
+
+            .mul(
+                u.warpStrength
+            );
+
+        p =
+            vec2(
+                p.x.add(warp),
+                p.y.sub(warp.mul(.5))
+            );
+
+        p =
+            p.mul(
+                u.brushScale
+            );
+
+        const id =
+            floor(p);
+
+        const f =
+            fract(p);
+
+        let bestSoft =
+            float(0);
+
+        let bestCover =
+            float(0);
+
+        let bestCol =
+            u.undercoat;
+
+        for(let y=-2;y<=2;y++){
+
+            for(let x=-2;x<=2;x++){
+
+                const offs =
+                    vec2(x,y);
+
+                const cellId =
+                    id.add(offs);
+
+                const rnd =
+                    hash21(cellId);
+
+                const gvCover =
+
+                    f.sub(
+                        offs.add(.5)
+                    );
+
+                let gv =
+                    vec2(
+
+                        gvCover.x.add(
+                            rnd.sub(.5).mul(u.jitter)
+                        ),
+
+                        gvCover.y.add(
+                            fract(rnd.mul(4.7)).sub(.5).mul(u.jitter)
+                        )
+
+                    );
+
+                const edgeFBM =
+
+                    fbm(
+                        gv.mul(8).add(
+                            cellId.mul(.31)
+                        )
+                    );
+
+                const brush =
+                    squareBrush(
+                        gv,
+                        rnd,
+                        edgeFBM,
+                        float(0)
+                    );
+
+                const cover =
+                    squareBrush(
+                        gvCover,
+                        rnd,
+                        edgeFBM,
+                        float(1)
+                    );
+
+                const isBest =
+                    brush.greaterThan(bestSoft);
+
+                bestCol =
+                    mix(
+                        bestCol,
+                        stoneColor(rnd),
+                        isBest
+                    );
+
+                bestSoft =
+                    max(
+                        bestSoft,
+                        brush
+                    );
+
+                bestCover =
+                    max(
+                        bestCover,
+                        cover
+                    );
+
+            }
+
+        }
+
+        const homeRnd =
+            hash21(id);
+
+        const covered =
+            step(
+                .001,
+                bestCover
+            );
+
+        const uncovered =
+            covered.oneMinus();
+
+        const col =
+            mix(
+                mix(
+                    u.undercoat,
+                    stoneColor(homeRnd),
+                    uncovered
+                ),
+                bestCol,
+                covered
+            );
+
+        return vec4(
+            col,
+            1
+        );
+
+    })();
+
+}
+
+// =====================================================
+// UI
+// =====================================================
+
+function buildUI(){
+
+    const pane =
+        new Pane({
+
+            container:
+                document.getElementById(
+                    "pane"
+                )
+
+        });
+
+    const bind = (key,opts)=>{
+
+        pane.addBinding(
+            params,
+            key,
+            opts
+        ).on(
+            "change",
+            syncUniforms
+        );
+
+    };
+
+    bind("brushScale",{ min:2, max:20 });
+    bind("sizeMin",{ min:.15, max:.55 });
+    bind("sizeMax",{ min:.3, max:.9 });
+    bind("edgeNoise",{ min:0, max:.5 });
+    bind("edgeSoftness",{ min:.01, max:.2 });
+    bind("warpStrength",{ min:0, max:.5 });
+    bind("jitter",{ min:0, max:.35 });
+    bind("rotation",{ min:0, max:1 });
+
+    const colors =
+        pane.addFolder({
+            title:"Colors"
+        });
+
+    const bindColor = (key)=>{
+
+        colors.addBinding(
+            params,
+            key,
+            { view:"color" }
+        ).on(
+            "change",
+            syncColors
+        );
+
+    };
+
+    bindColor("color1");
+    bindColor("color2");
+    bindColor("color3");
+    bindColor("color4");
+    bindColor("undercoat");
+
+}
+
+// =====================================================
+// LOOP
+// =====================================================
+
+function animate(){
+
+    requestAnimationFrame(
+        animate
+    );
+
+    controls.update();
+
+    renderer.render(
+        scene,
+        camera
+    );
+
+}
+
+// =====================================================
+// RESIZE
+// =====================================================
+
+function onResize(){
+
+    camera.aspect =
+        innerWidth / innerHeight;
+
+    camera.updateProjectionMatrix();
+
+    renderer.setSize(
+        innerWidth,
+        innerHeight
+    );
+
+}
+
+</script>
+</body>
+</html>

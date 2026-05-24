@@ -134,7 +134,12 @@ export function createPlayerController(
  * @param {object} RAPIER - RAPIER module
  * @param {THREE.Scene} scene
  * @param {import("@dimforge/rapier3d").World} physicsWorld
- * @returns {{ physicsDebugGroup: THREE.Group, buildRapierDebugMeshes: () => void }}
+ * @returns {{
+ *   physicsDebugGroup: THREE.Group,
+ *   buildRapierDebugMeshes: () => void,
+ *   updateRapierDebugMeshes: () => void,
+ *   disposeRapierDebugMeshes: () => void,
+ * }}
  */
 export function createPhysicsDebug(RAPIER, scene, physicsWorld) {
   const physicsDebugGroup = new THREE.Group();
@@ -144,65 +149,160 @@ export function createPhysicsDebug(RAPIER, scene, physicsWorld) {
     wireframe: true,
     depthTest: true,
   });
+
+  /** @type {{ wire: THREE.LineSegments, collider: object, dynamic: boolean }[]} */
+  const debugEntries = [];
+  const _dbgPos = new THREE.Vector3();
+  const _dbgQuat = new THREE.Quaternion();
+  const _bQ = new THREE.Quaternion();
+  const _cQ = new THREE.Quaternion();
+  const _colOffset = new THREE.Vector3();
+
+  /** Full triangle wireframe only for small trimeshes — large ones use AABB. */
+  const TRIMESH_WIRE_INDEX_MAX = 2400;
+
+  function colliderWorldPose(body, collider, outPos, outQuat) {
+    const bt = body.translation();
+    const br = body.rotation();
+    const ct = collider.translation();
+    const cr = collider.rotation();
+    _bQ.set(br.x, br.y, br.z, br.w);
+    _cQ.set(cr.x, cr.y, cr.z, cr.w);
+    outQuat.copy(_bQ).multiply(_cQ);
+    _colOffset.set(ct.x, ct.y, ct.z).applyQuaternion(_bQ);
+    outPos.set(bt.x + _colOffset.x, bt.y + _colOffset.y, bt.z + _colOffset.z);
+  }
+
+  function aabbWireGeometryFromVertices(v) {
+    let minX = Infinity, minY = Infinity, minZ = Infinity;
+    let maxX = -Infinity, maxY = -Infinity, maxZ = -Infinity;
+    for (let k = 0; k < v.length; k += 3) {
+      const x = v[k], y = v[k + 1], z = v[k + 2];
+      if (x < minX) minX = x;
+      if (y < minY) minY = y;
+      if (z < minZ) minZ = z;
+      if (x > maxX) maxX = x;
+      if (y > maxY) maxY = y;
+      if (z > maxZ) maxZ = z;
+    }
+    const box = new THREE.BoxGeometry(maxX - minX, maxY - minY, maxZ - minZ);
+    const cx = (minX + maxX) * 0.5;
+    const cy = (minY + maxY) * 0.5;
+    const cz = (minZ + maxZ) * 0.5;
+    box.translate(cx, cy, cz);
+    const wire = new THREE.WireframeGeometry(box);
+    box.dispose();
+    return wire;
+  }
+
+  function shapeToWireGeometry(shape, st) {
+    if (shape.type === st.Cuboid && shape.halfExtents) {
+      const h = shape.halfExtents;
+      const box = new THREE.BoxGeometry(h.x * 2, h.y * 2, h.z * 2);
+      const wire = new THREE.WireframeGeometry(box);
+      box.dispose();
+      return wire;
+    }
+    if (shape.type === st.Ball && shape.radius != null) {
+      const sph = new THREE.SphereGeometry(shape.radius, 8, 6);
+      const wire = new THREE.WireframeGeometry(sph);
+      sph.dispose();
+      return wire;
+    }
+    if (shape.type === st.Capsule && shape.halfHeight != null) {
+      const cap = new THREE.CapsuleGeometry(shape.radius, shape.halfHeight * 2, 4, 8);
+      const wire = new THREE.WireframeGeometry(cap);
+      cap.dispose();
+      return wire;
+    }
+    if (shape.type === st.Cylinder && shape.halfHeight != null) {
+      const cyl = new THREE.CylinderGeometry(
+        shape.radius,
+        shape.radius,
+        shape.halfHeight * 2,
+        8,
+      );
+      const wire = new THREE.WireframeGeometry(cyl);
+      cyl.dispose();
+      return wire;
+    }
+    if (shape.type === st.TriMesh && shape.vertices && shape.indices) {
+      const v = shape.vertices;
+      const idx = shape.indices;
+      if (idx.length > TRIMESH_WIRE_INDEX_MAX) {
+        return aabbWireGeometryFromVertices(v);
+      }
+      const posArr = [];
+      const idxArr = [];
+      for (let k = 0; k < v.length; k += 3) posArr.push(v[k], v[k + 1], v[k + 2]);
+      for (let k = 0; k < idx.length; k++) idxArr.push(idx[k]);
+      const bg = new THREE.BufferGeometry();
+      bg.setAttribute("position", new THREE.Float32BufferAttribute(posArr, 3));
+      bg.setIndex(idxArr);
+      const wire = new THREE.WireframeGeometry(bg);
+      bg.dispose();
+      return wire;
+    }
+    return null;
+  }
+
+  function disposeRapierDebugMeshes() {
+    for (const entry of debugEntries) {
+      entry.wire.geometry?.dispose();
+      physicsDebugGroup.remove(entry.wire);
+    }
+    debugEntries.length = 0;
+  }
+
   function buildRapierDebugMeshes() {
-    physicsDebugGroup.clear();
+    disposeRapierDebugMeshes();
     try {
+      const st = RAPIER.ShapeType;
       physicsWorld.forEachCollider((collider) => {
         const body = collider.parent ? collider.parent() : null;
-        const pos = body ? body.translation() : collider.translation();
-        const rot = body ? body.rotation() : { x: 0, y: 0, z: 0, w: 1 };
         const shape = collider.shape;
         if (!shape) return;
-        let geo = null;
-        const st = RAPIER.ShapeType;
-        if (shape.type === st.Cuboid && shape.halfExtents) {
-          const h = shape.halfExtents;
-          geo = new THREE.BoxGeometry(h.x * 2, h.y * 2, h.z * 2);
-        } else if (shape.type === st.Ball && shape.radius != null) {
-          geo = new THREE.SphereGeometry(shape.radius, 8, 6);
-        } else if (shape.type === st.Capsule && shape.halfHeight != null) {
-          const halfH = shape.halfHeight;
-          const r = shape.radius;
-          geo = new THREE.CapsuleGeometry(r, halfH * 2, 4, 8);
-        } else if (shape.type === st.Cylinder && shape.halfHeight != null) {
-          const halfH = shape.halfHeight;
-          const r = shape.radius;
-          geo = new THREE.CylinderGeometry(r, r, halfH * 2, 8);
-        } else if (
-          shape.type === st.TriMesh &&
-          shape.vertices &&
-          shape.indices
-        ) {
-          const v = shape.vertices;
-          const i = shape.indices;
-          const posArr = [];
-          const idxArr = [];
-          for (let k = 0; k < v.length; k += 3)
-            posArr.push(v[k], v[k + 1], v[k + 2]);
-          for (let k = 0; k < i.length; k++) idxArr.push(i[k]);
-          const bg = new THREE.BufferGeometry();
-          bg.setAttribute(
-            "position",
-            new THREE.Float32BufferAttribute(posArr, 3),
-          );
-          bg.setIndex(idxArr);
-          geo = bg;
+        const wireGeo = shapeToWireGeometry(shape, st);
+        if (!wireGeo) return;
+        const wire = new THREE.LineSegments(wireGeo, rapierDebugMat);
+        if (body) {
+          colliderWorldPose(body, collider, _dbgPos, _dbgQuat);
+        } else {
+          const t = collider.translation();
+          _dbgPos.set(t.x, t.y, t.z);
+          _dbgQuat.identity();
         }
-        if (geo) {
-          const wire = new THREE.LineSegments(
-            new THREE.WireframeGeometry(geo),
-            rapierDebugMat,
-          );
-          wire.position.set(pos.x, pos.y, pos.z);
-          wire.quaternion.set(rot.x, rot.y, rot.z, rot.w);
-          physicsDebugGroup.add(wire);
-        }
+        wire.position.copy(_dbgPos);
+        wire.quaternion.copy(_dbgQuat);
+        physicsDebugGroup.add(wire);
+        debugEntries.push({
+          wire,
+          collider,
+          dynamic: !!(body && body.isDynamic && body.isDynamic()),
+        });
       });
     } catch (e) {
       console.warn("Rapier debug render:", e);
     }
   }
-  return { physicsDebugGroup, buildRapierDebugMeshes };
+
+  function updateRapierDebugMeshes() {
+    for (const entry of debugEntries) {
+      if (!entry.dynamic) continue;
+      const body = entry.collider.parent?.();
+      if (!body) continue;
+      colliderWorldPose(body, entry.collider, _dbgPos, _dbgQuat);
+      entry.wire.position.copy(_dbgPos);
+      entry.wire.quaternion.copy(_dbgQuat);
+    }
+  }
+
+  return {
+    physicsDebugGroup,
+    buildRapierDebugMeshes,
+    updateRapierDebugMeshes,
+    disposeRapierDebugMeshes,
+  };
 }
 
 /**
