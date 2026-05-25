@@ -3129,6 +3129,12 @@ export async function startV2App(opts = {}) {
         }
 
         sharedGroundBundle.syncFromParams(toolState.groundTsl);
+        // Rebuild the player BVH from the restored cliffs / props / splines /
+        // fullRoad / caves. Without this the user has to click "Rebake BVH"
+        // manually after every project load to get collision back. We do it
+        // here (and not inside any of the individual importData calls) so the
+        // bake happens once, after every collidable store has been populated.
+        rebakePlayerBvh();
         // Rebuild everything
         invalidateSurfaceMaterials();
         rebuildGlobalHeightTexture();
