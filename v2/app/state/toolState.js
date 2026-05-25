@@ -110,6 +110,57 @@ export function createToolState() {
     skyMode: "physical",
     physicalSky: { ...V2_CONFIG.physicalSky },
     lensFlare: { ...V2_CONFIG.lensFlare },
+    /**
+     * Post-processing master switch + per-effect params.
+     * When `enabled === false` the renderer falls back to a direct
+     * `renderer.render(scene, camera)` (zero post-FX cost).
+     * Bloom uses Three's TSL `BloomNode`; defaults match folio-2025 with a
+     * touch more punch (lower threshold, slightly higher strength).
+     */
+    postFx: {
+      enabled: false,
+      bloom: {
+        enabled: true,
+        strength: 0.3,
+        threshold: 0.9,
+        radius: 0.4,
+        smoothWidth: 1.0,
+      },
+      /**
+       * FXAA replaces the renderer's MSAA, which doesn't apply once we render
+       * through `RenderPipeline`. On by default whenever post-FX is enabled.
+       */
+      fxaa: {
+        enabled: true,
+      },
+      /**
+       * Screen-Space Ambient Occlusion via `n8ao-webgpu` (TSL port of N8AO).
+       * Off by default — first enable lazily allocates the N8AO node, which
+       * costs a one-time ~50–200 ms shader compile.
+       *
+       * Quality presets adjust `aoSamples` / `denoiseSamples` / `denoiseRadius`
+       * — changing them rebuilds shaders, so do it once at startup.
+       *
+       * `transparencyAware` is gated separately (off by default) because it
+       * costs ~2 extra full-scene renders per frame for transparent depth.
+       *
+       * `aoRadius` is in world units when `screenSpaceRadius` is false (the
+       * default), otherwise in pixels.
+       */
+      ssao: {
+        enabled: false,
+        quality: "Medium",
+        aoRadius: 5,
+        distanceFalloff: 1,
+        intensity: 3,
+        color: "#000000",
+        halfRes: false,
+        depthAwareUpsampling: true,
+        screenSpaceRadius: false,
+        displayMode: "Combined",
+        transparencyAware: false,
+      },
+    },
     csm: { ...V2_CONFIG.csm },
     fog: {
       height: { ...V2_CONFIG.fog.height },

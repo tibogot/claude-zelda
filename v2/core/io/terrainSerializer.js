@@ -432,6 +432,12 @@ function extractSerializableSettings(toolState) {
     skyMode: toolState.skyMode,
     physicalSky: { ...toolState.physicalSky },
     lensFlare: { ...toolState.lensFlare },
+    postFx: {
+      enabled: toolState.postFx.enabled,
+      bloom: { ...toolState.postFx.bloom },
+      fxaa: { ...toolState.postFx.fxaa },
+      ssao: { ...toolState.postFx.ssao },
+    },
     csm: { ...toolState.csm },
     fog: {
       height: { ...toolState.fog.height },
@@ -568,6 +574,20 @@ export function applySettings(toolState, settings) {
   if (settings.skyMode) toolState.skyMode = settings.skyMode;
   if (settings.physicalSky) Object.assign(toolState.physicalSky, settings.physicalSky);
   if (settings.lensFlare) Object.assign(toolState.lensFlare, settings.lensFlare);
+  if (settings.postFx) {
+    if (settings.postFx.enabled != null) {
+      toolState.postFx.enabled = settings.postFx.enabled;
+    }
+    if (settings.postFx.bloom) {
+      Object.assign(toolState.postFx.bloom, settings.postFx.bloom);
+    }
+    if (settings.postFx.fxaa) {
+      Object.assign(toolState.postFx.fxaa, settings.postFx.fxaa);
+    }
+    if (settings.postFx.ssao) {
+      Object.assign(toolState.postFx.ssao, settings.postFx.ssao);
+    }
+  }
   if (settings.csm) Object.assign(toolState.csm, settings.csm);
   if (settings.fog) {
     if (settings.fog.height) Object.assign(toolState.fog.height, settings.fog.height);

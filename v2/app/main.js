@@ -154,6 +154,7 @@ import { createLeafFxStore } from "../core/ambientfx/leafFxStore.js";
 import { BorderMountains } from "../render/terrain/borderMountains.js";
 import { createVolumetricCloudSystem } from "../render/clouds/volumetricCloudSystem.js";
 import { createVolumetricCloudSystemOptimized } from "../render/clouds/volumetricCloudSystemv2.js";
+import { PostFxPipeline } from "../render/post/postFxPipeline.js";
 
 // Returned by `getTerrainHeight` whenever the sampled XZ is over a painted
 // hole pixel. Finite (no NaN/Infinity edge cases) but far enough below any
@@ -3139,6 +3140,7 @@ export async function startV2App(opts = {}) {
         if (toolState.skyMode === "hdr" && !hdrTexture)
           toolState.skyMode = "physical";
         applySkyMode(toolState.skyMode);
+        applyPostFxState();
         chunkStream.markAllDirty();
         chunkStream.update(camera.position);
         if (toolState.borderMountains.enabled) rebuildBorderMountains();
@@ -3369,6 +3371,23 @@ export async function startV2App(opts = {}) {
     getSunDir: () => sunDir,
     getParams: () => toolState.lensFlare,
   });
+
+  /**
+   * Post-FX pipeline (WebGPU PostProcessing + bloom). Lazy-built on first
+   * enable; while disabled the loop calls `renderer.render(scene, camera)`
+   * exactly like before, so cost is zero.
+   */
+  const postFxPipeline = new PostFxPipeline({ renderer, scene, camera });
+  function applyPostFxState() {
+    const p = toolState.postFx;
+    postFxPipeline.setBloomParams(p.bloom);
+    postFxPipeline.setBloomEnabled(p.bloom.enabled);
+    postFxPipeline.setFxaaEnabled(p.fxaa.enabled);
+    postFxPipeline.setSsaoParams(p.ssao);
+    postFxPipeline.setSsaoEnabled(p.ssao.enabled);
+    postFxPipeline.setEnabled(p.enabled);
+  }
+  applyPostFxState();
 
   // Both cloud systems bake heavy 3D textures (~96³ / 128³ voxels) on the CPU at
   // construction time. Defer creation until the user actually enables one — the
@@ -4667,7 +4686,15 @@ export async function startV2App(opts = {}) {
       }
     }
     if (!didCloudRt) {
-      renderer.render(scene, camera);
+      // Post-FX path is skipped while volumetric clouds composite directly to
+      // the backbuffer (their pipeline owns the final blit). When clouds did
+      // not render this frame, route through PostProcessing iff post-FX is
+      // active, otherwise the original direct render path stays free.
+      if (postFxPipeline.isActive()) {
+        postFxPipeline.render();
+      } else {
+        renderer.render(scene, camera);
+      }
     }
   });
 
@@ -4741,6 +4768,8 @@ export async function startV2App(opts = {}) {
     rebuildSkyEnv,
     applySkyMode,
     importHdr,
+    postFxPipeline,
+    applyPostFxState,
     clearRampPoint() {
       sculptSystem.clearRampPoint();
       syncRampMarker();
