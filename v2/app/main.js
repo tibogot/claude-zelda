@@ -121,8 +121,11 @@ import {
   createKeyProp,
   keyBoundingBox,
   KEY_DEFAULTS,
+  registerGlbCollectibleKind,
 } from "../core/props/collectibleFactory.js";
 import { createCollectibleBurst } from "../effects/collectibleBurst.js";
+import { createCollectibleGizmo } from "../effects/collectibleGizmo.js";
+import { COLLECTIBLE_KINDS } from "../core/props/collectibleFactory.js";
 import { createCollectibleRuntime } from "../play/collectibleRuntime.js";
 import { createCollectibleSfx } from "../play/collectibleSfx.js";
 import { TransformControls } from "three/addons/controls/TransformControls.js";
@@ -979,6 +982,7 @@ export async function startV2App(opts = {}) {
   livePropManager.registerFactory("key", (params) => createKeyProp(params));
 
   const collectibleBurst = createCollectibleBurst(scene);
+  const collectibleGizmo = createCollectibleGizmo(scene);
   const splineSystem = new SplineSystem({
     scene,
     toolState,
@@ -1505,6 +1509,7 @@ export async function startV2App(opts = {}) {
   let _importPropGlb,
     _addPrimitive,
     _addLiveProp,
+    _importGlbCollectible,
     _removePropSlot,
     _importPropLod,
     _propCastShadowChanged,
@@ -2508,6 +2513,53 @@ export async function startV2App(opts = {}) {
       propUiCallbacks._rebuildPropUi?.();
       console.log(`[V2] Live prop "${livePropName}" added (type ${typeIdx})`);
       ui?.pane.refresh();
+    }),
+    onImportGlbCollectible: (_importGlbCollectible = async () => {
+      const file = await openGlbPicker();
+      if (!file) return;
+      try {
+        const { submeshes, name } = await loadTreeGlbFromFile(file);
+        const gltfScene = new THREE.Group();
+        for (const sm of submeshes) {
+          const mesh = new THREE.Mesh(sm.geometry, sm.material);
+          mesh.applyMatrix4(sm.localMatrix);
+          gltfScene.add(mesh);
+        }
+        const kindDef = registerGlbCollectibleKind(name, gltfScene, {
+          pickupRadius: 1.5,
+          burstColor: "#ffd56a",
+          spinSpeed: 1.2,
+          bobAmp: 0.15,
+          bobSpeed: 1.4,
+        });
+        livePropManager.registerFactory(kindDef.factoryId, kindDef.create);
+
+        const bbox = kindDef.boundingBox();
+        const typeIdx = propStore.registerLiveType(
+          kindDef.name,
+          kindDef.factoryId,
+          kindDef.defaults,
+          bbox,
+        );
+        propInstancer.onTypeRegistered(typeIdx);
+        const slotIdx = toolState.propSlots.length;
+        toolState.propSlots.push({
+          name: kindDef.name,
+          loaded: true,
+          typeIdx,
+          live: true,
+          factoryId: kindDef.factoryId,
+          collectible: true,
+        });
+        toolState.props.activeSlot = slotIdx;
+        propUiCallbacks._rebuildPropUi?.();
+        console.log(
+          `[V2] GLB collectible "${kindDef.name}" imported (type ${typeIdx}, kind "${kindDef.kind}", ${submeshes.length} submeshes)`,
+        );
+        ui?.pane.refresh();
+      } catch (err) {
+        console.error("[V2] Failed to load GLB collectible:", err);
+      }
     }),
     onRemovePropSlot: (_removePropSlot = (slotIdx) => {
       toolState.propSlots.splice(slotIdx, 1);
@@ -4633,6 +4685,20 @@ export async function startV2App(opts = {}) {
     collectibleBurst.update(dtSec);
     if (playMode.active) {
       collectibleRuntime.update(dtSec, playMode.playerPos, playMode.moveMode);
+      if (collectibleGizmo.isVisible()) collectibleGizmo.hide();
+    } else {
+      // Sync gizmo to current prop selection (only when selection is a collectible live prop).
+      const selIdx = propInstancer.selectedIdx;
+      let shown = false;
+      if (selIdx >= 0) {
+        const entry = livePropManager.getLiveEntry(selIdx);
+        const kind = entry?.obj?.kind;
+        if (kind && COLLECTIBLE_KINDS.has(kind)) {
+          collectibleGizmo.show(entry.obj.group.position, entry.obj.pickupRadius ?? 1.0);
+          shown = true;
+        }
+      }
+      if (!shown && collectibleGizmo.isVisible()) collectibleGizmo.hide();
     }
     treeLodRenderer.update(treeStore, camera, toolState.treeLod);
     foliageLodRenderer.update(treeStore, camera, toolState.foliageLod);
@@ -4925,6 +4991,20 @@ export async function startV2App(opts = {}) {
     },
     addLiveProp(name) {
       _addLiveProp(name);
+    },
+    importGlbCollectible() {
+      _importGlbCollectible();
+    },
+    /**
+     * Collectibles gameplay API.
+     *   app.collectibles.onPickup((kind, instIdx, position, kindCount) => { ... })
+     *   app.collectibles.getCounts()  // { coin: 3, heart: 1, ... }
+     */
+    collectibles: {
+      onPickup: (cb) => collectibleRuntime.onPickup(cb),
+      offPickup: (cb) => collectibleRuntime.offPickup(cb),
+      getCounts: () => collectibleRuntime.getCountsByKind(),
+      getTotal: () => collectibleRuntime.getCollectedCount(),
     },
     propTextureLibrary,
     /** Swap the material on a primitive slot. All instances of that slot use the new material. */
@@ -5601,6 +5681,7 @@ export async function startV2App(opts = {}) {
       propInstancer.dispose();
       livePropManager.dispose();
       collectibleBurst.dispose();
+      collectibleGizmo.dispose();
       transformControls.dispose();
       grassManager.dispose();
       ambientFxStore.clear();

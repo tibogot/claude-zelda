@@ -14,9 +14,10 @@
  * spin/bob params remain per-instance because they're tied to mesh.userData state.
  */
 import * as THREE from "three";
-import { MeshBasicNodeMaterial } from "three";
+import { MeshBasicNodeMaterial, MeshStandardNodeMaterial } from "three";
 import {
   uniform, float, mix, abs, sin, time, normalView, oneMinus, vec3,
+  materialEmissive,
 } from "three/tsl";
 
 /* ─────────── module-level kind registry ─────────── */
@@ -393,6 +394,8 @@ export function registerGlbCollectibleKind(name, gltfScene, opts = {}) {
     bobAmp = 0.15,
     bobSpeed = 1.4,
     baseYOffset = 0.3,
+    glow = true,           // attach rim Fresnel + pulse emissive overlay
+    glowIntensity = 0.55,  // overlay strength (additive on top of any existing emissive)
   } = opts;
 
   const kindKey = name.toLowerCase();
@@ -420,12 +423,52 @@ export function registerGlbCollectibleKind(name, gltfScene, opts = {}) {
   const defaults = { pickupRadius, spinSpeed, bobAmp, bobSpeed };
   const burstColorObj = new THREE.Color(burstColor);
 
+  /**
+   * Glow-material cache. One node material per UNIQUE source material in the GLB —
+   * shared across all instances of this kind. Renderer batches identical materials,
+   * so this preserves draw-call count and triggers only N shader compiles (N = unique mats)
+   * at import time rather than per-instance.
+   */
+  const glowMatCache = new Map();
+  function _glowMatFor(srcMat) {
+    if (!glow) return srcMat;
+    if (glowMatCache.has(srcMat)) return glowMatCache.get(srcMat);
+
+    const node = new MeshStandardNodeMaterial();
+    // Copy PBR properties — texture maps share references (no extra memory).
+    if (srcMat.color)        node.color.copy(srcMat.color);
+    if (srcMat.emissive)     node.emissive.copy(srcMat.emissive);
+    if ("emissiveIntensity" in srcMat) node.emissiveIntensity = srcMat.emissiveIntensity;
+    if ("roughness" in srcMat) node.roughness = srcMat.roughness;
+    if ("metalness" in srcMat) node.metalness = srcMat.metalness;
+    if ("opacity" in srcMat)   node.opacity   = srcMat.opacity;
+    if (srcMat.transparent)    node.transparent = true;
+    if (srcMat.alphaTest)      node.alphaTest = srcMat.alphaTest;
+    if (srcMat.side != null)   node.side = srcMat.side;
+    if (srcMat.map)          node.map = srcMat.map;
+    if (srcMat.normalMap)    node.normalMap = srcMat.normalMap;
+    if (srcMat.roughnessMap) node.roughnessMap = srcMat.roughnessMap;
+    if (srcMat.metalnessMap) node.metalnessMap = srcMat.metalnessMap;
+    if (srcMat.aoMap)        node.aoMap = srcMat.aoMap;
+    if (srcMat.emissiveMap)  node.emissiveMap = srcMat.emissiveMap;
+
+    // Emissive overlay: keep the GLB's existing emissive contribution, ADD rim + pulse on top.
+    const uGlowColor = uniform(burstColorObj.clone());
+    const uGlow = uniform(glowIntensity);
+    const pulse = mix(float(0.7), float(1.3), sin(time.mul(3.0)).mul(0.5).add(0.5));
+    const rim = oneMinus(abs(normalView.z)).pow(2.0);
+    node.emissiveNode = materialEmissive.add(uGlowColor.mul(uGlow).mul(pulse).mul(rim));
+
+    glowMatCache.set(srcMat, node);
+    return node;
+  }
+
   function create(params = {}) {
     const p = { ...defaults, ...params };
     const group = new THREE.Group();
     const inner = new THREE.Group();
     for (const sm of submeshes) {
-      const m = new THREE.Mesh(sm.geometry, sm.material);
+      const m = new THREE.Mesh(sm.geometry, _glowMatFor(sm.material));
       m.applyMatrix4(sm.localMatrix);
       m.castShadow = true;
       m.receiveShadow = false;

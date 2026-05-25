@@ -51,6 +51,8 @@ export function createCollectibleRuntime({ livePropManager, burst, playSfx }) {
   let active = false;
   const _v = new THREE.Vector3();
   const _v2 = new THREE.Vector3();
+  /** Listeners: (kind, instIdx, position, kindCount) → void. */
+  const pickupListeners = new Set();
 
   // HUD element built lazily on first start().
   let hudEl = null;
@@ -169,6 +171,15 @@ export function createCollectibleRuntime({ livePropManager, burst, playSfx }) {
     const kind = entry.obj.kind;
     counts[kind] = (counts[kind] || 0) + 1;
     _renderHud();
+
+    // Fire listeners — game-logic hook.
+    if (pickupListeners.size) {
+      const pickupPos = _v.copy(orig);
+      for (const fn of pickupListeners) {
+        try { fn(kind, instIdx, pickupPos, counts[kind]); }
+        catch (e) { console.error("[collectibles] onPickup listener threw:", e); }
+      }
+    }
   }
 
   function _tickAnims(dt) {
@@ -270,5 +281,25 @@ export function createCollectibleRuntime({ livePropManager, burst, playSfx }) {
   function getCountsByKind() { return { ...counts }; }
   function isActive() { return active; }
 
-  return { start, stop, update, getCollectedCount, getCountsByKind, isActive };
+  /**
+   * Subscribe to pickup events. Listener receives (kind, instIdx, position, kindCount).
+   * Returns an unsubscribe function for convenience.
+   *
+   * Example:
+   *   const off = runtime.onPickup((kind, idx, pos, n) => {
+   *     if (kind === "coin" && n >= 10) openDoor();
+   *     if (kind === "heart") restoreHp(1);
+   *   });
+   */
+  function onPickup(cb) {
+    pickupListeners.add(cb);
+    return () => pickupListeners.delete(cb);
+  }
+  function offPickup(cb) { pickupListeners.delete(cb); }
+
+  return {
+    start, stop, update,
+    getCollectedCount, getCountsByKind, isActive,
+    onPickup, offPickup,
+  };
 }
