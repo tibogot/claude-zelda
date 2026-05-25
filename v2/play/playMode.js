@@ -24,6 +24,34 @@ import {
   DEFAULT_LOTUS_COLLISION_HULL,
 } from "./carPhysics.js";
 import { LotusPhysics, DEFAULT_LOTUS_PHYSICS_PARAMS } from "./lotusPhysics.js";
+import {
+  RigidBody as VvvRigidBody,
+  Tire as VvvTire,
+  applyVvvStabilizer,
+  applyVvvWallProbes,
+  createDefaultVvvWheelLayout,
+  createDefaultVvvWallProbes,
+  deriveVvvTireFromVehicle,
+  DEFAULT_VVV_CHASSIS,
+  DEFAULT_VVV_WHEEL,
+  DEFAULT_VVV_TIRE,
+  DEFAULT_VVV_WALL,
+  VVV_GRAVITY,
+} from "./vvvCarPhysics.js";
+
+// ============================================================
+// === VVV CAR scratch (module-scope; reused across frames to avoid GC).
+// ============================================================
+const _vvvAxisX = new THREE.Vector3(1, 0, 0);
+const _vvvAxisY = new THREE.Vector3();          // chassis-up in world (recomputed)
+const _vvvAxisY_local = new THREE.Vector3(0, 1, 0);
+const _vvvAxisY_world = new THREE.Vector3(0, 1, 0);
+const _vvvFwdW = new THREE.Vector3();
+const _vvvSteerQ = new THREE.Quaternion();
+const _vvvSpinQ = new THREE.Quaternion();
+const _vvvTireVel = new THREE.Vector3();
+const _vvvOffset = new THREE.Vector3();
+const _vvvArrowDir = new THREE.Vector3();
 
 const CAP_R = 0.4;
 const CAP_H = 1.2;
@@ -96,6 +124,22 @@ const ISO_FLY_CHASE_SMOOTH = 5.5;
 // Drift car physics — arcade model
 const CAR_MODEL = "../models/bruno.glb";
 const LOTUS_MODEL = "../models/lotusclaude2.glb";
+/** Lotus wheels for VVV mode (same asset as models/lotus-circuit-parkour.html). */
+const VVV_WHEEL_GLB = "../models/lotusrealsize2.glb";
+/** Per-side inset (m) from playMode `_loadLotus` track estimate — tyres tuck under body. */
+const VVV_HUB_TRACK_INSET = 0.08;
+/** VVV chase camera defaults (separate from Lotus `lotusCam`). */
+const DEFAULT_VVV_CAM = {
+  distance: 5,
+  height: 0.7,
+  lookAtY: 1.2,
+  chaseSpeed: 7.5,
+  driftLag: 1.8,
+  fov: 75,
+  speedPullBack: 1,
+  chassisRollClamp: 0.2,
+  chassisPitchClamp: 0.3,
+};
 const CAR_MODEL_YAW = Math.PI / 2;
 const CAR_MODEL_SCALE = 1.9;
 const CAR_ACCEL = 26;
@@ -785,14 +829,15 @@ function clearBullets(pool) {
   }
 }
 
-const MODE_ORDER = ["capsule", "char", "fly", "car", "lotus", "rts"];
+const MODE_ORDER = ["capsule", "char", "fly", "car", "lotus", "vvv", "rts"];
 const MODE_META = {
   capsule: { label: "Capsule", icon: "◉", digit: "1" },
   char:    { label: "Character", icon: "🧝", digit: "2" },
   fly:     { label: "Flight", icon: "✈", digit: "3" },
   car:     { label: "Bruno", icon: "🚙", digit: "4" },
   lotus:   { label: "Lotus", icon: "🏎", digit: "5" },
-  rts:     { label: "Director", icon: "🎬", digit: "6" },
+  vvv:     { label: "VVV (rigid)", icon: "🚗", digit: "6" },
+  rts:     { label: "Director", icon: "🎬", digit: "7" },
 };
 
 export class PlayMode {
@@ -1058,19 +1103,65 @@ export class PlayMode {
       chassisRollClamp: 0.2,
       chassisPitchClamp: 0.3,
     };
+    this.vvvCam = { ...DEFAULT_VVV_CAM };
+    /** Low-passed body.pos.y for the chase camera. Suppresses suspension bob
+     *  and airblend pops on takeoff / landing. Initialised lazily. */
+    this._vvvCamFocusYSmooth = null;
+    /** Low-passed camera position for VVV (matches standalone's CAM_LERP). */
+    this._vvvCamPosSmooth = null;
     this._lotusCamDistSmooth = 0;
+    this._vvvCamDistSmooth = 0;
     this._lotusBlinkerSide = 0;
     this._lotusBlinkerTime = 0;
     this._lotusBlinkerAutoHold = 0;
     this._lotusCamGui = null;
+    this._vvvCamGui = null;
     this._jeepTuningGui = null;
     /** @type {Record<string, number> | null} */
     this._jeepGuiLive = null;
     /** Controllers for live jeep telemetry rows (lil-gui). */
     this._jeepGuiLiveCtrls = [];
-    this._loadLotus();
+    this._lotusLoadPromise = this._loadLotus();
     this._initLotusCamGui();
+    this._initVvvGui();
     this._initJeepTuningGui();
+
+    // === VVV rigid-body car state (see v2/play/vvvCarPhysics.js) ===
+    // Per-instance copies of the default tunings so tweakpane can mutate them
+    // without affecting the standalone defaults.
+    this._vvvChassis = { ...DEFAULT_VVV_CHASSIS };
+    this._vvvWheel = { ...DEFAULT_VVV_WHEEL };
+    this._vvvTire = { ...DEFAULT_VVV_TIRE };
+    this._vvvWall = { ...DEFAULT_VVV_WALL };
+    this._vvvBody = new VvvRigidBody({
+      mass: this._vvvChassis.mass,
+      size: this._vvvChassis,
+    });
+    this._vvvLayout = createDefaultVvvWheelLayout();
+    this._vvvTires = this._vvvLayout.map(
+      (w) => new VvvTire({ name: w.name, localPos: w.pos, steer: w.steer, drive: w.drive }),
+    );
+    this._vvvWallProbes = createDefaultVvvWallProbes(this._vvvChassis);
+    /** Accumulated visual spin angle per wheel (radians). */
+    this._vvvWheelSpin = [0, 0, 0, 0];
+    /** Smoothed steer input −1..+1, exponential ease toward target. */
+    this._vvvSteerSmooth = 0;
+    /** Substeps per frame for the rigid-body integrator. */
+    this._vvvSubsteps = 4;
+    this.vvvLoaded = false;
+    this.vvvRoot = null;
+    this.vvvChassisPivot = null;
+    this.vvvChassisMesh = null;
+    this.vvvWheels = [];
+    this.vvvWheelsLoaded = false;
+    /** Force-arrow debug (matches `models/lotus-vvv-physics.html`). */
+    this._vvvVis = { showArrows: true, arrowScale: 0.0008 };
+    this._vvvArrowGroup = null;
+    this._vvvForceArrows = null;
+    /** Hub positions vs geometric center (before `comLower`). Filled when GLB loads. */
+    this._vvvHubBase = null;
+    this._setupVvvCar();
+    this._loadVvvCarVisuals();
 
     this._modePill = null;
     this._modePillIcon = null;
@@ -1104,7 +1195,8 @@ export class PlayMode {
       char:    { fov: 60, distance: CAM_DIST, sensX: CAM_SENS_X, sensY: CAM_SENS_Y },
       fly:     { fov: 60, distance: CAM_DIST, sensX: FLY_MOUSE_SENS_X, sensY: FLY_MOUSE_SENS_Y },
       car:     { fov: 60 },   // car uses carSettings for the rest
-      lotus:   { fov: this.lotusCam.fov }, // mirror; lotusCam.fov stays authoritative
+      lotus:   { fov: this.lotusCam.fov },
+      vvv:     { ...DEFAULT_VVV_CAM },
       iso:     { fov: 60, pitch: ISO_PITCH },
       rts:     { fov: 50, distance: 60, pitch: 0.95, panSpeed: 40, rotateSens: 0.003, edgePan: false, edgePanZone: 24, edgePanSpeed: 30 },
     };
@@ -1464,7 +1556,7 @@ export class PlayMode {
     this.controls.maxPolarAngle = Math.PI;
     this.controls.minPolarAngle = 0;
     // Seed orbit target on current pawn so the initial orbit feels natural.
-    const ty = this.playerPos.y + 1.0;
+    const ty = this._getDetachedOrbitTargetY();
     this.controls.target.set(this.playerPos.x, ty, this.playerPos.z);
     this.controls.enabled = true;
     if (this._detachBadge) this._detachBadge.style.display = "block";
@@ -1512,7 +1604,13 @@ export class PlayMode {
           }
         }
       }
-      // Keep lotusCam.fov in sync with persisted value
+      if (this.vvvCam && parsed.vvv) {
+        for (const k of Object.keys(this.vvvCam)) {
+          if (typeof parsed.vvv[k] === "number" && Number.isFinite(parsed.vvv[k])) {
+            this.vvvCam[k] = parsed.vvv[k];
+          }
+        }
+      }
       if (this.lotusCam && typeof parsed.lotus?.fov === "number") {
         this.lotusCam.fov = parsed.lotus.fov;
       }
@@ -1521,9 +1619,11 @@ export class PlayMode {
 
   _saveCameraTuning() {
     try {
-      // Lotus FOV authoritative source is this.lotusCam; mirror before persisting.
       if (this.lotusCam && this.cameraTuning.lotus) {
         this.cameraTuning.lotus.fov = this.lotusCam.fov;
+      }
+      if (this.vvvCam && this.cameraTuning.vvv) {
+        Object.assign(this.cameraTuning.vvv, this.vvvCam);
       }
       localStorage.setItem("v2.playCameraTuning", JSON.stringify(this.cameraTuning));
     } catch (_) { /* ignore quota */ }
@@ -1531,7 +1631,8 @@ export class PlayMode {
 
   _applyCameraFov() {
     let fov;
-    if (this.moveMode === "lotus") fov = this.lotusCam.fov;
+    if (this.moveMode === "vvv") fov = this.vvvCam.fov;
+    else if (this.moveMode === "lotus") fov = this.lotusCam.fov;
     else fov = this.cameraTuning[this.moveMode]?.fov ?? 60;
     if (this.camera.fov !== fov) {
       this.camera.fov = fov;
@@ -1585,6 +1686,18 @@ export class PlayMode {
         folder.add(this.carSettings, "cameraChaseSpeed", 0.5, 12, 0.1).name("Chase speed").onChange(onAny);
         folder.add(this.carSettings, "cameraDriftLag", 0, 5, 0.1).name("Drift lag").onChange(onAny);
       }
+    } else if (mode === "vvv") {
+      const vc = this.vvvCam;
+      folder.add(vc, "fov", 40, 110, 1).name("FOV").onChange(onAny);
+      folder.add(vc, "distance", 2, 16, 0.1).name("Distance").onChange(onAny);
+      folder.add(vc, "height", 0.5, 8, 0.1).name("Height").onChange(onAny);
+      folder.add(vc, "lookAtY", 0, 4, 0.1).name("Look-at Y").onChange(onAny);
+      folder.add(vc, "chaseSpeed", 1, 12, 0.1).name("Chase speed").onChange(onAny);
+      folder.add(vc, "driftLag", 0, 5, 0.1).name("Drift lag").onChange(onAny);
+      folder.add(vc, "speedPullBack", 0, 8, 0.1).name("Speed pull-back").onChange(onAny);
+      folder
+        .add({ open: () => this._vvvCamGui && (this._vvvCamGui.domElement.style.display = "") }, "open")
+        .name("Open VVV panel ↗");
     } else if (mode === "fly") {
       const t = this.cameraTuning.fly;
       folder.add(t, "fov", 40, 110, 1).name("FOV").onChange(onAny);
@@ -1621,12 +1734,14 @@ export class PlayMode {
           fly:     { fov: 60, distance: CAM_DIST, sensX: FLY_MOUSE_SENS_X, sensY: FLY_MOUSE_SENS_Y },
           car:     { fov: 60 },
           lotus:   { fov: 70 },
+          vvv:     { ...DEFAULT_VVV_CAM },
           iso:     { fov: 60, pitch: ISO_PITCH },
           rts:     { fov: 50, distance: 60, pitch: 0.95, panSpeed: 40, rotateSens: 0.003, edgePan: false, edgePanZone: 24, edgePanSpeed: 30 },
         }[mode];
         if (!defaults) return;
         Object.assign(this.cameraTuning[mode], defaults);
         if (mode === "lotus") this.lotusCam.fov = defaults.fov;
+        if (mode === "vvv") Object.assign(this.vvvCam, defaults);
         this._applyCameraFov();
         this._saveCameraTuning();
         this._rebuildCameraTuningGui();
@@ -2425,6 +2540,598 @@ export class PlayMode {
     }
   }
 
+  // ============================================================
+  // === VVV CAR (rigid-body) — visual setup + per-frame update
+  // ============================================================
+  /** Empty root; chassis + wheels loaded from `lotusrealsize2.glb` in `_loadVvvCarVisuals`. */
+  _setupVvvCar() {
+    const root = new THREE.Group();
+    root.rotation.order = "YXZ";
+    root.visible = false;
+    const pivot = new THREE.Group();
+    root.add(pivot);
+
+    this.scene.add(root);
+    this.vvvRoot = root;
+    this.vvvChassisPivot = pivot;
+    this.vvvChassisMesh = null;
+    this.vvvLoaded = true;
+    this._setupVvvForceArrows();
+  }
+
+  /**
+   * Hub layout + physics chassis dims from lotusrealsize2 chassis AABB (real scale, +Z fwd).
+   * Same coefficients as playMode `_loadLotus`, but X/Z swapped because VVV skips CAR_MODEL_YAW.
+   */
+  _applyVvvLayoutFromChassisMetrics({ cSize, cCenter, cMinY }) {
+    const halfTrack = Math.max(0.35, cSize.x * 0.459 - VVV_HUB_TRACK_INSET);
+    const halfWB = cSize.z * 0.287;
+    const wbShift = cSize.z * -0.024;
+    const hubY = cMinY + cSize.y * 0.23 - cCenter.y;
+
+    const specs = [
+      { name: "FL", x: -halfTrack, z: halfWB + wbShift, steer: true },
+      { name: "FR", x: halfTrack, z: halfWB + wbShift, steer: true },
+      { name: "RL", x: -halfTrack, z: -halfWB + wbShift, steer: false },
+      { name: "RR", x: halfTrack, z: -halfWB + wbShift, steer: false },
+    ];
+
+    this._vvvHubBase = specs.map((s) => ({
+      name: s.name,
+      steer: s.steer,
+      x: s.x,
+      y: hubY,
+      z: s.z,
+    }));
+    this._applyVvvComToWheelLayout();
+
+    const C = this._vvvChassis;
+    C.width = cSize.x;
+    C.height = cSize.y;
+    C.length = cSize.z;
+    this._vvvBody.rebuildInertia({ mass: C.mass, size: C });
+    this._vvvWallProbes = createDefaultVvvWallProbes(C);
+
+    return { halfTrack, halfWB, hubY, wbShift };
+  }
+
+  /** Rebuild hub `localPos` from `_vvvHubBase` + `comLower` (CoM below mesh center). */
+  _applyVvvComToWheelLayout() {
+    if (!this._vvvHubBase || this._vvvHubBase.length !== 4) return;
+    const drop = this._vvvChassis.comLower ?? 0;
+    for (let i = 0; i < 4; i++) {
+      const b = this._vvvHubBase[i];
+      const cfg = this._vvvLayout[i];
+      cfg.name = b.name;
+      cfg.steer = b.steer;
+      cfg.pos.set(b.x, b.y + drop, b.z);
+      this._vvvTires[i].localPos.copy(cfg.pos);
+      this._vvvTires[i].canSteer = b.steer;
+      this._vvvTires[i].name = b.name;
+      const w = this.vvvWheels?.[i];
+      if (w) w.hubLocal.copy(cfg.pos);
+    }
+    this._rederiveVvvTireTuning();
+  }
+
+  /** Spring rest length / ray range from measured hubs + tyre radius.
+   *  Uses standalone gravity (9.81) — keeping the original spring/damper tune. */
+  _rederiveVvvTireTuning() {
+    const hubLocalY = this._vvvLayout[0]?.pos.y ?? -0.1;
+    Object.assign(
+      this._vvvTire,
+      deriveVvvTireFromVehicle({
+        mass: this._vvvChassis.mass,
+        wheelRadius: this._vvvWheel.radius,
+        hubLocalY,
+        gravity: VVV_GRAVITY,
+      }),
+    );
+  }
+
+  /** Per-wheel force arrows: suspension (green), steering (blue), drive (red). */
+  _setupVvvForceArrows() {
+    const group = new THREE.Group();
+    group.visible = false;
+    this.scene.add(group);
+    this._vvvArrowGroup = group;
+    this._vvvForceArrows = this._vvvTires.map(() => {
+      const up = new THREE.ArrowHelper(
+        new THREE.Vector3(0, 1, 0),
+        new THREE.Vector3(),
+        0.1,
+        0x60ff80,
+        0.18,
+        0.1,
+      );
+      const side = new THREE.ArrowHelper(
+        new THREE.Vector3(1, 0, 0),
+        new THREE.Vector3(),
+        0.1,
+        0x4090ff,
+        0.18,
+        0.1,
+      );
+      const fwd = new THREE.ArrowHelper(
+        new THREE.Vector3(0, 0, 1),
+        new THREE.Vector3(),
+        0.1,
+        0xff5060,
+        0.18,
+        0.1,
+      );
+      group.add(up, side, fwd);
+      return { up, side, fwd };
+    });
+  }
+
+  _placeVvvForceArrow(arrow, origin, force) {
+    const mag = force.length();
+    if (mag < 1e-3) {
+      arrow.setLength(0.001, 0.001, 0.001);
+      return;
+    }
+    _vvvArrowDir.copy(force).normalize();
+    arrow.position.copy(origin);
+    arrow.setDirection(_vvvArrowDir);
+    const scale = this._vvvVis.arrowScale;
+    const visLen = Math.min(3.5, mag * scale);
+    arrow.setLength(
+      visLen,
+      Math.min(0.25, visLen * 0.18),
+      Math.min(0.16, visLen * 0.12),
+    );
+  }
+
+  /** wheelContainer origin ≠ hub; same fix as lotus-circuit-parkour.html. */
+  _measureVvvWheelHubOffset(wheelSrc) {
+    const hubOff = new THREE.Vector3();
+    const probe = wheelSrc.clone(true);
+    probe.position.set(0, 0, 0);
+    probe.rotation.set(0, 0, 0);
+    probe.scale.set(1, 1, 1);
+    probe.updateMatrixWorld(true);
+    let cyl = null;
+    probe.traverse((c) => {
+      if (!cyl && /^wheelCylinder(\.|\d|$)/.test(c.name)) cyl = c;
+    });
+    if (!cyl) {
+      probe.traverse((c) => {
+        if (!cyl && c.isMesh && /TYRE|TIRE/i.test(c.name)) cyl = c;
+      });
+    }
+    if (cyl) {
+      new THREE.Box3().setFromObject(cyl).getCenter(hubOff);
+    }
+    return hubOff;
+  }
+
+  _findVvvWheelCylinder(container) {
+    let cylinder = null;
+    container.traverse((c) => {
+      if (!cylinder && /^wheelCylinder(\.|\d|$)/.test(c.name)) cylinder = c;
+      if (!cylinder && c.isMesh && /TYRE|TIRE/i.test(c.name)) cylinder = c;
+    });
+    return cylinder;
+  }
+
+  _scaleVvvWheelContainer(container, targetRadius) {
+    container.updateMatrixWorld(true);
+    const cylinder = this._findVvvWheelCylinder(container);
+    if (!cylinder) return null;
+    const _box = new THREE.Box3().setFromObject(cylinder);
+    const _size = new THREE.Vector3();
+    _box.getSize(_size);
+    const meshR = Math.max(_size.y, _size.z) * 0.5;
+    const s = targetRadius / Math.max(meshR, 0.01);
+    container.scale.setScalar(s);
+    return cylinder;
+  }
+
+  /** Wheel on `vvvRoot` at measured hub; container keeps fixed Lotus rim facing. */
+  _attachVvvWheelVisual(container, cylinder, cfg, lotusLeft, hubLocal) {
+    container.visible = true;
+    container.traverse((o) => {
+      if (o.isMesh || o.isSkinnedMesh) o.visible = true;
+    });
+    container.position.copy(hubLocal);
+    this.vvvRoot.add(container);
+    return {
+      container,
+      cylinder: cylinder || container,
+      hubLocal: hubLocal.clone(),
+      isLeft: lotusLeft,
+      steer: cfg.steer,
+      name: cfg.name,
+    };
+  }
+
+  /** Chassis + four wheels from lotusrealsize2.glb (real scale, matched layout). */
+  async _loadVvvCarVisuals() {
+    try {
+      const gltf = await new Promise((resolve, reject) => {
+        getSharedGltfLoader().load(
+          `${VVV_WHEEL_GLB}?v=vvv-realsize-chassis`,
+          resolve,
+          undefined,
+          reject,
+        );
+      });
+      let chassisSrc = null;
+      let wheelSrc = null;
+      gltf.scene.traverse((o) => {
+        if (!chassisSrc && /^chassis(\.|\d|$)/.test(o.name)) chassisSrc = o;
+        if (!wheelSrc && /^wheelContainer(\.|\d|$)/.test(o.name)) wheelSrc = o;
+      });
+      if (!chassisSrc || !wheelSrc) {
+        console.warn(
+          "[V2] VVV lotusrealsize2: missing chassis/wheelContainer in",
+          VVV_WHEEL_GLB,
+        );
+        return;
+      }
+
+      const chassisVisual = chassisSrc.clone(true);
+      chassisVisual.position.set(0, 0, 0);
+      chassisVisual.rotation.set(0, 0, 0);
+      chassisVisual.scale.setScalar(1);
+      const strays = [];
+      chassisVisual.traverse((o) => {
+        if (/^wheelContainer(\.|\d|$)/.test(o.name)) strays.push(o);
+        if (o.isMesh || o.isSkinnedMesh) {
+          o.castShadow = true;
+          o.receiveShadow = true;
+        }
+      });
+      strays.forEach((s) => s.parent?.remove(s));
+
+      chassisVisual.updateMatrixWorld(true);
+      const cBox = new THREE.Box3().setFromObject(chassisVisual);
+      const cSize = new THREE.Vector3();
+      const cCenter = new THREE.Vector3();
+      cBox.getSize(cSize);
+      cBox.getCenter(cCenter);
+      chassisVisual.position.set(-cCenter.x, -cCenter.y, -cCenter.z);
+      this.vvvChassisPivot.add(chassisVisual);
+      this.vvvChassisMesh = chassisVisual;
+      if (this._excludeFromReflection) this._excludeFromReflection(this.vvvRoot);
+
+      this._applyVvvLayoutFromChassisMetrics({
+        cSize,
+        cCenter,
+        cMinY: cBox.min.y,
+      });
+
+      const hubOff = this._measureVvvWheelHubOffset(wheelSrc);
+      const W = this._vvvWheel;
+      const nativeProbe = wheelSrc.clone(true);
+      nativeProbe.traverse((c) => {
+        if (c.isMesh || c.isSkinnedMesh) c.position.sub(hubOff);
+      });
+      nativeProbe.updateMatrixWorld(true);
+      const nativeCyl = this._findVvvWheelCylinder(nativeProbe);
+      if (nativeCyl) {
+        const _box = new THREE.Box3().setFromObject(nativeCyl);
+        const _sz = new THREE.Vector3();
+        _box.getSize(_sz);
+        const meshR = Math.max(_sz.y, _sz.z) * 0.5;
+        if (meshR > 0.1) W.radius = meshR;
+      }
+
+      this._rederiveVvvTireTuning();
+
+      this.vvvWheels = this._vvvLayout.map((cfg) => {
+        const container = wheelSrc.clone(true);
+        const lotusLeft = cfg.name === "FL" || cfg.name === "RL";
+        container.rotation.set(0, lotusLeft ? Math.PI : 0, 0);
+        container.traverse((c) => {
+          if (c.isMesh || c.isSkinnedMesh) {
+            c.position.sub(hubOff);
+            c.castShadow = true;
+            c.receiveShadow = true;
+          }
+        });
+        const cylinder = this._scaleVvvWheelContainer(container, W.radius);
+        return this._attachVvvWheelVisual(
+          container,
+          cylinder,
+          cfg,
+          lotusLeft,
+          cfg.pos,
+        );
+      });
+
+      this.vvvWheelsLoaded = this.vvvWheels.length === 4;
+      if (this.vvvWheelsLoaded) {
+        console.log(
+          "[V2] VVV lotusrealsize2 loaded — chassis",
+          cSize.x.toFixed(2),
+          "×",
+          cSize.y.toFixed(2),
+          "×",
+          cSize.z.toFixed(2),
+          "m, wheel R",
+          W.radius.toFixed(3),
+          "m:",
+          this.vvvWheels.map((w) => w.name).join(", "),
+        );
+      } else {
+        console.warn("[V2] VVV wheels: expected 4, got", this.vvvWheels.length);
+      }
+    } catch (err) {
+      console.warn("[V2] Failed to load VVV car visuals:", err);
+      this.vvvWheelsLoaded = false;
+    }
+  }
+
+  /** Build the BVH-backed ground & wall query callbacks once per frame. */
+  _buildVvvQueries() {
+    const bvh = this.cliffBvh;
+    const getTH = this.getTerrainHeight || this.getWorldHeight;
+
+    // Ground query — BVH along the probe ray + terrain height at ray origin XZ.
+    // Negative distance (surface above origin) is kept so bottom-out can recover.
+    const groundQuery = (ox, oy, oz, dx, dy, dz, maxDist) => {
+      let best = null;
+
+      if (bvh?.baked) {
+        const bvhHit = bvh.raycast3D(ox, oy, oz, dx, dy, dz, maxDist);
+        if (bvhHit) best = bvhHit;
+      }
+
+      if (getTH) {
+        const terrainY = getTH(ox, oz);
+        if (isFinite(terrainY)) {
+          const vertDist = oy - terrainY;
+          if (vertDist <= maxDist) {
+            const terrainHit = {
+              distance: Math.max(vertDist, -1.0),
+              point: { x: ox, y: terrainY, z: oz },
+            };
+            if (!best || terrainHit.distance < best.distance) {
+              best = terrainHit;
+            }
+          }
+        }
+      }
+
+      return best;
+    };
+
+    // Wall query — uses cliffBvh.raycast3D and filters out drivable surfaces
+    // (|normal.y| > 0.7 = floor/ramp top, ignore). Only near-vertical surfaces
+    // (walls, cliff faces) get reported.
+    const wallQuery = (ox, oy, oz, dx, dy, dz, maxDist) => {
+      if (!bvh?.baked) return null;
+      const hit = bvh.raycast3D(ox, oy, oz, dx, dy, dz, maxDist);
+      if (!hit) return null;
+      if (Math.abs(hit.normal.y) > 0.7) return null;
+      return hit;
+    };
+
+    return { groundQuery, wallQuery };
+  }
+
+  /** Run one frame of VVV physics: substepped force application + integration,
+   *  then sync `playerPos` and `carHeading` for the rest of play mode (camera,
+   *  HUD) to read. Input is throttle/steer/handbrake plucked from `this._keys`. */
+  _updateVvvCar(dtSec) {
+    const body = this._vvvBody;
+    const tires = this._vvvTires;
+    const T = this._vvvTire;
+    const W = this._vvvWheel;
+    const WL = this._vvvWall;
+    const keys = this.keysHeld || {};
+
+    // --- INPUT ---
+    const left = (keys.KeyA || keys.ArrowLeft) ? 1 : 0;
+    const right = (keys.KeyD || keys.ArrowRight) ? 1 : 0;
+    const fwd = (keys.KeyW || keys.ArrowUp) ? 1 : 0;
+    const back = (keys.KeyS || keys.ArrowDown) ? 1 : 0;
+    const steerTarget = left - right;
+    const throttle = fwd - back;
+    const handbrake = !!keys.Space;
+    // Exponential ease the steer input.
+    const k = 1 - Math.exp(-T.steerSmooth * dtSec);
+    this._vvvSteerSmooth += (steerTarget - this._vvvSteerSmooth) * k;
+    const steerAngle = this._vvvSteerSmooth * T.maxSteerAngle;
+
+    // --- PROBES ---
+    const { groundQuery, wallQuery } = this._buildVvvQueries();
+
+    // --- PHYSICS STEP (substepped semi-implicit Euler) ---
+    const sub = Math.max(1, this._vvvSubsteps);
+    const subDt = dtSec / sub;
+    for (let s = 0; s < sub; s++) {
+      body.forceAccum.y += -VVV_GRAVITY * body.mass;
+
+      // Tire forces
+      const ctx = {
+        steerAngle,
+        throttle,
+        handbrake,
+        groundQuery,
+        tireT: T,
+        wheelT: W,
+      };
+      for (let i = 0; i < tires.length; i++) tires[i].apply(body, subDt, ctx);
+
+      // Wall probes (cliffBvh)
+      applyVvvWallProbes(body, this._vvvWallProbes, WL, wallQuery);
+
+      // Anti-roll stabilizer
+      applyVvvStabilizer(body, tires, T);
+
+      // Integrate + angular cap
+      body.integrate(subDt);
+      body.capAngularVelocity(T.maxAngVel);
+    }
+
+    // --- VISUAL WHEEL SPIN (accumulate per wheel from forward speed) ---
+    for (let i = 0; i < tires.length; i++) {
+      const t = tires[i];
+      const cfg = this._vvvLayout[i];
+      // Wheel forward direction in world (chassis fwd, then steer for fronts)
+      _vvvFwdW.set(0, 0, 1).applyQuaternion(body.quat);
+      if (cfg.steer && steerAngle !== 0) {
+        _vvvAxisY.set(0, 1, 0).applyQuaternion(body.quat);
+        _vvvSteerQ.setFromAxisAngle(_vvvAxisY, steerAngle);
+        _vvvFwdW.applyQuaternion(_vvvSteerQ);
+      }
+      body.getVelocityAtPoint(t.worldPos, _vvvTireVel);
+      const fwdSpeed = _vvvTireVel.dot(_vvvFwdW);
+      this._vvvWheelSpin[i] += (fwdSpeed / W.radius) * dtSec;
+      // Wrap to keep FP bounded
+      if (this._vvvWheelSpin[i] >  Math.PI * 2) this._vvvWheelSpin[i] -= Math.PI * 2;
+      if (this._vvvWheelSpin[i] < -Math.PI * 2) this._vvvWheelSpin[i] += Math.PI * 2;
+    }
+
+    this.playerPos.x = body.pos.x;
+    this.playerPos.y = body.pos.y;
+    this.playerPos.z = body.pos.z;
+
+    // Low-pass body.y for the chase camera (12 / s). Standalone smooths camera
+    // position with CAM_LERP=6; we smooth the LOOK target instead because the
+    // v2 chase camera assigns position instantly each frame.
+    if (this._vvvCamFocusYSmooth == null) {
+      this._vvvCamFocusYSmooth = body.pos.y;
+    } else {
+      const k = 1 - Math.exp(-12 * dtSec);
+      this._vvvCamFocusYSmooth += (body.pos.y - this._vvvCamFocusYSmooth) * k;
+    }
+    // Heading from chassis forward projected on XZ (stable when body pitches/rolls).
+    // Euler-Y from the full quat jitters under suspension and makes the chase cam shake.
+    _vvvFwdW.set(0, 0, 1).applyQuaternion(body.quat);
+    let heading = Math.atan2(_vvvFwdW.x, _vvvFwdW.z) - Math.PI;
+    while (heading >  Math.PI) heading -= 2 * Math.PI;
+    while (heading < -Math.PI) heading += 2 * Math.PI;
+    this.carHeading = heading;
+    this.carVx = body.vel.x;
+    this.carVz = body.vel.z;
+  }
+
+  /** Position + orient the box chassis and 4 wheel meshes from body state.
+   *  Called from the per-frame visual section (alongside Bruno/Lotus). */
+  _syncVvvVisuals(dtSec) {
+    if (!this.vvvLoaded) return;
+    const showVvv = this.moveMode === "vvv";
+    this.vvvRoot.visible = showVvv;
+    if (this.vvvWheels) {
+      for (const w of this.vvvWheels) {
+        w.container.visible = showVvv && this.vvvWheelsLoaded;
+      }
+    }
+    if (this._vvvArrowGroup) {
+      this._vvvArrowGroup.visible = showVvv && this._vvvVis.showArrows;
+    }
+    if (!showVvv) return;
+
+    const body = this._vvvBody;
+    const tires = this._vvvTires;
+    const T = this._vvvTire;
+    const W = this._vvvWheel;
+    const C = this._vvvChassis;
+
+    // Root follows body CoM in world space (same pattern as lotusRoot). The mesh
+    // uses local offsets only — do NOT write world coords into child.position while
+    // the root stays at (0,0,0) or the chase camera reads vvvRoot.position.y ≈ 0.
+    this.vvvRoot.position.copy(body.pos);
+    this.vvvRoot.quaternion.copy(body.quat);
+    this.vvvChassisPivot.position.set(0, C.visualLift + (C.comLower ?? 0), 0);
+
+    // Wheels on vvvRoot: hub layout from GLB + vertical droop along body Y.
+    const steerAngle = this._vvvSteerSmooth * T.maxSteerAngle;
+    const visK = 1 - Math.exp(-T.suspVisSmooth * dtSec);
+    if (!this.vvvWheelsLoaded) {
+      this._syncVvvForceArrows(tires);
+      return;
+    }
+    for (let i = 0; i < tires.length; i++) {
+      const t = tires[i];
+      const cfg = this._vvvLayout[i];
+      const w = this.vvvWheels[i];
+      if (!w) continue;
+
+      const targetDist = t.grounded ? t.hitDistance : T.restLength;
+      if (t._vvvSmoothDist === undefined) t._vvvSmoothDist = targetDist;
+      t._vvvSmoothDist += (targetDist - t._vvvSmoothDist) * visK;
+      const suspExt = Math.max(0, t._vvvSmoothDist - W.radius);
+      w.container.position.set(
+        w.hubLocal.x,
+        w.hubLocal.y - suspExt,
+        w.hubLocal.z,
+      );
+      const baseYaw = w.isLeft ? Math.PI : 0;
+      w.container.rotation.set(
+        0,
+        baseYaw + (cfg.steer ? steerAngle : 0),
+        0,
+      );
+      const spinSign = w.isLeft ? 1 : -1;
+      if (w.cylinder) w.cylinder.rotation.x = spinSign * this._vvvWheelSpin[i];
+    }
+    this._syncVvvForceArrows(tires);
+  }
+
+  _syncVvvForceArrows(tires) {
+    const arrows = this._vvvForceArrows;
+    if (!arrows || !this._vvvVis.showArrows) return;
+    for (let i = 0; i < tires.length; i++) {
+      const t = tires[i];
+      const a = arrows[i];
+      if (!a) continue;
+      this._placeVvvForceArrow(a.up, t.worldPos, t.lastSuspension);
+      this._placeVvvForceArrow(a.side, t.worldPos, t.lastSteering);
+      this._placeVvvForceArrow(a.fwd, t.worldPos, t.lastAccel);
+    }
+  }
+
+  /** Teleport the VVV body to a spawn position (called when activating mode
+   *  or after a respawn). The +π in the quaternion converts v2's heading
+   *  convention (heading=0 ⇒ forward = world −Z) to the standalone VVV
+   *  module's convention (chassis-local +Z is the chassis forward axis).
+   *  The reverse conversion happens in _updateVvvCar when syncing carHeading. */
+  /** Chase-cam anchor Y: terrain + nominal ride height — not raw CoM (springs bob). */
+  /** Orbit target height while F-detached — avoids spring bob on rigid-body CoM. */
+  _getDetachedOrbitTargetY() {
+    if (this.moveMode === "vvv") {
+      const speed = Math.sqrt(this.carVx * this.carVx + this.carVz * this.carVz);
+      return (
+        this._getVvvCameraFocusY(
+          this.playerPos.x,
+          this.playerPos.z,
+          this.playerPos.y,
+          speed,
+        ) + (this.vvvCam?.lookAtY ?? 1.2)
+      );
+    }
+    if (this.moveMode === "lotus" && this.lotusRoot) {
+      return this.lotusRoot.position.y + (this.lotusCam?.lookAtY ?? 1.4);
+    }
+    return this.playerPos.y + 1.0;
+  }
+
+  /** Smoothed chase-cam Y. Tracks the rigid body CoM but with a low-pass that
+   *  kills the suspension micro-bob and gives the standalone's planted feel. */
+  _getVvvCameraFocusY(px, pz, bodyY /* , speed */) {
+    if (this._vvvCamFocusYSmooth == null) this._vvvCamFocusYSmooth = bodyY;
+    return this._vvvCamFocusYSmooth;
+  }
+
+  _vvvSpawnAt(x, y, z, headingRad = 0) {
+    const body = this._vvvBody;
+    body.pos.set(x, y, z);
+    body.vel.set(0, 0, 0);
+    body.angVel.set(0, 0, 0);
+    body.quat.setFromAxisAngle(_vvvAxisY_world, headingRad + Math.PI);
+    body.forceAccum.set(0, 0, 0);
+    body.torqueAccum.set(0, 0, 0);
+    this._vvvSteerSmooth = 0;
+    for (let i = 0; i < 4; i++) this._vvvWheelSpin[i] = 0;
+    this._vvvCamFocusYSmooth = null;
+    this._vvvCamPosSmooth = null;
+  }
+
   async _initLotusCamGui() {
     try {
       const { GUI } =
@@ -2630,6 +3337,114 @@ export class PlayMode {
       this._lotusCamGui = gui;
     } catch (err) {
       console.warn("[V2] lil-gui load failed:", err);
+    }
+  }
+
+  async _initVvvGui() {
+    try {
+      const { GUI } =
+        await import("https://cdn.jsdelivr.net/npm/lil-gui@0.20.0/dist/lil-gui.esm.min.js");
+      const gui = new GUI({ title: "VVV (rigid)", width: 300 });
+      gui.domElement.style.position = "fixed";
+      gui.domElement.style.top = "10px";
+      gui.domElement.style.right = "10px";
+
+      const T = this._vvvTire;
+      const C = this._vvvChassis;
+      const WL = this._vvvWall;
+      const body = this._vvvBody;
+
+      const rebuildInertia = () => {
+        body.rebuildInertia({ mass: C.mass, size: C });
+      };
+
+      const susp = gui.addFolder("Suspension");
+      susp.add(T, "springStrength", 5000, 150000, 500).name("Spring k");
+      susp.add(T, "damper", 0, 20000, 50).name("Damper");
+      susp.add(T, "restLength", 0.2, 1.5, 0.01).name("Rest length");
+      susp.add(T, "rayLength", 0.3, 2.0, 0.01).name("Ray length");
+      susp.add(T, "rayPadAbove", 0, 1.5, 0.01).name("Ray pad above");
+      susp.add(T, "rayForwardBias", 0, 1.0, 0.05).name("Fwd/rear bias");
+      susp.add(T, "rayLateralBias", 0, 1.5, 0.05).name("Lateral bias");
+      susp.add(T, "bottomOutThresh", 0.3, 1.0, 0.05).name("Bottom-out start");
+      susp.add(T, "bottomOutMult", 0, 30, 0.5).name("Bottom-out mult");
+      susp.add(T, "suspVisSmooth", 0, 40, 0.5).name("Susp visual smooth");
+
+      const steer = gui.addFolder("Steering & grip");
+      steer.add(T, "maxSteerAngle", 0.1, 1.2, 0.01).name("Max steer (rad)");
+      steer.add(T, "steerSmooth", 1, 30, 0.5).name("Steer smooth");
+      steer.add(T, "gripFront", 0, 1, 0.01).name("Grip front");
+      steer.add(T, "gripRear", 0, 1, 0.01).name("Grip rear");
+      steer.add(T, "gripHandbrake", 0, 1, 0.01).name("Grip handbrake");
+      steer.add(T, "frictionCoeff", 0.3, 12, 0.1).name("Friction μ");
+      steer.add(T, "maxAngVel", 3, 20, 0.5).name("Max ω (rad/s)");
+      steer.add(T, "stabilizerStrength", 0, 30000, 200).name("Anti-roll");
+      steer.add(T, "stabilizerRollDamp", 0, 15000, 100).name("Roll damp");
+
+      const drive = gui.addFolder("Drive");
+      drive.add(T, "accelForce", 500, 20000, 100).name("Accel (N)");
+      drive.add(T, "topSpeed", 5, 80, 1).name("Top speed (m/s)");
+      drive.add(T, "powerCurveExp", 0.5, 4, 0.1).name("Power curve exp");
+      drive.add(T, "brakeForce", 0, 30000, 100).name("Brake (N)");
+      drive.add(T, "reverseAccel", 0, 10000, 100).name("Reverse (N)");
+      drive.add(T, "brakeReverseThreshold", 0, 5, 0.05).name("Brake/rev thresh");
+      drive.add(T, "engineBrake", 0, 5000, 50).name("Engine brake");
+
+      const wall = gui.addFolder("Wall probes");
+      wall.add(WL, "probeRange", 0.05, 2.0, 0.01).name("Probe range");
+      wall.add(WL, "stiffness", 5000, 800000, 5000).name("Stiffness");
+      wall.add(WL, "damper", 0, 40000, 200).name("Damper");
+      wall.add(WL, "clampPenFrac", 0, 1.0, 0.05).name("Vel-clamp pen");
+
+      const ch = gui.addFolder("Chassis");
+      ch.add(C, "mass", 400, 4000, 50).name("Mass (kg)").onChange(rebuildInertia);
+      ch.add(C, "width", 0.8, 4.0, 0.05).name("Width").onChange(rebuildInertia);
+      ch.add(C, "height", 0.3, 2.5, 0.05).name("Height").onChange(rebuildInertia);
+      ch.add(C, "length", 1.5, 6.0, 0.05).name("Length").onChange(rebuildInertia);
+      ch.add(C, "visualLift", -0.5, 2.0, 0.01).name("Visual lift");
+      ch
+        .add(C, "comLower", 0, 0.45, 0.01)
+        .name("CoM lower (m)")
+        .onChange(() => this._applyVvvComToWheelLayout());
+
+      gui.add(this, "_vvvSubsteps", 1, 8, 1).name("Physics substeps");
+
+      const vis = gui.addFolder("Visual");
+      vis
+        .add(this._vvvVis, "showArrows")
+        .name("Force arrows")
+        .onChange((v) => {
+          if (this._vvvArrowGroup) {
+            this._vvvArrowGroup.visible = v && this.moveMode === "vvv";
+          }
+        });
+      vis.add(this._vvvVis, "arrowScale", 0.0001, 0.005, 0.0001).name("Arrow scale");
+
+      gui
+        .add(
+          {
+            reset: () => {
+              Object.assign(this._vvvChassis, DEFAULT_VVV_CHASSIS);
+              Object.assign(this._vvvWheel, DEFAULT_VVV_WHEEL);
+              Object.assign(this._vvvTire, DEFAULT_VVV_TIRE);
+              Object.assign(this._vvvWall, DEFAULT_VVV_WALL);
+              this._vvvSubsteps = 6;
+              this._vvvVis.showArrows = true;
+              this._vvvVis.arrowScale = 0.0008;
+              rebuildInertia();
+              this._applyVvvComToWheelLayout();
+              this._vvvSubsteps = 4;
+              for (const c of gui.controllersRecursive()) c.updateDisplay();
+            },
+          },
+          "reset",
+        )
+        .name("Reset defaults");
+
+      gui.domElement.style.display = "none";
+      this._vvvCamGui = gui;
+    } catch (err) {
+      console.warn("[V2] VVV lil-gui load failed:", err);
     }
   }
 
@@ -3237,7 +4052,10 @@ export class PlayMode {
     return this.moveMode === "fly" && this.planeLoaded;
   }
   get carMode() {
-    return this.moveMode === "car" || this.moveMode === "lotus";
+    return this.moveMode === "car" || this.moveMode === "lotus" || this.moveMode === "vvv";
+  }
+  get vvvDriving() {
+    return this.moveMode === "vvv";
   }
 
   _clearTrails() {
@@ -3457,6 +4275,10 @@ export class PlayMode {
     if (this.charRoot) this.charRoot.visible = false;
     if (this.carRoot) this.carRoot.visible = false;
     if (this.lotusRoot) this.lotusRoot.visible = false;
+    if (this.vvvRoot) this.vvvRoot.visible = false;
+    if (this.vvvWheels) {
+      for (const w of this.vvvWheels) w.container.visible = false;
+    }
     if (this._flyHud) this._flyHud.style.display = "none";
     if (this._carHud) this._carHud.style.display = "none";
     if (this._carSpeedometer) this._carSpeedometer.style.display = "none";
@@ -3472,6 +4294,7 @@ export class PlayMode {
       this.camera.updateProjectionMatrix();
     }
     if (this._lotusCamGui) this._lotusCamGui.domElement.style.display = "none";
+    if (this._vvvCamGui) this._vvvCamGui.domElement.style.display = "none";
     if (this._jeepTuningGui) this._jeepTuningGui.domElement.style.display = "none";
     this.planeSpeed = 0;
     this.planeNitro = PLANE_NITRO_FULL;
@@ -3666,7 +4489,9 @@ export class PlayMode {
         mx = -Math.sin(this.flyHeading) * sg;
         mz = -Math.cos(this.flyHeading) * sg;
       }
-    } else if (this.carMode) {
+    } else if (this.carMode && !this.vvvDriving) {
+      // VVV bypasses the kinematic Bruno/Lotus input block — its physics
+      // reads keys directly inside _updateVvvCar and drives the body via forces.
       const forward = keys.KeyW || keys.ArrowUp;
       const backward = keys.KeyS || keys.ArrowDown;
       const leftKey = keys.KeyA || keys.ArrowLeft;
@@ -4010,6 +4835,17 @@ export class PlayMode {
 
     const mlen = Math.hypot(mx, mz);
     const carDriving = this.carMode;
+    const vvvDriving = this.vvvDriving;
+
+    // VVV (rigid-body) car: runs its own physics + syncs playerPos / carHeading
+    // BEFORE the kinematic carDriving paths below execute. The two carPhysics
+    // call sites further down gate themselves with `!vvvDriving` so they no-op
+    // in this mode. Camera / HUD downstream read playerPos+carHeading and
+    // therefore work transparently.
+    if (vvvDriving) {
+      this._updateVvvCar(dtSec);
+    }
+
     const moveSpeed = flying
       ? Math.abs(this.planeSpeed)
       : carDriving
@@ -4038,7 +4874,7 @@ export class PlayMode {
       }
 
       if (this.cliffBvh?.baked && !flying) {
-        if (carDriving) {
+        if (carDriving && !vvvDriving) {
           const _vehSf =
             this.moveMode === "lotus"
               ? this.lotusRoot?.scale.x || 1
@@ -4376,7 +5212,9 @@ export class PlayMode {
         while (dYaw < -PI) dYaw += 2 * PI;
         this.charYaw += dYaw * (1 - Math.exp(-14 * dtSec));
       }
-    } else if (carDriving) {
+    } else if (carDriving && !vvvDriving) {
+      // VVV bypasses this block entirely — its physics already ran in
+      // _updateVvvCar above and synced playerPos / carHeading.
       this.flyHeight = 0;
       const _isLotus = this.moveMode === "lotus";
       const _sf = _isLotus
@@ -4591,7 +5429,8 @@ export class PlayMode {
       (this.moveMode === "fly" && !this.planeLoaded) ||
       (this.moveMode === "char" && !this.charLoaded) ||
       (this.moveMode === "car" && !this.carLoaded) ||
-      (this.moveMode === "lotus" && !this.lotusLoaded);
+      (this.moveMode === "lotus" && !this.lotusLoaded) ||
+      (this.moveMode === "vvv" && !this.vvvLoaded);
     this.capsule.position.set(this.playerPos.x, capsuleCY, this.playerPos.z);
     if (mlen > 0) {
       this._lastMx = mx / mlen;
@@ -4968,6 +5807,10 @@ export class PlayMode {
       }
     }
 
+    // Car visual — VVV rigid body. Mesh visibility + per-frame position+
+    // orientation are handled in _syncVvvVisuals (lotusrealsize2 chassis + wheels).
+    this._syncVvvVisuals(dtSec);
+
     // Drift marks & smoke (shared by both car modes)
     if (anyCarRendered) {
       const speed = Math.sqrt(
@@ -5226,11 +6069,14 @@ export class PlayMode {
     // Camera
     const charLookY = this.playerPos.y + CHAR_HEIGHT * 0.75;
     const isLotusMode = this.moveMode === "lotus";
-    const _lc = isLotusMode ? this.lotusCam : null;
+    const isVvvMode = this.moveMode === "vvv";
+    const _lc = isVvvMode ? this.vvvCam : isLotusMode ? this.lotusCam : null;
     const _carLookYOff = _lc ? _lc.lookAtY : 1.2;
     const carLookY = carDriving
-      ? (isLotusMode ? this.lotusRoot : this.carRoot)?.position.y +
-          _carLookYOff || this.playerPos.y + _carLookYOff
+      ? (isVvvMode
+          ? this.playerPos.y + _carLookYOff
+          : (isLotusMode ? this.lotusRoot : this.carRoot)?.position.y + _carLookYOff) ||
+        this.playerPos.y + _carLookYOff
       : 0;
     const lookAtY = flying
       ? this.flyHeight + 0.45
@@ -5243,6 +6089,8 @@ export class PlayMode {
     // Lotus / Bruno tuning GUIs
     if (this._lotusCamGui)
       this._lotusCamGui.domElement.style.display = isLotusMode ? "" : "none";
+    if (this._vvvCamGui)
+      this._vvvCamGui.domElement.style.display = isVvvMode ? "" : "none";
     if (this._jeepTuningGui) {
       const showJeep = this.active && this.moveMode === "car";
       this._jeepTuningGui.domElement.style.display = showJeep ? "" : "none";
@@ -5253,14 +6101,30 @@ export class PlayMode {
       // Smoothly track the pawn so orbit stays useful while sim continues.
       const tgt = this.controls.target;
       const lerp = 1 - Math.exp(-6 * dtSec);
+      const orbitY = this._getDetachedOrbitTargetY();
       tgt.x += (this.playerPos.x - tgt.x) * lerp;
-      tgt.y += ((this.playerPos.y + 1.0) - tgt.y) * lerp;
+      tgt.y += (orbitY - tgt.y) * lerp;
       tgt.z += (this.playerPos.z - tgt.z) * lerp;
       this.controls.update();
       return;
     }
 
     if (carDriving && !iso) {
+      let camFocusX = this.playerPos.x;
+      let camFocusY = this.playerPos.y;
+      let camFocusZ = this.playerPos.z;
+      const vvvSpeed = isVvvMode
+        ? Math.sqrt(this.carVx * this.carVx + this.carVz * this.carVz)
+        : 0;
+      if (isVvvMode) {
+        camFocusY = this._getVvvCameraFocusY(
+          camFocusX,
+          camFocusZ,
+          this.playerPos.y,
+          vvvSpeed,
+        );
+      }
+
       let chaseTarget = this.carHeading;
       if (this.carDrifting) {
         const rx = Math.cos(this.carHeading);
@@ -5277,15 +6141,18 @@ export class PlayMode {
       let camDelta = chaseTarget - this.carCamYaw;
       while (camDelta > Math.PI) camDelta -= 2 * Math.PI;
       while (camDelta < -Math.PI) camDelta += 2 * Math.PI;
-      this.carCamYaw +=
-        camDelta *
-        (1 -
-          Math.exp(
-            -(_lc
-              ? _lc.chaseSpeed
-              : (this.carSettings.cameraChaseSpeed ?? CAR_CAM_CHASE_SPEED)) *
-              dtSec,
-          ));
+      // Idle VVV body still rocks on springs — freeze yaw chase until moving.
+      if (!isVvvMode || vvvSpeed > 0.4) {
+        this.carCamYaw +=
+          camDelta *
+          (1 -
+            Math.exp(
+              -(_lc
+                ? _lc.chaseSpeed
+                : (this.carSettings.cameraChaseSpeed ?? CAR_CAM_CHASE_SPEED)) *
+                dtSec,
+            ));
+      }
 
       const _camBaseDist = _lc
         ? _lc.distance
@@ -5299,24 +6166,54 @@ export class PlayMode {
         const carSpeed = Math.sqrt(
           this.carVx * this.carVx + this.carVz * this.carVz,
         );
-        const speedRatio = THREE.MathUtils.clamp(
-          carSpeed / Math.max(1, CAR_MAX_SPEED),
-          0,
-          1,
-        );
+        const pullSpeed = isVvvMode ? vvvSpeed : carSpeed;
+        const speedRatio =
+          isVvvMode && pullSpeed < 1.2
+            ? 0
+            : THREE.MathUtils.clamp(
+                pullSpeed / Math.max(1, CAR_MAX_SPEED),
+                0,
+                1,
+              );
         const targetPullBack = speedRatio * _lc.speedPullBack;
-        this._lotusCamDistSmooth = THREE.MathUtils.lerp(
-          this._lotusCamDistSmooth,
+        const pullSmooth = isVvvMode
+          ? this._vvvCamDistSmooth
+          : this._lotusCamDistSmooth;
+        const nextPull = THREE.MathUtils.lerp(
+          pullSmooth,
           targetPullBack,
           1 - Math.exp(-3 * dtSec),
         );
-        _camDist = _camBaseDist + this._lotusCamDistSmooth;
+        if (isVvvMode) this._vvvCamDistSmooth = nextPull;
+        else this._lotusCamDistSmooth = nextPull;
+        _camDist = _camBaseDist + nextPull;
       }
-      const camBehindX = this.playerPos.x + Math.sin(this.carCamYaw) * _camDist;
-      const camBehindZ = this.playerPos.z + Math.cos(this.carCamYaw) * _camDist;
-      const camY = lookAtY + _camHeight;
-      this.camera.position.set(camBehindX, camY, camBehindZ);
-      this.camera.lookAt(this.playerPos.x, lookAtY, this.playerPos.z);
+      const vvvLookY = isVvvMode ? camFocusY + _carLookYOff : lookAtY;
+      const camBehindX = camFocusX + Math.sin(this.carCamYaw) * _camDist;
+      const camBehindZ = camFocusZ + Math.cos(this.carCamYaw) * _camDist;
+      const camY = (isVvvMode ? vvvLookY : lookAtY) + _camHeight;
+      if (isVvvMode) {
+        // Lerp the actual camera position toward the chase target — matches
+        // standalone CAM_LERP=6/s. Avoids the camera snapping during the
+        // suspension/airborne transition. Lookat target is already filtered.
+        if (this._vvvCamPosSmooth == null) {
+          this._vvvCamPosSmooth = new THREE.Vector3(
+            camBehindX,
+            camY,
+            camBehindZ,
+          );
+          this.camera.position.copy(this._vvvCamPosSmooth);
+        } else {
+          const kCam = 1 - Math.exp(-6 * dtSec);
+          this._vvvCamPosSmooth.x += (camBehindX - this._vvvCamPosSmooth.x) * kCam;
+          this._vvvCamPosSmooth.y += (camY - this._vvvCamPosSmooth.y) * kCam;
+          this._vvvCamPosSmooth.z += (camBehindZ - this._vvvCamPosSmooth.z) * kCam;
+          this.camera.position.copy(this._vvvCamPosSmooth);
+        }
+      } else {
+        this.camera.position.set(camBehindX, camY, camBehindZ);
+      }
+      this.camera.lookAt(camFocusX, isVvvMode ? vvvLookY : lookAtY, camFocusZ);
     } else if (iso) {
       if (flying) {
         let yawDelta = this.flyHeading - this.isoYaw;
@@ -5526,6 +6423,27 @@ export class PlayMode {
       this._lotusPhysics._driftTime = 0;
       this._lotusPhysics.driftBoostMeter = 0;
       this._lotusPhysics._driftBoostActive = false;
+      this.driftMarks.reset();
+      this.driftSmoke.reset();
+    } else if (target === "vvv") {
+      this.moveMode = "vvv";
+      this.carHeading = yaw;
+      this.carCamYaw = yaw;
+      this.carVx = 0;
+      this.carVz = 0;
+      const groundY = this.getWorldHeight(this.playerPos.x, this.playerPos.z);
+      const hubY = this._vvvLayout[0]?.pos.y ?? -0.1;
+      const rest = this._vvvTire.restLength ?? 0.55;
+      const k = this._vvvTire.springStrength || 65000;
+      // Per-wheel weight ÷ k = static spring deflection. Spawning 5 cm above
+      // equilibrium lets the spring settle instead of being pre-loaded.
+      const staticDef = (this._vvvChassis.mass * VVV_GRAVITY * 0.25) / k;
+      const spawnY = groundY + rest - staticDef + Math.abs(hubY) + 0.05;
+      this._vvvSpawnAt(this.playerPos.x, spawnY, this.playerPos.z, yaw);
+      this.playerPos.x = this._vvvBody.pos.x;
+      this.playerPos.y = this._vvvBody.pos.y;
+      this.playerPos.z = this._vvvBody.pos.z;
+      this._lotusCamDistSmooth = 0;
       this.driftMarks.reset();
       this.driftSmoke.reset();
     } else if (target === "rts") {
@@ -6141,6 +7059,10 @@ export class PlayMode {
     if (this._lotusCamGui) {
       this._lotusCamGui.destroy();
       this._lotusCamGui = null;
+    }
+    if (this._vvvCamGui) {
+      this._vvvCamGui.destroy();
+      this._vvvCamGui = null;
     }
     if (this._jeepTuningGui) {
       this._jeepTuningGui.destroy();
