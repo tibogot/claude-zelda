@@ -1,0 +1,1677 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Brick material lab — wall + arch (medieval-arch-showcase)</title>
+    <style>
+      body {
+        margin: 0;
+        overflow: hidden;
+        background: #1a1d24;
+        font-family: system-ui, sans-serif;
+      }
+      canvas {
+        display: block;
+        width: 100%;
+        height: 100vh;
+      }
+      #tweak-root {
+        position: fixed;
+        top: 8px;
+        right: 8px;
+        z-index: 50;
+        width: min(360px, calc(100vw - 16px));
+        max-height: calc(100vh - 16px);
+        overflow-x: hidden;
+        overflow-y: auto;
+        overscroll-behavior: contain;
+        pointer-events: auto;
+      }
+      #hint {
+        position: fixed;
+        left: 12px;
+        bottom: 12px;
+        z-index: 40;
+        max-width: min(420px, calc(100vw - 24px));
+        color: rgba(255, 255, 255, 0.72);
+        font-size: 12px;
+        line-height: 1.45;
+        pointer-events: none;
+      }
+      #export-snippet {
+        position: fixed;
+        left: 12px;
+        top: 12px;
+        z-index: 40;
+        max-width: min(480px, calc(100vw - 380px));
+        padding: 8px 10px;
+        background: rgba(0, 0, 0, 0.45);
+        border: 1px solid rgba(255, 255, 255, 0.12);
+        border-radius: 6px;
+        color: rgba(200, 210, 220, 0.9);
+        font-size: 11px;
+        font-family: ui-monospace, monospace;
+        line-height: 1.35;
+        white-space: pre-wrap;
+        word-break: break-all;
+        pointer-events: none;
+      }
+    </style>
+  </head>
+  <body>
+    <div id="tweak-root" aria-label="Brick lab settings"></div>
+    <pre id="export-snippet" aria-hidden="true"></pre>
+    <div id="hint">
+      medieval-arch-showcase wall + arch (same layout code). Gizmo: move
+      opening. Orbit: drag · Zoom: wheel.
+    </div>
+
+    <script type="importmap">
+      {
+        "imports": {
+          "three": "https://cdn.jsdelivr.net/npm/three@0.183.1/build/three.webgpu.js",
+          "three/webgpu": "https://cdn.jsdelivr.net/npm/three@0.183.1/build/three.webgpu.js",
+          "three/tsl": "https://cdn.jsdelivr.net/npm/three@0.183.1/build/three.tsl.js",
+          "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.183.1/examples/jsm/",
+          "tweakpane": "https://cdn.jsdelivr.net/npm/tweakpane@4.0.3/dist/tweakpane.min.js"
+        }
+      }
+    </script>
+
+    <script type="module">
+      import * as THREE from "three/webgpu";
+      import { OrbitControls } from "three/addons/controls/OrbitControls.js";
+      import { TransformControls } from "three/addons/controls/TransformControls.js";
+      import { RoundedBoxGeometry } from "three/addons/geometries/RoundedBoxGeometry.js";
+      import { Pane } from "tweakpane";
+      import {
+        Fn,
+        float,
+        color,
+        vec2,
+        vec3,
+        sin,
+        mix,
+        smoothstep,
+        mul,
+        sub,
+        add,
+        abs,
+        max,
+        min,
+        fract,
+        length,
+        normalize,
+        div,
+        normalWorld,
+        normalLocal,
+        positionLocal,
+        positionWorld,
+        dot,
+        pow,
+        clamp,
+        uniform,
+        attribute,
+      } from "three/tsl";
+
+      function mulberry32(seed) {
+        let a = seed >>> 0;
+        return function () {
+          a |= 0;
+          a = (a + 0x6d2b79f5) | 0;
+          let t = Math.imul(a ^ (a >>> 15), 1 | a);
+          t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t;
+          return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+        };
+      }
+
+      // === Arch path math (medieval-arch-showcase wall mode) =====================
+
+      function pointedArchGeom(R, k) {
+        const c = R * Math.max(0, k);
+        const r = c + R;
+        const apexDy = Math.sqrt(Math.max(0, R * (R + 2 * c)));
+        return { c, r, apexDy };
+      }
+
+      function pointedArcHalfLen(R, k) {
+        const { c, r, apexDy } = pointedArchGeom(R, k);
+        if (apexDy <= 1e-6) return 0;
+        const thetaSpring = Math.atan2(0, c + R);
+        const thetaApex = Math.atan2(apexDy, c);
+        return r * Math.abs(thetaApex - thetaSpring);
+      }
+
+      function pathULength(p) {
+        const Lj = Math.max(1e-6, p.springY - p.sillY);
+        if (p.archShape === "pointed") {
+          return (
+            2 * Lj + 2 * pointedArcHalfLen(p.ringRadius, p.archPointedness)
+          );
+        }
+        return 2 * Lj + Math.PI * p.ringRadius;
+      }
+
+      function sampleSill(s, R, y0) {
+        const t = s / (2 * R);
+        const x = THREE.MathUtils.lerp(-R, R, t);
+        return { x, y: y0, tx: 1, ty: 0 };
+      }
+
+      function sampleUPath(s, p) {
+        const R = p.ringRadius;
+        const y0 = p.sillY;
+        const ys = p.springY;
+        const Lj = Math.max(1e-6, ys - y0);
+        const isPointed = p.archShape === "pointed";
+        let u = s;
+
+        if (u <= Lj) {
+          const t = u / Lj;
+          const y = THREE.MathUtils.lerp(y0, ys, t);
+          return { x: -R, y, tx: 0, ty: 1 };
+        }
+        u -= Lj;
+
+        if (isPointed) {
+          const pg = pointedArchGeom(R, p.archPointedness);
+          const alpha = Math.atan2(pg.apexDy, Math.max(1e-6, pg.c));
+          const oneArc = pg.r * alpha;
+          if (u <= oneArc) {
+            const t = u / oneArc;
+            const ang = Math.PI - t * alpha;
+            const x = pg.c + pg.r * Math.cos(ang);
+            const y = ys + pg.r * Math.sin(ang);
+            const tx = Math.sin(ang);
+            const ty = -Math.cos(ang);
+            const inv = 1 / Math.hypot(tx, ty);
+            return { x, y, tx: tx * inv, ty: ty * inv };
+          }
+          u -= oneArc;
+          if (u <= oneArc) {
+            const t = u / oneArc;
+            const ang = alpha * (1 - t);
+            const x = -pg.c + pg.r * Math.cos(ang);
+            const y = ys + pg.r * Math.sin(ang);
+            const tx = Math.sin(ang);
+            const ty = -Math.cos(ang);
+            const inv = 1 / Math.hypot(tx, ty);
+            return { x, y, tx: tx * inv, ty: ty * inv };
+          }
+          u -= oneArc;
+        } else {
+          const La = Math.PI * R;
+          if (u <= La) {
+            const t = u / La;
+            const ang = Math.PI * (1 - t);
+            const ca = Math.cos(ang);
+            const sa = Math.sin(ang);
+            const x = R * ca;
+            const y = ys + R * sa;
+            const tx = sa;
+            const ty = -ca;
+            const inv = 1 / Math.hypot(tx, ty);
+            return { x, y, tx: tx * inv, ty: ty * inv };
+          }
+          u -= La;
+        }
+
+        const t = THREE.MathUtils.clamp(u / Lj, 0, 1);
+        const y = THREE.MathUtils.lerp(ys, y0, t);
+        return { x: R, y, tx: 0, ty: -1 };
+      }
+
+      function subtractIntervals(intervals, holeLo, holeHi) {
+        if (holeHi <= holeLo) return intervals;
+        const out = [];
+        for (const [a, b] of intervals) {
+          if (b <= a + 1e-6) continue;
+          if (holeHi <= a || holeLo >= b) {
+            out.push([a, b]);
+            continue;
+          }
+          if (holeLo > a + 1e-4) out.push([a, Math.min(holeLo, b)]);
+          if (holeHi < b - 1e-4) out.push([Math.max(holeHi, a), b]);
+        }
+        return out;
+      }
+
+      function wallOpeningHalfX(
+        y,
+        R_out,
+        y0,
+        ys,
+        seam,
+        archShape,
+        pointedness,
+      ) {
+        if (y < y0 - 1e-6) return 0;
+        if (y < ys - 1e-6) return R_out + seam;
+        const dy = y - ys;
+        if (archShape === "pointed") {
+          const { c, r, apexDy } = pointedArchGeom(R_out, pointedness);
+          if (dy > apexDy + 1e-6) return 0;
+          const inner = r * r - dy * dy;
+          if (inner <= 0) return 0;
+          const halfW = -c + Math.sqrt(inner);
+          if (halfW <= 0) return 0;
+          return halfW + seam;
+        }
+        if (dy > R_out + 1e-6) return 0;
+        const inner = R_out * R_out - dy * dy;
+        if (inner <= 0) return 0;
+        return Math.sqrt(inner) + seam;
+      }
+
+      function wallOpeningCurvature(
+        y,
+        R_out,
+        y0,
+        ys,
+        seam,
+        archShape,
+        pointedness,
+      ) {
+        const e = 0.06;
+        const a = wallOpeningHalfX(
+          y + e,
+          R_out,
+          y0,
+          ys,
+          seam,
+          archShape,
+          pointedness,
+        );
+        const b = wallOpeningHalfX(
+          y - e,
+          R_out,
+          y0,
+          ys,
+          seam,
+          archShape,
+          pointedness,
+        );
+        return Math.abs(a - b) / e;
+      }
+
+      /** Lab params: showcase wall + arch layout, tunable brick material. */
+      const params = {
+        doorInnerHalfW: 1.15,
+        masonryShell: 0.42,
+        legHeight: 2.35,
+        sillY: 0.02,
+        closeBottom: false,
+        spacingMul: 1.02,
+        archAlong: 0,
+        archAlongZ: -0.22,
+        archRingDepthScale: 1.09,
+        showArchGizmo: true,
+        archShape: "round",
+        archPointedness: 1.0,
+
+        brickW: 0.52,
+        brickH: 0.38,
+        brickD: 0.55,
+        brickRound: 0.02,
+        roundSegments: 4,
+        faceBulge: 0,
+        chipStrength: 0.025,
+        shapeWarp: 1.2,
+
+        wallEnabled: true,
+        wallWidth: 15,
+        wallHeight: 6.2,
+        wallDepth: 0.62,
+        wallZ: -0.22,
+        wallMortar: 0.001,
+        wallSeamInset: 0.038,
+        wallMinBrickScale: 0.26,
+        wallCrownSquash: 0.78,
+        wallAnchorY: 0.02,
+        planVariety: 0.35,
+        depthRecess: 0.28,
+        depthSpread: 0.75,
+        showMortarBacking: false,
+
+        maxBricks: 2200,
+        maxWallBricks: 22000,
+        colorSeed: 31415,
+
+        sunIntensity: 4.5,
+        ambientIntensity: 1.05,
+        fillIntensity: 1.25,
+        exposure: 1.45,
+      };
+
+      const tmpO = new THREE.Object3D();
+      const _archGizmoWP = new THREE.Vector3();
+
+      // ===========================================================================
+      // === medieval-arch-showcase brick variation + per-instance noise (exact) ===
+      // ===========================================================================
+
+      function setBrickVarAt(mesh, index, shapeMix, warp, grey, grain) {
+        const att = mesh.geometry.getAttribute("brickVar");
+        if (!att) return;
+        const a = att.array;
+        const o = index * 4;
+        a[o] = shapeMix;
+        a[o + 1] = warp;
+        a[o + 2] = grey;
+        a[o + 3] = grain;
+      }
+
+      /** Door ring: showcase variation (tight coherent voussoirs). */
+      function pickBrickVariation(
+        rnd,
+        baseSx,
+        baseSy,
+        baseSz,
+        mode,
+        ringDepthScale,
+      ) {
+        let sx = baseSx;
+        let sy = baseSy;
+        let sz = baseSz;
+        let shapeMix = 0.5;
+        let warp = 0.25;
+        let grey = 0.45;
+        const grain = rnd();
+
+        if (mode === "door") {
+          sx *= 1 + (rnd() - 0.5) * 0.055;
+          sy *= 0.97 + rnd() * 0.05;
+          sz *= 0.97 + rnd() * 0.05;
+          const bump =
+            typeof ringDepthScale === "number" &&
+            ringDepthScale > 0 &&
+            !Number.isNaN(ringDepthScale)
+              ? ringDepthScale
+              : 1.09;
+          sz *= bump;
+          shapeMix = 0.56 + rnd() * 0.07;
+          warp = 0.16 + rnd() * 0.2;
+          grey = 0.32 + rnd() * 0.34;
+          return { sx, sy, sz, shapeMix, warp, grey, grain };
+        }
+
+        const u = rnd();
+        if (u < 0.12) {
+          shapeMix = 0.38;
+          sx *= 1.04 + rnd() * 0.1;
+          sy *= 0.9 + rnd() * 0.08;
+          sz *= 0.93 + rnd() * 0.07;
+        } else if (u < 0.22) {
+          shapeMix = 0.3;
+          sx *= 0.93 + rnd() * 0.08;
+          sy *= 0.86 + rnd() * 0.08;
+          sz *= 0.91 + rnd() * 0.07;
+        } else {
+          shapeMix = 0.46 + rnd() * 0.18;
+          sx *= 0.94 + rnd() * 0.1;
+          sy *= 0.92 + rnd() * 0.09;
+          sz *= 0.92 + rnd() * 0.08;
+        }
+        warp = 0.22 + rnd() * 0.38;
+        grey = 0.3 + rnd() * 0.42;
+        return { sx, sy, sz, shapeMix, warp, grey, grain };
+      }
+
+      /** Shader-only per-brick personality for wall field bricks. */
+      function pickBrickShaderVar(rnd) {
+        let shapeMix, warp;
+        const u = rnd();
+        if (u < 0.18) {
+          shapeMix = 0.28 + rnd() * 0.12;
+          warp = 0.45 + rnd() * 0.4;
+        } else if (u < 0.4) {
+          shapeMix = 0.4 + rnd() * 0.15;
+          warp = 0.28 + rnd() * 0.3;
+        } else {
+          shapeMix = 0.55 + rnd() * 0.2;
+          warp = 0.18 + rnd() * 0.22;
+        }
+        return {
+          shapeMix,
+          warp,
+          grey: 0.28 + rnd() * 0.5,
+          grain: rnd(),
+        };
+      }
+
+      /**
+       * Front-face recession: bricks sit at varying depth into the shell while
+       * row mortar gaps stay fixed on the wall plane. Bias toward flush bricks.
+       */
+      function pickDepthPlacement(rnd) {
+        const spread = THREE.MathUtils.clamp(params.depthSpread, 0, 1);
+        const recessFrac = Math.max(0, params.depthRecess);
+        if (spread <= 0 || recessFrac <= 0) {
+          const sz = 1;
+          return {
+            sz,
+            z: -(params.brickD * sz) * 0.5,
+            recess: 0,
+          };
+        }
+
+        const u = Math.pow(rnd(), 0.88);
+        const sz = 1 - u * recessFrac * 0.22;
+        let recess = u * recessFrac * params.brickD * spread;
+        recess = Math.min(
+          recess,
+          Math.max(0, params.wallDepth - params.brickD * sz),
+        );
+        const z = -recess - params.brickD * sz * 0.5;
+        return { sz, z, recess };
+      }
+
+      function pickPlanSy(rnd) {
+        const v = THREE.MathUtils.clamp(params.planVariety, 0, 1);
+        if (v <= 0) return 1;
+        return THREE.MathUtils.lerp(1, 0.94 + rnd() * 0.06, v);
+      }
+
+      function createInstancedBrickGeometry(baseGeo, capacity) {
+        const g = baseGeo.clone();
+        const arr = new Float32Array(capacity * 4);
+        const att = new THREE.InstancedBufferAttribute(arr, 4);
+        att.setUsage(THREE.DynamicDrawUsage);
+        g.setAttribute("brickVar", att);
+        return g;
+      }
+
+      // ===========================================================================
+      // === medieval-arch-showcase brick material (exact colorNode/positionNode) ==
+      // ===========================================================================
+
+      const _sunDirVec = new THREE.Vector3();
+      const sunDirUniform = uniform(new THREE.Vector3());
+      const uFaceBulge = uniform(params.faceBulge);
+      const uChipStrength = uniform(params.chipStrength);
+      const uShapeWarp = uniform(params.shapeWarp);
+
+      function createBrickMaterial() {
+        const brickVarA = attribute("brickVar", "vec4");
+        const shapeM = brickVarA.x;
+        const warpS = brickVarA.y;
+        const greyK = brickVarA.z;
+        const grain = brickVarA.w;
+
+        const mat = new THREE.MeshStandardNodeMaterial({
+          metalness: 0.015,
+        });
+
+        mat.colorNode = Fn(() => {
+          const pw = positionWorld;
+          const seed = grain.mul(6.283).add(greyK.mul(12.7));
+          const p1 = pw
+            .mul(1.05)
+            .add(vec3(seed, seed.mul(0.71), seed.mul(0.53)));
+          const p2 = pw
+            .mul(2.35)
+            .add(vec3(seed.mul(1.3), seed.mul(0.9), seed.mul(1.1)));
+          const p3 = pw.mul(5.1).add(vec3(seed.mul(2.1), seed, seed.mul(1.7)));
+          const w1 = sin(dot(p1, vec3(1.7, 2.3, 1.9)))
+            .mul(0.5)
+            .add(0.5);
+          const w2 = sin(dot(p2, vec3(2.2, 1.4, 2.6)))
+            .mul(0.5)
+            .add(0.5);
+          const w3 = sin(dot(p3, vec3(1.5, 2.8, 2.1)))
+            .mul(0.5)
+            .add(0.5);
+          const fbm = w1.mul(0.52).add(w2.mul(0.32)).add(w3.mul(0.16));
+          const streak = sin(
+            pw.x
+              .mul(2.8)
+              .add(pw.y.mul(4.2))
+              .add(pw.z.mul(1.6))
+              .add(grain.mul(24)),
+          )
+            .mul(0.5)
+            .add(0.5);
+
+          const dark = mix(color(0x1a1c20), color(0x2e3138), greyK);
+          const mid = mix(
+            color(0x42454c),
+            color(0x565a62),
+            pow(greyK, float(0.9)),
+          );
+          const light = mix(
+            color(0x65696f),
+            color(0x82868e),
+            smoothstep(0.1, 0.9, greyK),
+          );
+          const body0 = mix(dark, mix(mid, light, greyK), float(0.58));
+          const stain = smoothstep(float(0.22), float(0.78), fbm);
+          const body1 = mul(body0, mix(float(0.86), float(1.06), stain));
+          const warm = mix(color(0x5c5248), color(0x6a6056), streak);
+          const body2 = mix(
+            body1,
+            mul(body1, warm),
+            float(0.07).mul(smoothstep(0.35, 0.72, streak)),
+          );
+          const moss = smoothstep(float(0.62), float(0.94), w2.mul(w3));
+          const body3 = mix(
+            body2,
+            mul(body2, color(0x9aa898)),
+            moss.mul(0.045).mul(warpS.mul(0.4).add(0.6)),
+          );
+
+          const speck = fract(
+            sin(dot(pw.xz, vec2(12.9898, 78.233))).mul(43758.5453),
+          );
+          const freckle = smoothstep(float(0.72), float(0.96), speck).mul(0.11);
+          const baseCol = mul(body3, sub(float(1), freckle));
+          const nd = clamp(dot(normalWorld, sunDirUniform), 0, 1);
+          const coolShade = mix(
+            float(0.88),
+            float(1.14),
+            nd.mul(0.55).add(0.45),
+          );
+          const ax = abs(normalWorld.x);
+          const ay = abs(normalWorld.y);
+          const az = abs(normalWorld.z);
+          const edgeFac = pow(max(ax, max(ay, az)), float(2.35));
+          const edgeLift = mix(float(1), float(1.1), edgeFac.mul(0.38));
+          const edgeCool = mix(float(1), float(0.94), edgeFac.mul(0.12));
+          const shapeTone = mix(
+            float(0.96),
+            float(1.04),
+            shapeM.mul(0.35).add(0.65),
+          );
+          return mul(
+            mul(mul(mul(baseCol, coolShade), edgeLift), edgeCool),
+            shapeTone,
+          );
+        })();
+
+        mat.roughnessNode = Fn(() => {
+          const pw = positionWorld
+            .mul(2.4)
+            .add(vec3(grain.mul(9), greyK.mul(6), shapeM.mul(3)));
+          const pit = sin(dot(pw, vec3(2.1, 1.7, 2.4)))
+            .mul(0.5)
+            .add(0.5);
+          const pit2 = sin(dot(pw.mul(1.7), vec3(1.6, 2.2, 1.9)))
+            .mul(0.5)
+            .add(0.5);
+          const microRough = pit.mul(0.55).add(pit2.mul(0.45));
+          const baseR = mix(
+            float(0.82),
+            float(0.97),
+            greyK.mul(0.38).add(grain.mul(0.24)),
+          );
+          return clamp(
+            baseR.add(microRough.mul(0.07)),
+            float(0.44),
+            float(0.995),
+          );
+        })();
+
+        mat.emissiveNode = Fn(() => {
+          const nd = clamp(dot(normalWorld, sunDirUniform), 0, 1);
+          const rim = pow(
+            sub(float(1), abs(dot(normalWorld, vec3(0, 1, 0)))),
+            float(2.15),
+          );
+          const g0 = mix(color(0x4a4d52), color(0x686c72), nd);
+          return mul(g0, mul(rim, float(0.032))).mul(warpS.mul(0.55).add(0.45));
+        })();
+
+        mat.positionNode = Fn(() => {
+          const pl = positionLocal;
+          const nl = normalLocal;
+          const ax = abs(pl.x);
+          const ay = abs(pl.y);
+          const az = abs(pl.z);
+          const mn = min(ax, min(ay, az));
+          const mx = max(ax, max(ay, az));
+          const edgeShell = smoothstep(float(0.14), float(0.44), mx);
+          const cornerBand = smoothstep(float(0.022), float(0.095), mn).mul(
+            smoothstep(float(0.33), float(0.48), mx),
+          );
+          const plLen = length(pl);
+          const cenW = smoothstep(float(0.01), float(0.05), plLen);
+
+          // Flatness of vertex normal — ~1 on flat faces, lower on fillet ring.
+          // We use this to push flat faces outward (pillow bulge) without
+          // touching the rounded edges (which would flip triangle winding).
+          const nFlat = max(abs(nl.x), max(abs(nl.y), abs(nl.z)));
+          const filletGuard = smoothstep(float(0.78), float(0.99), nFlat);
+
+          // Per-brick warp strength (driven by per-instance attribute)
+          const wv = warpS.mul(shapeM.mul(0.55).add(0.45)).mul(uShapeWarp);
+
+          // Distance from face center, normalized 0..1. For a vertex on a
+          // flat face, this is the distance in the tangent plane to the
+          // brick's central axis. Used as a "pillow" mask: 1 in face center,
+          // 0 at face edges.
+          const faceTangent = sub(mx, max(ax, max(ay, az)).mul(float(0))); // = mx
+          const offAxis = sub(mx, mn)
+            .mul(float(0))
+            .add(min(ax, min(ay, az))); // = mn
+          // Simpler: pillow mask = 1 when off-axis (mn) is small relative to dominant (mx).
+          const pillowMask = sub(
+            float(1),
+            smoothstep(float(0.05), float(0.27), mn),
+          ).mul(filletGuard);
+
+          // High-frequency bump for surface texture variation
+          const bump = sin(
+            pl.x.mul(11).add(pl.y.mul(9)).add(pl.z.mul(7)).add(grain.mul(40)),
+          )
+            .mul(0.5)
+            .add(0.5);
+
+          // Outward face bulge — main "pillow" displacement. Always positive
+          // (pushes face outward along its normal).
+          const bulgeAmp = uFaceBulge
+            .mul(pillowMask)
+            .mul(wv.mul(0.5).add(0.5)) // even no-warp bricks get some bulge
+            .mul(mix(float(0.55), float(1.15), bump))
+            .mul(cenW);
+
+          // Inward chip at random corners, along radial direction so it
+          // stays smooth on the rounded fillet (no winding flips).
+          const chipPick = fract(
+            grain.mul(47.13).add(greyK.mul(91.7)).add(shapeM.mul(23.1)),
+          );
+          const chipMask = smoothstep(float(0.84), float(0.96), chipPick)
+            .mul(cornerBand)
+            .mul(edgeShell)
+            .mul(cenW);
+          const chipMag = uChipStrength
+            .mul(chipMask)
+            .mul(warpS.mul(0.42).add(0.58));
+          const rlen = max(length(pl), float(1e-5));
+          const radial = normalize(div(pl, rlen));
+          const chip = mul(radial, float(-1)).mul(chipMag);
+
+          return positionLocal.add(nl.mul(bulgeAmp)).add(chip);
+        })();
+
+        return mat;
+      }
+
+      // ===========================================================================
+      // === Scene setup ===========================================================
+      // ===========================================================================
+
+      const scene = new THREE.Scene();
+      scene.background = new THREE.Color(0x8a9aad);
+      scene.fog = new THREE.Fog(0x8a9aad, 28, 55);
+
+      const camera = new THREE.PerspectiveCamera(
+        50,
+        window.innerWidth / window.innerHeight,
+        0.05,
+        120,
+      );
+      camera.position.set(3.2, 2.1, 4.8);
+
+      const renderer = new THREE.WebGPURenderer({ antialias: true });
+      renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+      renderer.setSize(window.innerWidth, window.innerHeight);
+      renderer.shadowMap.enabled = true;
+      renderer.shadowMap.type = THREE.PCFSoftShadowMap;
+      renderer.toneMapping = THREE.ACESFilmicToneMapping;
+      renderer.toneMappingExposure = params.exposure;
+      renderer.outputColorSpace = THREE.SRGBColorSpace;
+      document.body.appendChild(renderer.domElement);
+
+      const controls = new OrbitControls(camera, renderer.domElement);
+      controls.enableDamping = true;
+      controls.target.set(0, 1.4, 0);
+
+      const hemi = new THREE.HemisphereLight(
+        0xd8e4f5,
+        0x6a6258,
+        params.ambientIntensity,
+      );
+      scene.add(hemi);
+
+      const ambient = new THREE.AmbientLight(0xe8eef5, 0.35);
+      scene.add(ambient);
+
+      const sun = new THREE.DirectionalLight(0xfff8ee, params.sunIntensity);
+      sun.position.set(6, 12, 8);
+      sun.castShadow = true;
+      sun.shadow.mapSize.set(2048, 2048);
+      sun.shadow.camera.near = 0.5;
+      sun.shadow.camera.far = 40;
+      sun.shadow.camera.left = -8;
+      sun.shadow.camera.right = 8;
+      sun.shadow.camera.top = 8;
+      sun.shadow.camera.bottom = -8;
+      sun.shadow.bias = -0.00012;
+      sun.shadow.normalBias = 0.02;
+      sun.shadow.radius = 4;
+      scene.add(sun);
+      scene.add(sun.target);
+      sun.target.position.set(0.2, 1.2, 0);
+
+      const fill = new THREE.DirectionalLight(0xc5d4ec, params.fillIntensity);
+      fill.position.set(-7, 6, -5);
+      scene.add(fill);
+
+      function syncSunDirectionUniform() {
+        _sunDirVec.copy(sun.target.position).sub(sun.position).normalize();
+        sunDirUniform.value.copy(_sunDirVec);
+      }
+
+      // Ground
+      const groundMesh = new THREE.Mesh(
+        new THREE.PlaneGeometry(24, 24),
+        new THREE.MeshStandardNodeMaterial({
+          color: 0x5c636e,
+          roughness: 0.92,
+          metalness: 0,
+        }),
+      );
+      groundMesh.rotation.x = -Math.PI / 2;
+      groundMesh.receiveShadow = true;
+      scene.add(groundMesh);
+
+      // Mortar backing (so brick gaps don't show sky)
+      function createMortarMaterial() {
+        const m = new THREE.MeshStandardNodeMaterial({ metalness: 0 });
+        m.colorNode = Fn(() => {
+          const pw = positionWorld;
+          const n1 = sin(dot(pw.mul(8.0), vec3(2.1, 1.7, 1.3)))
+            .mul(0.5)
+            .add(0.5);
+          const n2 = sin(
+            dot(pw.mul(20.0).add(vec3(7.0, 13.0, 3.0)), vec3(1.7, 2.4, 1.9)),
+          )
+            .mul(0.5)
+            .add(0.5);
+          const grit = n1.mul(0.65).add(n2.mul(0.35));
+          return mix(color(0x24201a), color(0x342d24), grit);
+        })();
+        m.roughnessNode = Fn(() => {
+          const pw = positionWorld;
+          const n = sin(dot(pw.mul(15.0), vec3(2.3, 1.9, 1.5)))
+            .mul(0.5)
+            .add(0.5);
+          return clamp(float(0.94).add(n.mul(0.04)), float(0.6), float(0.99));
+        })();
+        return m;
+      }
+
+      // ===========================================================================
+      // === Brick geometry + wall layout ==========================================
+      // ===========================================================================
+
+      let brickGeo = null;
+      let brickMat = null;
+      let mortarMat = null;
+      let lastGeoSig = "";
+      let doorMesh = null;
+      let wallMesh = null;
+      let mortarMesh = null;
+      let archPivot = null;
+      let archGizmoTarget = null;
+      let archGizmo = null;
+      let archGizmoHelper = null;
+      let isDraggingArchGizmo = false;
+
+      function brickGeometrySignature() {
+        return [
+          params.brickW,
+          params.brickH,
+          params.brickD,
+          params.brickRound,
+          params.roundSegments,
+        ].join(",");
+      }
+
+      function ensureBrickGeometry(force) {
+        const sig = brickGeometrySignature();
+        if (!force && brickGeo && sig === lastGeoSig) return;
+        if (brickGeo) {
+          brickGeo.dispose();
+          brickGeo = null;
+        }
+        const rRound = Math.max(0.0001, params.brickRound);
+        const segs = Math.max(1, Math.min(6, params.roundSegments | 0));
+        brickGeo = new RoundedBoxGeometry(
+          params.brickW,
+          params.brickH,
+          params.brickD,
+          segs,
+          rRound,
+        );
+        lastGeoSig = sig;
+      }
+
+      function getGateX() {
+        return params.archAlong;
+      }
+
+      function ringParamsFromGui() {
+        const R_in = Math.max(0.08, params.doorInnerHalfW);
+        const R_out = R_in + Math.max(0.05, params.masonryShell);
+        const springY = params.sillY + Math.max(0.05, params.legHeight);
+        return {
+          ringRadius: R_out,
+          sillY: params.sillY,
+          springY,
+          archShape: params.archShape || "round",
+          archPointedness: Number.isFinite(params.archPointedness)
+            ? params.archPointedness
+            : 1.0,
+        };
+      }
+
+      function clampArchAlong() {
+        const R_in = Math.max(0.08, params.doorInnerHalfW);
+        const R_out = R_in + Math.max(0.05, params.masonryShell);
+        const halfW = params.wallWidth * 0.5;
+        const margin = 0.28;
+        const lim = Math.max(0.15, halfW - R_out - margin);
+        params.archAlong = THREE.MathUtils.clamp(params.archAlong, -lim, lim);
+      }
+
+      function clampArchAlongZ() {
+        const d = Math.max(0.06, params.wallDepth);
+        const lim = d * 0.55 + 0.42 + Math.abs(params.wallZ || 0) * 0.35;
+        params.archAlongZ = THREE.MathUtils.clamp(params.archAlongZ, -lim, lim);
+      }
+
+      function clampDoorSillInWall() {
+        const R_in = Math.max(0.08, params.doorInnerHalfW);
+        const R_out = R_in + Math.max(0.05, params.masonryShell);
+        const leg = Math.max(0.05, params.legHeight);
+        const w0 = params.wallAnchorY;
+        const w1 = params.wallAnchorY + params.wallHeight;
+        const margin = 0.1;
+        let archHeight = R_out;
+        if (params.archShape === "pointed") {
+          const k = Number.isFinite(params.archPointedness)
+            ? params.archPointedness
+            : 1.0;
+          archHeight = pointedArchGeom(R_out, k).apexDy;
+        }
+        const maxSill = w1 - margin - leg - archHeight;
+        const minSill = w0 - 0.12;
+        params.sillY = THREE.MathUtils.clamp(params.sillY, minSill, maxSill);
+      }
+
+      function archGizmoWorldPosition(out) {
+        archPivot.updateMatrixWorld(true);
+        if (archGizmoTarget) archGizmoTarget.getWorldPosition(out);
+        else out.copy(archPivot.position);
+        return out;
+      }
+
+      function resetArchGizmoTargetOffset() {
+        if (archGizmoTarget) archGizmoTarget.position.set(0, 0, 0);
+      }
+
+      function syncArchPivotOrientation() {
+        if (!archPivot || !archGizmo) return;
+        resetArchGizmoTargetOffset();
+        archPivot.rotation.set(0, 0, 0);
+        archPivot.quaternion.identity();
+        if (archGizmoTarget) archGizmoTarget.quaternion.identity();
+        archGizmo.setSpace("world");
+        archGizmo.showX = archGizmo.showY = archGizmo.showZ = true;
+        archPivot.updateMatrixWorld(true);
+      }
+
+      function updateArchGizmoFromParams() {
+        if (!archPivot || isDraggingArchGizmo) return;
+        clampArchAlong();
+        clampArchAlongZ();
+        clampDoorSillInWall();
+        archPivot.position.set(
+          params.archAlong,
+          params.sillY + params.legHeight * 0.35,
+          params.archAlongZ,
+        );
+        syncArchPivotOrientation();
+      }
+
+      function syncFromArchPivot() {
+        if (!archPivot) return;
+        const pw = archGizmoWorldPosition(_archGizmoWP);
+        params.archAlong = pw.x;
+        params.archAlongZ = pw.z;
+        params.sillY = THREE.MathUtils.clamp(
+          pw.y - params.legHeight * 0.35,
+          -2,
+          10,
+        );
+        clampArchAlong();
+        clampArchAlongZ();
+        clampDoorSillInWall();
+        resetArchGizmoTargetOffset();
+        archPivot.position.x = params.archAlong;
+        archPivot.position.y = params.sillY + params.legHeight * 0.35;
+        archPivot.position.z = params.archAlongZ;
+        syncArchPivotOrientation();
+        rebuildInstances(false);
+      }
+
+      function frameWallCamera() {
+        const rp = ringParamsFromGui();
+        const midY = (rp.springY + params.sillY) * 0.5 + rp.ringRadius * 0.35;
+        controls.target.set(params.archAlong, midY, params.archAlongZ * 0.22);
+        camera.position.set(
+          params.archAlong + 4.2,
+          midY + 2.4,
+          params.archAlongZ + 6.8,
+        );
+        controls.update();
+      }
+
+      function disposeMasonryMeshes() {
+        if (doorMesh) {
+          scene.remove(doorMesh);
+          if (doorMesh.geometry) doorMesh.geometry.dispose();
+          doorMesh = null;
+        }
+        if (wallMesh) {
+          scene.remove(wallMesh);
+          if (wallMesh.geometry) wallMesh.geometry.dispose();
+          wallMesh = null;
+        }
+        if (mortarMesh) {
+          scene.remove(mortarMesh);
+          if (mortarMesh.geometry) mortarMesh.geometry.dispose();
+          mortarMesh = null;
+        }
+      }
+
+      function buildDoorInstances() {
+        if (!brickGeo) return;
+        const rp = ringParamsFromGui();
+        const R = rp.ringRadius;
+        const Lu = pathULength(rp);
+        const Ls = params.closeBottom ? 2 * R : 0;
+        const jRing = THREE.MathUtils.clamp(
+          params.brickW * 0.022,
+          0.0045,
+          0.012,
+        );
+        const targetMod =
+          params.brickW * THREE.MathUtils.clamp(params.spacingMul, 0.82, 1.08) +
+          jRing;
+        let nU = Math.max(5, Math.round(Lu / targetMod));
+        if (rp.archShape === "pointed" && nU % 2 === 1) nU += 1;
+        let nS = Ls > 0 ? Math.max(2, Math.round(Ls / targetMod)) : 0;
+        if (nU + nS > params.maxBricks) {
+          const room = params.maxBricks - nS;
+          nU = Math.max(4, Math.min(nU, room));
+          if (nU + nS > params.maxBricks)
+            nS = Math.max(0, params.maxBricks - nU);
+        }
+        const cap = Math.min(params.maxBricks, nU + nS + 8);
+        const doorGeo = createInstancedBrickGeometry(brickGeo, cap);
+        doorMesh = new THREE.InstancedMesh(doorGeo, brickMat, cap);
+        doorMesh.castShadow = true;
+        doorMesh.receiveShadow = true;
+
+        const rnd = mulberry32(params.colorSeed | 0);
+        let k = 0;
+        const gx = getGateX();
+
+        let alongU =
+          nU > 0 ? (Lu - Math.max(0, nU - 1) * jRing) / nU : params.brickW;
+        let alongS =
+          nS > 0 ? (Ls - Math.max(0, nS - 1) * jRing) / nS : params.brickW;
+        const minAlong = params.brickW * 0.44;
+        while (nU > 4 && alongU < minAlong) {
+          nU--;
+          alongU =
+            nU > 0 ? (Lu - Math.max(0, nU - 1) * jRing) / nU : params.brickW;
+        }
+        while (nS > 2 && alongS < minAlong) {
+          nS--;
+          alongS =
+            nS > 0 ? (Ls - Math.max(0, nS - 1) * jRing) / nS : params.brickW;
+        }
+
+        const placeBrick = (x, y, tx, ty, along) => {
+          const yaw = Math.atan2(ty, tx);
+          const baseSx = THREE.MathUtils.clamp(
+            along / params.brickW,
+            0.86,
+            1.12,
+          );
+          const baseSy = 0.94 + rnd() * 0.05;
+          const baseSz = 0.94 + rnd() * 0.05;
+          const v = pickBrickVariation(
+            rnd,
+            baseSx,
+            baseSy,
+            baseSz,
+            "door",
+            params.archRingDepthScale,
+          );
+          tmpO.position.set(x + gx, y, 0);
+          tmpO.rotation.set(0, 0, yaw);
+          tmpO.scale.set(v.sx, v.sy, v.sz);
+          tmpO.updateMatrix();
+          doorMesh.setMatrixAt(k, tmpO.matrix);
+          setBrickVarAt(doorMesh, k, v.shapeMix, v.warp, v.grey, v.grain);
+          k++;
+        };
+
+        for (let i = 0; i < nU; i++) {
+          const s = jRing * i + alongU * (i + 0.5);
+          const o = sampleUPath(s, rp);
+          placeBrick(o.x, o.y, o.tx, o.ty, alongU);
+        }
+        for (let i = 0; i < nS; i++) {
+          const s = jRing * i + alongS * (i + 0.5);
+          const o = sampleSill(s, R, rp.sillY);
+          placeBrick(o.x, o.y, o.tx, o.ty, alongS);
+        }
+
+        doorMesh.count = k;
+        doorMesh.instanceMatrix.needsUpdate = true;
+        const bv = doorMesh.geometry.getAttribute("brickVar");
+        if (bv) bv.needsUpdate = true;
+        doorMesh.position.set(0, 0, params.archAlongZ);
+        scene.add(doorMesh);
+      }
+
+      function buildWallInstances() {
+        if (!brickGeo || !params.wallEnabled) return;
+
+        const rp = ringParamsFromGui();
+        const R_in = Math.max(0.08, params.doorInnerHalfW);
+        const R_out = R_in + Math.max(0.05, params.masonryShell);
+        const doorSill = params.sillY;
+        const ys = rp.springY;
+        const seam = params.wallSeamInset;
+        const mortar = params.wallMortar;
+        const nomH = params.brickH;
+        const nomW = params.brickW;
+        const rowH = nomH + mortar;
+        const wallLo = -params.wallWidth * 0.5;
+        const wallHi = params.wallWidth * 0.5;
+        const wallBase = params.wallAnchorY;
+        const baseY = wallBase + mortar * 0.5 + nomH * 0.5;
+        const topY = wallBase + Math.max(nomH * 2, params.wallHeight);
+        const ny = Math.min(220, Math.max(3, Math.ceil((topY - baseY) / rowH)));
+
+        wallMesh = new THREE.InstancedMesh(
+          createInstancedBrickGeometry(brickGeo, params.maxWallBricks),
+          brickMat,
+          params.maxWallBricks,
+        );
+        wallMesh.castShadow = true;
+        wallMesh.receiveShadow = true;
+        wallMesh.position.set(0, 0, params.wallZ);
+
+        const rnd = mulberry32((params.colorSeed ^ 91379) | 0);
+        let k = 0;
+        const gx = getGateX();
+        let maxRecess = 0;
+
+        const placeWallBrick = (cx, cy, sx, crownSy) => {
+          if (k >= params.maxWallBricks) return false;
+          const shader = pickBrickShaderVar(rnd);
+          const depth = pickDepthPlacement(rnd);
+          maxRecess = Math.max(maxRecess, depth.recess);
+          const sy = pickPlanSy(rnd) * crownSy;
+          const sz = depth.sz * (0.92 + rnd() * 0.06);
+          tmpO.position.set(cx, cy, depth.z);
+          tmpO.rotation.set(0, 0, 0);
+          tmpO.scale.set(sx, sy, sz);
+          tmpO.updateMatrix();
+          wallMesh.setMatrixAt(k, tmpO.matrix);
+          setBrickVarAt(
+            wallMesh,
+            k,
+            shader.shapeMix,
+            shader.warp,
+            shader.grey,
+            shader.grain,
+          );
+          k++;
+          return true;
+        };
+
+        outer: for (let iy = 0; iy < ny; iy++) {
+          const yMid = baseY + iy * rowH;
+          if (yMid > topY - nomH * 0.2) break;
+
+          const openH = wallOpeningHalfX(
+            yMid,
+            R_out,
+            doorSill,
+            ys,
+            seam,
+            params.archShape,
+            params.archPointedness,
+          );
+          let intervals = [[wallLo, wallHi]];
+          if (openH > 1e-5) {
+            intervals = subtractIntervals(intervals, gx - openH, gx + openH);
+          }
+
+          const curv = wallOpeningCurvature(
+            yMid,
+            R_out,
+            doorSill,
+            ys,
+            seam,
+            params.archShape,
+            params.archPointedness,
+          );
+          const curveT = THREE.MathUtils.smoothstep(0.06, 1.15, curv);
+          const nomWCurve =
+            nomW *
+            THREE.MathUtils.lerp(
+              1,
+              THREE.MathUtils.clamp(params.wallMinBrickScale, 0.16, 0.95),
+              Math.pow(curveT, 1.08),
+            );
+
+          const haunch =
+            yMid >= ys - mortar * 1.5 && yMid <= ys + R_out * 1.05
+              ? THREE.MathUtils.smoothstep(ys - 0.12, ys + R_out * 0.82, yMid)
+              : 0;
+          const crownSy =
+            1 -
+            (1 - THREE.MathUtils.clamp(params.wallCrownSquash, 0.42, 1)) *
+              Math.pow(haunch, 1.28);
+
+          for (const [segLo, segHi] of intervals) {
+            const span = segHi - segLo;
+            if (span < nomW * params.wallMinBrickScale * 0.45) continue;
+
+            const minW = nomW * params.wallMinBrickScale;
+            const jMin = 0.0035;
+            const jMax = Math.min(
+              mortar,
+              Math.max(jMin, span * 0.014 + jMin * 0.6),
+            );
+            const j = THREE.MathUtils.clamp(mortar, jMin, jMax);
+            const hj = j * 0.5;
+            let innerLo = segLo + hj;
+            let innerHi = segHi - hj;
+            if (iy % 2 === 1) {
+              const shift = Math.min(
+                (nomWCurve + j) * 0.48,
+                Math.max(0, innerHi - innerLo - minW * 1.2) * 0.35,
+              );
+              const eps = Math.max(1e-3, nomW * 0.025);
+              const rightOfOpening = openH > 1e-5 && segLo >= gx + openH - eps;
+              const leftOfOpening = openH > 1e-5 && segHi <= gx - openH + eps;
+              if (rightOfOpening) innerHi -= shift;
+              else if (leftOfOpening) innerLo += shift;
+              else innerLo += shift;
+            }
+
+            const innerLen = innerHi - innerLo;
+            if (innerLen < minW * 0.72) continue;
+
+            let nBricks = Math.max(1, Math.round(innerLen / (nomWCurve + j)));
+            let wEq = (innerLen - (nBricks - 1) * j) / nBricks;
+            for (let it = 0; it < 96; it++) {
+              wEq = (innerLen - (nBricks - 1) * j) / nBricks;
+              if (wEq < minW * 0.998) {
+                if (nBricks <= 1) break;
+                nBricks--;
+              } else if (wEq > nomWCurve * 1.075 && nBricks < 1600) {
+                nBricks++;
+              } else break;
+            }
+            wEq = (innerLen - (nBricks - 1) * j) / nBricks;
+            if (wEq < minW * 0.88) continue;
+
+            for (let bi = 0; bi < nBricks; bi++) {
+              if (k >= params.maxWallBricks) break outer;
+              const cx = innerLo + wEq * 0.5 + bi * (wEq + j);
+              if (cx > innerHi - wEq * 0.5 + 1e-4) break;
+
+              let tuckY = 0;
+              if (openH > 1e-4 && curveT > 0.04) {
+                const gap = Math.max(0, Math.abs(cx - gx) - openH);
+                const band = params.brickW * 3.8;
+                if (gap < band) {
+                  const t = THREE.MathUtils.smoothstep(1, 0, gap / band);
+                  tuckY =
+                    -nomH * 0.12 * Math.pow(t, 1.2) * Math.pow(curveT, 0.55);
+                }
+              }
+
+              const sx = wEq / nomW;
+              if (!placeWallBrick(cx, yMid + tuckY, sx, crownSy)) break outer;
+            }
+          }
+        }
+
+        wallMesh.count = k;
+        wallMesh.instanceMatrix.needsUpdate = true;
+        const wbv = wallMesh.geometry.getAttribute("brickVar");
+        if (wbv) wbv.needsUpdate = true;
+        scene.add(wallMesh);
+
+        if (params.showMortarBacking) {
+          if (!mortarMat) mortarMat = createMortarMaterial();
+          const wallH = topY - wallBase;
+          const wallT = Math.max(0.08, params.wallDepth);
+          const mortarGeo = new THREE.BoxGeometry(
+            params.wallWidth,
+            wallH,
+            wallT,
+          );
+          mortarMesh = new THREE.Mesh(mortarGeo, mortarMat);
+          mortarMesh.position.set(
+            0,
+            wallBase + wallH * 0.5,
+            params.wallZ - params.wallDepth * 0.5 - wallT * 0.5 - 0.004,
+          );
+          mortarMesh.receiveShadow = true;
+          scene.add(mortarMesh);
+        }
+      }
+
+      let archDragRaf = 0;
+
+      function setupArchGizmo() {
+        if (archGizmo) return;
+        archPivot = new THREE.Object3D();
+        archPivot.name = "archPivot";
+        scene.add(archPivot);
+
+        archGizmoTarget = new THREE.Object3D();
+        archGizmoTarget.name = "archGizmoTarget";
+        archPivot.add(archGizmoTarget);
+
+        archGizmo = new TransformControls(camera, renderer.domElement);
+        archGizmo.attach(archGizmoTarget);
+        archGizmo.setMode("translate");
+        archGizmo.setSpace("world");
+        archGizmo.size = 0.78;
+        archGizmo.enabled = params.showArchGizmo;
+        archGizmo.visible = params.showArchGizmo;
+
+        archGizmo.addEventListener("dragging-changed", (e) => {
+          isDraggingArchGizmo = e.value;
+          controls.enabled = !e.value;
+          if (!e.value) {
+            if (archDragRaf) {
+              cancelAnimationFrame(archDragRaf);
+              archDragRaf = 0;
+            }
+            clampArchAlong();
+            clampArchAlongZ();
+            clampDoorSillInWall();
+            updateArchGizmoFromParams();
+            rebuildInstances(false);
+          }
+        });
+        archGizmo.addEventListener("change", () => {
+          if (!isDraggingArchGizmo) return;
+          if (archDragRaf) cancelAnimationFrame(archDragRaf);
+          archDragRaf = requestAnimationFrame(() => {
+            archDragRaf = 0;
+            syncFromArchPivot();
+          });
+        });
+
+        archGizmoHelper = archGizmo.getHelper();
+        scene.add(archGizmoHelper);
+        updateArchGizmoFromParams();
+      }
+
+      function rebuildInstances(remakeGeometry) {
+        disposeMasonryMeshes();
+        ensureBrickGeometry(!!remakeGeometry);
+        if (!brickMat) brickMat = createBrickMaterial();
+        clampArchAlong();
+        clampArchAlongZ();
+        clampDoorSillInWall();
+        if (isDraggingArchGizmo && archPivot) {
+          resetArchGizmoTargetOffset();
+          archPivot.position.x = params.archAlong;
+          archPivot.position.y = params.sillY + params.legHeight * 0.35;
+          archPivot.position.z = params.archAlongZ;
+        }
+        buildDoorInstances();
+        buildWallInstances();
+        if (!isDraggingArchGizmo) updateArchGizmoFromParams();
+        updateExportSnippet();
+      }
+
+      function updateExportSnippet() {
+        const el = document.getElementById("export-snippet");
+        const snippet = {
+          brickW: +params.brickW.toFixed(3),
+          brickH: +params.brickH.toFixed(3),
+          brickD: +params.brickD.toFixed(3),
+          brickRound: +params.brickRound.toFixed(4),
+          roundSegments: params.roundSegments | 0,
+          faceBulge: +params.faceBulge.toFixed(4),
+          chipStrength: +params.chipStrength.toFixed(4),
+          shapeWarp: +params.shapeWarp.toFixed(2),
+          wallMortar: +params.wallMortar.toFixed(4),
+          wallSeamInset: +params.wallSeamInset.toFixed(3),
+          wallMinBrickScale: +params.wallMinBrickScale.toFixed(2),
+          wallCrownSquash: +params.wallCrownSquash.toFixed(2),
+          wallDepth: +params.wallDepth.toFixed(3),
+          planVariety: +params.planVariety.toFixed(2),
+          depthRecess: +params.depthRecess.toFixed(2),
+          depthSpread: +params.depthSpread.toFixed(2),
+          doorInnerHalfW: +params.doorInnerHalfW.toFixed(2),
+          masonryShell: +params.masonryShell.toFixed(2),
+          legHeight: +params.legHeight.toFixed(2),
+          archRingDepthScale: +params.archRingDepthScale.toFixed(2),
+          colorSeed: params.colorSeed | 0,
+        };
+        el.textContent = JSON.stringify(snippet, null, 2);
+      }
+
+      function syncLiveUniforms() {
+        uFaceBulge.value = params.faceBulge;
+        uChipStrength.value = params.chipStrength;
+        uShapeWarp.value = params.shapeWarp;
+        sun.intensity = params.sunIntensity;
+        hemi.intensity = params.ambientIntensity;
+        fill.intensity = params.fillIntensity;
+        renderer.toneMappingExposure = params.exposure;
+        syncSunDirectionUniform();
+      }
+
+      let rebuildTimer = 0;
+      function scheduleRebuild(geometry) {
+        clearTimeout(rebuildTimer);
+        rebuildTimer = setTimeout(
+          () => {
+            rebuildInstances(!!geometry);
+          },
+          geometry ? 120 : 40,
+        );
+      }
+
+      // ===========================================================================
+      // === Tweakpane =============================================================
+      // ===========================================================================
+
+      const pane = new Pane({
+        container: document.getElementById("tweak-root"),
+      });
+
+      const fSize = pane.addFolder({ title: "Brick size", expanded: true });
+      fSize.addBinding(params, "brickW", { min: 0.2, max: 1.2, step: 0.01 });
+      fSize.addBinding(params, "brickH", { min: 0.15, max: 0.8, step: 0.01 });
+      fSize.addBinding(params, "brickD", { min: 0.2, max: 1.2, step: 0.01 });
+      fSize.addBinding(params, "brickRound", {
+        label: "corner radius",
+        min: 0.0001,
+        max: 0.12,
+        step: 0.001,
+      });
+      fSize.addBinding(params, "roundSegments", {
+        label: "round segments",
+        min: 1,
+        max: 6,
+        step: 1,
+      });
+
+      const fShape = pane.addFolder({
+        title: "Brick shape (pillow / chip)",
+        expanded: true,
+      });
+      fShape.addBinding(params, "faceBulge", {
+        label: "face bulge",
+        min: 0,
+        max: 0.08,
+        step: 0.001,
+      });
+      fShape.addBinding(params, "chipStrength", {
+        label: "corner chip",
+        min: 0,
+        max: 0.06,
+        step: 0.001,
+      });
+      fShape.addBinding(params, "shapeWarp", {
+        label: "shape warp ×",
+        min: 0,
+        max: 2.5,
+        step: 0.05,
+      });
+
+      const fWall = pane.addFolder({ title: "Wall layout", expanded: true });
+      fWall.addBinding(params, "wallWidth", { min: 6, max: 28, step: 0.5 });
+      fWall.addBinding(params, "wallHeight", { min: 2.5, max: 14, step: 0.1 });
+      fWall.addBinding(params, "wallDepth", {
+        label: "shell depth",
+        min: 0.35,
+        max: 1.2,
+        step: 0.01,
+      });
+      fWall.addBinding(params, "wallZ", {
+        label: "wall Z offset",
+        min: -1.2,
+        max: 0.6,
+        step: 0.02,
+      });
+      fWall.addBinding(params, "wallAnchorY", {
+        label: "wall base Y",
+        min: -0.5,
+        max: 1.5,
+        step: 0.02,
+      });
+      fWall.addBinding(params, "wallMortar", {
+        label: "mortar gap",
+        min: 0.001,
+        max: 0.06,
+        step: 0.001,
+      });
+      fWall.addBinding(params, "wallSeamInset", {
+        label: "arch seam inset",
+        min: 0.01,
+        max: 0.08,
+        step: 0.002,
+      });
+      fWall.addBinding(params, "wallMinBrickScale", {
+        label: "min brick width",
+        min: 0.16,
+        max: 0.95,
+        step: 0.01,
+      });
+      fWall.addBinding(params, "wallCrownSquash", {
+        label: "haunch squash",
+        min: 0.42,
+        max: 1,
+        step: 0.02,
+      });
+      fWall.addBinding(params, "planVariety", {
+        label: "height variety",
+        min: 0,
+        max: 1,
+        step: 0.02,
+      });
+      fWall.addBinding(params, "depthRecess", {
+        label: "depth recess ×",
+        min: 0,
+        max: 0.55,
+        step: 0.01,
+      });
+      fWall.addBinding(params, "depthSpread", {
+        label: "depth spread",
+        min: 0,
+        max: 1,
+        step: 0.02,
+      });
+      fWall.addBinding(params, "showMortarBacking", {
+        label: "mortar backing",
+      });
+      fWall.addBinding(params, "colorSeed", { min: 1, max: 999999, step: 1 });
+
+      const fArch = pane.addFolder({ title: "Arch / opening", expanded: true });
+      fArch.addBinding(params, "doorInnerHalfW", {
+        label: "inner half-width",
+        min: 0.4,
+        max: 2.5,
+        step: 0.05,
+      });
+      fArch.addBinding(params, "masonryShell", {
+        label: "ring shell",
+        min: 0.12,
+        max: 0.9,
+        step: 0.02,
+      });
+      fArch.addBinding(params, "legHeight", {
+        label: "jamb height",
+        min: 0.5,
+        max: 4.5,
+        step: 0.05,
+      });
+      fArch.addBinding(params, "sillY", {
+        label: "sill Y",
+        min: -0.5,
+        max: 4,
+        step: 0.02,
+      });
+      fArch.addBinding(params, "archAlong", {
+        label: "opening X",
+        min: -8,
+        max: 8,
+        step: 0.05,
+      });
+      fArch.addBinding(params, "archAlongZ", {
+        label: "ring depth Z",
+        min: -1.2,
+        max: 1.2,
+        step: 0.02,
+      });
+      fArch.addBinding(params, "archRingDepthScale", {
+        label: "ring brick depth",
+        min: 0.85,
+        max: 1.35,
+        step: 0.01,
+      });
+      fArch.addBinding(params, "archShape", {
+        label: "profile",
+        options: { Round: "round", Pointed: "pointed" },
+      });
+      fArch.addBinding(params, "archPointedness", {
+        label: "pointedness",
+        min: 0.3,
+        max: 1.8,
+        step: 0.05,
+      });
+      fArch.addBinding(params, "closeBottom", { label: "sill row" });
+      fArch.addBinding(params, "spacingMul", {
+        label: "ring spacing",
+        min: 0.82,
+        max: 1.08,
+        step: 0.01,
+      });
+      fArch.addBinding(params, "showArchGizmo", { label: "move gizmo" });
+
+      const fScene = pane.addFolder({ title: "Scene", expanded: false });
+      fScene.addBinding(params, "wallEnabled", { label: "show wall" });
+
+      const fLight = pane.addFolder({ title: "Lighting", expanded: false });
+      fLight.addBinding(params, "sunIntensity", {
+        min: 0.5,
+        max: 8,
+        step: 0.1,
+      });
+      fLight.addBinding(params, "fillIntensity", {
+        label: "fill",
+        min: 0,
+        max: 4,
+        step: 0.05,
+      });
+      fLight.addBinding(params, "ambientIntensity", {
+        label: "sky fill",
+        min: 0,
+        max: 2.5,
+        step: 0.02,
+      });
+      fLight.addBinding(params, "exposure", { min: 0.6, max: 2.5, step: 0.05 });
+      fLight.addButton({ title: "Frame wall" }).on("click", () => {
+        frameWallCamera();
+      });
+
+      const geoKeys = new Set([
+        "brickW",
+        "brickH",
+        "brickD",
+        "brickRound",
+        "roundSegments",
+      ]);
+      const layoutKeys = new Set([
+        "wallEnabled",
+        "wallWidth",
+        "wallHeight",
+        "wallDepth",
+        "wallZ",
+        "wallAnchorY",
+        "showMortarBacking",
+        "wallMortar",
+        "wallSeamInset",
+        "wallMinBrickScale",
+        "wallCrownSquash",
+        "planVariety",
+        "depthRecess",
+        "depthSpread",
+        "colorSeed",
+        "doorInnerHalfW",
+        "masonryShell",
+        "legHeight",
+        "sillY",
+        "closeBottom",
+        "spacingMul",
+        "archAlong",
+        "archAlongZ",
+        "archRingDepthScale",
+        "archShape",
+        "archPointedness",
+      ]);
+
+      pane.on("change", (ev) => {
+        syncLiveUniforms();
+        updateExportSnippet();
+        const key = ev.target?.key;
+        if (key === "showArchGizmo" && archGizmo) {
+          archGizmo.enabled = params.showArchGizmo;
+          archGizmo.visible = params.showArchGizmo;
+          return;
+        }
+        if (geoKeys.has(key)) {
+          scheduleRebuild(true);
+        } else if (layoutKeys.has(key)) {
+          scheduleRebuild(false);
+        }
+      });
+
+      pane.addButton({ title: "Rebuild preview" }).on("click", () => {
+        scheduleRebuild(true);
+      });
+
+      setupArchGizmo();
+      rebuildInstances(true);
+      frameWallCamera();
+      syncLiveUniforms();
+
+      await renderer.init();
+
+      function animate() {
+        requestAnimationFrame(animate);
+        controls.update();
+        renderer.render(scene, camera);
+      }
+      animate();
+
+      window.addEventListener("resize", () => {
+        camera.aspect = window.innerWidth / window.innerHeight;
+        camera.updateProjectionMatrix();
+        renderer.setSize(window.innerWidth, window.innerHeight);
+      });
+    </script>
+  </body>
+</html>

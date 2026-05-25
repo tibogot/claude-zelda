@@ -2117,6 +2117,48 @@
         };
       }
 
+      function _text(parent, obj, key, opts) {
+        const { label, onChange, hint, placeholder } = opts;
+        const row = document.createElement("div");
+        row.className = "prop-row";
+        if (hint) row.title = hint;
+        const safeVal = String(obj[key] ?? "").replace(/"/g, "&quot;");
+        const safePh = placeholder
+          ? ` placeholder="${String(placeholder).replace(/"/g, "&quot;")}"`
+          : "";
+        row.innerHTML = `<span class="prop-label">${label}</span><div class="prop-value"><input type="text" class="prop-num-input" style="width:100%" value="${safeVal}"${safePh}></div>`;
+        const inp = row.querySelector(".prop-num-input");
+        const commit = () => {
+          obj[key] = inp.value;
+          onChange?.();
+        };
+        inp.addEventListener("change", commit);
+        inp.addEventListener("keydown", (e) => {
+          if (e.key === "Enter") inp.blur();
+        });
+        parent.appendChild(row);
+        return {
+          row,
+          refresh() {
+            if (document.activeElement !== inp) inp.value = String(obj[key] ?? "");
+          },
+        };
+      }
+
+      /** Add the two extra brush controls (falloff + previewShape) shared by every brush-using tool. */
+      function _addBrushExtras(parent, ts) {
+        _slider(parent, ts.brush, "falloff", {
+          label: "Shape",
+          min: 0.5,
+          max: 4,
+          step: 0.05,
+        });
+        _dropdown(parent, ts.brush, "previewShape", {
+          label: "Preview shape",
+          options: { Dome: "dome", Circle: "circle" },
+        });
+      }
+
       function _dropdown(parent, obj, key, opts) {
         const { label, options, onChange, hint } = opts;
         const row = document.createElement("div");
@@ -3519,6 +3561,16 @@
           const slot = lib.getSlot(libState.activeSlotId);
           if (!slot) return;
 
+          _text(libEditor, slot, "name", {
+            label: "Name",
+            onChange: () => {
+              lib.renameSlot(slot.id, slot.name);
+              buildLibSlotPicker();
+              buildLayerCards();
+              rebuildTexturePickers();
+            },
+          });
+
           const mapLabels = {
             albedo: "Albedo",
             normal: "Normal",
@@ -3734,6 +3786,7 @@
           max: cfg.sculpt.strengthMax,
           step: 0.01,
         });
+        _addBrushExtras(brushBody, ts);
 
         // --- Active slot ---
         const slotBody = _section(panel, "Tree Slot");
@@ -3805,6 +3858,13 @@
         for (let i = 0; i < ts.treeSlots.length; i++) {
           const slot = ts.treeSlots[i];
           const slBody = _section(panel, slot.name, false);
+          _text(slBody, slot, "name", {
+            label: "Name",
+            onChange: () => {
+              const hdr = slBody.previousElementSibling;
+              if (hdr) hdr.innerHTML = _arrowSvg + " " + slot.name;
+            },
+          });
           _slider(slBody, slot, "baseScale", {
             label: "Base scale",
             min: 0.01,
@@ -4519,6 +4579,7 @@
           max: cfg.sculpt.strengthMax,
           step: 0.01,
         });
+        _addBrushExtras(brushBody, ts);
 
         const slotBody = _section(panel, "Grass preset slot");
         function rebuildSlotPicker() {
@@ -4579,7 +4640,7 @@
         _slider(massBody, ts.billboardGrassPaint, "massPlaceCount", {
           label: "Instances",
           min: 1,
-          max: 50000,
+          max: 200000,
           step: 1,
         });
         _toggle(massBody, ts.billboardGrassPaint, "massPlaceKeepExisting", {
@@ -4850,6 +4911,7 @@
           max: cfg.sculpt.strengthMax,
           step: 0.01,
         });
+        _addBrushExtras(brushBody, ts);
 
         // --- Active slot + brush (same layout as Tree Slot) ---
         const slotBody = _section(panel, "Foliage Slot");
@@ -4936,6 +4998,13 @@
         for (let i = 0; i < ts.foliageSlots.length; i++) {
           const slot = ts.foliageSlots[i];
           const sBody = _section(panel, slot.name, false);
+          _text(sBody, slot, "name", {
+            label: "Name",
+            onChange: () => {
+              const hdr = sBody.previousElementSibling;
+              if (hdr) hdr.innerHTML = _arrowSvg + " " + slot.name;
+            },
+          });
           const structCb = () => app.foliageSlotStructureChanged(i);
           const matCb = () => app.foliageSlotMaterialChanged(i);
 
@@ -5509,6 +5578,17 @@
         hint.textContent =
           "Click on terrain to drop a box-room cave at that spot. Place it on the same XZ as a painted hole so the player falls in.";
         info.appendChild(hint);
+
+        const placedInfo = _info(
+          info,
+          "Placed",
+          `${app.caveStore?.count?.() ?? 0}`,
+        );
+        if (app.caveStore?.onChange) {
+          app.caveStore.onChange(() => {
+            placedInfo.update(`${app.caveStore.count()}`);
+          });
+        }
 
         const size = _section(panel, "Cave size");
         _slider(size, ts.cave, "width", {
@@ -9597,6 +9677,7 @@
           max: cfg.sculpt.strengthMax,
           step: 0.01,
         });
+        _addBrushExtras(brushBody, app.toolState);
 
         const mainBody = _section(panel, "Grass");
         _toggle(mainBody, gp, "enabled", { label: "Enabled", onChange: gCh });
@@ -10184,6 +10265,7 @@
           max: cfg.sculpt.strengthMax,
           step: 0.01,
         });
+        _addBrushExtras(brushBody, app.toolState);
 
         const body = _section(panel, "Cliff Grass");
         _button(body, {
@@ -10212,16 +10294,28 @@
           max: cfg.sculpt.brushMax,
           step: 0.5,
         });
+        _slider(brushBody, ts.brush, "strength", {
+          label: "Strength",
+          min: cfg.sculpt.strengthMin,
+          max: cfg.sculpt.strengthMax,
+          step: 0.01,
+        });
+        _addBrushExtras(brushBody, ts);
 
         // Active slot
         const slotBody = _section(panel, "Active Slot");
-        const slotOpts = {};
-        for (let i = 0; i < ts.cliffSlots.length; i++)
-          slotOpts[ts.cliffSlots[i].name] = i;
-        _dropdown(slotBody, ts.cliffs, "activeSlot", {
-          label: "Active [1-5]",
-          options: slotOpts,
-        });
+        let activeSlotDropdown;
+        function rebuildActiveSlotDropdown() {
+          slotBody.innerHTML = "";
+          const slotOpts = {};
+          for (let i = 0; i < ts.cliffSlots.length; i++)
+            slotOpts[ts.cliffSlots[i].name] = i;
+          activeSlotDropdown = _dropdown(slotBody, ts.cliffs, "activeSlot", {
+            label: "Active [1-5]",
+            options: slotOpts,
+          });
+        }
+        rebuildActiveSlotDropdown();
 
         // Per-slot GLB import
         const slotsBody = _section(panel, "Cliff Slots (GLB Import)");
@@ -10232,6 +10326,16 @@
             `Slot ${i + 1}: ${slot.name}`,
             i === 0,
           );
+          _text(sb, slot, "name", {
+            label: "Name",
+            onChange: () => {
+              const hdr = sb.previousElementSibling;
+              if (hdr)
+                hdr.innerHTML =
+                  _arrowSvg + " " + `Slot ${i + 1}: ${slot.name}`;
+              rebuildActiveSlotDropdown();
+            },
+          });
           _button(sb, {
             title: "Load GLB...",
             onClick: () => app.importCliffGlb(i),

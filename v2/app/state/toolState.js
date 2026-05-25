@@ -270,14 +270,14 @@ export function createToolState() {
     /** Procedural billboard ground cover (separate from foliage paint + GPU grass). */
     billboardGrassPaint: {
       activeSlot: 0,
-      density: 0.8,
-      minSpacing: 1.5,
+      density: 1.5,
+      minSpacing: 0.9,
       scaleMin: 0.7,
       scaleMax: 1.3,
       randomRotation: true,
       slopeEnabled: true,
       slopeMax: 0.7,
-      massPlaceCount: 8000,
+      massPlaceCount: 30000,
       massPlaceKeepExisting: true,
       erase: false,
       eraseAllSlots: false,

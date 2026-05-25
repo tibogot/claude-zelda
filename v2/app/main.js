@@ -4700,6 +4700,7 @@ export async function startV2App(opts = {}) {
     actorSystem,
     dialogueRunner,
     listDialogueGraphIds,
+    caveStore,
     setMode(mode, opts = {}) {
       if (mode === "play") {
         _pendingPlayImmersive = opts.immersive === true;
