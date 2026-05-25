@@ -30,6 +30,7 @@ import {
   If,
 } from "three/tsl";
 import { createWindTexture } from "../../core/foliage/windTexture.js";
+import { hash42 } from "../../core/foliage/tsl-utils.js";
 import { getRevoGrassConfig } from "../../core/revoGrass/revoGrassConfig.js";
 import { RevoGrassMask } from "../../core/revoGrass/revoGrassMask.js";
 import { createRevoBladeGeometry } from "../../core/revoGrass/revoGrassGeometry.js";
@@ -61,6 +62,8 @@ function buildUniforms(rp) {
     uBladeBoundsRadius: uniform(rp.bladeHeight ?? 1.75),
     uBladeMinScale: uniform(rp.bladeMinScale ?? 0.75),
     uBladeMaxScale: uniform(rp.bladeMaxScale ?? 2),
+    uClumpStrength: uniform(rp.clumpStrength ?? 0),
+    uClumpScale: uniform(rp.clumpScale ?? 2.0),
     uTrailGrowthRate: uniform(rp.trailGrowthRate ?? 0.04),
     uTrailMinScale: uniform(rp.trailMinScale ?? 0.25),
     uTrailRadius: uniform(rp.trailRadius ?? 1),
@@ -143,7 +146,23 @@ function createSsbo(config, uniforms, { heightTex, windTex, exclusionTex }) {
     data1.w.assign(float(0));
     const posNoise = noise.g;
     data2.x.assign(float(0));
-    const n = hash(instanceIndex.add(7919));
+    // Voronoi-cell clumping: each uClumpScale-sized cell has a random anchor;
+    // blades close to it share the cell's scale, blades far blend back to their
+    // per-instance random. clumpStrength = 0 → pure per-blade uniform (no
+    // patches). clumpStrength = 1 → tight scale clumps of cell size. Falloff is
+    // soft so adjacent cells blend rather than showing hard boundaries.
+    const cellP = vec2(offsetX, offsetZ).div(uniforms.uClumpScale);
+    const cellID = floor(cellP);
+    const cellFrac = fract(cellP);
+    const cv = hash42(cellID);
+    const anchor = vec2(cv.x, cv.y);
+    const cellSeed = cv.z;
+    const clumpDist = length(anchor.sub(cellFrac));
+    const clumpInfluence = smoothstep(0.75, 0.05, clumpDist).mul(
+      uniforms.uClumpStrength,
+    );
+    const perBladeRand = hash(instanceIndex.add(7919));
+    const n = mix(perBladeRand, cellSeed, clumpInfluence);
     const shaped = n.mul(n);
     const randomScale = remap(
       shaped,
@@ -557,6 +576,8 @@ export class RevoGrassSystem {
     const u = this._uniforms;
     u.uBladeMinScale.value = rp.bladeMinScale ?? 0.75;
     u.uBladeMaxScale.value = rp.bladeMaxScale ?? 2;
+    u.uClumpStrength.value = rp.clumpStrength ?? 0;
+    u.uClumpScale.value = rp.clumpScale ?? 2.0;
     u.uBladeBoundsRadius.value = rp.bladeHeight ?? 1.75;
     u.uTrailGrowthRate.value = rp.trailGrowthRate ?? 0.04;
     u.uTrailMinScale.value = rp.trailMinScale ?? 0.25;

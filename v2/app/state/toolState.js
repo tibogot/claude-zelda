@@ -1100,6 +1100,8 @@ export function createToolState() {
       bladeWidth: 0.06,
       bladeMinScale: 0.75,
       bladeMaxScale: 2.0,
+      clumpStrength: 0,
+      clumpScale: 2.0,
       baseColor: "#8c6b30",
       tipColor: "#77be13",
       colorMixFactor: 0.8,
