@@ -5077,6 +5077,74 @@ export async function startV2App(opts = {}) {
     riverActiveIndexChanged() {
       _riverActiveIndexChanged();
     },
+    roadChanged() {
+      roadSystem.saveActiveStyle();
+      roadSystem.syncMaterial();
+      roadSystem.rebuildAllMeshes();
+      ui?.pane.refresh();
+    },
+    roadNewRoad() {
+      roadSystem.startNewRoad();
+      ui?.pane.refresh();
+    },
+    roadDeleteActive() {
+      roadSystem.deleteActiveRoad();
+      ui?.pane.refresh();
+    },
+    roadDeleteSelected() {
+      roadSystem.deleteSelected();
+      ui?.pane.refresh();
+    },
+    roadSnapY() {
+      roadSystem.snapSelectedYToTerrain();
+      ui?.pane.refresh();
+    },
+    roadSelectedYChanged() {
+      roadSystem.setSelectedPointY(toolState.road.selectedPointY);
+    },
+    roadActiveIndexChanged() {
+      roadSystem._clampActive();
+      toolState.road.activeStyleSectionIndex = 0;
+      roadSystem.selectedIdx = -1;
+      roadSystem.loadActiveStyle();
+      roadSystem._rebuildVisual();
+      ui?.pane.refresh();
+    },
+    roadStyleSectionChanged() {
+      roadSystem._clampActiveStyleSection();
+      roadSystem.loadActiveStyle();
+      ui?.pane.refresh();
+    },
+    roadNewStyleSection() {
+      roadSystem.createStyleSectionAtSelected();
+      ui?.pane.refresh();
+    },
+    roadDeleteStyleSection() {
+      roadSystem.deleteActiveStyleSection();
+      ui?.pane.refresh();
+    },
+    roadFlattenTerrain() {
+      roadSystem.flattenTerrainUnderRoads();
+      roadSystem.rebuildAllMeshes();
+      markHeightTexDirty();
+      treeStore.syncAllHeights(terrainStore);
+      foliageStore.syncAllHeights(terrainStore);
+      billboardGrassStore.syncAllHeights(terrainStore);
+      splineSystem.syncGuardrailsToGround();
+      splineSystem.syncKerbsToGround();
+      splineSystem.syncLinearFeaturesToGround();
+      ui?.pane.refresh();
+    },
+    roadApplyStabilityPreset() {
+      const rp = toolState.road;
+      rp.heightOffset = 0.15;
+      rp.adaptiveLift = true;
+      rp.slopeLift = 0.35;
+      rp.liftMax = 0.6;
+      roadSystem.syncMaterial();
+      roadSystem.rebuildAllMeshes();
+      ui?.pane.refresh();
+    },
     smartRoadChanged() {
       smartRoadSystem.syncMaterial();
       smartRoadSystem.rebuildAllMeshes();

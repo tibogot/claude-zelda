@@ -27,6 +27,7 @@ import {
   length,
   step,
   fract,
+  If,
 } from "three/tsl";
 import { createWindTexture } from "../../core/foliage/windTexture.js";
 import { getRevoGrassConfig } from "../../core/revoGrass/revoGrassConfig.js";
@@ -128,14 +129,21 @@ function createSsbo(config, uniforms, { heightTex, windTex, exclusionTex }) {
       .abs()
       .fract();
     const noise = texture(windTex, noiseUv);
-    const wrapNoise = noise.b.sub(0.5);
-    data1.x.assign(offsetX.add(wrapNoise.mul(17).fract()));
-    data1.y.assign(offsetZ.add(wrapNoise.mul(13).fract()));
+    // Per-instance hashes for position-jitter and scale instead of texture
+    // samples. Any FBM channel of windTex is too low-frequency relative to
+    // blade spacing → adjacent blades get correlated values and clump into
+    // visible bands. Hash gives true per-blade randomness so the tile fills
+    // uniformly. posNoise (color/sway-phase) stays on the texture because
+    // spatial coherence there reads as natural wind-waves, not as bald spots.
+    const hashPosX = hash(instanceIndex.add(8521));
+    const hashPosZ = hash(instanceIndex.add(3197));
+    data1.x.assign(offsetX.add(hashPosX));
+    data1.y.assign(offsetZ.add(hashPosZ));
     data1.z.assign(float(0));
     data1.w.assign(float(0));
     const posNoise = noise.g;
     data2.x.assign(float(0));
-    const n = noise.b;
+    const n = hash(instanceIndex.add(7919));
     const shaped = n.mul(n);
     const randomScale = remap(
       shaped,
@@ -189,6 +197,7 @@ function createSsbo(config, uniforms, { heightTex, windTex, exclusionTex }) {
   const computeUpdate = Fn(() => {
     const data1 = buffer1.element(instanceIndex);
     const data2 = buffer2.element(instanceIndex);
+    const aux = bufferAux.element(instanceIndex);
 
     const wrapped = wrapTileOffsetXZ(
       vec2(data1.x, data1.y),
@@ -244,42 +253,51 @@ function createSsbo(config, uniforms, { heightTex, windTex, exclusionTex }) {
       .mul(exclAlpha)
       .mul(step(float(-500), yOffset));
 
-    const diff = worldPos.xz.sub(uniforms.uAnchorPosition.xz);
-    const distSq = diff.dot(diff);
-    const inner = uniforms.uTrailRadiusSq.mul(0.35);
-    const outer = uniforms.uTrailRadiusSq;
-    const grounded = step(
-      float(0.1),
-      float(1).sub(uniforms.uAnchorPosition.y.sub(yOffset)),
-    );
-    const contact = float(1)
-      .sub(smoothstep(inner, outer, distSq))
-      .mul(grounded);
-
-    const currentScale = data2.y;
-    const originalScale = data2.z;
-    data2.y.assign(computeTrailScale(originalScale, currentScale, contact));
-
-    const posNoise = data2.w;
-    const prevWind = vec2(data1.z, data1.w);
-    const newWind = computeWind(prevWind, worldPos, posNoise);
-    data1.z.assign(newWind.x);
-    data1.w.assign(newWind.y);
-
-    const shadowFactor = mix(
-      float(1),
-      computeGrassShadowFactor(
-        worldPos,
-        uniforms.uAnchorPosition,
-        uniforms.uPlayerRadius,
-        uniforms.uBakedShadowWeight,
-      ),
-      uniforms.uPlayerShadowEnabled,
-    );
-    const aux = bufferAux.element(instanceIndex);
+    /** Write defaults so culled blades skip the expensive trail/wind/shadow work.
+     *  Material reads aux.x to mask scale to 0 → culled blades are invisible and
+     *  the rest of aux is ignored for them. data2.y (current trail scale) is
+     *  intentionally preserved across cull/uncull so a blade's crushed-grass
+     *  memory survives going off-screen. */
     aux.x.assign(isVisible);
-    aux.y.assign(shadowFactor);
-    aux.z.assign(newWind.z);
+    aux.y.assign(float(1));
+    aux.z.assign(float(0));
+
+    If(isVisible, () => {
+      const diff = worldPos.xz.sub(uniforms.uAnchorPosition.xz);
+      const distSq = diff.dot(diff);
+      const inner = uniforms.uTrailRadiusSq.mul(0.35);
+      const outer = uniforms.uTrailRadiusSq;
+      const grounded = step(
+        float(0.1),
+        float(1).sub(uniforms.uAnchorPosition.y.sub(yOffset)),
+      );
+      const contact = float(1)
+        .sub(smoothstep(inner, outer, distSq))
+        .mul(grounded);
+
+      const currentScale = data2.y;
+      const originalScale = data2.z;
+      data2.y.assign(computeTrailScale(originalScale, currentScale, contact));
+
+      const posNoise = data2.w;
+      const prevWind = vec2(data1.z, data1.w);
+      const newWind = computeWind(prevWind, worldPos, posNoise);
+      data1.z.assign(newWind.x);
+      data1.w.assign(newWind.y);
+      aux.z.assign(newWind.z);
+
+      const shadowFactor = mix(
+        float(1),
+        computeGrassShadowFactor(
+          worldPos,
+          uniforms.uAnchorPosition,
+          uniforms.uPlayerRadius,
+          uniforms.uBakedShadowWeight,
+        ),
+        uniforms.uPlayerShadowEnabled,
+      );
+      aux.y.assign(shadowFactor);
+    });
   })().compute(config.count, [config.workgroupSize]);
 
   return {

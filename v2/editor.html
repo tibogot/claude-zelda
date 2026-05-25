@@ -1996,10 +1996,11 @@
 
       const _liveSliders = [];
       function _slider(parent, obj, key, opts) {
-        const { label, min, max, step = 0.01, curve, onChange } = opts;
+        const { label, min, max, step = 0.01, curve, onChange, hint } = opts;
         const isLog = curve === "log" && min > 0 && max > min;
         const row = document.createElement("div");
         row.className = "prop-row";
+        if (hint) row.title = hint;
         const cur = obj[key];
         // Log-curve sliders use an internal 0..1 range mapped exponentially so fine values
         // near `min` get most of the slider travel. The number input still uses real units.
@@ -2074,9 +2075,10 @@
       }
 
       function _color(parent, obj, key, opts) {
-        const { label, onChange } = opts;
+        const { label, onChange, hint } = opts;
         const row = document.createElement("div");
         row.className = "prop-row";
+        if (hint) row.title = hint;
         row.innerHTML = `<span class="prop-label">${label}</span><div class="prop-value"><div class="prop-color-wrap"><input type="color" class="prop-color" value="${obj[key]}"><span class="prop-slider-val" style="width:auto">${obj[key]}</span></div></div>`;
         const inp = row.querySelector(".prop-color");
         const hex = row.querySelector(".prop-slider-val");
@@ -2096,9 +2098,10 @@
       }
 
       function _toggle(parent, obj, key, opts) {
-        const { label, onChange } = opts;
+        const { label, onChange, hint } = opts;
         const row = document.createElement("div");
         row.className = "prop-row";
+        if (hint) row.title = hint;
         row.innerHTML = `<span class="prop-label">${label}</span><div class="prop-value"><button class="prop-toggle ${obj[key] ? "checked" : ""}">${_checkSvg}</button></div>`;
         const btn = row.querySelector(".prop-toggle");
         btn.addEventListener("click", () => {
@@ -2115,9 +2118,10 @@
       }
 
       function _dropdown(parent, obj, key, opts) {
-        const { label, options, onChange } = opts;
+        const { label, options, onChange, hint } = opts;
         const row = document.createElement("div");
         row.className = "prop-row";
+        if (hint) row.title = hint;
         let optHtml = "";
         for (const [text, val] of Object.entries(options)) {
           optHtml += `<option value="${val}" ${obj[key] === val ? "selected" : ""}>${text}</option>`;
@@ -2138,12 +2142,14 @@
       }
 
       function _button(parent, opts) {
-        const { title, onClick } = opts;
+        const { title, onClick, hint } = opts;
         const btn = document.createElement("button");
         btn.className = "section-btn";
         btn.textContent = title;
+        if (hint) btn.title = hint;
         btn.addEventListener("click", onClick);
         parent.appendChild(btn);
+        return btn;
       }
 
       function _info(parent, label, value) {
@@ -2179,7 +2185,7 @@
         grass: ["Brush", "Grass"],
         revoGrass: [],
         cliffGrass: ["Brush", "Cliff Grass"],
-        road: ["Road"],
+        road: [],
         fullRoad: ["Full Road"],
         smartRoad: [],
         river: ["River"],
@@ -2234,6 +2240,7 @@
         "spline",
         "grass",
         "revoGrass",
+        "road",
         "smartRoad",
       ]);
 
@@ -2311,6 +2318,8 @@
         const smartRoadPanel = document.getElementById("smartroad-panel");
         if (smartRoadPanel)
           smartRoadPanel.style.display = mode === "smartRoad" ? "" : "none";
+        const roadPanel = document.getElementById("road-panel");
+        if (roadPanel) roadPanel.style.display = mode === "road" ? "" : "none";
 
         const kept = [];
         const show = hasCustom
@@ -6284,6 +6293,323 @@
           max: 5,
           step: 0.01,
           onChange: () => app.riverChanged(),
+        });
+
+        return panel;
+      }
+
+      // === Build custom Road panel (parity with v2/ui/roadTweakpane.js) ===
+      function buildRoadPanel(app) {
+        const panel = document.createElement("div");
+        panel.id = "road-panel";
+        const rp = app.toolState.road;
+        const ch = () => app.roadChanged();
+
+        const main = _section(panel, "Road");
+        _toggle(main, rp, "showHandles", { label: "Show handles", onChange: ch });
+        _toggle(main, rp, "closed", { label: "Close path (loop)", onChange: ch });
+        _slider(main, rp, "activeRoadIndex", {
+          label: "Active road #",
+          min: 0,
+          max: 63,
+          step: 1,
+          onChange: () => app.roadActiveIndexChanged(),
+        });
+        _button(main, { title: "New road", onClick: () => app.roadNewRoad() });
+        _button(main, {
+          title: "Delete active road",
+          onClick: () => app.roadDeleteActive(),
+        });
+        _slider(main, rp, "activeStyleSectionIndex", {
+          label: "Style section #",
+          min: 0,
+          max: 63,
+          step: 1,
+          onChange: () => app.roadStyleSectionChanged(),
+        });
+        _button(main, {
+          title: "New style from selected point",
+          onClick: () => app.roadNewStyleSection(),
+        });
+        _button(main, {
+          title: "Delete style section",
+          onClick: () => app.roadDeleteStyleSection(),
+        });
+        _button(main, {
+          title: "Delete selected point",
+          onClick: () => app.roadDeleteSelected(),
+        });
+        _slider(main, rp, "selectedPointY", {
+          label: "Point Y",
+          min: -50,
+          max: 200,
+          step: 0.1,
+          onChange: () => app.roadSelectedYChanged(),
+        });
+        _button(main, {
+          title: "Snap selected Y to terrain",
+          onClick: () => app.roadSnapY(),
+        });
+        _button(main, {
+          title: "Flatten terrain under roads",
+          onClick: () => app.roadFlattenTerrain(),
+        });
+        _button(main, {
+          title: "Apply Stability Preset (Racing)",
+          onClick: () => app.roadApplyStabilityPreset(),
+          hint: "Sets adaptive lift on, height offset 0.15, slope lift 0.35, lift cap 0.6.",
+        });
+
+        const mat = _section(panel, "Material", false);
+        _color(mat, rp, "colorTint", { label: "Color tint", onChange: ch });
+        _slider(mat, rp, "colorBrightness", {
+          label: "Brightness",
+          min: 0.2,
+          max: 2.0,
+          step: 0.05,
+          onChange: ch,
+        });
+        _color(mat, rp, "lineColor", { label: "Edge color", onChange: ch });
+        _slider(mat, rp, "lineWidth", {
+          label: "Edge width",
+          min: 0,
+          max: 0.2,
+          step: 0.005,
+          onChange: ch,
+        });
+        _slider(mat, rp, "lineSoftness", {
+          label: "Edge softness",
+          min: 0,
+          max: 0.1,
+          step: 0.002,
+          onChange: ch,
+        });
+        _slider(mat, rp, "lineInset", {
+          label: "Edge inset",
+          min: 0,
+          max: 0.15,
+          step: 0.005,
+          onChange: ch,
+        });
+
+        const edgeBlend = _section(mat, "Edge blend", false);
+        _slider(edgeBlend, rp, "edgeBlendWidth", {
+          label: "Blend width",
+          min: 0,
+          max: 0.3,
+          step: 0.01,
+          onChange: ch,
+        });
+        _slider(edgeBlend, rp, "edgeBlendNoise", {
+          label: "Noise scale",
+          min: 1,
+          max: 30,
+          step: 0.5,
+          onChange: ch,
+        });
+
+        const center = _section(mat, "Center line", false);
+        _toggle(center, rp, "centerLine", { label: "Enable", onChange: ch });
+        _color(center, rp, "centerLineColor", { label: "Color", onChange: ch });
+        _slider(center, rp, "centerLineWidth", {
+          label: "Width",
+          min: 0.005,
+          max: 0.1,
+          step: 0.002,
+          onChange: ch,
+        });
+        _slider(center, rp, "centerLineSoftness", {
+          label: "Softness",
+          min: 0,
+          max: 0.05,
+          step: 0.002,
+          onChange: ch,
+        });
+        _toggle(center, rp, "centerLineDashed", { label: "Dashed", onChange: ch });
+        _slider(center, rp, "centerLineDashScale", {
+          label: "Dash density",
+          min: 0.002,
+          max: 2,
+          step: 0.002,
+          onChange: ch,
+        });
+
+        const highway = _section(center, "Highway lanes", false);
+        _toggle(highway, rp, "doubleCenterLine", {
+          label: "Double center",
+          onChange: ch,
+        });
+        _slider(highway, rp, "centerLineGap", {
+          label: "Center gap",
+          min: 0.002,
+          max: 0.05,
+          step: 0.001,
+          onChange: ch,
+        });
+        _toggle(highway, rp, "centerLeftEnabled", {
+          label: "Left center on",
+          onChange: ch,
+        });
+        _color(highway, rp, "centerLeftColor", {
+          label: "Left center color",
+          onChange: ch,
+        });
+        _toggle(highway, rp, "centerLeftDashed", {
+          label: "Left center dashed",
+          onChange: ch,
+        });
+        _toggle(highway, rp, "centerRightEnabled", {
+          label: "Right center on",
+          onChange: ch,
+        });
+        _color(highway, rp, "centerRightColor", {
+          label: "Right center color",
+          onChange: ch,
+        });
+        _toggle(highway, rp, "centerRightDashed", {
+          label: "Right center dashed",
+          onChange: ch,
+        });
+        _toggle(highway, rp, "laneLines", {
+          label: "Lane separators",
+          onChange: ch,
+        });
+        _slider(highway, rp, "laneLineWidth", {
+          label: "Lane line width",
+          min: 0.001,
+          max: 0.02,
+          step: 0.001,
+          onChange: ch,
+        });
+        _slider(highway, rp, "laneDashScale", {
+          label: "Lane dash density",
+          min: 0.005,
+          max: 2,
+          step: 0.005,
+          onChange: ch,
+        });
+
+        const geo = _section(panel, "Geometry", false);
+        _slider(geo, rp, "width", {
+          label: "Width",
+          min: 1,
+          max: 50,
+          step: 0.5,
+          onChange: ch,
+        });
+        _slider(geo, rp, "segments", {
+          label: "Segments",
+          min: 20,
+          max: 600,
+          step: 10,
+          onChange: ch,
+        });
+        _slider(geo, rp, "heightOffset", {
+          label: "Height offset",
+          min: 0,
+          max: 2,
+          step: 0.01,
+          onChange: ch,
+        });
+        _toggle(geo, rp, "adaptiveLift", {
+          label: "Adaptive lift",
+          onChange: ch,
+        });
+        _slider(geo, rp, "slopeLift", {
+          label: "Slope lift",
+          min: 0,
+          max: 2,
+          step: 0.01,
+          onChange: ch,
+        });
+        _slider(geo, rp, "liftMax", {
+          label: "Lift cap",
+          min: 0,
+          max: 2,
+          step: 0.01,
+          onChange: ch,
+        });
+
+        const enh = _section(panel, "Enhanced (PBR + Reflect)", false);
+        _toggle(enh, rp, "enhanced", { label: "Enable", onChange: ch });
+        _slider(enh, rp, "normalStrength", {
+          label: "Normal strength",
+          min: 0,
+          max: 3,
+          step: 0.05,
+          onChange: ch,
+        });
+        _slider(enh, rp, "roughnessBase", {
+          label: "Roughness",
+          min: 0.05,
+          max: 1,
+          step: 0.01,
+          onChange: ch,
+        });
+        _slider(enh, rp, "reflectStrength", {
+          label: "Reflect strength",
+          min: 0,
+          max: 1,
+          step: 0.05,
+          onChange: ch,
+        });
+        _slider(enh, rp, "mixBlur", {
+          label: "Reflect blur",
+          min: 0,
+          max: 0.3,
+          step: 0.005,
+          onChange: ch,
+        });
+        _slider(enh, rp, "mixStrength", {
+          label: "Reflect mix",
+          min: 0,
+          max: 4,
+          step: 0.1,
+          onChange: ch,
+        });
+        _slider(enh, rp, "mixContrast", {
+          label: "Reflect contrast",
+          min: 0.2,
+          max: 3,
+          step: 0.05,
+          onChange: ch,
+        });
+        _slider(enh, rp, "normalDistort", {
+          label: "Normal distort",
+          min: 0,
+          max: 0.5,
+          step: 0.01,
+          onChange: ch,
+        });
+        _slider(enh, rp, "texScale", {
+          label: "Texture scale",
+          min: 0.5,
+          max: 20,
+          step: 0.5,
+          onChange: ch,
+        });
+
+        const lod = _section(enh, "LOD distances", false);
+        _slider(lod, rp, "lodNear", {
+          label: "Near (full)",
+          min: 5,
+          max: 100,
+          step: 1,
+          onChange: ch,
+        });
+        _slider(lod, rp, "lodMid", {
+          label: "Mid (reduced)",
+          min: 20,
+          max: 200,
+          step: 5,
+          onChange: ch,
+        });
+        _slider(lod, rp, "lodFar", {
+          label: "Far (TSL only)",
+          min: 50,
+          max: 500,
+          step: 10,
+          onChange: ch,
         });
 
         return panel;
@@ -11139,6 +11465,7 @@
           toolsTab.appendChild(buildSplinePanel(app));
           toolsTab.appendChild(buildGrassPanel(app));
           toolsTab.appendChild(buildRevoGrassPanel(app));
+          toolsTab.appendChild(buildRoadPanel(app));
           toolsTab.appendChild(buildSmartRoadPanel(app));
 
           // Move Tweakpane pane into the Tools tab & apply mode-aware folder visibility
