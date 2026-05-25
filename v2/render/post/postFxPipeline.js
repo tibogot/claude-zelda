@@ -1,9 +1,10 @@
 import * as THREE from "three";
-import { renderOutput } from "three/tsl";
+import { renderOutput, uniform } from "three/tsl";
 import { bloom } from "three/addons/tsl/display/BloomNode.js";
 import { fxaa } from "three/addons/tsl/display/FXAANode.js";
 import { sharpen } from "three/addons/tsl/display/SharpenNode.js";
 import { chromaticAberration } from "three/addons/tsl/display/ChromaticAberrationNode.js";
+import { dof } from "three/addons/tsl/display/DepthOfFieldNode.js";
 import {
   N8AONode,
   createN8AOScenePass,
@@ -158,6 +159,30 @@ export class PostFxPipeline {
      * rebuilds don't allocate.
      */
     this._caCenter = new THREE.Vector2(0.5, 0.5);
+
+    /**
+     * Depth of Field (Bokeh — three.js TSL `DepthOfFieldNode`). Heavy: owns
+     * 6 internal RTs and runs CoC + 64-tap + 16-tap blurs in half-res. Sits
+     * AFTER bloom in linear HDR so OOF bright objects produce real bokeh
+     * (the bloom on top of them gets blurred along with them, like a real
+     * lens). Built lazily on first enable.
+     *
+     * Uniforms are persistent so slider drags don't recompile. The DoF node
+     * itself IS rebuilt whenever the upstream linear chain changes (bloom or
+     * SSAO toggle), because three's DoF stores its input texture node at
+     * construction time. Every rebuild disposes the prior 6-RT chain.
+     */
+    this._dofEnabled = false;
+    this._dofNode = null;
+    this._dofUniforms = null;
+    this._dofParams = {
+      /** World-space distance from camera to focal plane. */
+      focusDistance: 50,
+      /** World-space range over which objects fully blur. */
+      focalLength: 30,
+      /** Artistic blur size scalar. 0 = no blur, ~5 = subtle, ~15 = strong. */
+      bokehScale: 5,
+    };
   }
 
   /**
@@ -178,7 +203,8 @@ export class PostFxPipeline {
       this._ssaoEnabled ||
       this._polishEnabled ||
       this._sharpenEnabled ||
-      this._chromaticAberrationEnabled
+      this._chromaticAberrationEnabled ||
+      this._dofEnabled
     );
   }
 
@@ -280,6 +306,29 @@ export class PostFxPipeline {
     }
   }
 
+  setDofEnabled(enabled) {
+    if (this._dofEnabled === enabled) return;
+    this._dofEnabled = enabled;
+    if (enabled && this._dofUniforms === null) {
+      // Lazy uniform creation — never allocate until first enable.
+      this._dofUniforms = {
+        focusDistance: uniform(this._dofParams.focusDistance),
+        focalLength: uniform(this._dofParams.focalLength),
+        bokehScale: uniform(this._dofParams.bokehScale),
+      };
+    }
+    if (this._renderPipeline) this._refreshOutputNode();
+  }
+
+  /**
+   * DoF params — pure uniform updates, no node rebuild. Safe to call
+   * every frame from a slider drag.
+   */
+  setDofParams(partial = {}) {
+    Object.assign(this._dofParams, partial);
+    this._applyDofUniforms();
+  }
+
   /**
    * `THREE.RenderPipeline` tracks renderer drawing buffer size internally —
    * we don't need to forward `setSize`. Method kept for API symmetry / future
@@ -297,6 +346,7 @@ export class PostFxPipeline {
     if (this._ssaoNode?.dispose) this._ssaoNode.dispose();
     if (this._bloomPass?.dispose) this._bloomPass.dispose();
     if (this._sharpenNode?.dispose) this._sharpenNode.dispose();
+    if (this._dofNode?.dispose) this._dofNode.dispose();
     this._renderPipeline = null;
     this._scenePass = null;
     this._scenePassColor = null;
@@ -304,6 +354,8 @@ export class PostFxPipeline {
     this._ssaoNode = null;
     this._sharpenNode = null;
     this._chromaticAberrationNode = null;
+    this._dofNode = null;
+    this._dofUniforms = null;
     this._polishUniforms = null;
   }
 
@@ -382,6 +434,14 @@ export class PostFxPipeline {
     if (p.smoothWidth) p.smoothWidth.value = this._bloomParams.smoothWidth;
   }
 
+  _applyDofUniforms() {
+    const u = this._dofUniforms;
+    if (!u) return;
+    u.focusDistance.value = this._dofParams.focusDistance;
+    u.focalLength.value = this._dofParams.focalLength;
+    u.bokehScale.value = this._dofParams.bokehScale;
+  }
+
   _applyPolishUniforms() {
     const u = this._polishUniforms;
     if (!u) return;
@@ -451,6 +511,17 @@ export class PostFxPipeline {
   _refreshOutputNode() {
     if (!this._renderPipeline) return;
 
+    // Each refresh fully rebuilds any node that owns its own RTs / materials,
+    // because the upstream chain shape can change (e.g. bloom toggles,
+    // SSAO toggles) and these nodes store their input texture node at
+    // construction time. Disposing first prevents GPU memory leaks.
+    if (this._dofNode?.dispose) this._dofNode.dispose();
+    this._dofNode = null;
+    if (this._sharpenNode?.dispose) this._sharpenNode.dispose();
+    this._sharpenNode = null;
+    // ChromaticAberrationNode allocates no RTs — nothing to dispose.
+    this._chromaticAberrationNode = null;
+
     // SSAO branch: when on, the n8ao node outputs a fully composited
     // beauty + AO texture node — it replaces `scenePassColor` for
     // downstream stages. Bloom still reads from raw `scenePassColor`
@@ -461,9 +532,24 @@ export class PostFxPipeline {
         : this._scenePassColor;
 
     // Linear-HDR composition (bloom adds in linear).
-    const linearComposite = this._bloomEnabled
+    let linearBeauty = this._bloomEnabled
       ? sceneInput.add(this._bloomPass)
       : sceneInput;
+
+    // DoF lives at the END of the linear chain (after bloom) so bright
+    // out-of-focus pixels produce real bokeh — including the bloom that
+    // would have lit up around them. Cinematic.
+    if (this._dofEnabled && this._dofUniforms) {
+      const viewZ = this._scenePass.getViewZNode();
+      this._dofNode = dof(
+        linearBeauty,
+        viewZ,
+        this._dofUniforms.focusDistance,
+        this._dofUniforms.focalLength,
+        this._dofUniforms.bokehScale,
+      );
+      linearBeauty = this._dofNode;
+    }
 
     // Display-referred chain order:
     //   1. renderOutput   — tonemap + sRGB encode
@@ -471,14 +557,11 @@ export class PostFxPipeline {
     //   3. Sharpen (RCAS) — counteract FXAA softening
     //   4. CA             — lens fringe fringes the sharp+aliased edges
     //   5. Polish         — grade + vignette + grain (last, so grain isn't AA'd)
-    let node = renderOutput(linearComposite);
+    let node = renderOutput(linearBeauty);
 
     if (this._fxaaEnabled) node = fxaa(node);
 
     if (this._sharpenEnabled) {
-      // SharpenNode caches its own RT internally; rebuild on toggle is fine
-      // (toggling is rare, slider-driven sharpness changes go through here too
-      // because we pass the JS value as the constructor arg).
       const userSharpness = this._sharpenParams.sharpness;
       // User slider 0..1 (low → high) → addon param 1..0 (none → max).
       const remapped = 1.0 - Math.max(0, Math.min(1, userSharpness));

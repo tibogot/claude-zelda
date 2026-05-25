@@ -226,6 +226,23 @@ export function createToolState() {
         /** Per-channel scale separation. ~1.1 default from the addon. */
         scale: 1.1,
       },
+      /**
+       * Depth of Field (Bokeh — three.js TSL DepthOfFieldNode). Heavy:
+       * allocates 6 internal RTs and runs CoC + 64-tap + 16-tap blurs in
+       * half-res once enabled. Off by default.
+       *
+       * `focusDistance` and `focalLength` are in WORLD UNITS — match them to
+       * your scene scale. With the editor's typical camera at ~150 units and
+       * max distance 1500, `focusDistance: 50, focalLength: 30` gives a
+       * sensible mid-scene focus.
+       */
+      dof: {
+        enabled: false,
+        focusDistance: 50,
+        focalLength: 30,
+        /** Artistic blur size. 0 = none, ~5 = subtle, ~15 = strong. */
+        bokehScale: 5,
+      },
     },
     csm: { ...V2_CONFIG.csm },
     fog: {

@@ -3419,6 +3419,8 @@ export async function startV2App(opts = {}) {
     postFxPipeline.setSharpenEnabled(p.sharpen.enabled);
     postFxPipeline.setChromaticAberrationParams(p.chromaticAberration);
     postFxPipeline.setChromaticAberrationEnabled(p.chromaticAberration.enabled);
+    postFxPipeline.setDofParams(p.dof);
+    postFxPipeline.setDofEnabled(p.dof.enabled);
     postFxPipeline.setEnabled(p.enabled);
   }
   applyPostFxState();
