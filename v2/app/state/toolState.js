@@ -10,6 +10,20 @@ export function createToolState() {
   return {
     /** `view` (orbit only) | `sculpt` | `paint` | `treePaint` | `spline` | `decals` | … Defaults to `view` — matches v1. */
     mode: "view",
+    /**
+     * Shared gizmo (TransformControls) settings — applies to every mode that
+     * uses the gizmo: cliffs, props, actors, water, waterfall, decals, and
+     * road decals. `space` = "world" (rings aligned to world axes — best for
+     * cardinal alignment) or "local" (rings aligned to the object's own axes
+     * — best for incremental tweaks on already-rotated objects). Toggle in
+     * any gizmo mode with the **Q** hotkey. `rotationSnapDeg` is the snap
+     * angle (degrees) applied while holding **Shift** during a rotate drag;
+     * 0 disables snap. Scale gizmo always uses local space (three.js fixed).
+     */
+    gizmo: {
+      space: "world",
+      rotationSnapDeg: 15,
+    },
     /** `tile` = grid material; `tsl` = procedural TSL; `image` = tiled image-slot material. */
     terrainSurface: "tile",
     /** Texture-library slot ids picked by the surface modes that use slots. */
@@ -159,6 +173,58 @@ export function createToolState() {
         screenSpaceRadius: false,
         displayMode: "Combined",
         transparencyAware: false,
+      },
+      /**
+       * "Color & Polish" bundle — single fullscreen pass that applies color
+       * grading + vignette + film grain on top of the final image. Off by
+       * default (master `enabled` false) so the polish pass is skipped from
+       * the graph entirely until the user opts in. Once enabled, leaving any
+       * sub-slider at its identity value (brightness 0, contrast 1,
+       * saturation 1, vignetteStrength 0, grainStrength 0, etc.) costs a
+       * few extra muls per pixel — effectively free.
+       */
+      polish: {
+        enabled: false,
+        brightness: 0,
+        contrast: 1,
+        saturation: 1,
+        /** -1 (cool/blue) to 1 (warm/orange). */
+        temperature: 0,
+        /** -1 (green) to 1 (magenta). */
+        tint: 0,
+        /** 0..1. 0 = no vignette. */
+        vignetteStrength: 0,
+        /** Inner edge of falloff. 0 = darken from screen center, 1 = corners only. */
+        vignetteFalloff: 0.5,
+        /** 0 = circular, 1 = square (more elongated on widescreen). Reserved for now. */
+        vignetteRoundness: 1,
+        vignetteColor: "#000000",
+        /** 0..0.3 typical. 0 = no grain. */
+        grainStrength: 0,
+        /** Higher = finer grain. 1 = ~screen-pixel-sized. */
+        grainSize: 1,
+      },
+      /**
+       * RCAS contrast-adaptive sharpening (FidelityFX). Sits AFTER FXAA so it
+       * counteracts the softening that FXAA introduces. Off by default.
+       */
+      sharpen: {
+        enabled: false,
+        /** User slider 0..1 (low → high). Internally remapped to addon param. */
+        sharpness: 0.5,
+        /** Attenuate sharpening in noisy areas. Off by default. */
+        denoise: false,
+      },
+      /**
+       * Lens-style chromatic aberration. Off by default — at low strengths
+       * gives a subtle "real lens" feel, at high strengths a stylized look.
+       */
+      chromaticAberration: {
+        enabled: false,
+        /** Aberration magnitude. 0 = none, ~1 = lens-like, >2 = stylized. */
+        strength: 1,
+        /** Per-channel scale separation. ~1.1 default from the addon. */
+        scale: 1.1,
       },
     },
     csm: { ...V2_CONFIG.csm },

@@ -1050,6 +1050,34 @@ export async function startV2App(opts = {}) {
   transformControls.enabled = false;
   transformControls.visible = false;
   scene.add(transformControls.getHelper());
+
+  // Modes that share the single TransformControls instance. Used to gate
+  // gizmo-only hotkeys (Q toggle, Shift snap) so they don't fire elsewhere.
+  const GIZMO_MODES = new Set([
+    "cliffs",
+    "props",
+    "actors",
+    "water",
+    "waterfall",
+    "decals",
+    "fullRoad",
+    "smartRoad",
+  ]);
+
+  // Single point of truth for shared gizmo settings (space + rotation snap).
+  // Call after any gizmo state change so a fresh attach/setMode keeps the
+  // user's preferences. `space` persists on the controls in three.js, but we
+  // re-apply defensively because some flows toggle modes rapidly.
+  let _gizmoShiftHeld = false;
+  function applyGizmoSettings() {
+    const g = toolState.gizmo;
+    transformControls.setSpace(g.space === "local" ? "local" : "world");
+    const snapDeg = _gizmoShiftHeld ? g.rotationSnapDeg : 0;
+    transformControls.setRotationSnap(
+      snapDeg > 0 ? (snapDeg * Math.PI) / 180 : null,
+    );
+  }
+  applyGizmoSettings();
   fullRoadSystem.setTransformControls(transformControls);
   smartRoadSystem.setTransformControls(transformControls);
   const activeGraphRoadSystem = () =>
@@ -3385,6 +3413,12 @@ export async function startV2App(opts = {}) {
     postFxPipeline.setFxaaEnabled(p.fxaa.enabled);
     postFxPipeline.setSsaoParams(p.ssao);
     postFxPipeline.setSsaoEnabled(p.ssao.enabled);
+    postFxPipeline.setPolishParams(p.polish);
+    postFxPipeline.setPolishEnabled(p.polish.enabled);
+    postFxPipeline.setSharpenParams(p.sharpen);
+    postFxPipeline.setSharpenEnabled(p.sharpen.enabled);
+    postFxPipeline.setChromaticAberrationParams(p.chromaticAberration);
+    postFxPipeline.setChromaticAberrationEnabled(p.chromaticAberration.enabled);
     postFxPipeline.setEnabled(p.enabled);
   }
   applyPostFxState();
@@ -4146,6 +4180,32 @@ export async function startV2App(opts = {}) {
   window.addEventListener("keydown", (event) => {
     if (event.defaultPrevented) return;
     const ctrl = event.ctrlKey || event.metaKey;
+    // Shift held → enable rotation snap on the gizmo (industry-standard
+    // muscle memory). We only react when in a gizmo mode to avoid surprising
+    // users elsewhere. Repeat fires while held; bail on repeat to avoid
+    // re-applying every frame.
+    if (
+      event.code === "ShiftLeft" ||
+      event.code === "ShiftRight"
+    ) {
+      if (!event.repeat && GIZMO_MODES.has(toolState.mode)) {
+        _gizmoShiftHeld = true;
+        applyGizmoSettings();
+      }
+    }
+    if (
+      !ctrl &&
+      event.code === "KeyQ" &&
+      GIZMO_MODES.has(toolState.mode) &&
+      !playMode.active
+    ) {
+      event.preventDefault();
+      toolState.gizmo.space =
+        toolState.gizmo.space === "local" ? "world" : "local";
+      applyGizmoSettings();
+      ui?.pane.refresh();
+      return;
+    }
     if (ctrl && event.code === "KeyZ") {
       event.preventDefault();
       const sys = activeEditSystem();
@@ -4422,6 +4482,26 @@ export async function startV2App(opts = {}) {
       event.preventDefault();
       toolState.mode = toolState.mode === "playSpawn" ? "view" : "playSpawn";
       applyModeChangedEffects();
+    }
+  });
+
+  // Release the Shift-snap modifier. We don't gate on mode here so the
+  // gizmo's snap is always cleared on key release, even if the user switched
+  // modes while holding Shift.
+  window.addEventListener("keyup", (event) => {
+    if (event.code === "ShiftLeft" || event.code === "ShiftRight") {
+      if (_gizmoShiftHeld) {
+        _gizmoShiftHeld = false;
+        applyGizmoSettings();
+      }
+    }
+  });
+  // Clearing on blur prevents a "stuck snap" if the user Alt-Tabs while
+  // holding Shift mid-drag and never sees the keyup.
+  window.addEventListener("blur", () => {
+    if (_gizmoShiftHeld) {
+      _gizmoShiftHeld = false;
+      applyGizmoSettings();
     }
   });
 

@@ -2,12 +2,15 @@ import * as THREE from "three";
 import { renderOutput } from "three/tsl";
 import { bloom } from "three/addons/tsl/display/BloomNode.js";
 import { fxaa } from "three/addons/tsl/display/FXAANode.js";
+import { sharpen } from "three/addons/tsl/display/SharpenNode.js";
+import { chromaticAberration } from "three/addons/tsl/display/ChromaticAberrationNode.js";
 import {
   N8AONode,
   createN8AOScenePass,
   applyQualityMode,
   resolveDisplayMode,
 } from "n8ao-webgpu";
+import { createPolishUniforms, polish } from "./polishNode.js";
 
 /**
  * v2 Post FX pipeline (WebGPU/TSL).
@@ -99,6 +102,62 @@ export class PostFxPipeline {
     };
     /** Reused `THREE.Color` so we don't allocate per-update. */
     this._ssaoColor = new THREE.Color(0, 0, 0);
+
+    /**
+     * Color & Polish (Tier 1 polish bundle: grading + vignette + grain).
+     * Single fullscreen pass, runs LAST in the chain so the grain isn't
+     * smoothed by FXAA and the vignette tints the final pixel.
+     *
+     * Uniforms are built lazily on first enable so this object pays nothing
+     * if the user never turns it on.
+     */
+    this._polishEnabled = false;
+    this._polishUniforms = null;
+    this._polishParams = {
+      brightness: 0,
+      contrast: 1,
+      saturation: 1,
+      temperature: 0,
+      tint: 0,
+      vignetteStrength: 0,
+      vignetteFalloff: 0.5,
+      vignetteRoundness: 1,
+      vignetteColor: "#000000",
+      grainStrength: 0,
+      grainSize: 1,
+    };
+    /** Reused `THREE.Color` for vignette uniform. */
+    this._vignetteColor = new THREE.Color(0, 0, 0);
+
+    /**
+     * Sharpen (RCAS — FidelityFX). Has its own RT (auto-baked input). Sits
+     * AFTER FXAA so AA softening doesn't undo the sharpening.
+     */
+    this._sharpenEnabled = false;
+    this._sharpenNode = null;
+    this._sharpenParams = {
+      sharpness: 0.5,
+      denoise: false,
+    };
+
+    /**
+     * Chromatic Aberration. TempNode that auto-bakes its input, so chained
+     * after Sharpen and before Polish (so grain/vignette stay on top).
+     */
+    this._chromaticAberrationEnabled = false;
+    this._chromaticAberrationNode = null;
+    this._chromaticAberrationParams = {
+      strength: 1.0,
+      scale: 1.1,
+    };
+    /**
+     * The CA addon's docstring says `center=null` defaults to screen center,
+     * but the implementation blindly calls `nodeObject(center)` which yields
+     * a null node and crashes the builder ("Cannot read properties of null
+     * (reading 'build')"). Pass an explicit Vector2 every time. Reused so
+     * rebuilds don't allocate.
+     */
+    this._caCenter = new THREE.Vector2(0.5, 0.5);
   }
 
   /**
@@ -113,7 +172,14 @@ export class PostFxPipeline {
   }
 
   _anyEffectEnabled() {
-    return this._bloomEnabled || this._fxaaEnabled || this._ssaoEnabled;
+    return (
+      this._bloomEnabled ||
+      this._fxaaEnabled ||
+      this._ssaoEnabled ||
+      this._polishEnabled ||
+      this._sharpenEnabled ||
+      this._chromaticAberrationEnabled
+    );
   }
 
   setEnabled(enabled) {
@@ -163,6 +229,57 @@ export class PostFxPipeline {
     if (this._ssaoNode) this._applySsaoConfig();
   }
 
+  setPolishEnabled(enabled) {
+    if (this._polishEnabled === enabled) return;
+    this._polishEnabled = enabled;
+    if (enabled && this._polishUniforms === null) {
+      this._polishUniforms = createPolishUniforms();
+      this._applyPolishUniforms();
+    }
+    if (this._renderPipeline) this._refreshOutputNode();
+  }
+
+  /**
+   * Update polish parameters — purely uniform updates, no shader rebuild.
+   * Safe to call every frame from a slider drag.
+   */
+  setPolishParams(partial = {}) {
+    Object.assign(this._polishParams, partial);
+    if (this._polishUniforms) this._applyPolishUniforms();
+  }
+
+  setSharpenEnabled(enabled) {
+    if (this._sharpenEnabled === enabled) return;
+    this._sharpenEnabled = enabled;
+    if (this._renderPipeline) this._refreshOutputNode();
+  }
+
+  /**
+   * Sharpen params. `sharpness` 0 = max sharpen, 2 = none. We expose 0..1
+   * to the user and remap inside `_refreshOutputNode` (1 - userValue).
+   */
+  setSharpenParams(partial = {}) {
+    Object.assign(this._sharpenParams, partial);
+    if (this._sharpenEnabled && this._renderPipeline) {
+      // Sharpen is structural (it owns an RT). Param changes only need an
+      // outputNode rebuild because we pass values as JS numbers, not uniforms.
+      this._refreshOutputNode();
+    }
+  }
+
+  setChromaticAberrationEnabled(enabled) {
+    if (this._chromaticAberrationEnabled === enabled) return;
+    this._chromaticAberrationEnabled = enabled;
+    if (this._renderPipeline) this._refreshOutputNode();
+  }
+
+  setChromaticAberrationParams(partial = {}) {
+    Object.assign(this._chromaticAberrationParams, partial);
+    if (this._chromaticAberrationEnabled && this._renderPipeline) {
+      this._refreshOutputNode();
+    }
+  }
+
   /**
    * `THREE.RenderPipeline` tracks renderer drawing buffer size internally —
    * we don't need to forward `setSize`. Method kept for API symmetry / future
@@ -179,11 +296,15 @@ export class PostFxPipeline {
   dispose() {
     if (this._ssaoNode?.dispose) this._ssaoNode.dispose();
     if (this._bloomPass?.dispose) this._bloomPass.dispose();
+    if (this._sharpenNode?.dispose) this._sharpenNode.dispose();
     this._renderPipeline = null;
     this._scenePass = null;
     this._scenePassColor = null;
     this._bloomPass = null;
     this._ssaoNode = null;
+    this._sharpenNode = null;
+    this._chromaticAberrationNode = null;
+    this._polishUniforms = null;
   }
 
   _ensureBuilt() {
@@ -261,6 +382,31 @@ export class PostFxPipeline {
     if (p.smoothWidth) p.smoothWidth.value = this._bloomParams.smoothWidth;
   }
 
+  _applyPolishUniforms() {
+    const u = this._polishUniforms;
+    if (!u) return;
+    const p = this._polishParams;
+    u.brightness.value = p.brightness;
+    u.contrast.value = p.contrast;
+    u.saturation.value = p.saturation;
+    u.temperature.value = p.temperature;
+    u.tint.value = p.tint;
+    u.vignetteStrength.value = p.vignetteStrength;
+    u.vignetteFalloff.value = p.vignetteFalloff;
+    u.vignetteRoundness.value = p.vignetteRoundness;
+    u.grainStrength.value = p.grainStrength;
+    u.grainSize.value = p.grainSize;
+    // Vignette uniform is a Vector3 (sRGB stays linear-interpreted in display
+    // space, no convertSRGBToLinear here — we already operate on tonemapped
+    // sRGB pixels and want the picked color to appear as-is).
+    this._vignetteColor.set(p.vignetteColor);
+    u.vignetteColor.value.set(
+      this._vignetteColor.r,
+      this._vignetteColor.g,
+      this._vignetteColor.b,
+    );
+  }
+
   _applySsaoConfig() {
     const n = this._ssaoNode;
     if (!n) return;
@@ -319,13 +465,46 @@ export class PostFxPipeline {
       ? sceneInput.add(this._bloomPass)
       : sceneInput;
 
-    // Convert to display-referred sRGB before FXAA (FXAA requires sRGB).
-    const transformed = renderOutput(linearComposite);
+    // Display-referred chain order:
+    //   1. renderOutput   — tonemap + sRGB encode
+    //   2. FXAA           — edge AA (sRGB input required)
+    //   3. Sharpen (RCAS) — counteract FXAA softening
+    //   4. CA             — lens fringe fringes the sharp+aliased edges
+    //   5. Polish         — grade + vignette + grain (last, so grain isn't AA'd)
+    let node = renderOutput(linearComposite);
 
-    // FXAA is the last hop when enabled.
-    this._renderPipeline.outputNode = this._fxaaEnabled
-      ? fxaa(transformed)
-      : transformed;
+    if (this._fxaaEnabled) node = fxaa(node);
+
+    if (this._sharpenEnabled) {
+      // SharpenNode caches its own RT internally; rebuild on toggle is fine
+      // (toggling is rare, slider-driven sharpness changes go through here too
+      // because we pass the JS value as the constructor arg).
+      const userSharpness = this._sharpenParams.sharpness;
+      // User slider 0..1 (low → high) → addon param 1..0 (none → max).
+      const remapped = 1.0 - Math.max(0, Math.min(1, userSharpness));
+      this._sharpenNode = sharpen(
+        node,
+        remapped,
+        this._sharpenParams.denoise,
+      );
+      node = this._sharpenNode;
+    }
+
+    if (this._chromaticAberrationEnabled) {
+      this._chromaticAberrationNode = chromaticAberration(
+        node,
+        this._chromaticAberrationParams.strength,
+        this._caCenter,
+        this._chromaticAberrationParams.scale,
+      );
+      node = this._chromaticAberrationNode;
+    }
+
+    if (this._polishEnabled && this._polishUniforms) {
+      node = polish(node, this._polishUniforms);
+    }
+
+    this._renderPipeline.outputNode = node;
     this._renderPipeline.needsUpdate = true;
   }
 }

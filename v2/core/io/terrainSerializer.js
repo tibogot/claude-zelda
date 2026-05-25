@@ -437,6 +437,9 @@ function extractSerializableSettings(toolState) {
       bloom: { ...toolState.postFx.bloom },
       fxaa: { ...toolState.postFx.fxaa },
       ssao: { ...toolState.postFx.ssao },
+      polish: { ...toolState.postFx.polish },
+      sharpen: { ...toolState.postFx.sharpen },
+      chromaticAberration: { ...toolState.postFx.chromaticAberration },
     },
     csm: { ...toolState.csm },
     fog: {
@@ -586,6 +589,18 @@ export function applySettings(toolState, settings) {
     }
     if (settings.postFx.ssao) {
       Object.assign(toolState.postFx.ssao, settings.postFx.ssao);
+    }
+    if (settings.postFx.polish) {
+      Object.assign(toolState.postFx.polish, settings.postFx.polish);
+    }
+    if (settings.postFx.sharpen) {
+      Object.assign(toolState.postFx.sharpen, settings.postFx.sharpen);
+    }
+    if (settings.postFx.chromaticAberration) {
+      Object.assign(
+        toolState.postFx.chromaticAberration,
+        settings.postFx.chromaticAberration,
+      );
     }
   }
   if (settings.csm) Object.assign(toolState.csm, settings.csm);

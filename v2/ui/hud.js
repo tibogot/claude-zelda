@@ -1,3 +1,14 @@
+const GIZMO_MODES = new Set([
+  "cliffs",
+  "props",
+  "actors",
+  "water",
+  "waterfall",
+  "decals",
+  "fullRoad",
+  "smartRoad",
+]);
+
 export function createHud() {
   const el = document.getElementById("hud");
   return {
@@ -18,6 +29,16 @@ export function createHud() {
         `wheel: Shift = radius, Alt = strength`,
         `undo=${sculptSystem.undoStack.length} redo=${sculptSystem.redoStack.length}`,
       ];
+      if (GIZMO_MODES.has(toolState.mode) && toolState.gizmo) {
+        const g = toolState.gizmo;
+        const snap =
+          g.rotationSnapDeg > 0
+            ? `Shift = snap ${g.rotationSnapDeg}°`
+            : `snap off`;
+        lines.push(
+          `gizmo: ${g.space === "local" ? "LOCAL" : "WORLD"} · ${snap} · Q toggles space · outer ring = screen-space rotate`,
+        );
+      }
       el.textContent = lines.join("\n");
     },
   };

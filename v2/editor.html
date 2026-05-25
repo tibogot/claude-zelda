@@ -8,10 +8,10 @@
     <script type="importmap">
       {
         "imports": {
-          "three": "https://cdn.jsdelivr.net/npm/three@0.183.1/build/three.webgpu.js",
-          "three/webgpu": "https://cdn.jsdelivr.net/npm/three@0.183.1/build/three.webgpu.js",
-          "three/tsl": "https://cdn.jsdelivr.net/npm/three@0.183.1/build/three.tsl.js",
-          "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.183.1/examples/jsm/",
+          "three": "https://cdn.jsdelivr.net/npm/three@0.184.0/build/three.webgpu.js",
+          "three/webgpu": "https://cdn.jsdelivr.net/npm/three@0.184.0/build/three.webgpu.js",
+          "three/tsl": "https://cdn.jsdelivr.net/npm/three@0.184.0/build/three.tsl.js",
+          "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.184.0/examples/jsm/",
           "three-mesh-bvh": "https://cdn.jsdelivr.net/npm/three-mesh-bvh@0.9.9/build/index.module.js",
           "howler": "https://esm.sh/howler@2.2.4",
           "n8ao-webgpu": "https://cdn.jsdelivr.net/npm/n8ao-webgpu@0.1.0/dist/index.js"
@@ -10639,6 +10639,136 @@
           min: 0,
           max: 1,
           step: 0.01,
+          onChange: syncPostFx,
+        });
+
+        const polishBody = _section(postFxBody, "Color & Polish", true);
+        _toggle(polishBody, ts.postFx.polish, "enabled", {
+          label: "Enabled",
+          hint: "Color grading + vignette + film grain in a single fullscreen pass. Off = node skipped from the graph entirely.",
+          onChange: syncPostFx,
+        });
+        const gradeBody = _section(polishBody, "Grading", true);
+        _slider(gradeBody, ts.postFx.polish, "brightness", {
+          label: "Brightness",
+          min: -1,
+          max: 1,
+          step: 0.01,
+          hint: "Additive offset on the final pixel. ±0.2 is plenty for most scenes.",
+          onChange: syncPostFx,
+        });
+        _slider(gradeBody, ts.postFx.polish, "contrast", {
+          label: "Contrast",
+          min: 0,
+          max: 2,
+          step: 0.01,
+          hint: "Pivot is mid-grey (0.5). 1 = identity, >1 = punchier, <1 = flatter.",
+          onChange: syncPostFx,
+        });
+        _slider(gradeBody, ts.postFx.polish, "saturation", {
+          label: "Saturation",
+          min: 0,
+          max: 2,
+          step: 0.01,
+          hint: "0 = grayscale, 1 = identity, 2 = oversaturated.",
+          onChange: syncPostFx,
+        });
+        _slider(gradeBody, ts.postFx.polish, "temperature", {
+          label: "Temperature",
+          min: -1,
+          max: 1,
+          step: 0.01,
+          hint: "Negative = cooler/blue, positive = warmer/orange. Subtle by design (±0.1 internal scale).",
+          onChange: syncPostFx,
+        });
+        _slider(gradeBody, ts.postFx.polish, "tint", {
+          label: "Tint",
+          min: -1,
+          max: 1,
+          step: 0.01,
+          hint: "Negative = green, positive = magenta.",
+          onChange: syncPostFx,
+        });
+        const vignetteBody = _section(polishBody, "Vignette", true);
+        _slider(vignetteBody, ts.postFx.polish, "vignetteStrength", {
+          label: "Strength",
+          min: 0,
+          max: 1,
+          step: 0.01,
+          hint: "0 = no vignette. ~0.4 is a typical cinematic feel.",
+          onChange: syncPostFx,
+        });
+        _slider(vignetteBody, ts.postFx.polish, "vignetteFalloff", {
+          label: "Falloff",
+          min: 0,
+          max: 1,
+          step: 0.01,
+          hint: "Inner edge of the darkening. 0 = darken from center, 0.7 = only the outer ring.",
+          onChange: syncPostFx,
+        });
+        _color(vignetteBody, ts.postFx.polish, "vignetteColor", {
+          label: "Color",
+          hint: "Default black. Try a deep red/blue for stylized looks.",
+          onChange: syncPostFx,
+        });
+        const grainBody = _section(polishBody, "Film grain", true);
+        _slider(grainBody, ts.postFx.polish, "grainStrength", {
+          label: "Strength",
+          min: 0,
+          max: 0.3,
+          step: 0.005,
+          hint: "0 = no grain. ~0.04 is a subtle cinematic shimmer; >0.15 gets noisy.",
+          onChange: syncPostFx,
+        });
+        _slider(grainBody, ts.postFx.polish, "grainSize", {
+          label: "Size",
+          min: 0.5,
+          max: 4,
+          step: 0.05,
+          hint: "Higher = finer grain.",
+          onChange: syncPostFx,
+        });
+
+        const sharpenBody = _section(postFxBody, "Sharpen (RCAS)", true);
+        _toggle(sharpenBody, ts.postFx.sharpen, "enabled", {
+          label: "Enabled",
+          hint: "FidelityFX contrast-adaptive sharpening. Sits AFTER FXAA so it counteracts the AA softening.",
+          onChange: syncPostFx,
+        });
+        _slider(sharpenBody, ts.postFx.sharpen, "sharpness", {
+          label: "Sharpness",
+          min: 0,
+          max: 1,
+          step: 0.01,
+          hint: "0 = none, 1 = max. Toggling off is a structural change (rebuild); slider drag rebuilds outputNode each step.",
+          onChange: syncPostFx,
+        });
+        _toggle(sharpenBody, ts.postFx.sharpen, "denoise", {
+          label: "Denoise",
+          hint: "Attenuates sharpening in noisy areas. Helpful when grain is high.",
+          onChange: syncPostFx,
+        });
+
+        const caBody = _section(postFxBody, "Chromatic Aberration", true);
+        _toggle(caBody, ts.postFx.chromaticAberration, "enabled", {
+          label: "Enabled",
+          hint: "Lens fringe — RGB channel separation toward the corners.",
+          onChange: syncPostFx,
+        });
+        _slider(caBody, ts.postFx.chromaticAberration, "strength", {
+          label: "Strength",
+          min: 0,
+          max: 5,
+          step: 0.05,
+          hint: "0 = none, ~1 = subtle real lens, >2 = stylized.",
+          onChange: syncPostFx,
+        });
+        _slider(caBody, ts.postFx.chromaticAberration, "scale", {
+          label: "Scale",
+          min: 1,
+          max: 1.5,
+          step: 0.005,
+          hint: "Per-channel radial scale separation. 1.1 is the addon default.",
           onChange: syncPostFx,
         });
 
