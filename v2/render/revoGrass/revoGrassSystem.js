@@ -198,11 +198,18 @@ function createSsbo(config, uniforms, { heightTex, windTex, exclusionTex }) {
     data1.x.assign(wrapped.x);
     data1.y.assign(wrapped.y);
 
-    const worldPos = vec3(
+    /** Sample terrain height first so the frustum cull tests the blade where it
+     *  actually renders. Using y=0 here was a latent bug: blades on hilly terrain
+     *  projected far below NDC center in chase cam and got culled around the player. */
+    const worldXZ = vec2(
       wrapped.x.add(uniforms.uAnchorPosition.x),
-      float(0),
       wrapped.y.add(uniforms.uAnchorPosition.z),
     );
+    const terrainUV = worldXZ.div(uniforms.uTerrainSize).add(0.5);
+    const yOffset = texture(heightTex, terrainUV).x;
+    data2.x.assign(yOffset);
+
+    const worldPos = vec3(worldXZ.x, yOffset, worldXZ.y);
 
     const stochasticKeep = computeStochasticKeep(
       worldPos,
@@ -227,14 +234,11 @@ function createSsbo(config, uniforms, { heightTex, windTex, exclusionTex }) {
       uniforms.uFrustumCullEnabled,
     );
 
-    const terrainUV = worldPos.xz.div(uniforms.uTerrainSize).add(0.5);
     const exclAlpha = mix(
       float(1),
       step(uniforms.uExclusionThreshold, texture(exclusionTex, terrainUV).g),
       uniforms.uExclusionEnabled,
     );
-    const yOffset = texture(heightTex, terrainUV).x;
-    data2.x.assign(yOffset);
     const isVisible = stochasticKeep
       .mul(frustumVis)
       .mul(exclAlpha)
@@ -263,11 +267,10 @@ function createSsbo(config, uniforms, { heightTex, windTex, exclusionTex }) {
     data1.w.assign(newWind.y);
     bufferWindNoise.element(instanceIndex).assign(newWind.z);
 
-    const grassWorldPos = vec3(worldPos.x, yOffset, worldPos.z);
     const shadowFactor = mix(
       float(1),
       computeGrassShadowFactor(
-        grassWorldPos,
+        worldPos,
         uniforms.uAnchorPosition,
         uniforms.uPlayerRadius,
         uniforms.uBakedShadowWeight,
