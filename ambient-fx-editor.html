@@ -9,17 +9,6 @@
       body { overflow: hidden; background: #000; font-family: sans-serif; }
       canvas { display: block; width: 100vw; height: 100vh; }
 
-      .tp-dfwv {
-        position: fixed !important;
-        top: 16px !important;
-        right: 16px !important;
-        width: 280px !important;
-        z-index: 20;
-        max-height: calc(100vh - 32px) !important;
-        overflow-y: auto !important;
-        overflow-x: hidden !important;
-      }
-
       #info {
         position: fixed;
         bottom: 16px;
@@ -57,8 +46,7 @@
           "three": "https://cdn.jsdelivr.net/npm/three@0.183.1/build/three.webgpu.js",
           "three/webgpu": "https://cdn.jsdelivr.net/npm/three@0.183.1/build/three.webgpu.js",
           "three/tsl": "https://cdn.jsdelivr.net/npm/three@0.183.1/build/three.tsl.js",
-          "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.183.1/examples/jsm/",
-          "tweakpane": "https://cdn.jsdelivr.net/npm/tweakpane@4.0.5/+esm"
+          "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.183.1/examples/jsm/"
         }
       }
     </script>
@@ -72,11 +60,12 @@
         mx_noise_float,
       } from "three/tsl";
       import { OrbitControls } from "three/addons/controls/OrbitControls.js";
-      import { Pane } from "tweakpane";
+      import { mountInspector } from "./inspector.js";
       import { createButterflyFX, buildButterflyUI } from "./fx-butterflies.js";
       import { createEmberFX, buildEmberUI } from "./fx-embers.js";
       import { createFlowingLines } from "./flowing-lines.js";
       import { createFloatingLeavesFX, buildFloatingLeavesUI } from "./fx-floating-leaves.js";
+      import { createGhostLeavesFX, buildGhostLeavesUI } from "./fx-ghost-leaves.js";
       import { createRainFX, buildRainUI } from "./fx-rain.js";
       import {
         createBillboardCloudFX,
@@ -122,8 +111,8 @@
       let activeEffect = null;
       let activeEffectName = "none";
 
-      // ─── Tweakpane refs (must be declared before init) ────────────────
-      let pane, fxFolder;
+      // ─── Inspector refs (must be declared before init) ────────────────
+      let inspector, fxFolder;
 
       // Simple terrain height used for both the ground mesh and flowing lines.
       function terrainHeight(x, z) {
@@ -363,7 +352,7 @@
           activeEffect = effects[name].create(scene, shared, renderer);
           // Build effect-specific UI
           if (effects[name].buildUI) {
-            fxFolder = pane.addFolder({ title: name, expanded: true });
+            fxFolder = inspector.addFolder({ title: name, expanded: true });
             effects[name].buildUI(fxFolder, activeEffect, shared);
           }
           labelEl.textContent = `FX: ${name}`;
@@ -378,35 +367,36 @@
           Fireflies:      "#bf5",
           "Flowing Lines":"#adf",
           "Floating Leaves":"#9f6",
+          "Falling Leaves":"#e9a35a",
           Rain:           "#8cf",
           "Billboard Clouds": "#def",
         };
         return colors[name] || "#7df";
       }
 
-      // ─── Tweakpane UI ─────────────────────────────────────────────────
+      // ─── Inspector UI ─────────────────────────────────────────────────
       function buildUI() {
-        pane = new Pane({ title: "Ambient FX" });
+        inspector = mountInspector(document.body, "Ambient FX");
 
-        // Effect selector
-        pane.addBinding(shared, "effect", {
+        // ── Effect selector ──
+        const fxSelFolder = inspector.addFolder({ title: "Effect", expanded: true });
+        fxSelFolder.addBinding(shared, "effect", {
           label: "Effect",
           options: {
-            "None":         "none",
-            "Butterflies":  "Butterflies",
-            "Embers":       "Embers",
-            "Fireflies":    "Fireflies",
-            "Flowing Lines":"Flowing Lines",
-            "Floating Leaves":"Floating Leaves",
-            "Rain":         "Rain",
+            "None":            "none",
+            "Butterflies":     "Butterflies",
+            "Embers":          "Embers",
+            "Fireflies":       "Fireflies",
+            "Flowing Lines":   "Flowing Lines",
+            "Floating Leaves": "Floating Leaves",
+            "Falling Leaves":  "Falling Leaves",
+            "Rain":            "Rain",
             "Billboard Clouds": "Billboard Clouds",
           },
         }).on("change", (ev) => switchEffect(ev.value));
 
-        pane.addBlade({ view: "separator" });
-
         // ── Shared environment controls ──
-        const envFolder = pane.addFolder({ title: "Environment", expanded: true });
+        const envFolder = inspector.addFolder({ title: "Environment", expanded: true });
 
         envFolder.addBinding(shared, "timeOfDay", {
           label: "Time of Day",
@@ -473,7 +463,7 @@
         });
         csFolder.addBinding(cloudShadow, "useSharedWind", { label: "Use env wind dir" });
 
-        // Placeholder for effect-specific folder (created dynamically)
+        // Placeholder for effect-specific folder (created dynamically on switch).
         fxFolder = null;
       }
 
@@ -655,6 +645,10 @@
       effects["Floating Leaves"] = {
         create: (sc, sh) => createFloatingLeavesFX(sc, sh, terrainHeight),
         buildUI: (folder, state, sh) => buildFloatingLeavesUI(folder, state),
+      };
+      effects["Falling Leaves"] = {
+        create: (sc, sh) => createGhostLeavesFX(sc, sh),
+        buildUI: (folder, state) => buildGhostLeavesUI(folder, state),
       };
       effects["Rain"] = {
         create: (sc, sh) => {
