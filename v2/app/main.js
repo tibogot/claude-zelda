@@ -30,7 +30,6 @@ import { createSharedTileMaterial } from "../render/terrain/sharedTileMaterial.j
 import { createV2ProceduralGroundMaterial } from "../render/terrain/proceduralGroundMaterial.js";
 import { ChunkStreamManager } from "../core/streaming/chunkStreamManager.js";
 import { SculptSystem } from "../tools/sculpt/sculptSystem.js";
-import { createTweakpaneUi } from "../ui/tweakpaneUi.js";
 import { createHud } from "../ui/hud.js";
 import { createLensFlareSystem } from "../effects/lensFlare.js";
 import { createAutoCliffUniforms } from "../../chunkTerrainAutoCliff.js";
@@ -1337,16 +1336,13 @@ export async function startV2App(opts = {}) {
 
   let _pendingPlayImmersive = false;
 
-  /** Editor shell: fullscreen viewport + hide Tweakpane vs keep chrome for tweaking. */
+  /** Editor shell: fullscreen viewport vs keep chrome for tweaking. */
   function syncPlayEditorChrome(immersive) {
     const appEl = document.getElementById("app");
-    const tpEl = document.querySelector(".tp-dfwv");
     if (immersive) {
       appEl?.classList.add("play-fullscreen");
-      if (tpEl) tpEl.style.display = "none";
     } else {
       appEl?.classList.remove("play-fullscreen");
-      if (tpEl) tpEl.style.display = "";
     }
   }
 
@@ -1429,15 +1425,6 @@ export async function startV2App(opts = {}) {
     splineSystem.handleGroup.visible =
       toolState.mode === "spline" && toolState.spline.showHandles;
     if (toolState.mode !== "spline") splineSystem.clearPreview();
-    if (ui?.waterFolder) ui.waterFolder.hidden = toolState.mode !== "water";
-    if (ui?.decalFolder) ui.decalFolder.hidden = toolState.mode !== "decals";
-    if (ui?.barrierFolder)
-      ui.barrierFolder.expanded = toolState.mode === "barrier";
-    if (ui?.holeFolder) ui.holeFolder.expanded = toolState.mode === "hole";
-    if (ui?.caveFolder) ui.caveFolder.expanded = toolState.mode === "cave";
-    if (ui?.fleurFolder) ui.fleurFolder.hidden = toolState.mode !== "fleurs";
-    if (ui?.ambientFxFolder)
-      ui.ambientFxFolder.hidden = toolState.mode !== "ambientfx";
     if (toolState.mode === "ambientfx") {
       ambientFxStore.setRingsVisible(toolState.ambientFx.showRings);
       leafFxStore.setRingsVisible(toolState.ambientFx.showRings);
@@ -1468,8 +1455,17 @@ export async function startV2App(opts = {}) {
   }
 
   const hud = createHud();
-  /** @type {ReturnType<typeof createTweakpaneUi>} */
-  let ui;
+  /**
+   * Tweakpane has been fully replaced by the custom UI in `v2/editor.html`.
+   * This stub preserves the `(_xxx = () => {...})` callback-assignment side
+   * effects inside the big options literal below (so all module-level
+   * `_callback` vars still get populated) while returning `null` so every
+   * `ui?.pane.refresh()` and `ui?.refreshXxx?.()` call site short-circuits.
+   */
+  function createTweakpaneUi(_options) {
+    return null;
+  }
+  let ui = null;
   let _saveProject, _loadProject;
   let _importTreeGlb,
     _loadTreePreset,
@@ -3188,8 +3184,9 @@ export async function startV2App(opts = {}) {
   }
   syncHoleOverlay();
 
-  propUiCallbacks = ui.propCallbacks;
-  ui.propFolder?.setPropStoreRef?.(propStore);
+  // Wire the prop-add primitive callback (formerly set by Tweakpane's prop folder)
+  // so project load can re-create built-in primitive slots via `propUiCallbacks.onAddPrimitive`.
+  propUiCallbacks.onAddPrimitive = _addPrimitive;
 
   playMode.onExit = () => {
     toolState.mode = "view";
@@ -3553,12 +3550,6 @@ export async function startV2App(opts = {}) {
     transformControls.setMode(toolState.props.transformMode);
     transformControls.enabled = true;
     transformControls.visible = true;
-    const inst = propStore.instances[instIdx];
-    if (inst?.liveParams && ui?.propFolder) {
-      ui.propFolder.showLiveParams(inst, propStore, livePropManager);
-    } else {
-      ui?.propFolder?.hideLiveParams();
-    }
     _onPropSelectionChanged?.(instIdx);
   }
 
@@ -4004,7 +3995,7 @@ export async function startV2App(opts = {}) {
         config.sculpt.strengthMax,
       );
     }
-    ui.refreshBrush();
+    ui?.refreshBrush?.();
   }
   renderer.domElement.addEventListener("wheel", onCanvasWheelBrush, {
     passive: false,
@@ -4642,7 +4633,7 @@ export async function startV2App(opts = {}) {
       }
       perf.trisApprox = tris;
       hud.update({ perf, toolState, sculptSystem });
-      ui.refreshPerf();
+      ui?.refreshPerf?.();
       hudLastMs = now;
     }
     // Road reflection disabled for now (re-enable later)
@@ -4701,6 +4692,7 @@ export async function startV2App(opts = {}) {
     dialogueRunner,
     listDialogueGraphIds,
     caveStore,
+    propUiCallbacks,
     setMode(mode, opts = {}) {
       if (mode === "play") {
         _pendingPlayImmersive = opts.immersive === true;
@@ -5491,7 +5483,7 @@ export async function startV2App(opts = {}) {
       volumetricCloudSystem = null;
       volumetricCloudSystemOptimized?.dispose?.();
       volumetricCloudSystemOptimized = null;
-      ui.dispose();
+      ui?.dispose?.();
       chunkStream.dispose();
       treeLodRenderer.dispose();
       cliffInstancer.dispose();

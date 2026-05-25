@@ -12,7 +12,6 @@
           "three/webgpu": "https://cdn.jsdelivr.net/npm/three@0.183.1/build/three.webgpu.js",
           "three/tsl": "https://cdn.jsdelivr.net/npm/three@0.183.1/build/three.tsl.js",
           "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.183.1/examples/jsm/",
-          "tweakpane": "https://esm.sh/tweakpane@4.0.4",
           "three-mesh-bvh": "https://cdn.jsdelivr.net/npm/three-mesh-bvh@0.9.9/build/index.module.js",
           "howler": "https://esm.sh/howler@2.2.4"
         }
@@ -1181,18 +1180,6 @@
         flex-shrink: 0;
       }
 
-      /* === TWEAKPANE OVERRIDE — embed inside Tools tab === */
-      .tp-dfwv {
-        position: relative !important;
-        top: auto !important;
-        right: auto !important;
-        width: 100% !important;
-        max-height: none !important;
-        overflow-y: visible !important;
-        z-index: auto !important;
-        border-radius: 0 !important;
-      }
-
       /* === LANDING PAGE === */
       #landing {
         position: fixed;
@@ -2216,74 +2203,9 @@
         parent.appendChild(div);
       }
 
-      // === Mode → Tweakpane folder mapping ===
-      const MODE_FOLDERS = {
-        view: [],
-        sculpt: ["Brush", "Sculpt"],
-        paint: ["Brush", "Paint", "Terrain appearance", "Texture library"],
-        treePaint: ["Brush", "Tree LOD"],
-        foliagePaint: ["Brush", "Billboard Foliage"],
-        billboardGrassPaint: ["Brush", "Billboard Grass"],
-        grass: ["Brush", "Grass"],
-        revoGrass: [],
-        cliffGrass: ["Brush", "Cliff Grass"],
-        road: [],
-        fullRoad: [],
-        smartRoad: [],
-        river: ["River"],
-        spline: ["Spline"],
-        cliffs: ["Brush", "Cliffs"],
-        props: ["Props"],
-        water: ["Water bodies · W"],
-        waterfall: ["Waterfall"],
-        actors: ["Actors · N"],
-        decals: ["Decals · D"],
-        fleurs: ["Flowers · M"],
-        ambientfx: ["Ambient FX · X"],
-        barrier: ["Barrier"],
-        hole: ["Terrain holes"],
-        playSpawn: [],
-        play: [],
-      };
-      const ALWAYS_HIDDEN = new Set([
-        "Global",
-        "Lighting & atmosphere",
-        "Terrain/LOD",
-        "Perf Gate",
-      ]);
-      const ALWAYS_VISIBLE = new Set();
-
-      const CUSTOM_MODES = new Set([
-        "sculpt",
-        "paint",
-        "treePaint",
-        "props",
-        "foliagePaint",
-        "billboardGrassPaint",
-        "playSpawn",
-        "hole",
-        "barrier",
-        "ambientfx",
-        "fleurs",
-        "cliffGrass",
-        "cliffs",
-        "water",
-        "waterfall",
-        "actors",
-        "decals",
-        "river",
-        "spline",
-        "grass",
-        "revoGrass",
-        "road",
-        "fullRoad",
-        "smartRoad",
-        "play",
-      ]);
-
-      function syncToolsTab(pane, mode) {
-        if (!pane) return;
-        const hasCustom = CUSTOM_MODES.has(mode);
+      // === Mode → custom-panel visibility ===
+      // (Every mode now uses a custom UI panel built in this file.)
+      function syncToolsTab(mode) {
         const sculptPanel = document.getElementById("sculpt-panel");
         if (sculptPanel)
           sculptPanel.style.display = mode === "sculpt" ? "" : "none";
@@ -2363,22 +2285,6 @@
         const fullRoadPanel = document.getElementById("fullroad-panel");
         if (fullRoadPanel)
           fullRoadPanel.style.display = mode === "fullRoad" ? "" : "none";
-
-        const kept = [];
-        const show = hasCustom
-          ? new Set(kept)
-          : new Set(MODE_FOLDERS[mode] || []);
-        for (const child of pane.children) {
-          if (ALWAYS_HIDDEN.has(child.title)) {
-            child.hidden = true;
-            continue;
-          }
-          if (ALWAYS_VISIBLE.has(child.title)) {
-            child.hidden = false;
-            continue;
-          }
-          child.hidden = !show.has(child.title);
-        }
       }
 
       // === Build custom Sculpt panel ===
@@ -12685,24 +12591,17 @@
           toolsTab.appendChild(buildFullRoadPanel(app));
           toolsTab.appendChild(buildSmartRoadPanel(app));
 
-          // Move Tweakpane pane into the Tools tab & apply mode-aware folder visibility
+          // Wire prop-slot rebuild callback (was set by Tweakpane's propFolder)
+          // so that adding/removing/loading slots from app code rebuilds the custom props panel.
+          if (app.propUiCallbacks) {
+            app.propUiCallbacks._rebuildPropUi = () =>
+              propsPanel._rebuildPropUi?.();
+          }
+
           requestAnimationFrame(() => {
-            const tp = document.querySelector(".tp-dfwv");
-            if (tp) {
-              document.getElementById("tab-tools").appendChild(tp);
-            }
-            syncToolsTab(app.ui?.pane, app.toolState.mode);
+            syncToolsTab(app.toolState.mode);
             toolsModeSelect.value = app.toolState.mode;
             statusText.textContent = "Ready";
-
-            // Chain editor props panel rebuild into the Tweakpane propCallbacks
-            const origRebuild = app.ui?.propCallbacks?._rebuildPropUi;
-            if (app.ui?.propCallbacks) {
-              app.ui.propCallbacks._rebuildPropUi = () => {
-                origRebuild?.();
-                propsPanel._rebuildPropUi?.();
-              };
-            }
           });
 
           // Build the World tab with custom controls
@@ -12758,7 +12657,7 @@
               app.setMode(m);
             }
             syncToolbarHighlight();
-            syncToolsTab(app.ui?.pane, m);
+            syncToolsTab(m);
             toolsModeSelect.value = m;
             if (m === "play") syncPlayImmersiveButtonLabel();
           });
@@ -12770,7 +12669,7 @@
           if (!app) return;
           app.setMode(toolsModeSelect.value);
           syncToolbarHighlight();
-          syncToolsTab(app.ui?.pane, toolsModeSelect.value);
+          syncToolsTab(toolsModeSelect.value);
         });
 
         document
@@ -12803,7 +12702,7 @@
             if (app.toolState.mode !== _lastMode) {
               _lastMode = app.toolState.mode;
               syncToolbarHighlight();
-              syncToolsTab(app.ui?.pane, _lastMode);
+              syncToolsTab(_lastMode);
               toolsModeSelect.value = _lastMode;
               if (_lastMode === "play") syncPlayImmersiveButtonLabel();
             }
@@ -12852,7 +12751,7 @@
             if (!app) return;
             app.setMode("view");
             syncToolbarHighlight();
-            syncToolsTab(app.ui?.pane, "view");
+            syncToolsTab("view");
             toolsModeSelect.value = "view";
           });
       }
