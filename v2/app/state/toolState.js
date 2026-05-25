@@ -1091,10 +1091,10 @@ export function createToolState() {
     /** Revo-style fluffy tile (follows player / camera) — separate from Gemini G and billboard U. */
     revoGrass: {
       enabled: false,
-      qualityPreset: "ultra",
-      tileSize: 130,
-      bladesPerSide: 1088,
-      segments: 4,
+      qualityPreset: "ultraCompact",
+      tileSize: 60,
+      bladesPerSide: 512,
+      segments: 3,
       receiveShadow: false,
       bladeHeight: 1.75,
       bladeWidth: 0.06,
@@ -1120,7 +1120,7 @@ export function createToolState() {
       trailCrushSpeed: 0.4,
       playerRadius: 0.5,
       stochasticR0: 10,
-      stochasticR1: 60,
+      stochasticR1: 30,
       stochasticPMin: 0.1,
       windIntensity: 1,
       windColorStrength: 0.6,

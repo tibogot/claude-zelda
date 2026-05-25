@@ -1,7 +1,11 @@
-/** Grid side presets — 1088² is Revo Realms ultra; use balanced/high for editor play. */
+/** Grid side presets — 1088² is Revo Realms ultra; use balanced/high for editor play.
+ *  ultraCompact matches Ultra density (~70 blades/m²) over a smaller 60 m tile
+ *  so total instances stay at ~262k while the visible look around the player
+ *  is indistinguishable from Ultra. */
 export const REVO_GRASS_QUALITY = {
   balanced: { bladesPerSide: 384, label: "Balanced (~147k)" },
   high: { bladesPerSide: 512, label: "High (~262k)" },
+  ultraCompact: { bladesPerSide: 512, label: "Ultra Compact (~262k)" },
   ultra: { bladesPerSide: 1088, label: "Ultra / Revo (~1.18M)" },
 };
 

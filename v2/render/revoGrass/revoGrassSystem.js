@@ -24,7 +24,6 @@ import {
   remap,
   time,
   PI2,
-  INFINITY,
   length,
   step,
   fract,
@@ -51,7 +50,6 @@ function buildUniforms(rp) {
     uAnchorPosition: uniform(new THREE.Vector3()),
     uTerrainSize: uniform(0),
     uSunDir: uniform(new THREE.Vector3(0.5, 0.8, 0.3)),
-    uCameraForward: uniform(new THREE.Vector3(0, 0, -1)),
     uCameraMatrix: uniform(new THREE.Matrix4()),
     uFx: uniform(1),
     uFy: uniform(1),
@@ -99,9 +97,9 @@ function buildUniforms(rp) {
 function createSsbo(config, uniforms, { heightTex, windTex, exclusionTex }) {
   const buffer1 = instancedArray(config.count, "vec4");
   const buffer2 = instancedArray(config.count, "vec4");
-  const bufferVis = instancedArray(config.count, "float");
-  const bufferShadow = instancedArray(config.count, "float");
-  const bufferWindNoise = instancedArray(config.count, "float");
+  /** Packed per-blade scratch — .x = visibility, .y = shadow, .z = wind noise,
+   *  .w = reserved. One vec4 read in the VS instead of three separate floats. */
+  const bufferAux = instancedArray(config.count, "vec4");
 
   const fBladesPerSide = float(config.bladesPerSide);
   const fSpacing = float(config.spacing);
@@ -149,9 +147,11 @@ function createSsbo(config, uniforms, { heightTex, windTex, exclusionTex }) {
     data2.y.assign(randomScale);
     data2.z.assign(randomScale);
     data2.w.assign(posNoise);
-    bufferVis.element(instanceIndex).assign(float(1));
-    bufferShadow.element(instanceIndex).assign(float(1));
-    bufferWindNoise.element(instanceIndex).assign(float(0));
+    const aux = bufferAux.element(instanceIndex);
+    aux.x.assign(float(1));
+    aux.y.assign(float(1));
+    aux.z.assign(float(0));
+    aux.w.assign(float(0));
   })().compute(config.count, [config.workgroupSize]);
 
   const computeWind = Fn(([prevWind, worldPos, posNoise]) => {
@@ -265,7 +265,6 @@ function createSsbo(config, uniforms, { heightTex, windTex, exclusionTex }) {
     const newWind = computeWind(prevWind, worldPos, posNoise);
     data1.z.assign(newWind.x);
     data1.w.assign(newWind.y);
-    bufferWindNoise.element(instanceIndex).assign(newWind.z);
 
     const shadowFactor = mix(
       float(1),
@@ -277,16 +276,16 @@ function createSsbo(config, uniforms, { heightTex, windTex, exclusionTex }) {
       ),
       uniforms.uPlayerShadowEnabled,
     );
-    bufferShadow.element(instanceIndex).assign(shadowFactor);
-    bufferVis.element(instanceIndex).assign(isVisible);
+    const aux = bufferAux.element(instanceIndex);
+    aux.x.assign(isVisible);
+    aux.y.assign(shadowFactor);
+    aux.z.assign(newWind.z);
   })().compute(config.count, [config.workgroupSize]);
 
   return {
     buffer1,
     buffer2,
-    bufferVis,
-    bufferShadow,
-    bufferWindNoise,
+    bufferAux,
     computeInit,
     computeUpdate,
   };
@@ -303,9 +302,10 @@ function createMaterial(ssbo, uniforms) {
 
       const data1 = ssbo.buffer1.element(instanceIndex);
       const data2 = ssbo.buffer2.element(instanceIndex);
-      const isVisible = ssbo.bufferVis.element(instanceIndex);
-      const shadowFactor = ssbo.bufferShadow.element(instanceIndex);
-      const windNoiseFactor = ssbo.bufferWindNoise.element(instanceIndex);
+      const aux = ssbo.bufferAux.element(instanceIndex);
+      const isVisible = aux.x;
+      const shadowFactor = aux.y;
+      const windNoiseFactor = aux.z;
       const offsetX = data1.x;
       const offsetY = data2.x;
       const offsetZ = data1.y;
@@ -330,9 +330,9 @@ function createMaterial(ssbo, uniforms) {
         .mul(bendProfile);
       this.rotationNode = vec3(baseBending, 0, 0);
 
-      const offscreenOffset = uniforms.uCameraForward
-        .mul(INFINITY)
-        .mul(float(1).sub(isVisible));
+      /** Culled blades are already collapsed to a point via scaleNode = 0; the
+       *  rasterizer drops the degenerate triangle. No need to also push to
+       *  infinity (which risked clip-space NaN on some drivers). */
       const bladePosition = vec3(offsetX, offsetY, offsetZ);
       const randomPhase = positionNoise.mul(PI2);
       const swayAmount = sin(time.mul(5).add(randomPhase)).mul(0.15);
@@ -354,7 +354,6 @@ function createMaterial(ssbo, uniforms) {
       const windOffset = vec3(windXZ.x, windY, windXZ.y).mul(bendProfile);
 
       this.positionNode = bladePosition
-        .add(offscreenOffset)
         .add(swayOffset)
         .add(flutterOffset)
         .add(windOffset);
@@ -430,6 +429,7 @@ export class RevoGrassSystem {
     this._anchorDelta = new THREE.Vector2();
     this._cameraMatrix = new THREE.Matrix4();
     this._lastComputeMs = 0;
+    this._lastMovedMs = 0;
     this._playWindIntensity = 1;
     this._playWindAngleDeg = null;
   }
@@ -609,7 +609,6 @@ export class RevoGrassSystem {
     this._mesh.position.set(anchorPos.x, 0, anchorPos.z);
 
     if (camera) {
-      camera.getWorldDirection(u.uCameraForward.value);
       this._cameraMatrix.multiplyMatrices(
         camera.projectionMatrix,
         camera.matrixWorldInverse,
@@ -622,11 +621,18 @@ export class RevoGrassSystem {
 
     this._lastAnchor.copy(anchorPos);
 
+    /** Three-tier compute throttle: moving = 60 Hz for snappy trail/wind reaction,
+     *  active idle (<1 s since last move) = configured Hz (default 30), deep idle
+     *  (>1 s still) = 10 Hz. Wind frequencies are 1–2 Hz so 10 Hz looks identical
+     *  while saving a real chunk of compute on laptops / when AFK. */
     const minInterval = Math.max(16, rp.computeMinIntervalMs ?? 33);
     const now = performance.now();
+    if (moved) this._lastMovedMs = now;
+    const idleMs = now - this._lastMovedMs;
     const sinceCompute = now - this._lastComputeMs;
     const moveInterval = Math.min(16, minInterval);
-    const requiredInterval = moved ? moveInterval : minInterval;
+    const idleInterval = idleMs > 1000 ? Math.max(minInterval, 100) : minInterval;
+    const requiredInterval = moved ? moveInterval : idleInterval;
     if (sinceCompute < requiredInterval) return;
 
     if (this._computeBusy) return;

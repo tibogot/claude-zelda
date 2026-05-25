@@ -7808,25 +7808,41 @@
         _toggle(mainBody, rp, "enabled", { label: "Enabled", onChange: rCh });
 
         const tileBody = _section(panel, "Tile", false);
+        /** Ultra-Compact preset shrinks the tile radius from 65 m → 30 m while
+         *  keeping the same per-m² density as Ultra (~70 blades/m²). Far blades
+         *  beyond ~30 m are killed by the stochastic fade anyway in Ultra, so
+         *  visually you don't lose anything around the player — only the dead
+         *  zone past 30 m disappears, which is covered by billboard grass. */
         _dropdown(tileBody, rp, "qualityPreset", {
           label: "Quality",
           options: {
             "Balanced (~147k)": "balanced",
             "High (~262k)": "high",
+            "Ultra Compact (~262k)": "ultraCompact",
             "Ultra / Revo (~1.18M)": "ultra",
           },
           onChange: () => {
-            const sides = { balanced: 384, high: 512, ultra: 1088 };
-            rp.bladesPerSide = sides[rp.qualityPreset] ?? 384;
+            if (rp.qualityPreset === "ultraCompact") {
+              rp.bladesPerSide = 512;
+              rp.tileSize = 60;
+              rp.segments = 3;
+              rp.stochasticR1 = 30;
+            } else {
+              const sides = { balanced: 384, high: 512, ultra: 1088 };
+              rp.bladesPerSide = sides[rp.qualityPreset] ?? 384;
+            }
+            _refreshInstances();
             rRb();
           },
         });
-        _info(tileBody, "Instances", (() => {
-          const n = (rp.bladesPerSide ?? 384) ** 2;
+        const _instanceText = (blades) => {
+          const n = (blades ?? 384) ** 2;
           return n >= 500000
             ? `${(n / 1000).toFixed(0)}k — very heavy, lower grid`
             : `${(n / 1000).toFixed(0)}k blades`;
-        })());
+        };
+        const _instInfo = _info(tileBody, "Instances", _instanceText(rp.bladesPerSide));
+        const _refreshInstances = () => _instInfo.update(_instanceText(rp.bladesPerSide));
         _slider(tileBody, rp, "tileSize", {
           label: "Size (m)",
           min: 40,
@@ -7839,7 +7855,10 @@
           min: 64,
           max: 1088,
           step: 16,
-          onChange: rRb,
+          onChange: () => {
+            _refreshInstances();
+            rRb();
+          },
         });
         _slider(tileBody, rp, "segments", {
           label: "Segments",
