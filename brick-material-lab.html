@@ -57,11 +57,32 @@
         word-break: break-all;
         pointer-events: none;
       }
+      #perf-stats {
+        position: fixed;
+        left: 12px;
+        bottom: 60px;
+        z-index: 40;
+        padding: 8px 10px;
+        background: rgba(0, 0, 0, 0.55);
+        border: 1px solid rgba(120, 200, 255, 0.25);
+        border-radius: 6px;
+        color: rgba(180, 220, 255, 0.92);
+        font-size: 11px;
+        font-family: ui-monospace, monospace;
+        line-height: 1.5;
+        pointer-events: none;
+        min-width: 180px;
+      }
+      #perf-stats b {
+        color: #9ad9ff;
+        font-weight: 600;
+      }
     </style>
   </head>
   <body>
     <div id="tweak-root" aria-label="Brick lab settings"></div>
     <pre id="export-snippet" aria-hidden="true"></pre>
+    <div id="perf-stats" aria-hidden="true"></div>
     <div id="hint">
       medieval-arch-showcase wall + arch (same layout code). Gizmo: move opening.
       Orbit: drag · Zoom: wheel.
@@ -114,6 +135,7 @@
         uniform,
         attribute,
       } from "three/tsl";
+      import { fbmPerlin2D, perlinNoise2D } from "./tsl-noise.js";
 
       function mulberry32(seed) {
         let a = seed >>> 0;
@@ -304,6 +326,28 @@
         maxWallBricks: 22000,
         colorSeed: 31415,
 
+        // Brick texture (live uniforms — apply to Low + Medium quality)
+        brickColorDark: "#23272d",
+        brickColorLight: "#7c818a",
+        brickNoiseScale: 1.8,         // worldspace noise frequency
+        brickNoiseContrast: 0.5,      // 0 = soft blobs, 1 = sharp patches
+        brickNoiseStrength: 0.2,      // 0 = flat colour, 1 = strong dark/light bands
+        brickEdgeStrength: 0.08,      // -ve = darker corners (worn), +ve = lifted (clean)
+        brickShadeStrength: 0.24,     // sun-side vs shadow-side brightness range
+        brickRoughness: 0.85,
+        brickRoughnessVar: 0.15,
+        // FBM Perlin (matches v2 ground TSL — proper organic noise, not stripes)
+        brickNoiseOctaves: 3,         // 1..4 (fbmPerlin2D smoothly fades octaves)
+        brickNoiseLacunarity: 2.0,
+        brickNoiseGain: 0.5,
+
+        // Perf / quality
+        shaderQuality: "high",       // "low" | "medium" | "high"
+        lightweightShadows: true,    // skip displacement during shadow pass
+        castShadows: true,
+        receiveShadows: true,
+        shadowMapSize: 2048,         // 512 | 1024 | 2048 | 4096
+
         sunIntensity: 4.5,
         ambientIntensity: 1.05,
         fillIntensity: 1.25,
@@ -436,7 +480,10 @@
         const g = baseGeo.clone();
         const arr = new Float32Array(capacity * 4);
         const att = new THREE.InstancedBufferAttribute(arr, 4);
-        att.setUsage(THREE.DynamicDrawUsage);
+        // StaticDrawUsage: instance data is uploaded once after build and
+        // never changes per-frame in the lab (and in the game except during
+        // active destruction events).
+        att.setUsage(THREE.StaticDrawUsage);
         g.setAttribute("brickVar", att);
         return g;
       }
@@ -451,7 +498,39 @@
       const uChipStrength = uniform(params.chipStrength);
       const uShapeWarp = uniform(params.shapeWarp);
 
-      function createBrickMaterial() {
+      // Live brick-texture uniforms (used by Low + Medium quality shaders).
+      const uBrickColorDark = uniform(new THREE.Color(params.brickColorDark));
+      const uBrickColorLight = uniform(new THREE.Color(params.brickColorLight));
+      const uBrickNoiseScale = uniform(params.brickNoiseScale);
+      const uBrickNoiseContrast = uniform(params.brickNoiseContrast);
+      const uBrickNoiseStrength = uniform(params.brickNoiseStrength);
+      const uBrickEdgeStrength = uniform(params.brickEdgeStrength);
+      const uBrickShadeStrength = uniform(params.brickShadeStrength);
+      const uBrickRoughness = uniform(params.brickRoughness);
+      const uBrickRoughnessVar = uniform(params.brickRoughnessVar);
+      const uBrickNoiseOctaves = uniform(params.brickNoiseOctaves);
+      const uBrickNoiseLacunarity = uniform(params.brickNoiseLacunarity);
+      const uBrickNoiseGain = uniform(params.brickNoiseGain);
+
+      function syncBrickTextureUniforms() {
+        uBrickColorDark.value.set(params.brickColorDark);
+        uBrickColorLight.value.set(params.brickColorLight);
+        uBrickNoiseScale.value = params.brickNoiseScale;
+        uBrickNoiseContrast.value = params.brickNoiseContrast;
+        uBrickNoiseStrength.value = params.brickNoiseStrength;
+        uBrickEdgeStrength.value = params.brickEdgeStrength;
+        uBrickShadeStrength.value = params.brickShadeStrength;
+        uBrickRoughness.value = params.brickRoughness;
+        uBrickRoughnessVar.value = params.brickRoughnessVar;
+        uBrickNoiseOctaves.value = params.brickNoiseOctaves;
+        uBrickNoiseLacunarity.value = params.brickNoiseLacunarity;
+        uBrickNoiseGain.value = params.brickNoiseGain;
+      }
+
+      let _brickMaterialQuality = null;
+      let _brickMaterialShadowMode = null;
+
+      function createBrickMaterial(quality, lightweightShadows) {
         const brickVarA = attribute("brickVar", "vec4");
         const shapeM = brickVarA.x;
         const warpS = brickVarA.y;
@@ -462,84 +541,207 @@
           metalness: 0.015,
         });
 
-        mat.colorNode = Fn(() => {
-          const pw = positionWorld;
-          const seed = grain.mul(6.283).add(greyK.mul(12.7));
-          const p1 = pw.mul(1.05).add(vec3(seed, seed.mul(0.71), seed.mul(0.53)));
-          const p2 = pw.mul(2.35).add(vec3(seed.mul(1.3), seed.mul(0.9), seed.mul(1.1)));
-          const p3 = pw.mul(5.1).add(vec3(seed.mul(2.1), seed, seed.mul(1.7)));
-          const w1 = sin(dot(p1, vec3(1.7, 2.3, 1.9))).mul(0.5).add(0.5);
-          const w2 = sin(dot(p2, vec3(2.2, 1.4, 2.6))).mul(0.5).add(0.5);
-          const w3 = sin(dot(p3, vec3(1.5, 2.8, 2.1))).mul(0.5).add(0.5);
-          const fbm = w1.mul(0.52).add(w2.mul(0.32)).add(w3.mul(0.16));
-          const streak = sin(
-            pw.x.mul(2.8).add(pw.y.mul(4.2)).add(pw.z.mul(1.6)).add(grain.mul(24)),
-          ).mul(0.5).add(0.5);
+        const isHigh = quality === "high";
+        const isMedium = quality === "medium";
+        const isLow = quality === "low";
 
-          const dark = mix(color(0x1a1c20), color(0x2e3138), greyK);
-          const mid = mix(color(0x42454c), color(0x565a62), pow(greyK, float(0.9)));
-          const light = mix(color(0x65696f), color(0x82868e), smoothstep(0.1, 0.9, greyK));
-          const body0 = mix(dark, mix(mid, light, greyK), float(0.58));
-          const stain = smoothstep(float(0.22), float(0.78), fbm);
-          const body1 = mul(body0, mix(float(0.86), float(1.06), stain));
-          const warm = mix(color(0x5c5248), color(0x6a6056), streak);
-          const body2 = mix(
-            body1,
-            mul(body1, warm),
-            float(0.07).mul(smoothstep(0.35, 0.72, streak)),
-          );
-          const moss = smoothstep(float(0.62), float(0.94), w2.mul(w3));
-          const body3 = mix(
-            body2,
-            mul(body2, color(0x9aa898)),
-            moss.mul(0.045).mul(warpS.mul(0.4).add(0.6)),
-          );
+        // ===== colorNode — three quality tiers =====
+        if (isLow) {
+          // ~10 ALU: per-instance tint + flat lit colour. Uses live uniforms
+          // so the "Brick texture" folder can shape it without a recompile.
+          mat.colorNode = Fn(() => {
+            const base = mix(uBrickColorDark, uBrickColorLight, greyK);
+            const nd = clamp(dot(normalWorld, sunDirUniform), 0, 1);
+            const halfShade = uBrickShadeStrength.mul(0.5);
+            const shade = mix(
+              sub(float(1), halfShade),
+              add(float(1), halfShade),
+              nd.mul(0.5).add(0.5),
+            );
+            const shapeTone = mix(float(0.96), float(1.04), shapeM);
+            return mul(mul(base, shade), shapeTone);
+          })();
+        } else if (isMedium) {
+          // ~50 ALU: real FBM Perlin (matches v2 ground TSL), triplanar-lite
+          // blend so noise reads correctly on any wall orientation.
+          mat.colorNode = Fn(() => {
+            const pw = positionWorld;
+            const seed = grain.mul(6.283).add(greyK.mul(12.7));
+            const seedOffset = vec2(seed, seed.mul(0.71));
 
-          const speck = fract(
-            sin(dot(pw.xz, vec2(12.9898, 78.233))).mul(43758.5453),
-          );
-          const freckle = smoothstep(float(0.72), float(0.96), speck).mul(0.11);
-          const baseCol = mul(body3, sub(float(1), freckle));
-          const nd = clamp(dot(normalWorld, sunDirUniform), 0, 1);
-          const coolShade = mix(float(0.88), float(1.14), nd.mul(0.55).add(0.45));
-          const ax = abs(normalWorld.x);
-          const ay = abs(normalWorld.y);
-          const az = abs(normalWorld.z);
-          const edgeFac = pow(max(ax, max(ay, az)), float(2.35));
-          const edgeLift = mix(float(1), float(1.1), edgeFac.mul(0.38));
-          const edgeCool = mix(float(1), float(0.94), edgeFac.mul(0.12));
-          const shapeTone = mix(float(0.96), float(1.04), shapeM.mul(0.35).add(0.65));
-          return mul(
-            mul(mul(mul(baseCol, coolShade), edgeLift), edgeCool),
-            shapeTone,
-          );
-        })();
+            // Triplanar-lite: sample XY and ZY planes, blend by abs(normal.x).
+            // Two perlin fbms instead of one, but covers all wall orientations
+            // without the streak-on-diagonal-faces artifact.
+            const pXY = pw.xy.mul(uBrickNoiseScale).add(seedOffset);
+            const pZY = pw.zy.mul(uBrickNoiseScale).add(seedOffset);
+            const nXY = fbmPerlin2D(
+              pXY,
+              uBrickNoiseOctaves,
+              uBrickNoiseLacunarity,
+              uBrickNoiseGain,
+            );
+            const nZY = fbmPerlin2D(
+              pZY,
+              uBrickNoiseOctaves,
+              uBrickNoiseLacunarity,
+              uBrickNoiseGain,
+            );
+            const blendW = abs(normalWorld.x);
+            const n1 = mix(nXY, nZY, blendW);
 
-        mat.roughnessNode = Fn(() => {
-          const pw = positionWorld
-            .mul(2.4)
-            .add(vec3(grain.mul(9), greyK.mul(6), shapeM.mul(3)));
-          const pit = sin(dot(pw, vec3(2.1, 1.7, 2.4))).mul(0.5).add(0.5);
-          const pit2 = sin(dot(pw.mul(1.7), vec3(1.6, 2.2, 1.9))).mul(0.5).add(0.5);
-          const microRough = pit.mul(0.55).add(pit2.mul(0.45));
-          const baseR = mix(
-            float(0.82),
-            float(0.97),
-            greyK.mul(0.38).add(grain.mul(0.24)),
-          );
-          return clamp(baseR.add(microRough.mul(0.07)), float(0.44), float(0.995));
-        })();
+            const base = mix(uBrickColorDark, uBrickColorLight, greyK);
 
-        mat.emissiveNode = Fn(() => {
-          const nd = clamp(dot(normalWorld, sunDirUniform), 0, 1);
-          const rim = pow(
-            sub(float(1), abs(dot(normalWorld, vec3(0, 1, 0)))),
-            float(2.15),
-          );
-          const g0 = mix(color(0x4a4d52), color(0x686c72), nd);
-          return mul(g0, mul(rim, float(0.032))).mul(warpS.mul(0.55).add(0.45));
-        })();
+            // Contrast control: tighter smoothstep window → harder dark/light bands
+            const halfWin = sub(float(0.5), uBrickNoiseContrast.mul(0.45));
+            const stain = smoothstep(halfWin, sub(float(1), halfWin), n1);
+            const body = mul(
+              base,
+              mix(
+                sub(float(1), uBrickNoiseStrength),
+                add(float(1), uBrickNoiseStrength),
+                stain,
+              ),
+            );
 
+            const nd = clamp(dot(normalWorld, sunDirUniform), 0, 1);
+            const halfShade = uBrickShadeStrength.mul(0.5);
+            const shade = mix(
+              sub(float(1), halfShade),
+              add(float(1), halfShade),
+              nd.mul(0.55).add(0.45),
+            );
+
+            const ax = abs(normalWorld.x);
+            const ay = abs(normalWorld.y);
+            const az = abs(normalWorld.z);
+            const edgeFac = pow(max(ax, max(ay, az)), float(2.4));
+            const edgeAdj = add(float(1), uBrickEdgeStrength.mul(edgeFac));
+            const shapeTone = mix(float(0.96), float(1.04), shapeM);
+            return mul(mul(mul(mul(body, shade), edgeAdj), shapeTone), float(1));
+          })();
+        } else {
+          // High (~120 ALU): real FBM Perlin base + stylistic accent layers
+          // (streak, warm, moss, freckle) for the "hero" look.
+          mat.colorNode = Fn(() => {
+            const pw = positionWorld;
+            const seed = grain.mul(6.283).add(greyK.mul(12.7));
+            const seedOffset = vec2(seed, seed.mul(0.71));
+
+            // Triplanar-lite FBM Perlin replaces the stripey sin() stack.
+            const pXY = pw.xy.mul(uBrickNoiseScale).add(seedOffset);
+            const pZY = pw.zy.mul(uBrickNoiseScale).add(seedOffset);
+            const fbmXY = fbmPerlin2D(
+              pXY,
+              uBrickNoiseOctaves,
+              uBrickNoiseLacunarity,
+              uBrickNoiseGain,
+            );
+            const fbmZY = fbmPerlin2D(
+              pZY,
+              uBrickNoiseOctaves,
+              uBrickNoiseLacunarity,
+              uBrickNoiseGain,
+            );
+            const fbm = mix(fbmXY, fbmZY, abs(normalWorld.x));
+            // Higher-frequency single Perlin for moss accent (cheap)
+            const w2 = perlinNoise2D(pXY.mul(2.35));
+            const w3 = perlinNoise2D(pZY.mul(5.1).add(vec2(7, 13)));
+            const streak = sin(
+              pw.x.mul(2.8).add(pw.y.mul(4.2)).add(pw.z.mul(1.6)).add(grain.mul(24)),
+            ).mul(0.5).add(0.5);
+
+            // Hero path: blend user dark/light through three implicit tiers
+            const dark = uBrickColorDark;
+            const light = uBrickColorLight;
+            const mid = mix(dark, light, float(0.5));
+            const body0 = mix(dark, mix(mid, light, greyK), float(0.58));
+            const halfWinH = sub(float(0.5), uBrickNoiseContrast.mul(0.35));
+            const stain = smoothstep(halfWinH, sub(float(1), halfWinH), fbm);
+            const body1 = mul(
+              body0,
+              mix(
+                sub(float(1), uBrickNoiseStrength),
+                add(float(1), uBrickNoiseStrength),
+                stain,
+              ),
+            );
+            const warm = mix(color(0x5c5248), color(0x6a6056), streak);
+            const body2 = mix(
+              body1,
+              mul(body1, warm),
+              float(0.07).mul(smoothstep(0.35, 0.72, streak)),
+            );
+            const moss = smoothstep(float(0.62), float(0.94), w2.mul(w3));
+            const body3 = mix(
+              body2,
+              mul(body2, color(0x9aa898)),
+              moss.mul(0.045).mul(warpS.mul(0.4).add(0.6)),
+            );
+
+            const speck = fract(
+              sin(dot(pw.xz, vec2(12.9898, 78.233))).mul(43758.5453),
+            );
+            const freckle = smoothstep(float(0.72), float(0.96), speck).mul(0.11);
+            const baseCol = mul(body3, sub(float(1), freckle));
+            const nd = clamp(dot(normalWorld, sunDirUniform), 0, 1);
+            const halfShadeH = uBrickShadeStrength.mul(0.5);
+            const coolShade = mix(
+              sub(float(1), halfShadeH),
+              add(float(1), halfShadeH),
+              nd.mul(0.55).add(0.45),
+            );
+            const ax = abs(normalWorld.x);
+            const ay = abs(normalWorld.y);
+            const az = abs(normalWorld.z);
+            const edgeFac = pow(max(ax, max(ay, az)), float(2.35));
+            const edgeLift = add(float(1), uBrickEdgeStrength.mul(edgeFac));
+            const shapeTone = mix(float(0.96), float(1.04), shapeM.mul(0.35).add(0.65));
+            return mul(mul(mul(baseCol, coolShade), edgeLift), shapeTone);
+          })();
+        }
+
+        // ===== roughnessNode — only adds cost on high =====
+        if (isHigh) {
+          mat.roughnessNode = Fn(() => {
+            const pw = positionWorld
+              .mul(2.4)
+              .add(vec3(grain.mul(9), greyK.mul(6), shapeM.mul(3)));
+            const pit = sin(dot(pw, vec3(2.1, 1.7, 2.4))).mul(0.5).add(0.5);
+            const pit2 = sin(dot(pw.mul(1.7), vec3(1.6, 2.2, 1.9))).mul(0.5).add(0.5);
+            const microRough = pit.mul(0.55).add(pit2.mul(0.45));
+            const baseR = mix(
+              float(0.82),
+              float(0.97),
+              greyK.mul(0.38).add(grain.mul(0.24)),
+            );
+            return clamp(baseR.add(microRough.mul(0.07)), float(0.44), float(0.995));
+          })();
+        } else {
+          // Cheap, uniform-driven roughness for Low + Medium quality.
+          mat.roughnessNode = Fn(() => {
+            const variation = sub(greyK.mul(2), float(1)).mul(uBrickRoughnessVar);
+            return clamp(
+              add(uBrickRoughness, variation),
+              float(0.3),
+              float(0.99),
+            );
+          })();
+        }
+
+        // ===== emissiveNode — only on high =====
+        if (isHigh) {
+          mat.emissiveNode = Fn(() => {
+            const nd = clamp(dot(normalWorld, sunDirUniform), 0, 1);
+            const rim = pow(
+              sub(float(1), abs(dot(normalWorld, vec3(0, 1, 0)))),
+              float(2.15),
+            );
+            const g0 = mix(color(0x4a4d52), color(0x686c72), nd);
+            return mul(g0, mul(rim, float(0.032))).mul(warpS.mul(0.55).add(0.45));
+          })();
+        }
+
+        // ===== positionNode (vertex displacement, runs for color AND shadow) =====
         mat.positionNode = Fn(() => {
           const pl = positionLocal;
           const nl = normalLocal;
@@ -608,7 +810,30 @@
           return positionLocal.add(nl.mul(bulgeAmp)).add(chip);
         })();
 
+        // Big shadow-pass win: skip bulge/chip displacement during shadow render.
+        // castShadowPositionNode tells three.js NodeMaterial to use this expression
+        // for the shadow depth pass instead of positionNode.
+        if (lightweightShadows) {
+          mat.castShadowPositionNode = positionLocal;
+        }
+
+        _brickMaterialQuality = quality;
+        _brickMaterialShadowMode = !!lightweightShadows;
         return mat;
+      }
+
+      function ensureBrickMaterial() {
+        if (
+          brickMat &&
+          _brickMaterialQuality === params.shaderQuality &&
+          _brickMaterialShadowMode === !!params.lightweightShadows
+        ) {
+          return;
+        }
+        brickMat = createBrickMaterial(
+          params.shaderQuality,
+          !!params.lightweightShadows,
+        );
       }
 
       // ===========================================================================
@@ -671,6 +896,22 @@
       function syncSunDirectionUniform() {
         _sunDirVec.copy(sun.target.position).sub(sun.position).normalize();
         sunDirUniform.value.copy(_sunDirVec);
+      }
+
+      function applyShadowMapSize() {
+        const s = Math.max(256, Math.min(4096, params.shadowMapSize | 0));
+        if (sun.shadow.mapSize.x === s && sun.shadow.mapSize.y === s) return;
+        sun.shadow.mapSize.set(s, s);
+        if (sun.shadow.map) {
+          sun.shadow.map.dispose();
+          sun.shadow.map = null;
+        }
+      }
+
+      function applyShadowSettingsToMesh(m) {
+        if (!m) return;
+        m.castShadow = !!params.castShadows;
+        m.receiveShadow = !!params.receiveShadows;
       }
 
       // Ground
@@ -914,8 +1155,8 @@
         const cap = Math.min(params.maxBricks, nU + nS + 8);
         const doorGeo = createInstancedBrickGeometry(brickGeo, cap);
         doorMesh = new THREE.InstancedMesh(doorGeo, brickMat, cap);
-        doorMesh.castShadow = true;
-        doorMesh.receiveShadow = true;
+        doorMesh.castShadow = !!params.castShadows;
+        doorMesh.receiveShadow = !!params.receiveShadows;
 
         const rnd = mulberry32(params.colorSeed | 0);
         let k = 0;
@@ -1003,8 +1244,8 @@
           brickMat,
           params.maxWallBricks,
         );
-        wallMesh.castShadow = true;
-        wallMesh.receiveShadow = true;
+        wallMesh.castShadow = !!params.castShadows;
+        wallMesh.receiveShadow = !!params.receiveShadows;
         wallMesh.position.set(0, 0, params.wallZ);
 
         const rnd = mulberry32((params.colorSeed ^ 91379) | 0);
@@ -1222,7 +1463,7 @@
       function rebuildInstances(remakeGeometry) {
         disposeMasonryMeshes();
         ensureBrickGeometry(!!remakeGeometry);
-        if (!brickMat) brickMat = createBrickMaterial();
+        ensureBrickMaterial();
         clampArchAlong();
         clampArchAlongZ();
         clampDoorSillInWall();
@@ -1262,6 +1503,23 @@
           legHeight: +params.legHeight.toFixed(2),
           archRingDepthScale: +params.archRingDepthScale.toFixed(2),
           colorSeed: params.colorSeed | 0,
+          brickColorDark: params.brickColorDark,
+          brickColorLight: params.brickColorLight,
+          brickNoiseScale: +params.brickNoiseScale.toFixed(2),
+          brickNoiseContrast: +params.brickNoiseContrast.toFixed(2),
+          brickNoiseStrength: +params.brickNoiseStrength.toFixed(2),
+          brickEdgeStrength: +params.brickEdgeStrength.toFixed(2),
+          brickShadeStrength: +params.brickShadeStrength.toFixed(2),
+          brickRoughness: +params.brickRoughness.toFixed(2),
+          brickRoughnessVar: +params.brickRoughnessVar.toFixed(2),
+          brickNoiseOctaves: +params.brickNoiseOctaves.toFixed(1),
+          brickNoiseLacunarity: +params.brickNoiseLacunarity.toFixed(2),
+          brickNoiseGain: +params.brickNoiseGain.toFixed(2),
+          shaderQuality: params.shaderQuality,
+          lightweightShadows: !!params.lightweightShadows,
+          castShadows: !!params.castShadows,
+          receiveShadows: !!params.receiveShadows,
+          shadowMapSize: params.shadowMapSize | 0,
         };
         el.textContent = JSON.stringify(snippet, null, 2);
       }
@@ -1275,6 +1533,7 @@
         fill.intensity = params.fillIntensity;
         renderer.toneMappingExposure = params.exposure;
         syncSunDirectionUniform();
+        syncBrickTextureUniforms();
       }
 
       let rebuildTimer = 0;
@@ -1327,6 +1586,138 @@
         max: 2.5,
         step: 0.05,
       });
+
+      const fTex = pane.addFolder({
+        title: "Brick texture (Low / Medium)",
+        expanded: true,
+      });
+      fTex.addBinding(params, "brickColorDark", { label: "color dark" });
+      fTex.addBinding(params, "brickColorLight", { label: "color light" });
+      fTex.addBinding(params, "brickNoiseScale", {
+        label: "noise scale",
+        min: 0.2,
+        max: 8,
+        step: 0.05,
+      });
+      fTex.addBinding(params, "brickNoiseContrast", {
+        label: "noise contrast",
+        min: 0,
+        max: 1,
+        step: 0.01,
+      });
+      fTex.addBinding(params, "brickNoiseStrength", {
+        label: "noise strength",
+        min: 0,
+        max: 0.6,
+        step: 0.01,
+      });
+      fTex.addBinding(params, "brickNoiseOctaves", {
+        label: "fbm octaves",
+        min: 1,
+        max: 4,
+        step: 0.5,
+      });
+      fTex.addBinding(params, "brickNoiseLacunarity", {
+        label: "fbm lacunarity",
+        min: 1.4,
+        max: 3.2,
+        step: 0.05,
+      });
+      fTex.addBinding(params, "brickNoiseGain", {
+        label: "fbm gain",
+        min: 0.2,
+        max: 0.8,
+        step: 0.02,
+      });
+      fTex.addBinding(params, "brickEdgeStrength", {
+        label: "edge (-dark / +lift)",
+        min: -0.3,
+        max: 0.3,
+        step: 0.01,
+      });
+      fTex.addBinding(params, "brickShadeStrength", {
+        label: "sun shade range",
+        min: 0,
+        max: 0.6,
+        step: 0.01,
+      });
+      fTex.addBinding(params, "brickRoughness", {
+        label: "roughness",
+        min: 0.3,
+        max: 0.99,
+        step: 0.01,
+      });
+      fTex.addBinding(params, "brickRoughnessVar", {
+        label: "roughness variation",
+        min: 0,
+        max: 0.4,
+        step: 0.01,
+      });
+
+      const fTexPresets = fTex.addFolder({
+        title: "Texture presets",
+        expanded: false,
+      });
+      fTexPresets
+        .addButton({ title: "Default Granite" })
+        .on("click", () => {
+          params.brickColorDark = "#23272d";
+          params.brickColorLight = "#7c818a";
+          params.brickNoiseScale = 1.8;
+          params.brickNoiseContrast = 0.5;
+          params.brickNoiseStrength = 0.2;
+          params.brickEdgeStrength = 0.08;
+          params.brickShadeStrength = 0.24;
+          params.brickRoughness = 0.85;
+          params.brickRoughnessVar = 0.15;
+          pane.refresh();
+          syncBrickTextureUniforms();
+        });
+      fTexPresets
+        .addButton({ title: "Sandstone (warm)" })
+        .on("click", () => {
+          params.brickColorDark = "#4a3a2a";
+          params.brickColorLight = "#c4a37a";
+          params.brickNoiseScale = 2.2;
+          params.brickNoiseContrast = 0.65;
+          params.brickNoiseStrength = 0.18;
+          params.brickEdgeStrength = -0.1;
+          params.brickShadeStrength = 0.22;
+          params.brickRoughness = 0.92;
+          params.brickRoughnessVar = 0.12;
+          pane.refresh();
+          syncBrickTextureUniforms();
+        });
+      fTexPresets
+        .addButton({ title: "Mossy stone (cool)" })
+        .on("click", () => {
+          params.brickColorDark = "#2a3328";
+          params.brickColorLight = "#727a68";
+          params.brickNoiseScale = 1.4;
+          params.brickNoiseContrast = 0.4;
+          params.brickNoiseStrength = 0.28;
+          params.brickEdgeStrength = -0.12;
+          params.brickShadeStrength = 0.28;
+          params.brickRoughness = 0.88;
+          params.brickRoughnessVar = 0.18;
+          pane.refresh();
+          syncBrickTextureUniforms();
+        });
+      fTexPresets
+        .addButton({ title: "Ghibli stylized" })
+        .on("click", () => {
+          params.brickColorDark = "#3e3a3a";
+          params.brickColorLight = "#b8aea2";
+          params.brickNoiseScale = 3.2;
+          params.brickNoiseContrast = 0.75;
+          params.brickNoiseStrength = 0.15;
+          params.brickEdgeStrength = -0.18;
+          params.brickShadeStrength = 0.32;
+          params.brickRoughness = 0.78;
+          params.brickRoughnessVar = 0.08;
+          pane.refresh();
+          syncBrickTextureUniforms();
+        });
 
       const fWall = pane.addFolder({ title: "Wall layout", expanded: true });
       fWall.addBinding(params, "wallWidth", { min: 6, max: 28, step: 0.5 });
@@ -1404,6 +1795,52 @@
       const fScene = pane.addFolder({ title: "Scene", expanded: false });
       fScene.addBinding(params, "wallEnabled", { label: "show wall" });
 
+      const fPerf = pane.addFolder({ title: "Performance", expanded: true });
+      fPerf.addBinding(params, "shaderQuality", {
+        label: "shader quality",
+        options: {
+          "Low (~10 ALU)": "low",
+          "Medium (~30 ALU)": "medium",
+          "High (~100 ALU)": "high",
+        },
+      });
+      fPerf.addBinding(params, "lightweightShadows", {
+        label: "skip displacement in shadows",
+      });
+      fPerf.addBinding(params, "castShadows", { label: "cast shadows" });
+      fPerf.addBinding(params, "receiveShadows", { label: "receive shadows" });
+      fPerf.addBinding(params, "shadowMapSize", {
+        label: "shadow map size",
+        options: { "512": 512, "1024": 1024, "2048": 2048, "4096": 4096 },
+      });
+      fPerf
+        .addButton({ title: "Game-ready preset" })
+        .on("click", () => {
+          params.shaderQuality = "medium";
+          params.lightweightShadows = true;
+          params.castShadows = true;
+          params.receiveShadows = true;
+          params.shadowMapSize = 1024;
+          params.roundSegments = 2;
+          params.faceBulge = 0;
+          params.chipStrength = 0.015;
+          pane.refresh();
+          scheduleRebuild(true);
+        });
+      fPerf
+        .addButton({ title: "Hero preset (best looking)" })
+        .on("click", () => {
+          params.shaderQuality = "high";
+          params.lightweightShadows = true;
+          params.castShadows = true;
+          params.receiveShadows = true;
+          params.shadowMapSize = 2048;
+          params.roundSegments = 4;
+          params.chipStrength = 0.025;
+          pane.refresh();
+          scheduleRebuild(true);
+        });
+
       const fLight = pane.addFolder({ title: "Lighting", expanded: false });
       fLight.addBinding(params, "sunIntensity", { min: 0.5, max: 8, step: 0.1 });
       fLight.addBinding(params, "fillIntensity", { label: "fill", min: 0, max: 4, step: 0.05 });
@@ -1449,6 +1886,16 @@
         "archPointedness",
       ]);
 
+      const perfKeysShadowOnly = new Set([
+        "castShadows",
+        "receiveShadows",
+        "shadowMapSize",
+      ]);
+      const perfKeysRebuildMat = new Set([
+        "shaderQuality",
+        "lightweightShadows",
+      ]);
+
       pane.on("change", (ev) => {
         syncLiveUniforms();
         updateExportSnippet();
@@ -1456,6 +1903,18 @@
         if (key === "showArchGizmo" && archGizmo) {
           archGizmo.enabled = params.showArchGizmo;
           archGizmo.visible = params.showArchGizmo;
+          return;
+        }
+        if (perfKeysShadowOnly.has(key)) {
+          applyShadowMapSize();
+          applyShadowSettingsToMesh(wallMesh);
+          applyShadowSettingsToMesh(doorMesh);
+          return;
+        }
+        if (perfKeysRebuildMat.has(key)) {
+          // Force material recompile; mesh data unchanged
+          brickMat = null;
+          scheduleRebuild(false);
           return;
         }
         if (geoKeys.has(key)) {
@@ -1470,14 +1929,71 @@
       });
 
       setupArchGizmo();
+      applyShadowMapSize();
       rebuildInstances(true);
       frameWallCamera();
       syncLiveUniforms();
 
       await renderer.init();
 
+      // ===== Live perf stats overlay =====
+      const perfStatsEl = document.getElementById("perf-stats");
+      const frameTimes = new Float32Array(60);
+      let frameIdx = 0;
+      let frameFilled = 0;
+      let lastFrameT = performance.now();
+      let statsAccum = 0;
+
+      function brickCount() {
+        return (wallMesh?.count || 0) + (doorMesh?.count || 0);
+      }
+
+      function vertCountPerBrick() {
+        const s = Math.max(1, Math.min(6, params.roundSegments | 0));
+        // RoundedBoxGeometry vertex count ≈ 6 * (s+1)^2 + corner/edge fillets.
+        // Approximate (good enough for the overlay).
+        return 24 + 6 * (s + 1) * (s + 1) + 12 * (s + 1);
+      }
+
+      function updatePerfStats() {
+        if (!perfStatsEl) return;
+        const sum = frameTimes
+          .subarray(0, Math.max(1, frameFilled))
+          .reduce((a, b) => a + b, 0);
+        const avg = sum / Math.max(1, frameFilled);
+        const fps = avg > 0 ? 1000 / avg : 0;
+        const bricks = brickCount();
+        const vperb = vertCountPerBrick();
+        const totalV = bricks * vperb;
+        const shadowM = sun.shadow.mapSize.x;
+        const drawCalls =
+          (wallMesh ? 1 : 0) +
+          (doorMesh ? 1 : 0) +
+          (mortarMesh ? 1 : 0) +
+          1; /* ground */
+        perfStatsEl.innerHTML =
+          `<b>${avg.toFixed(2)}ms</b> · <b>${fps.toFixed(0)} fps</b><br>` +
+          `bricks: <b>${bricks.toLocaleString()}</b> · verts/brick: ${vperb}<br>` +
+          `total verts: <b>${(totalV / 1000).toFixed(1)}k</b><br>` +
+          `draw calls: <b>${drawCalls}</b> · shadow: <b>${shadowM}</b><br>` +
+          `shader: <b>${params.shaderQuality}</b>` +
+          (params.lightweightShadows ? " · <b>light shadows</b>" : "") +
+          (params.castShadows ? "" : " · <b>no cast</b>");
+      }
+
       function animate() {
         requestAnimationFrame(animate);
+        const now = performance.now();
+        const dt = now - lastFrameT;
+        lastFrameT = now;
+        frameTimes[frameIdx] = dt;
+        frameIdx = (frameIdx + 1) % frameTimes.length;
+        if (frameFilled < frameTimes.length) frameFilled++;
+        statsAccum += dt;
+        if (statsAccum > 250) {
+          statsAccum = 0;
+          updatePerfStats();
+        }
         controls.update();
         renderer.render(scene, camera);
       }
