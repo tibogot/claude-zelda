@@ -5245,6 +5245,9 @@ export async function startV2App(opts = {}) {
       fullRoadSystem.clearAllDecals();
       ui?.pane.refresh();
     },
+    rebuildCarAudio() {
+      playMode.rebuildCarAudio();
+    },
     smartRoadChanged() {
       smartRoadSystem.syncMaterial();
       smartRoadSystem.rebuildAllMeshes();

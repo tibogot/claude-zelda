@@ -2200,15 +2200,8 @@
         ambientfx: ["Ambient FX · X"],
         barrier: ["Barrier"],
         hole: ["Terrain holes"],
-        playSpawn: ["Play / Spawn"],
-        play: [
-          "Play / Drift Smoke",
-          "Play / Car Feel",
-          "Play / Camera Collision",
-          "Play / Car audio",
-          "Play / Spawn",
-          "Audio (mixer)",
-        ],
+        playSpawn: [],
+        play: [],
       };
       const ALWAYS_HIDDEN = new Set([
         "Global",
@@ -2243,6 +2236,7 @@
         "road",
         "fullRoad",
         "smartRoad",
+        "play",
       ]);
 
       function syncToolsTab(pane, mode) {
@@ -2271,7 +2265,10 @@
             mode === "billboardGrassPaint" ? "" : "none";
         const playspawnPanel = document.getElementById("playspawn-panel");
         if (playspawnPanel)
-          playspawnPanel.style.display = mode === "playSpawn" ? "" : "none";
+          playspawnPanel.style.display =
+            mode === "playSpawn" || mode === "play" ? "" : "none";
+        const playPanel = document.getElementById("play-panel");
+        if (playPanel) playPanel.style.display = mode === "play" ? "" : "none";
         const holePanel = document.getElementById("hole-panel");
         if (holePanel) holePanel.style.display = mode === "hole" ? "" : "none";
         const cavePanel = document.getElementById("cave-panel");
@@ -5107,6 +5104,311 @@
           const slot = ts.foliageSlots[slotIdx];
           panel._foliageTexInfo[slotIdx]?.update(foliageTextureLabel(slot));
         };
+        return panel;
+      }
+
+      // === Build custom Play panel (Drift Smoke + Car Feel + Camera Collision + Car Audio) ===
+      function buildPlayPanel(app) {
+        const panel = document.createElement("div");
+        panel.id = "play-panel";
+        const ts = app.toolState;
+
+        // --- Drift Smoke ---
+        const smoke = ts.playSmoke;
+        const smokeBody = _section(panel, "Drift Smoke", false);
+        _toggle(smokeBody, smoke, "enabled", { label: "Enabled" });
+        _color(smokeBody, smoke, "color", { label: "Color" });
+        _slider(smokeBody, smoke, "opacity", {
+          label: "Opacity",
+          min: 0,
+          max: 1,
+          step: 0.01,
+        });
+        _slider(smokeBody, smoke, "emitRate", {
+          label: "Emit rate",
+          min: 0,
+          max: 120,
+          step: 1,
+        });
+        _slider(smokeBody, smoke, "trigger", {
+          label: "Trigger",
+          min: 0,
+          max: 0.5,
+          step: 0.01,
+          hint: "Slip angle above which smoke starts emitting.",
+        });
+        _slider(smokeBody, smoke, "sizeMin", {
+          label: "Size min",
+          min: 0.05,
+          max: 3,
+          step: 0.01,
+        });
+        _slider(smokeBody, smoke, "sizeMax", {
+          label: "Size max",
+          min: 0.05,
+          max: 4,
+          step: 0.01,
+        });
+        _slider(smokeBody, smoke, "sizeGrowth", {
+          label: "Growth",
+          min: 0,
+          max: 6,
+          step: 0.05,
+        });
+        _slider(smokeBody, smoke, "lifeMin", {
+          label: "Life min",
+          min: 0.1,
+          max: 4,
+          step: 0.05,
+        });
+        _slider(smokeBody, smoke, "lifeMax", {
+          label: "Life max",
+          min: 0.1,
+          max: 5,
+          step: 0.05,
+        });
+        _slider(smokeBody, smoke, "rise", {
+          label: "Rise",
+          min: 0,
+          max: 3,
+          step: 0.02,
+        });
+        _slider(smokeBody, smoke, "spread", {
+          label: "Spread",
+          min: 0,
+          max: 3,
+          step: 0.02,
+        });
+        _slider(smokeBody, smoke, "drag", {
+          label: "Drag",
+          min: 0,
+          max: 0.6,
+          step: 0.01,
+        });
+
+        // --- Car Feel ---
+        const car = ts.playCar;
+        const carBody = _section(panel, "Car Feel", false);
+        _slider(carBody, car, "accelScale", {
+          label: "Acceleration",
+          min: 0.25,
+          max: 3,
+          step: 0.05,
+        });
+        _slider(carBody, car, "maxSpeedScale", {
+          label: "Top speed",
+          min: 0.25,
+          max: 3,
+          step: 0.05,
+        });
+        _slider(carBody, car, "speedometerScale", {
+          label: "Speedometer",
+          min: 0.1,
+          max: 2,
+          step: 0.05,
+        });
+        _slider(carBody, car, "cameraDistance", {
+          label: "Cam distance",
+          min: 4,
+          max: 24,
+          step: 0.25,
+        });
+        _slider(carBody, car, "cameraHeight", {
+          label: "Cam height",
+          min: 1,
+          max: 10,
+          step: 0.1,
+        });
+        _slider(carBody, car, "cameraChaseSpeed", {
+          label: "Cam chase",
+          min: 0.5,
+          max: 12,
+          step: 0.1,
+        });
+        _slider(carBody, car, "cameraDriftLag", {
+          label: "Drift cam lag",
+          min: 0,
+          max: 5,
+          step: 0.1,
+        });
+
+        // --- Camera Collision ---
+        const camCol = ts.playCamera;
+        const camColBody = _section(panel, "Camera Collision", false);
+        _toggle(camColBody, camCol, "enabled", { label: "Enabled" });
+        _toggle(camColBody, camCol, "wallPullEnabled", { label: "Wall pull-in" });
+        _toggle(camColBody, camCol, "floorClampEnabled", {
+          label: "Floor clamp",
+        });
+        _slider(camColBody, camCol, "offset", {
+          label: "Skin offset",
+          min: 0,
+          max: 2,
+          step: 0.05,
+        });
+        _slider(camColBody, camCol, "easeOut", {
+          label: "Ease-out rate",
+          min: 0.5,
+          max: 20,
+          step: 0.1,
+        });
+
+        // --- Car Audio ---
+        const carAu = ts.playCarAudio;
+        const carAudioBody = _section(panel, "Car Audio", false);
+        _toggle(carAudioBody, carAu, "enabled", { label: "Enabled" });
+
+        const carVolBody = _section(carAudioBody, "Layer volumes", false);
+        _slider(carVolBody, carAu, "engineMul", {
+          label: "Synth engine",
+          min: 0,
+          max: 1.5,
+          step: 0.02,
+        });
+        _slider(carVolBody, carAu, "windMul", {
+          label: "Wind / speed",
+          min: 0,
+          max: 1,
+          step: 0.05,
+        });
+        _slider(carVolBody, carAu, "wheelsMul", {
+          label: "Wheels surface",
+          min: 0,
+          max: 1,
+          step: 0.05,
+        });
+        _slider(carVolBody, carAu, "nitroMul", {
+          label: "Nitro (one-shot)",
+          min: 0,
+          max: 1,
+          step: 0.05,
+        });
+        _slider(carVolBody, carAu, "driftBrakeMul", {
+          label: "Drift brake (Space)",
+          min: 0,
+          max: 1.2,
+          step: 0.05,
+        });
+
+        const engBody = _section(
+          carAudioBody,
+          "Synth engine (pitch ∝ speed)",
+          false,
+        );
+        _slider(engBody, carAu, "engineRefTopSpeed", {
+          label: "Normal top m/s (0=45)",
+          min: 0,
+          max: 90,
+          step: 1,
+        });
+        _slider(engBody, carAu, "engineVol", {
+          label: "Steady volume",
+          min: 0,
+          max: 1.5,
+          step: 0.02,
+        });
+        _slider(engBody, carAu, "enginePitchMin", {
+          label: "Idle pitch (1=native)",
+          min: 0.85,
+          max: 1.15,
+          step: 0.01,
+        });
+        _slider(engBody, carAu, "enginePitchMax", {
+          label: "Pitch @ normal top",
+          min: 1.2,
+          max: 4,
+          step: 0.05,
+        });
+        _slider(engBody, carAu, "enginePitchBoostMax", {
+          label: "Pitch @ boost top",
+          min: 1.5,
+          max: 4,
+          step: 0.05,
+        });
+        _slider(engBody, carAu, "enginePitchIdleSpeedMax", {
+          label: "Idle band m/s",
+          min: 0,
+          max: 3,
+          step: 0.05,
+        });
+        _slider(engBody, carAu, "enginePitchCurvePow", {
+          label: "Speed curve (1=linear)",
+          min: 0.5,
+          max: 2.5,
+          step: 0.05,
+        });
+        _slider(engBody, carAu, "enginePitchEase", {
+          label: "Pitch smooth",
+          min: 4,
+          max: 24,
+          step: 0.5,
+        });
+        _slider(carAudioBody, carAu, "engineFadeEaseUp", {
+          label: "Engine fade in",
+          min: 6,
+          max: 40,
+          step: 0.5,
+        });
+
+        const loopBody = _section(
+          carAudioBody,
+          "Loop regions (Howler sprites)",
+          false,
+        );
+        _slider(loopBody, carAu, "engineLoopStartMs", {
+          label: "Engine start ms",
+          min: 0,
+          max: 120000,
+          step: 10,
+        });
+        _slider(loopBody, carAu, "engineLoopDurationMs", {
+          label: "Engine dur ms (0=full)",
+          min: 0,
+          max: 120000,
+          step: 10,
+        });
+        _slider(loopBody, carAu, "windLoopStartMs", {
+          label: "Wind start ms",
+          min: 0,
+          max: 120000,
+          step: 10,
+        });
+        _slider(loopBody, carAu, "windLoopDurationMs", {
+          label: "Wind dur ms (0=full)",
+          min: 0,
+          max: 120000,
+          step: 10,
+        });
+        _slider(loopBody, carAu, "wheelsLoopStartMs", {
+          label: "Wheels start ms",
+          min: 0,
+          max: 120000,
+          step: 10,
+        });
+        _slider(loopBody, carAu, "wheelsLoopDurationMs", {
+          label: "Wheels dur ms (0=full)",
+          min: 0,
+          max: 120000,
+          step: 10,
+        });
+        _slider(loopBody, carAu, "driftBrakeLoopStartMs", {
+          label: "Drift start ms",
+          min: 0,
+          max: 120000,
+          step: 10,
+        });
+        _slider(loopBody, carAu, "driftBrakeLoopDurationMs", {
+          label: "Drift dur ms (0=full)",
+          min: 0,
+          max: 120000,
+          step: 10,
+        });
+        _button(loopBody, {
+          title: "Apply loop / clip rebuild",
+          onClick: () => app.rebuildCarAudio(),
+          hint: "Re-creates Howler sprites with the loop region values above.",
+        });
+
         return panel;
       }
 
@@ -11154,6 +11456,42 @@
           onChange: () => app.onConfigChanged(),
         });
 
+        // --- Audio mixer (Howler buses) ---
+        const audio = ts.audio;
+        const audioBody = _section(container, "Audio (mixer)", false);
+        _toggle(audioBody, audio, "muteAll", { label: "Mute all" });
+        _toggle(audioBody, audio, "pauseWhenHidden", {
+          label: "Pause when tab hidden",
+        });
+        const masterBus = audio.buses.master;
+        _slider(audioBody, masterBus, "volume", {
+          label: "Master vol",
+          min: 0,
+          max: 1,
+          step: 0.01,
+        });
+        _toggle(audioBody, masterBus, "mute", { label: "Master mute" });
+        _separator(audioBody);
+        const busLabels = {
+          sfx: "SFX",
+          music: "Music",
+          voice: "Voice",
+          ui: "UI",
+          vehicle: "Vehicle",
+        };
+        for (const busId of ["sfx", "music", "voice", "ui", "vehicle"]) {
+          const bus = audio.buses[busId];
+          if (!bus) continue;
+          const sub = _section(audioBody, busLabels[busId] ?? busId, false);
+          _slider(sub, bus, "volume", {
+            label: "Volume",
+            min: 0,
+            max: 1,
+            step: 0.01,
+          });
+          _toggle(sub, bus, "mute", { label: "Mute" });
+        }
+
         // --- Perf Gate (read-only; mirrors Tweakpane monitors) ---
         const perfBody = _section(container, "Perf Gate", false);
         const perfFps = _info(perfBody, "FPS", "0.0");
@@ -12221,6 +12559,7 @@
           toolsTab.appendChild(buildFoliagePanel(app));
           toolsTab.appendChild(buildBillboardGrassPanel(app));
           toolsTab.appendChild(buildPlaySpawnPanel(app));
+          toolsTab.appendChild(buildPlayPanel(app));
           toolsTab.appendChild(buildHolePanel(app));
           toolsTab.appendChild(buildCavePanel(app));
           toolsTab.appendChild(buildBarrierPanel(app));
