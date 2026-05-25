@@ -2186,7 +2186,7 @@
         revoGrass: [],
         cliffGrass: ["Brush", "Cliff Grass"],
         road: [],
-        fullRoad: ["Full Road"],
+        fullRoad: [],
         smartRoad: [],
         river: ["River"],
         spline: ["Spline"],
@@ -2241,6 +2241,7 @@
         "grass",
         "revoGrass",
         "road",
+        "fullRoad",
         "smartRoad",
       ]);
 
@@ -2320,6 +2321,9 @@
           smartRoadPanel.style.display = mode === "smartRoad" ? "" : "none";
         const roadPanel = document.getElementById("road-panel");
         if (roadPanel) roadPanel.style.display = mode === "road" ? "" : "none";
+        const fullRoadPanel = document.getElementById("fullroad-panel");
+        if (fullRoadPanel)
+          fullRoadPanel.style.display = mode === "fullRoad" ? "" : "none";
 
         const kept = [];
         const show = hasCustom
@@ -6610,6 +6614,759 @@
           max: 500,
           step: 10,
           onChange: ch,
+        });
+
+        return panel;
+      }
+
+      // === Build custom Full Road panel (parity with v2/ui/fullRoadTweakpane.js, non-smart-road branch) ===
+      function buildFullRoadPanel(app) {
+        const panel = document.createElement("div");
+        panel.id = "fullroad-panel";
+        const fr = app.toolState.fullRoad;
+        const ch = () => app.fullRoadChanged();
+        const accType = () => app.fullRoadAccessoryTypeChanged();
+        const accParam = () => app.fullRoadAccessoryParamsChanged();
+        const decParam = () => app.fullRoadDecalParamsChanged();
+
+        const main = _section(panel, "Full Road");
+        _toggle(main, fr, "showHandles", { label: "Show handles", onChange: ch });
+        _button(main, {
+          title: "Start new branch",
+          onClick: () => app.fullRoadStartBranch(),
+        });
+        _button(main, {
+          title: "Toggle selected junction",
+          onClick: () => app.fullRoadToggleJunction(),
+        });
+        _button(main, {
+          title: "Delete selected node",
+          onClick: () => app.fullRoadDeleteSelected(),
+        });
+        _button(main, {
+          title: "Clear full road network",
+          onClick: () => app.fullRoadClearAll(),
+        });
+        _slider(main, fr, "selectedPointY", {
+          label: "Node Y",
+          min: -50,
+          max: 200,
+          step: 0.1,
+          onChange: () => app.fullRoadSelectedYChanged(),
+        });
+        _button(main, {
+          title: "Snap selected Y to terrain",
+          onClick: () => app.fullRoadSnapY(),
+        });
+        _button(main, {
+          title: "Flatten terrain under full roads",
+          onClick: () => app.fullRoadFlattenTerrain(),
+        });
+        _button(main, {
+          title: "Apply City Road Preset",
+          onClick: () => app.fullRoadApplyCityPreset(),
+          hint: "Sets width 12, height offset 0.08, junction radius 10, dashed center, single edge, brightness 0.65, tex scale 3.",
+        });
+
+        const graph = _section(panel, "Graph / Junctions");
+        _slider(graph, fr, "nodeSnapRadius", {
+          label: "Node snap",
+          min: 0.5,
+          max: 20,
+          step: 0.25,
+          onChange: ch,
+        });
+        _slider(graph, fr, "branchSnapRadius", {
+          label: "Branch snap",
+          min: 0.5,
+          max: 30,
+          step: 0.25,
+          onChange: ch,
+        });
+        _slider(graph, fr, "junctionRadius", {
+          label: "Junction radius",
+          min: 2,
+          max: 80,
+          step: 0.5,
+          onChange: ch,
+        });
+        _slider(graph, fr, "junctionSegments", {
+          label: "Junction segs",
+          min: 12,
+          max: 96,
+          step: 4,
+          onChange: ch,
+        });
+
+        const geo = _section(panel, "Geometry", false);
+        _slider(geo, fr, "width", {
+          label: "Width",
+          min: 2,
+          max: 60,
+          step: 0.5,
+          onChange: ch,
+        });
+        _slider(geo, fr, "segments", {
+          label: "Max mesh segments",
+          min: 8,
+          max: 300,
+          step: 4,
+          onChange: ch,
+        });
+        _slider(geo, fr, "meshSegmentsPerMeter", {
+          label: "Mesh segments / m",
+          min: 0.15,
+          max: 4,
+          step: 0.05,
+          onChange: ch,
+        });
+        _slider(geo, fr, "heightOffset", {
+          label: "Height offset",
+          min: 0,
+          max: 2,
+          step: 0.01,
+          onChange: ch,
+        });
+        _toggle(geo, fr, "adaptiveLift", { label: "Adaptive lift", onChange: ch });
+        _slider(geo, fr, "slopeLift", {
+          label: "Slope lift",
+          min: 0,
+          max: 2,
+          step: 0.01,
+          onChange: ch,
+        });
+        _slider(geo, fr, "liftMax", {
+          label: "Lift cap",
+          min: 0,
+          max: 2,
+          step: 0.01,
+          onChange: ch,
+        });
+
+        const mat = _section(panel, "Material / Lines", false);
+        _color(mat, fr, "colorTint", { label: "Color tint", onChange: ch });
+        _slider(mat, fr, "colorBrightness", {
+          label: "Brightness",
+          min: 0.2,
+          max: 2.0,
+          step: 0.05,
+          onChange: ch,
+        });
+        _color(mat, fr, "lineColor", { label: "Edge color", onChange: ch });
+        _slider(mat, fr, "lineWidth", {
+          label: "Edge width",
+          min: 0,
+          max: 0.2,
+          step: 0.005,
+          onChange: ch,
+        });
+        _slider(mat, fr, "lineInset", {
+          label: "Edge inset",
+          min: 0,
+          max: 0.15,
+          step: 0.005,
+          onChange: ch,
+        });
+        _toggle(mat, fr, "centerLine", { label: "Center line", onChange: ch });
+        _toggle(mat, fr, "centerLineDashed", {
+          label: "Center dashed",
+          onChange: ch,
+        });
+        _toggle(mat, fr, "doubleCenterLine", {
+          label: "Double center",
+          onChange: ch,
+        });
+        _toggle(mat, fr, "laneLines", { label: "Lane separators", onChange: ch });
+        _slider(mat, fr, "laneDashScale", {
+          label: "Dash density",
+          min: 0.005,
+          max: 2,
+          step: 0.005,
+          onChange: ch,
+        });
+        _slider(mat, fr, "texScale", {
+          label: "Texture scale",
+          min: 0.5,
+          max: 20,
+          step: 0.5,
+          onChange: ch,
+        });
+
+        const enh = _section(panel, "Enhanced (PBR + Reflect)", false);
+        _toggle(enh, fr, "enhanced", { label: "Enable", onChange: ch });
+        _slider(enh, fr, "normalStrength", {
+          label: "Normal strength",
+          min: 0,
+          max: 3,
+          step: 0.05,
+          onChange: ch,
+        });
+        _slider(enh, fr, "roughnessBase", {
+          label: "Roughness",
+          min: 0.05,
+          max: 1,
+          step: 0.01,
+          onChange: ch,
+        });
+        _slider(enh, fr, "reflectStrength", {
+          label: "Reflect strength",
+          min: 0,
+          max: 1,
+          step: 0.05,
+          onChange: ch,
+        });
+        _slider(enh, fr, "mixBlur", {
+          label: "Reflect blur",
+          min: 0,
+          max: 0.3,
+          step: 0.005,
+          onChange: ch,
+        });
+        _slider(enh, fr, "mixStrength", {
+          label: "Reflect mix",
+          min: 0,
+          max: 4,
+          step: 0.1,
+          onChange: ch,
+        });
+        _slider(enh, fr, "mixContrast", {
+          label: "Reflect contrast",
+          min: 0.2,
+          max: 3,
+          step: 0.05,
+          onChange: ch,
+        });
+        _slider(enh, fr, "normalDistort", {
+          label: "Normal distort",
+          min: 0,
+          max: 0.5,
+          step: 0.01,
+          onChange: ch,
+        });
+
+        const aging = _section(panel, "Road aging (dirt / wear)", false);
+        _slider(aging, fr, "dirtAmount", {
+          label: "Dirt amount",
+          min: 0,
+          max: 1,
+          step: 0.01,
+          onChange: ch,
+        });
+        _slider(aging, fr, "dirtScale", {
+          label: "Dirt scale",
+          min: 0.5,
+          max: 20,
+          step: 0.1,
+          onChange: ch,
+        });
+        _slider(aging, fr, "dirtContrast", {
+          label: "Dirt contrast",
+          min: 0,
+          max: 1,
+          step: 0.01,
+          onChange: ch,
+        });
+        _color(aging, fr, "dirtTint", { label: "Dirt tint", onChange: ch });
+        _slider(aging, fr, "edgeDirtBoost", {
+          label: "Edge boost",
+          min: 0,
+          max: 2,
+          step: 0.01,
+          onChange: ch,
+        });
+        _slider(aging, fr, "wearAmount", {
+          label: "Wear amount",
+          min: 0,
+          max: 1,
+          step: 0.01,
+          onChange: ch,
+        });
+        _slider(aging, fr, "wearScale", {
+          label: "Wear scale",
+          min: 0.5,
+          max: 30,
+          step: 0.1,
+          onChange: ch,
+        });
+        _slider(aging, fr, "wearContrast", {
+          label: "Wear contrast",
+          min: 0,
+          max: 1,
+          step: 0.01,
+          onChange: ch,
+        });
+        _slider(aging, fr, "wearDarken", {
+          label: "Wear darken",
+          min: 0,
+          max: 0.8,
+          step: 0.01,
+          onChange: ch,
+        });
+        _slider(aging, fr, "scratchAmount", {
+          label: "Scratch amount",
+          min: 0,
+          max: 1,
+          step: 0.01,
+          onChange: ch,
+        });
+        _slider(aging, fr, "scratchScale", {
+          label: "Scratch scale",
+          min: 2,
+          max: 80,
+          step: 0.5,
+          onChange: ch,
+        });
+        _slider(aging, fr, "scratchThinness", {
+          label: "Scratch thinness",
+          min: 0.1,
+          max: 0.98,
+          step: 0.01,
+          onChange: ch,
+        });
+        _slider(aging, fr, "lineScratchAmount", {
+          label: "Line scratch amt",
+          min: 0,
+          max: 1,
+          step: 0.01,
+          onChange: ch,
+        });
+        _slider(aging, fr, "lineScratchScale", {
+          label: "Line scratch scale",
+          min: 1,
+          max: 20,
+          step: 0.5,
+          onChange: ch,
+        });
+        _slider(aging, fr, "lineScratchStretch", {
+          label: "Line scratch stretch",
+          min: 1,
+          max: 20,
+          step: 0.5,
+          onChange: ch,
+        });
+        _slider(aging, fr, "lineScratchThreshold", {
+          label: "Line scratch thresh",
+          min: 0.05,
+          max: 0.8,
+          step: 0.01,
+          onChange: ch,
+        });
+        _slider(aging, fr, "lineScratchSoftness", {
+          label: "Line scratch soft",
+          min: 0.02,
+          max: 0.5,
+          step: 0.01,
+          onChange: ch,
+        });
+        _slider(aging, fr, "lineScratchWarp", {
+          label: "Line scratch warp",
+          min: 0,
+          max: 2,
+          step: 0.05,
+          onChange: ch,
+        });
+        _slider(aging, fr, "lineScratchDetail", {
+          label: "Line scratch detail",
+          min: 0,
+          max: 1,
+          step: 0.05,
+          onChange: ch,
+        });
+        _slider(aging, fr, "lineScratchEdge", {
+          label: "Line scratch edge",
+          min: 0,
+          max: 1,
+          step: 0.05,
+          onChange: ch,
+        });
+        _slider(aging, fr, "roughnessDirtBoost", {
+          label: "Dirt roughness+",
+          min: 0,
+          max: 0.5,
+          step: 0.01,
+          onChange: ch,
+        });
+        _slider(aging, fr, "roughnessWearReduce", {
+          label: "Wear roughness−",
+          min: 0,
+          max: 0.4,
+          step: 0.01,
+          onChange: ch,
+        });
+
+        const wet = _section(panel, "Wet road / puddles", false);
+        _slider(wet, fr, "wetAmount", {
+          label: "Wet amount",
+          min: 0,
+          max: 1,
+          step: 0.01,
+          onChange: ch,
+        });
+        _slider(wet, fr, "wetCoverage", {
+          label: "Wet coverage",
+          min: 0,
+          max: 1,
+          step: 0.01,
+          onChange: ch,
+        });
+        _slider(wet, fr, "puddleAmount", {
+          label: "Puddle amount",
+          min: 0,
+          max: 1,
+          step: 0.01,
+          onChange: ch,
+        });
+        _slider(wet, fr, "puddleScale", {
+          label: "Puddle scale",
+          min: 0.4,
+          max: 12,
+          step: 0.1,
+          onChange: ch,
+        });
+        _slider(wet, fr, "puddleContrast", {
+          label: "Puddle contrast",
+          min: 0,
+          max: 1,
+          step: 0.01,
+          onChange: ch,
+        });
+        _slider(wet, fr, "puddleEdgeBoost", {
+          label: "Edge puddles",
+          min: 0,
+          max: 1.5,
+          step: 0.01,
+          onChange: ch,
+        });
+        _slider(wet, fr, "wetDarkening", {
+          label: "Wet darkening",
+          min: 0,
+          max: 0.6,
+          step: 0.01,
+          onChange: ch,
+        });
+        _slider(wet, fr, "wetRoughnessMin", {
+          label: "Min roughness",
+          min: 0.02,
+          max: 0.5,
+          step: 0.01,
+          onChange: ch,
+        });
+        _slider(wet, fr, "puddleReflectStrength", {
+          label: "Puddle reflect",
+          min: 0,
+          max: 1.5,
+          step: 0.01,
+          onChange: ch,
+        });
+        _slider(wet, fr, "puddleSkySuppress", {
+          label: "Sky suppress",
+          min: 0,
+          max: 1,
+          step: 0.01,
+          onChange: ch,
+        });
+        _color(wet, fr, "puddleTint", { label: "Puddle tint", onChange: ch });
+
+        const acc = _section(panel, "Road accessories", false);
+        _dropdown(acc, fr, "accessoryType", {
+          label: "Type",
+          options: {
+            Guardrail: "guardrail",
+            Kerb: "kerb",
+            Barrier: "barrier",
+            Fence: "fence",
+            Tunnel: "tunnel",
+          },
+          onChange: accType,
+        });
+        const accPaint = _section(acc, "Click-drag paint on road", false);
+        _toggle(accPaint, fr, "guardrailMode", {
+          label: "Guardrail paint mode",
+          onChange: accParam,
+          hint: "Shift+drag also works without toggling.",
+        });
+        _toggle(accPaint, fr, "kerbMode", {
+          label: "Kerb paint mode",
+          onChange: accParam,
+          hint: "Shift+drag also works without toggling.",
+        });
+        _toggle(accPaint, fr, "barrierMode", {
+          label: "Barrier paint mode",
+          onChange: accParam,
+          hint: "Shift+drag also works without toggling.",
+        });
+        _toggle(accPaint, fr, "fenceMode", {
+          label: "Fence paint mode",
+          onChange: accParam,
+          hint: "Shift+drag also works without toggling.",
+        });
+
+        const gr = _section(acc, "Guardrail", false);
+        _dropdown(gr, fr, "guardrailSide", {
+          label: "Side",
+          options: { Left: "left", Right: "right", Auto: "auto" },
+          onChange: accParam,
+        });
+        _slider(gr, fr, "guardrailEdgeOffset", {
+          label: "Edge offset",
+          min: 0,
+          max: 3,
+          step: 0.05,
+          onChange: accParam,
+        });
+        _slider(gr, fr, "guardrailHeight", {
+          label: "Height",
+          min: 0.1,
+          max: 2,
+          step: 0.05,
+          onChange: accParam,
+        });
+        _slider(gr, fr, "guardrailDepth", {
+          label: "Depth",
+          min: 0.05,
+          max: 1,
+          step: 0.02,
+          onChange: accParam,
+        });
+        _slider(gr, fr, "guardrailRailYOffset", {
+          label: "Rail Y offset",
+          min: 0,
+          max: 2,
+          step: 0.05,
+          onChange: accParam,
+        });
+        _slider(gr, fr, "guardrailPostSpacing", {
+          label: "Post spacing",
+          min: 0.5,
+          max: 8,
+          step: 0.25,
+          onChange: accParam,
+        });
+        _color(gr, fr, "guardrailColor", { label: "Color", onChange: accParam });
+
+        const kerb = _section(acc, "Kerb", false);
+        _dropdown(kerb, fr, "kerbSide", {
+          label: "Side",
+          options: { Left: "left", Right: "right", Auto: "auto" },
+          onChange: accParam,
+        });
+        _slider(kerb, fr, "kerbEdgeOffset", {
+          label: "Edge offset",
+          min: -1,
+          max: 2,
+          step: 0.05,
+          onChange: accParam,
+        });
+        _slider(kerb, fr, "kerbWidth", {
+          label: "Width",
+          min: 0.2,
+          max: 2,
+          step: 0.05,
+          onChange: accParam,
+        });
+        _slider(kerb, fr, "kerbHeight", {
+          label: "Height",
+          min: 0.02,
+          max: 0.5,
+          step: 0.01,
+          onChange: accParam,
+        });
+        _slider(kerb, fr, "kerbLipHeight", {
+          label: "Lip height",
+          min: 0,
+          max: 0.2,
+          step: 0.005,
+          onChange: accParam,
+        });
+        _slider(kerb, fr, "kerbStripeLength", {
+          label: "Stripe length",
+          min: 0.2,
+          max: 3,
+          step: 0.1,
+          onChange: accParam,
+        });
+        _color(kerb, fr, "kerbColorA", { label: "Color A", onChange: accParam });
+        _color(kerb, fr, "kerbColorB", { label: "Color B", onChange: accParam });
+
+        const bar = _section(acc, "Barrier", false);
+        _dropdown(bar, fr, "barrierSide", {
+          label: "Side",
+          options: { Left: "left", Right: "right", Auto: "auto" },
+          onChange: accParam,
+        });
+        _slider(bar, fr, "barrierEdgeOffset", {
+          label: "Edge offset",
+          min: 0,
+          max: 4,
+          step: 0.1,
+          onChange: accParam,
+        });
+        _slider(bar, fr, "barrierHeight", {
+          label: "Height",
+          min: 0.3,
+          max: 1.5,
+          step: 0.05,
+          onChange: accParam,
+        });
+        _slider(bar, fr, "barrierTopWidth", {
+          label: "Top width",
+          min: 0.05,
+          max: 0.5,
+          step: 0.02,
+          onChange: accParam,
+        });
+        _slider(bar, fr, "barrierBottomWidth", {
+          label: "Bottom width",
+          min: 0.2,
+          max: 1,
+          step: 0.02,
+          onChange: accParam,
+        });
+        _color(bar, fr, "barrierColor", { label: "Color", onChange: accParam });
+
+        const fen = _section(acc, "Fence", false);
+        _dropdown(fen, fr, "fenceSide", {
+          label: "Side",
+          options: { Left: "left", Right: "right", Auto: "auto" },
+          onChange: accParam,
+        });
+        _slider(fen, fr, "fenceEdgeOffset", {
+          label: "Edge offset",
+          min: 0,
+          max: 5,
+          step: 0.1,
+          onChange: accParam,
+        });
+        _slider(fen, fr, "fenceHeight", {
+          label: "Height",
+          min: 0.5,
+          max: 3,
+          step: 0.1,
+          onChange: accParam,
+        });
+        _slider(fen, fr, "fencePostSpacing", {
+          label: "Post spacing",
+          min: 1,
+          max: 6,
+          step: 0.25,
+          onChange: accParam,
+        });
+        _slider(fen, fr, "fenceRailCount", {
+          label: "Rail count",
+          min: 1,
+          max: 6,
+          step: 1,
+          onChange: accParam,
+        });
+        _color(fen, fr, "fenceColor", { label: "Color", onChange: accParam });
+
+        const tun = _section(acc, "Tunnel", false);
+        _toggle(tun, fr, "tunnelMode", {
+          label: "Tunnel paint mode",
+          onChange: accParam,
+          hint: "Shift+drag also works without toggling.",
+        });
+        _slider(tun, fr, "tunnelRadius", {
+          label: "Radius",
+          min: 1,
+          max: 20,
+          step: 0.25,
+          onChange: accParam,
+        });
+        _slider(tun, fr, "tunnelYOffset", {
+          label: "Y offset",
+          min: -5,
+          max: 10,
+          step: 0.1,
+          onChange: accParam,
+        });
+        _slider(tun, fr, "tunnelRadialSegments", {
+          label: "Radial segs",
+          min: 6,
+          max: 48,
+          step: 1,
+          onChange: accParam,
+        });
+        _slider(tun, fr, "tunnelPathSegments", {
+          label: "Path segs",
+          min: 32,
+          max: 400,
+          step: 4,
+          onChange: accParam,
+        });
+        _color(tun, fr, "tunnelColor", { label: "Color", onChange: accParam });
+        _button(acc, {
+          title: "Clear all accessories",
+          onClick: () => app.fullRoadAccessoryClearAll(),
+        });
+
+        const dec = _section(panel, "Road decals", false);
+        _toggle(dec, fr, "decalMode", {
+          label: "Decal mode",
+          onChange: () => app.fullRoadDecalModeToggled(),
+        });
+        _dropdown(dec, fr, "decalTransformMode", {
+          label: "Gizmo mode",
+          options: { Translate: "translate", Rotate: "rotate" },
+          onChange: () => app.fullRoadDecalTransformModeChanged(),
+        });
+        _button(dec, {
+          title: "Delete selected decal",
+          onClick: () => app.fullRoadDecalDeleteSelected(),
+        });
+        _dropdown(dec, fr, "decalType", {
+          label: "Type",
+          options: {
+            "Zebra crossing": "zebraCrossing",
+            "Ladder crossing": "ladderCrossing",
+            "Stop line": "stopLine",
+            "Arrow up": "arrowStraight",
+            "Arrow left": "arrowLeft",
+            "Arrow right": "arrowRight",
+            "Arrow up-left": "arrowStraightLeft",
+            "Arrow up-right": "arrowStraightRight",
+            "Give way": "giveWay",
+            "Speed circle": "speedCircle",
+            "Parking lines": "parkingLines",
+          },
+          onChange: () => app.fullRoadDecalTypeChanged(),
+        });
+        _slider(dec, fr, "decalWidth", {
+          label: "Width",
+          min: 1,
+          max: 20,
+          step: 0.5,
+          onChange: decParam,
+        });
+        _slider(dec, fr, "decalLength", {
+          label: "Length",
+          min: 1,
+          max: 20,
+          step: 0.5,
+          onChange: decParam,
+        });
+        _color(dec, fr, "decalColor", { label: "Color", onChange: decParam });
+        _slider(dec, fr, "decalStripeCount", {
+          label: "Stripe count",
+          min: 2,
+          max: 20,
+          step: 1,
+          onChange: decParam,
+        });
+        _toggle(dec, fr, "decalSnapToRoad", {
+          label: "Snap rotation",
+          onChange: decParam,
+        });
+        _slider(dec, fr, "decalRotation", {
+          label: "Manual rotation",
+          min: 0,
+          max: 360,
+          step: 5,
+          onChange: decParam,
+        });
+        _button(dec, {
+          title: "Clear all decals",
+          onClick: () => app.fullRoadDecalClearAll(),
         });
 
         return panel;
@@ -11482,6 +12239,7 @@
           toolsTab.appendChild(buildGrassPanel(app));
           toolsTab.appendChild(buildRevoGrassPanel(app));
           toolsTab.appendChild(buildRoadPanel(app));
+          toolsTab.appendChild(buildFullRoadPanel(app));
           toolsTab.appendChild(buildSmartRoadPanel(app));
 
           // Move Tweakpane pane into the Tools tab & apply mode-aware folder visibility

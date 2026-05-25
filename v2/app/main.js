@@ -5145,6 +5145,106 @@ export async function startV2App(opts = {}) {
       roadSystem.rebuildAllMeshes();
       ui?.pane.refresh();
     },
+    fullRoadChanged() {
+      fullRoadSystem.syncMaterial();
+      fullRoadSystem.rebuildAllMeshes();
+      fullRoadSystem._rebuildHandles();
+      ui?.pane.refresh();
+    },
+    fullRoadStartBranch() {
+      fullRoadSystem.startBranch();
+      ui?.pane.refresh();
+    },
+    fullRoadDeleteSelected() {
+      fullRoadSystem.deleteSelected();
+      ui?.pane.refresh();
+    },
+    fullRoadClearAll() {
+      fullRoadSystem.clearAll();
+      ui?.pane.refresh();
+    },
+    fullRoadSnapY() {
+      fullRoadSystem.snapSelectedYToTerrain();
+      ui?.pane.refresh();
+    },
+    fullRoadSelectedYChanged() {
+      fullRoadSystem.setSelectedPointY(toolState.fullRoad.selectedPointY);
+      ui?.pane.refresh();
+    },
+    fullRoadToggleJunction() {
+      fullRoadSystem.toggleSelectedJunction();
+      ui?.pane.refresh();
+    },
+    fullRoadFlattenTerrain() {
+      fullRoadSystem.flattenTerrainUnderRoads();
+      fullRoadSystem.rebuildAllMeshes();
+      markHeightTexDirty();
+      treeStore.syncAllHeights(terrainStore);
+      foliageStore.syncAllHeights(terrainStore);
+      billboardGrassStore.syncAllHeights(terrainStore);
+      splineSystem.syncGuardrailsToGround();
+      splineSystem.syncKerbsToGround();
+      splineSystem.syncLinearFeaturesToGround();
+      ui?.pane.refresh();
+    },
+    fullRoadApplyCityPreset() {
+      const rp = toolState.fullRoad;
+      rp.width = 12;
+      rp.heightOffset = 0.08;
+      rp.junctionRadius = 10;
+      rp.centerLine = true;
+      rp.centerLineDashed = true;
+      rp.doubleCenterLine = false;
+      rp.laneLines = false;
+      rp.lineWidth = 0.025;
+      rp.colorBrightness = 0.65;
+      rp.texScale = 3.0;
+      fullRoadSystem.syncMaterial();
+      fullRoadSystem.rebuildAllMeshes();
+      fullRoadSystem._rebuildHandles();
+      ui?.pane.refresh();
+    },
+    fullRoadAccessoryTypeChanged() {
+      fullRoadSystem.cancelAccessoryPaint();
+      ui?.pane.refresh();
+    },
+    fullRoadAccessoryParamsChanged() {
+      fullRoadSystem.rebuildAllAccessories();
+      ui?.pane.refresh();
+    },
+    fullRoadAccessoryClearAll() {
+      fullRoadSystem.clearAllAccessories();
+      ui?.pane.refresh();
+    },
+    fullRoadDecalModeToggled() {
+      if (!toolState.fullRoad.decalMode) {
+        fullRoadSystem._clearDecalPreview();
+        fullRoadSystem.deselectDecal();
+      }
+      ui?.pane.refresh();
+    },
+    fullRoadDecalTransformModeChanged() {
+      if (fullRoadSystem.selectedDecalId != null) {
+        transformControls.setMode(
+          toolState.fullRoad.decalTransformMode || "translate",
+        );
+      }
+    },
+    fullRoadDecalDeleteSelected() {
+      fullRoadSystem.deleteSelectedDecal();
+      ui?.pane.refresh();
+    },
+    fullRoadDecalTypeChanged() {
+      ui?.pane.refresh();
+    },
+    fullRoadDecalParamsChanged() {
+      fullRoadSystem.rebuildAllDecals();
+      ui?.pane.refresh();
+    },
+    fullRoadDecalClearAll() {
+      fullRoadSystem.clearAllDecals();
+      ui?.pane.refresh();
+    },
     smartRoadChanged() {
       smartRoadSystem.syncMaterial();
       smartRoadSystem.rebuildAllMeshes();
