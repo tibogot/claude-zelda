@@ -759,6 +759,35 @@
         background: rgba(92, 184, 92, 0.12);
       }
 
+      /* === DROP ZONES (section-level drag/drop for GLB/textures) === */
+      .drop-zone {
+        position: relative;
+      }
+      .drop-zone.drag-over {
+        outline: 2px dashed var(--green);
+        outline-offset: -2px;
+        background: rgba(92, 184, 92, 0.08);
+        border-radius: var(--radius);
+      }
+      .drop-zone.drag-over::after {
+        content: attr(data-drop-hint);
+        position: absolute;
+        top: 4px;
+        right: 6px;
+        font-size: 10px;
+        color: var(--green);
+        background: rgba(92, 184, 92, 0.18);
+        padding: 1px 6px;
+        border-radius: var(--radius);
+        pointer-events: none;
+        white-space: nowrap;
+      }
+      .prop-row-btn.drag-over {
+        border-color: var(--green) !important;
+        background: rgba(92, 184, 92, 0.18) !important;
+        color: var(--green) !important;
+      }
+
       /* === RIGHT PANEL (TABBED) === */
       #right-panel {
         grid-column: 5;
@@ -1735,15 +1764,20 @@
         html: "file-code",
       };
       const IMG_EXTS = new Set(["png", "jpg", "jpeg", "webp", "bmp"]);
+      const GLB_EXTS = new Set(["glb", "gltf"]);
+      const JSON_EXTS = new Set(["json"]);
 
-      /** Image file from a drag started on the bottom asset grid (`text/plain` name + `fsFileHandles`). */
-      async function tryGetImageFileFromAssetDrag(dataTransfer) {
+      function _extOf(name) {
+        return String(name || "").split(".").pop().toLowerCase();
+      }
+
+      /** File matching `allowedExts` from a drag started on the bottom asset grid. */
+      async function tryGetFileFromAssetDrag(dataTransfer, allowedExts) {
         const fileName = dataTransfer.getData("text/plain");
         if (!fileName) return null;
         const handle = fsFileHandles.get(fileName);
         if (!handle) return null;
-        const ext = fileName.split(".").pop().toLowerCase();
-        if (!IMG_EXTS.has(ext)) return null;
+        if (!allowedExts.has(_extOf(fileName))) return null;
         try {
           return await handle.getFile();
         } catch {
@@ -1751,15 +1785,85 @@
         }
       }
 
-      /** Bottom browser drag or OS file drop — first supported image file, if any. */
-      async function tryGetImageFileFromAnyDrop(dataTransfer) {
-        let file = await tryGetImageFileFromAssetDrag(dataTransfer);
+      /** Bottom browser drag or OS file drop — first file matching `allowedExts`, if any. */
+      async function tryGetFileFromAnyDrop(dataTransfer, allowedExts) {
+        let file = await tryGetFileFromAssetDrag(dataTransfer, allowedExts);
         if (!file && dataTransfer.files?.length) {
-          const f = dataTransfer.files[0];
-          const ext = f.name.split(".").pop().toLowerCase();
-          if (IMG_EXTS.has(ext)) file = f;
+          for (const f of dataTransfer.files) {
+            if (allowedExts.has(_extOf(f.name))) {
+              file = f;
+              break;
+            }
+          }
         }
         return file;
+      }
+
+      /** Image file from a drag started on the bottom asset grid (`text/plain` name + `fsFileHandles`). */
+      function tryGetImageFileFromAssetDrag(dataTransfer) {
+        return tryGetFileFromAssetDrag(dataTransfer, IMG_EXTS);
+      }
+
+      /** Bottom browser drag or OS file drop — first supported image file, if any. */
+      function tryGetImageFileFromAnyDrop(dataTransfer) {
+        return tryGetFileFromAnyDrop(dataTransfer, IMG_EXTS);
+      }
+
+      /** Bottom browser drag or OS file drop — first .glb/.gltf file, if any. */
+      function tryGetGlbFileFromAnyDrop(dataTransfer) {
+        return tryGetFileFromAnyDrop(dataTransfer, GLB_EXTS);
+      }
+
+      /** Bottom browser drag or OS file drop — first .json file, if any. */
+      function tryGetJsonFileFromAnyDrop(dataTransfer) {
+        return tryGetFileFromAnyDrop(dataTransfer, JSON_EXTS);
+      }
+
+      /**
+       * Wire an element as a drop zone for a single file kind.
+       * - `pickFile(dataTransfer)` returns the matching `File` (or null) for a drop.
+       * - `onFile(file)` is awaited on a successful drop.
+       * - `hint` is shown in the top-right corner while dragging over.
+       * Returns a teardown function (not currently needed since panels are rebuilt fresh).
+       */
+      function installDropZone(el, { pickFile, onFile, hint = "Drop here" }) {
+        if (!el) return () => {};
+        el.classList.add("drop-zone");
+        el.dataset.dropHint = hint;
+        const onOver = (e) => {
+          e.preventDefault();
+          e.dataTransfer.dropEffect = "copy";
+          el.classList.add("drag-over");
+        };
+        const onLeave = (e) => {
+          if (!el.contains(e.relatedTarget)) el.classList.remove("drag-over");
+        };
+        const onDrop = async (e) => {
+          e.preventDefault();
+          e.stopPropagation();
+          el.classList.remove("drag-over");
+          let file = null;
+          try {
+            file = await pickFile(e.dataTransfer);
+          } catch (err) {
+            console.warn("[V2] drop pickFile failed:", err);
+          }
+          if (!file) return;
+          try {
+            await onFile(file);
+          } catch (err) {
+            console.error("[V2] drop onFile failed:", err);
+          }
+        };
+        el.addEventListener("dragover", onOver);
+        el.addEventListener("dragleave", onLeave);
+        el.addEventListener("drop", onDrop);
+        return () => {
+          el.removeEventListener("dragover", onOver);
+          el.removeEventListener("dragleave", onLeave);
+          el.removeEventListener("drop", onDrop);
+          el.classList.remove("drop-zone", "drag-over");
+        };
       }
 
       /**
@@ -3783,17 +3887,38 @@
             step: 0.01,
           });
           _toggle(slBody, slot, "enabled", { label: "Enabled" });
-          _button(slBody, {
+          const lod0Btn = _button(slBody, {
             title: "Import LOD0 (detail)",
             onClick: () => app.importTreeGlb(i, 0),
           });
-          _button(slBody, {
+          installDropZone(lod0Btn, {
+            hint: "Drop .glb as LOD0",
+            pickFile: tryGetGlbFileFromAnyDrop,
+            onFile: async (file) => {
+              await app.importTreeGlb(i, 0, file);
+            },
+          });
+          const lod1Btn = _button(slBody, {
             title: "Import LOD1 (simplified)",
             onClick: () => app.importTreeGlb(i, 1),
           });
-          _button(slBody, {
+          installDropZone(lod1Btn, {
+            hint: "Drop .glb as LOD1",
+            pickFile: tryGetGlbFileFromAnyDrop,
+            onFile: async (file) => {
+              await app.importTreeGlb(i, 1, file);
+            },
+          });
+          const presetBtn = _button(slBody, {
             title: "Load tree preset",
             onClick: () => app.loadTreePreset(i),
+          });
+          installDropZone(presetBtn, {
+            hint: "Drop .json preset",
+            pickFile: tryGetJsonFileFromAnyDrop,
+            onFile: async (file) => {
+              await app.loadTreePreset(i, file);
+            },
           });
 
           // Foliage material
@@ -4005,6 +4130,14 @@
 
         // --- Import / Primitives ---
         const importBody = _section(panel, "Import");
+        installDropZone(importBody, {
+          hint: "Drop .glb to import",
+          pickFile: tryGetGlbFileFromAnyDrop,
+          onFile: async (file) => {
+            await app.importPropGlb(file);
+            rebuildAll();
+          },
+        });
         _button(importBody, {
           title: "Import GLB...",
           onClick: async () => {
@@ -4059,6 +4192,14 @@
         }
 
         const liveBody = _section(panel, "Add Live Prop", false);
+        installDropZone(liveBody, {
+          hint: "Drop .glb as collectible",
+          pickFile: tryGetGlbFileFromAnyDrop,
+          onFile: async (file) => {
+            await app.importGlbCollectible(file);
+            rebuildAll();
+          },
+        });
         _button(liveBody, {
           title: "Flag",
           onClick: () => {
@@ -4192,16 +4333,32 @@
                 "font-size:10px; padding:2px 6px; background:var(--bg-item); color:var(--text-dim); border:1px solid var(--border); border-radius:var(--radius); cursor:pointer; flex:1;";
               const lod1Btn = document.createElement("button");
               lod1Btn.textContent = "Import LOD1";
+              lod1Btn.className = "prop-row-btn";
               lod1Btn.style.cssText = btnStyle;
               lod1Btn.addEventListener("click", async () => {
                 await app.importPropLod(i, 1);
               });
+              installDropZone(lod1Btn, {
+                hint: "Drop .glb as LOD1",
+                pickFile: tryGetGlbFileFromAnyDrop,
+                onFile: async (file) => {
+                  await app.importPropLod(i, 1, file);
+                },
+              });
               lodRow.appendChild(lod1Btn);
               const lod2Btn = document.createElement("button");
               lod2Btn.textContent = "Import LOD2";
+              lod2Btn.className = "prop-row-btn";
               lod2Btn.style.cssText = btnStyle;
               lod2Btn.addEventListener("click", async () => {
                 await app.importPropLod(i, 2);
+              });
+              installDropZone(lod2Btn, {
+                hint: "Drop .glb as LOD2",
+                pickFile: tryGetGlbFileFromAnyDrop,
+                onFile: async (file) => {
+                  await app.importPropLod(i, 2, file);
+                },
               });
               lodRow.appendChild(lod2Btn);
               row.appendChild(lodRow);
@@ -4628,9 +4785,16 @@
             "Alpha mask",
             billboardGrassMaskLabel(slot),
           );
-          _button(sBody, {
+          const maskBtn = _button(sBody, {
             title: "Load mask",
             onClick: () => app.loadBillboardGrassMask(i),
+          });
+          installDropZone(maskBtn, {
+            hint: "Drop image as mask",
+            pickFile: tryGetImageFileFromAnyDrop,
+            onFile: async (file) => {
+              await app.loadBillboardGrassMask(i, file);
+            },
           });
           _dropdown(sBody, slot, "preset", {
             label: "Palette",
@@ -4965,9 +5129,16 @@
             "Texture",
             foliageTextureLabel(slot),
           );
-          _button(sBody, {
+          const texBtn = _button(sBody, {
             title: "Load texture",
             onClick: () => app.loadFoliageTexture(i),
+          });
+          installDropZone(texBtn, {
+            hint: "Drop image as texture",
+            pickFile: tryGetImageFileFromAnyDrop,
+            onFile: async (file) => {
+              await app.loadFoliageTexture(i, file);
+            },
           });
           _slider(sBody, slot, "baseScale", {
             label: "Base scale",
@@ -6450,9 +6621,16 @@
         const d = app.toolState.decal;
 
         const body = _section(panel, "Decals");
-        _button(body, {
+        const decalImgBtn = _button(body, {
           title: "Load image (brush)...",
           onClick: () => app.decalLoadImage(),
+        });
+        installDropZone(decalImgBtn, {
+          hint: "Drop image as brush",
+          pickFile: tryGetImageFileFromAnyDrop,
+          onFile: async (file) => {
+            await app.decalLoadImage(file);
+          },
         });
 
         _separator(body);
@@ -6505,9 +6683,16 @@
           title: "Save decals JSON",
           onClick: () => app.decalSaveJson(),
         });
-        _button(body, {
+        const decalJsonBtn = _button(body, {
           title: "Load decals JSON...",
           onClick: () => app.decalLoadJson(),
+        });
+        installDropZone(decalJsonBtn, {
+          hint: "Drop decals .json",
+          pickFile: tryGetJsonFileFromAnyDrop,
+          onFile: async (file) => {
+            await app.decalLoadJson(file);
+          },
         });
 
         _separator(body);
@@ -10659,9 +10844,16 @@
               rebuildActiveSlotDropdown();
             },
           });
-          _button(sb, {
+          const cliffGlbBtn = _button(sb, {
             title: "Load GLB...",
             onClick: () => app.importCliffGlb(i),
+          });
+          installDropZone(cliffGlbBtn, {
+            hint: "Drop .glb as cliff",
+            pickFile: tryGetGlbFileFromAnyDrop,
+            onFile: async (file) => {
+              await app.importCliffGlb(i, file);
+            },
           });
           _button(sb, {
             title: "Remove model",

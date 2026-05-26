@@ -1768,8 +1768,12 @@ export async function startV2App(opts = {}) {
     onPaintClear: () => paintSystem.clearAll(),
     onSoloLayerChanged: () => syncSoloLayer(),
     onHeightBlendChanged: () => syncHeightBlend(),
-    onImportTreeGlb: (_importTreeGlb = async (slotIdx, lod) => {
-      const file = await openGlbPicker();
+    onImportTreeGlb: (_importTreeGlb = async (
+      slotIdx,
+      lod,
+      preselectedFile = null,
+    ) => {
+      const file = preselectedFile ?? (await openGlbPicker());
       if (!file) return;
       try {
         const { submeshes, name } = await loadTreeGlbFromFile(file);
@@ -1801,12 +1805,11 @@ export async function startV2App(opts = {}) {
         );
       }
     }),
-    onLoadTreePreset: (_loadTreePreset = async (slotIdx) => {
-      const input = document.createElement("input");
-      input.type = "file";
-      input.accept = ".json";
-      input.onchange = async () => {
-        const file = input.files?.[0];
+    onLoadTreePreset: (_loadTreePreset = async (
+      slotIdx,
+      preselectedFile = null,
+    ) => {
+      const handleFile = async (file) => {
         if (!file) return;
         try {
           const { foliagePreset, trunkSubmeshes, trunkLod1Submeshes, json } =
@@ -1874,6 +1877,17 @@ export async function startV2App(opts = {}) {
           );
         }
       };
+      if (preselectedFile) {
+        await handleFile(preselectedFile);
+        return;
+      }
+      const input = document.createElement("input");
+      input.type = "file";
+      input.accept = ".json";
+      input.onchange = async () => {
+        const file = input.files?.[0];
+        await handleFile(file);
+      };
       input.click();
     }),
     onFoliageParamChanged: (_foliageParamChanged = (slotIdx) => {
@@ -1921,12 +1935,11 @@ export async function startV2App(opts = {}) {
     }),
     onTreeLodChanged: () => {},
     onFoliageLodChanged: (_foliageLodChanged = () => {}),
-    onLoadFoliageTexture: (_loadFoliageTexture = async (slotIdx) => {
-      const input = document.createElement("input");
-      input.type = "file";
-      input.accept = "image/*";
-      input.onchange = async () => {
-        const file = input.files?.[0];
+    onLoadFoliageTexture: (_loadFoliageTexture = async (
+      slotIdx,
+      preselectedFile = null,
+    ) => {
+      const handleFile = async (file) => {
         if (!file) return;
         const filename = file.name.split(/[/\\]/).pop();
         const slot = toolState.foliageSlots[slotIdx];
@@ -1967,6 +1980,18 @@ export async function startV2App(opts = {}) {
           );
         }
       };
+
+      if (preselectedFile) {
+        await handleFile(preselectedFile);
+        return;
+      }
+      const input = document.createElement("input");
+      input.type = "file";
+      input.accept = "image/*";
+      input.onchange = async () => {
+        const file = input.files?.[0];
+        await handleFile(file);
+      };
       input.click();
     }),
     onFoliageSlotStructureChanged: (_foliageSlotStructureChanged = (
@@ -1986,12 +2011,11 @@ export async function startV2App(opts = {}) {
     onClearAllFoliage: (_clearAllFoliage = () => {
       foliagePaintSystem.clearAll();
     }),
-    onLoadBillboardGrassMask: (_loadBillboardGrassMask = async (slotIdx) => {
-      const input = document.createElement("input");
-      input.type = "file";
-      input.accept = "image/*";
-      input.onchange = async () => {
-        const file = input.files?.[0];
+    onLoadBillboardGrassMask: (_loadBillboardGrassMask = async (
+      slotIdx,
+      preselectedFile = null,
+    ) => {
+      const handleFile = async (file) => {
         if (!file) return;
         const filename = file.name.split(/[/\\]/).pop();
         const slot = toolState.billboardGrassSlots[slotIdx];
@@ -2033,6 +2057,18 @@ export async function startV2App(opts = {}) {
             err,
           );
         }
+      };
+
+      if (preselectedFile) {
+        await handleFile(preselectedFile);
+        return;
+      }
+      const input = document.createElement("input");
+      input.type = "file";
+      input.accept = "image/*";
+      input.onchange = async () => {
+        const file = input.files?.[0];
+        await handleFile(file);
       };
       input.click();
     }),
@@ -2152,9 +2188,12 @@ export async function startV2App(opts = {}) {
         treeLodRenderer.setCastShadow(i, toolState.treeLod.castShadow);
       }
     }),
-    onImportCliffGlb: (_importCliffGlb = async (slotIdx) => {
+    onImportCliffGlb: (_importCliffGlb = async (
+      slotIdx,
+      preselectedFile = null,
+    ) => {
       tryBuildCliffBlendMaterial();
-      const file = await openGlbPicker();
+      const file = preselectedFile ?? (await openGlbPicker());
       if (!file) return;
       try {
         const { submeshes, name } = await loadTreeGlbFromFile(file);
@@ -2495,8 +2534,8 @@ export async function startV2App(opts = {}) {
       cliffU.uRockContrast.value = c.blendRockContrast;
       cliffU.uTriplanarSharp.value = c.blendTriplanarSharp;
     }),
-    onImportPropGlb: (_importPropGlb = async () => {
-      const file = await openGlbPicker();
+    onImportPropGlb: (_importPropGlb = async (preselectedFile = null) => {
+      const file = preselectedFile ?? (await openGlbPicker());
       if (!file) return;
       try {
         const { submeshes, name } = await loadTreeGlbFromFile(file);
@@ -2636,8 +2675,10 @@ export async function startV2App(opts = {}) {
       console.log(`[V2] Live prop "${livePropName}" added (type ${typeIdx})`);
       ui?.pane.refresh();
     }),
-    onImportGlbCollectible: (_importGlbCollectible = async () => {
-      const file = await openGlbPicker();
+    onImportGlbCollectible: (_importGlbCollectible = async (
+      preselectedFile = null,
+    ) => {
+      const file = preselectedFile ?? (await openGlbPicker());
       if (!file) return;
       try {
         const { submeshes, name } = await loadTreeGlbFromFile(file);
@@ -2694,8 +2735,12 @@ export async function startV2App(opts = {}) {
       ui?.pane.refresh();
       console.log(`[V2] Prop slot ${slotIdx} removed`);
     }),
-    onImportPropLod: (_importPropLod = async (slotIdx, lod) => {
-      const file = await openGlbPicker();
+    onImportPropLod: (_importPropLod = async (
+      slotIdx,
+      lod,
+      preselectedFile = null,
+    ) => {
+      const file = preselectedFile ?? (await openGlbPicker());
       if (!file) return;
       try {
         const { submeshes, name } = await loadTreeGlbFromFile(file);
@@ -2814,7 +2859,15 @@ export async function startV2App(opts = {}) {
       }
       ui?.pane.refresh();
     }),
-    onDecalLoadImage: (_decalLoadImage = () => decalSystem.openImagePicker()),
+    onDecalLoadImage: (_decalLoadImage = (preselectedFile = null) => {
+      if (preselectedFile) {
+        decalSystem
+          .loadImageFromFile(preselectedFile)
+          .catch((e) => console.warn("[Decals] load image", e));
+        return;
+      }
+      decalSystem.openImagePicker();
+    }),
     onDecalOpacityChanged: (_decalOpacityChanged = () => {
       decalSystem.applyOpacityToSelected();
       ui?.pane.refresh();
@@ -2839,8 +2892,8 @@ export async function startV2App(opts = {}) {
       });
       downloadBlob(blob, "decals.json");
     }),
-    onDecalLoadJson: (_decalLoadJson = async () => {
-      const file = await openFilePicker(".json");
+    onDecalLoadJson: (_decalLoadJson = async (preselectedFile = null) => {
+      const file = preselectedFile ?? (await openFilePicker(".json"));
       if (!file) return;
       try {
         const text = await file.text();
@@ -5117,11 +5170,11 @@ export async function startV2App(opts = {}) {
     syncSoloLayer,
     syncHeightBlend,
     invalidateSurfaceMaterials,
-    importTreeGlb(slotIdx, lod) {
-      _importTreeGlb(slotIdx, lod);
+    importTreeGlb(slotIdx, lod, file = null) {
+      _importTreeGlb(slotIdx, lod, file);
     },
-    loadTreePreset(slotIdx) {
-      _loadTreePreset(slotIdx);
+    loadTreePreset(slotIdx, file = null) {
+      _loadTreePreset(slotIdx, file);
     },
     removeTreeSlot(slotIdx) {
       _removeTreeSlot(slotIdx);
@@ -5149,8 +5202,8 @@ export async function startV2App(opts = {}) {
     clearAllBillboardGrass() {
       _clearAllBillboardGrass();
     },
-    loadBillboardGrassMask(slotIdx) {
-      _loadBillboardGrassMask(slotIdx);
+    loadBillboardGrassMask(slotIdx, file = null) {
+      _loadBillboardGrassMask(slotIdx, file);
     },
     treeCastShadowChanged() {
       _treeCastShadowChanged();
@@ -5158,8 +5211,8 @@ export async function startV2App(opts = {}) {
     foliageParamChanged(slotIdx) {
       _foliageParamChanged(slotIdx);
     },
-    importPropGlb() {
-      _importPropGlb();
+    importPropGlb(file = null) {
+      _importPropGlb(file);
     },
     addPrimitive(name) {
       _addPrimitive(name);
@@ -5167,8 +5220,8 @@ export async function startV2App(opts = {}) {
     addLiveProp(name) {
       _addLiveProp(name);
     },
-    importGlbCollectible() {
-      _importGlbCollectible();
+    importGlbCollectible(file = null) {
+      _importGlbCollectible(file);
     },
     /**
      * Collectibles gameplay API.
@@ -5208,8 +5261,8 @@ export async function startV2App(opts = {}) {
     removePropSlot(idx) {
       _removePropSlot(idx);
     },
-    importPropLod(slotIdx, lod) {
-      _importPropLod(slotIdx, lod);
+    importPropLod(slotIdx, lod, file = null) {
+      _importPropLod(slotIdx, lod, file);
     },
     propCastShadowChanged() {
       _propCastShadowChanged();
@@ -5237,8 +5290,8 @@ export async function startV2App(opts = {}) {
     rebakeBvh() {
       _rebakeBvh();
     },
-    loadFoliageTexture(slotIdx) {
-      _loadFoliageTexture(slotIdx);
+    loadFoliageTexture(slotIdx, file = null) {
+      _loadFoliageTexture(slotIdx, file);
     },
     foliageSlotStructureChanged(slotIdx) {
       _foliageSlotStructureChanged(slotIdx);
@@ -5325,8 +5378,8 @@ export async function startV2App(opts = {}) {
     cliffGrassClear() {
       _cliffGrassClear();
     },
-    importCliffGlb(slotIdx) {
-      _importCliffGlb(slotIdx);
+    importCliffGlb(slotIdx, file = null) {
+      _importCliffGlb(slotIdx, file);
     },
     removeCliffSlot(slotIdx) {
       _removeCliffSlot(slotIdx);
@@ -5391,8 +5444,8 @@ export async function startV2App(opts = {}) {
     setActorsPanelRefresh(fn) {
       _refreshActorsPanel = typeof fn === "function" ? fn : null;
     },
-    decalLoadImage() {
-      _decalLoadImage();
+    decalLoadImage(file = null) {
+      _decalLoadImage(file);
     },
     decalOpacityChanged() {
       _decalOpacityChanged();
@@ -5412,8 +5465,8 @@ export async function startV2App(opts = {}) {
     decalSaveJson() {
       _decalSaveJson();
     },
-    decalLoadJson() {
-      _decalLoadJson();
+    decalLoadJson(file = null) {
+      _decalLoadJson(file);
     },
     decalTransformModeChanged() {
       _decalTransformModeChanged();
