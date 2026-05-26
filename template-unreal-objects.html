@@ -3,7 +3,7 @@
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <title>Template — Unreal</title>
+    <title>Objects Lab</title>
     <style>
       :root {
         --bg-dark: #222222;
@@ -57,6 +57,27 @@
       #info span {
         color: #e0f0c0;
         font-weight: 600;
+      }
+
+      #lab-title {
+        position: fixed;
+        top: 14px;
+        left: 50%;
+        transform: translateX(-50%);
+        z-index: 15;
+        pointer-events: none;
+        user-select: none;
+        font-size: 13px;
+        font-weight: 600;
+        letter-spacing: 0.28em;
+        text-transform: uppercase;
+        color: var(--text);
+        padding: 8px 18px;
+        border-radius: 6px;
+        background: rgba(0, 0, 0, 0.45);
+        border: 1px solid rgba(255, 255, 255, 0.08);
+        backdrop-filter: blur(6px);
+        box-shadow: 0 2px 12px rgba(0, 0, 0, 0.25);
       }
 
       /* === RIGHT PANEL (v2/editor.html inspector look) === */
@@ -137,7 +158,8 @@
         color: white;
       }
       body.immersive #inspector,
-      body.immersive #info {
+      body.immersive #info,
+      body.immersive #lab-title {
         display: none;
       }
       body.immersive canvas {
@@ -392,10 +414,12 @@
     </script>
   </head>
   <body>
+    <div id="lab-title">Objects Lab</div>
     <div id="info">
-      Template &mdash; <span id="backend">loading…</span> &bull; WASD/Arrows
-      move &bull; Space jump &bull; RMB drag (or F immersive) to look &bull;
-      <span id="cammode">ORBIT</span> (Tab follow)
+      <span id="backend">loading…</span> &bull;
+      <span id="labmode">ORBIT</span> &bull; enable Edit mode to draw spline &bull;
+      RMB orbit &bull; WASD move &bull; Tab follow &bull;
+      <span id="cammode">ORBIT</span>
     </div>
     <div id="inspector">
       <div id="inspector-resize-handle" title="Drag to resize"></div>
@@ -415,6 +439,21 @@
       import { SkyMesh } from "three/addons/objects/SkyMesh.js";
       import { CSMShadowNode } from "three/addons/csm/CSMShadowNode.js";
       import { createTileMaterial } from "./tileMaterial.js";
+      import {
+        buildGuardrailMesh,
+        GUARDRAIL_DEFAULTS,
+        SPLINE_PRESETS,
+        HERO_STRIP_POINTS,
+      } from "./objects/guardrail.js";
+      import {
+        buildFenceMesh,
+        FENCE_DEFAULTS,
+      } from "./objects/fence.js";
+      import {
+        buildBarrierMesh,
+        BARRIER_DEFAULTS,
+      } from "./objects/barrier.js";
+      import { buildKerbMesh, KERB_DEFAULTS } from "./objects/kerb.js";
 
       const PARAMS = {
         camera: { fov: 60, followDist: 8 },
@@ -460,6 +499,17 @@
           maxFar: 300,
           lightMargin: 100,
           mapSize: 2048,
+        },
+        guardrail: { ...GUARDRAIL_DEFAULTS },
+        fence: { ...FENCE_DEFAULTS },
+        barrier: { ...BARRIER_DEFAULTS },
+        kerb: { ...KERB_DEFAULTS },
+        lab: { objectType: "guardrail" },
+        spline: {
+          closed: false,
+          editMode: false,
+          showHero: true,
+          showHandles: true,
         },
       };
 
@@ -519,14 +569,31 @@
           0.5,
           5000,
         );
-        camera.position.set(0, 20, 60);
+        camera.position.set(0, 12, 36);
 
         const controls = new OrbitControls(camera, renderer.domElement);
-        controls.target.set(0, 0, 0);
+        controls.target.set(0, 0.8, 12);
         controls.enableDamping = true;
         controls.dampingFactor = 0.05;
         controls.maxPolarAngle = Math.PI * 0.49;
         controls.enabled = true; // orbit is the default mode
+
+        function applyOrbitMouseButtons() {
+          if (PARAMS.spline.editMode) {
+            controls.mouseButtons = {
+              LEFT: null,
+              MIDDLE: THREE.MOUSE.DOLLY,
+              RIGHT: THREE.MOUSE.ROTATE,
+            };
+          } else {
+            controls.mouseButtons = {
+              LEFT: THREE.MOUSE.ROTATE,
+              MIDDLE: THREE.MOUSE.DOLLY,
+              RIGHT: THREE.MOUSE.PAN,
+            };
+          }
+        }
+        applyOrbitMouseButtons();
 
         // ── LIGHTS ──
         const sunDir = new THREE.Vector3();
@@ -639,6 +706,306 @@
         floor.receiveShadow = true;
         scene.add(floor);
 
+        // ── OBJECTS LAB (procedural objects + spline) ──
+        const raycaster = new THREE.Raycaster();
+        const ndc = new THREE.Vector2();
+        const dragHit = new THREE.Vector3();
+
+        function disposeLabObject(group) {
+          if (!group) return;
+          group.traverse((obj) => {
+            obj.geometry?.dispose();
+            obj.material?.dispose();
+          });
+        }
+
+        function getLabParams() {
+          switch (PARAMS.lab.objectType) {
+            case "fence":
+              return PARAMS.fence;
+            case "barrier":
+              return PARAMS.barrier;
+            case "kerb":
+              return PARAMS.kerb;
+            default:
+              return PARAMS.guardrail;
+          }
+        }
+
+        function buildLabObject({ points, closed, params }) {
+          const opts = {
+            points,
+            closed,
+            params,
+            getWorldHeight: sampleHeight,
+          };
+          switch (PARAMS.lab.objectType) {
+            case "fence":
+              return buildFenceMesh(opts);
+            case "barrier":
+              return buildBarrierMesh(opts);
+            case "kerb":
+              return buildKerbMesh(opts);
+            default:
+              return buildGuardrailMesh(opts);
+          }
+        }
+
+        const lab = {
+          points: SPLINE_PRESETS.sCurve.map(
+            (p) => new THREE.Vector3(p.x, p.y, p.z),
+          ),
+          selectedIdx: -1,
+          dragging: false,
+          pointMeshes: [],
+          objectGroup: null,
+          heroGroup: null,
+        };
+
+        const handleGroup = new THREE.Group();
+        handleGroup.name = "SplineHandles";
+        scene.add(handleGroup);
+
+        function disposeHandleGroup() {
+          while (handleGroup.children.length) {
+            const child = handleGroup.children[0];
+            handleGroup.remove(child);
+            child.geometry?.dispose();
+            child.material?.dispose();
+          }
+          lab.pointMeshes = [];
+        }
+
+        function rebuildObjects() {
+          if (lab.objectGroup) {
+            scene.remove(lab.objectGroup);
+            disposeLabObject(lab.objectGroup);
+            lab.objectGroup = null;
+          }
+          if (lab.heroGroup) {
+            scene.remove(lab.heroGroup);
+            disposeLabObject(lab.heroGroup);
+            lab.heroGroup = null;
+          }
+
+          const params = getLabParams();
+
+          if (lab.points.length >= 2) {
+            lab.objectGroup = buildLabObject({
+              points: lab.points,
+              closed: PARAMS.spline.closed,
+              params,
+            });
+            if (lab.objectGroup) {
+              lab.objectGroup.name = "ObjectSpline";
+              scene.add(lab.objectGroup);
+            }
+          }
+
+          if (PARAMS.spline.showHero) {
+            lab.heroGroup = buildLabObject({
+              points: HERO_STRIP_POINTS,
+              closed: false,
+              params,
+            });
+            if (lab.heroGroup) {
+              lab.heroGroup.name = "ObjectHero";
+              scene.add(lab.heroGroup);
+            }
+          }
+        }
+
+        function rebuildSplineVisual() {
+          disposeHandleGroup();
+          if (lab.points.length >= 2 && PARAMS.spline.showHandles) {
+            const curve = new THREE.CatmullRomCurve3(
+              lab.points,
+              !!PARAMS.spline.closed,
+              "catmullrom",
+              0.5,
+            );
+            const linePts = curve.getPoints(
+              Math.max(60, lab.points.length * 24),
+            );
+            const line = new THREE.Line(
+              new THREE.BufferGeometry().setFromPoints(linePts),
+              new THREE.LineBasicMaterial({ color: 0x00ccff }),
+            );
+            handleGroup.add(line);
+          }
+          if (PARAMS.spline.showHandles) {
+            for (let i = 0; i < lab.points.length; i++) {
+              const mesh = new THREE.Mesh(
+                new THREE.SphereGeometry(0.42, 12, 10),
+                new THREE.MeshBasicMaterial({
+                  color: i === lab.selectedIdx ? 0xffff00 : 0xff4400,
+                }),
+              );
+              mesh.position.copy(lab.points[i]);
+              mesh.position.y = sampleHeight(lab.points[i].x, lab.points[i].z);
+              handleGroup.add(mesh);
+              lab.pointMeshes.push(mesh);
+            }
+          }
+          handleGroup.visible = PARAMS.spline.showHandles;
+          rebuildObjects();
+        }
+
+        function applySplinePreset(name) {
+          const preset = SPLINE_PRESETS[name];
+          if (!preset) return;
+          lab.points = preset.map(
+            (p) => new THREE.Vector3(p.x, p.y, p.z),
+          );
+          lab.selectedIdx = -1;
+          lab.dragging = false;
+          rebuildSplineVisual();
+        }
+
+        function clearSpline() {
+          lab.points = [];
+          lab.selectedIdx = -1;
+          lab.dragging = false;
+          rebuildSplineVisual();
+        }
+
+        function undoLastPoint() {
+          if (lab.points.length === 0) return;
+          lab.points.pop();
+          lab.selectedIdx = Math.min(
+            lab.selectedIdx,
+            lab.points.length - 1,
+          );
+          rebuildSplineVisual();
+        }
+
+        function deleteSelectedPoint() {
+          if (lab.selectedIdx < 0 || lab.selectedIdx >= lab.points.length)
+            return;
+          lab.points.splice(lab.selectedIdx, 1);
+          lab.selectedIdx = Math.min(
+            lab.selectedIdx,
+            lab.points.length - 1,
+          );
+          rebuildSplineVisual();
+        }
+
+        function addSplinePoint(pos) {
+          lab.points.push(
+            new THREE.Vector3(pos.x, sampleHeight(pos.x, pos.z), pos.z),
+          );
+          lab.selectedIdx = lab.points.length - 1;
+          rebuildSplineVisual();
+        }
+
+        function pickHandle(clientX, clientY) {
+          ndc.x = (clientX / innerWidth) * 2 - 1;
+          ndc.y = -(clientY / innerHeight) * 2 + 1;
+          raycaster.setFromCamera(ndc, camera);
+          const hits = raycaster.intersectObjects(lab.pointMeshes, false);
+          if (hits.length === 0) return -1;
+          return lab.pointMeshes.indexOf(hits[0].object);
+        }
+
+        function groundHit(clientX, clientY, target = dragHit) {
+          ndc.x = (clientX / innerWidth) * 2 - 1;
+          ndc.y = -(clientY / innerHeight) * 2 + 1;
+          raycaster.setFromCamera(ndc, camera);
+          const hits = raycaster.intersectObject(floor, false);
+          if (hits.length === 0) return null;
+          target.copy(hits[0].point);
+          return target;
+        }
+
+        function frameCamera(mode) {
+          const box = new THREE.Box3();
+          if (lab.objectGroup) box.expandByObject(lab.objectGroup);
+          if (lab.heroGroup) box.expandByObject(lab.heroGroup);
+          if (box.isEmpty()) {
+            controls.target.set(0, 0.8, 12);
+            camera.position.set(0, 12, 36);
+            controls.update();
+            return;
+          }
+          const center = box.getCenter(new THREE.Vector3());
+          const size = box.getSize(new THREE.Vector3());
+          const maxDim = Math.max(size.x, size.y, size.z, 4);
+
+          if (mode === "hero" && lab.heroGroup) {
+            const hbox = new THREE.Box3().setFromObject(lab.heroGroup);
+            const hc = hbox.getCenter(new THREE.Vector3());
+            controls.target.copy(hc);
+            camera.position.set(hc.x + 4, hc.y + 2.2, hc.z + 5);
+          } else if (mode === "splineStart" && lab.points.length >= 1) {
+            const p0 = lab.points[0];
+            controls.target.set(p0.x, sampleHeight(p0.x, p0.z) + 1, p0.z);
+            camera.position.set(
+              p0.x + 6,
+              sampleHeight(p0.x, p0.z) + 4,
+              p0.z + 8,
+            );
+          } else {
+            controls.target.copy(center);
+            camera.position.set(
+              center.x + maxDim * 0.55,
+              center.y + maxDim * 0.35,
+              center.z + maxDim * 0.75,
+            );
+          }
+          controls.update();
+        }
+
+        const labmodeEl = document.getElementById("labmode");
+        function setSplineEditMode(on) {
+          PARAMS.spline.editMode = !!on;
+          lab.dragging = false;
+          applyOrbitMouseButtons();
+          labmodeEl.textContent = on ? "SPLINE EDIT" : "ORBIT";
+          rebuildSplineVisual();
+        }
+
+        rebuildSplineVisual();
+        frameCamera("overview");
+
+        renderer.domElement.addEventListener("pointerdown", (e) => {
+          if (!PARAMS.spline.editMode || e.button !== 0) return;
+          if (state.immersive) return;
+          const idx = pickHandle(e.clientX, e.clientY);
+          if (idx >= 0) {
+            lab.selectedIdx = idx;
+            lab.dragging = true;
+            rebuildSplineVisual();
+            renderer.domElement.setPointerCapture?.(e.pointerId);
+            e.preventDefault();
+            return;
+          }
+          const hit = groundHit(e.clientX, e.clientY);
+          if (hit) {
+            addSplinePoint(hit);
+            e.preventDefault();
+          }
+        });
+
+        renderer.domElement.addEventListener("pointermove", (e) => {
+          if (!lab.dragging || lab.selectedIdx < 0) return;
+          const hit = groundHit(e.clientX, e.clientY);
+          if (!hit) return;
+          lab.points[lab.selectedIdx].set(
+            hit.x,
+            sampleHeight(hit.x, hit.z),
+            hit.z,
+          );
+          rebuildSplineVisual();
+        });
+
+        const stopSplineDrag = (e) => {
+          if (!lab.dragging) return;
+          lab.dragging = false;
+          renderer.domElement.releasePointerCapture?.(e.pointerId);
+        };
+        renderer.domElement.addEventListener("pointerup", stopSplineDrag);
+        renderer.domElement.addEventListener("pointercancel", stopSplineDrag);
+
         // ── CAPSULE PLAYER (same shape + colors as v2/play/playMode.js) ──
         const capsuleGeo = new THREE.CapsuleGeometry(CAP_R, CAP_H, 4, 8);
         const capsuleMat = new THREE.MeshStandardMaterial({
@@ -669,6 +1036,17 @@
         const keys = Object.create(null);
         let rmbLook = false;
         window.addEventListener("keydown", (e) => {
+          if (e.target.matches("input, textarea, select")) return;
+          if (e.code === "Delete" || e.code === "Backspace") {
+            e.preventDefault();
+            deleteSelectedPoint();
+            return;
+          }
+          if (e.code === "KeyZ" && (e.ctrlKey || e.metaKey) && !e.shiftKey) {
+            e.preventDefault();
+            undoLastPoint();
+            return;
+          }
           if (e.code === "Tab") {
             e.preventDefault();
             setMode(state.mode === "follow" ? "orbit" : "follow");
@@ -865,6 +1243,16 @@
           floorMat,
           updateSun,
           rebuildSkyEnv,
+          lab,
+          rebuildObjects,
+          rebuildSplineVisual,
+          applySplinePreset,
+          clearSpline,
+          undoLastPoint,
+          deleteSelectedPoint,
+          setSplineEditMode,
+          frameCamera,
+          applyOrbitMouseButtons,
         });
       }
 
@@ -989,6 +1377,29 @@
         parent.appendChild(btn);
         return btn;
       }
+      function _dropdown(parent, obj, key, opts) {
+        const { label, options, onChange } = opts;
+        const row = document.createElement("div");
+        row.className = "prop-row";
+        row.innerHTML = `<span class="prop-label">${label}</span><div class="prop-value"></div>`;
+        const wrap = row.querySelector(".prop-value");
+        const sel = document.createElement("select");
+        sel.className = "prop-dropdown";
+        for (const [val, text] of Object.entries(options)) {
+          const opt = document.createElement("option");
+          opt.value = val;
+          opt.textContent = text;
+          if (obj[key] === val) opt.selected = true;
+          sel.appendChild(opt);
+        }
+        sel.addEventListener("change", () => {
+          obj[key] = sel.value;
+          onChange?.(sel.value);
+        });
+        wrap.appendChild(sel);
+        parent.appendChild(row);
+        return row;
+      }
       function _separator(parent) {
         const div = document.createElement("div");
         div.className = "section-separator";
@@ -996,8 +1407,35 @@
       }
 
       // === Build inspector panel ===
-      function buildInspector({ camera, floorMat, updateSun, rebuildSkyEnv }) {
+      function buildInspector({
+        camera,
+        floorMat,
+        updateSun,
+        rebuildSkyEnv,
+        lab,
+        rebuildObjects,
+        rebuildSplineVisual,
+        applySplinePreset,
+        clearSpline,
+        undoLastPoint,
+        deleteSelectedPoint,
+        setSplineEditMode,
+        frameCamera,
+      }) {
         const body = document.getElementById("inspector-body");
+        const rebuildObj = () => rebuildObjects();
+
+        function syncObjectSections() {
+          const type = PARAMS.lab.objectType;
+          guardrailSection.parentElement.style.display =
+            type === "guardrail" ? "" : "none";
+          fenceSection.parentElement.style.display =
+            type === "fence" ? "" : "none";
+          barrierSection.parentElement.style.display =
+            type === "barrier" ? "" : "none";
+          kerbSection.parentElement.style.display =
+            type === "kerb" ? "" : "none";
+        }
 
         // Toggle show/hide.
         document
@@ -1055,9 +1493,390 @@
           });
         }
 
+        // ── Object picker ──
+        {
+          const sec = _section(body, "Object", true);
+          _dropdown(sec, PARAMS.lab, "objectType", {
+            label: "Type",
+            options: {
+              guardrail: "Guardrail",
+              fence: "Fence",
+              barrier: "Barrier",
+              kerb: "Kerb",
+            },
+            onChange: () => {
+              syncObjectSections();
+              rebuildObj();
+            },
+          });
+        }
+
+        // ── Guardrail (object params — mirrors v2 names) ──
+        const guardrailSection = _section(body, "Guardrail", true);
+        {
+          const sec = guardrailSection;
+          const G = PARAMS.guardrail;
+          _slider(sec, G, "height", {
+            label: "Height",
+            min: 0.1,
+            max: 3,
+            step: 0.01,
+            onChange: rebuildObj,
+          });
+          _slider(sec, G, "depth", {
+            label: "Depth",
+            min: 0.05,
+            max: 2,
+            step: 0.01,
+            onChange: rebuildObj,
+          });
+          _slider(sec, G, "crownDepth", {
+            label: "Crown",
+            min: 0,
+            max: 0.5,
+            step: 0.005,
+            onChange: rebuildObj,
+          });
+          _slider(sec, G, "thickness", {
+            label: "Thickness",
+            min: 0,
+            max: 0.2,
+            step: 0.002,
+            onChange: rebuildObj,
+          });
+          _slider(sec, G, "railYOffset", {
+            label: "Rail Y",
+            min: 0,
+            max: 2,
+            step: 0.01,
+            onChange: rebuildObj,
+          });
+          _separator(sec);
+          _slider(sec, G, "postSpacing", {
+            label: "Post gap",
+            min: 0.5,
+            max: 8,
+            step: 0.1,
+            onChange: rebuildObj,
+          });
+          _slider(sec, G, "postWidth", {
+            label: "Post W",
+            min: 0.02,
+            max: 0.6,
+            step: 0.01,
+            onChange: rebuildObj,
+          });
+          _slider(sec, G, "postDepth", {
+            label: "Post D",
+            min: 0.02,
+            max: 0.6,
+            step: 0.01,
+            onChange: rebuildObj,
+          });
+          _slider(sec, G, "postHeight", {
+            label: "Post H",
+            min: 0.2,
+            max: 3,
+            step: 0.05,
+            onChange: rebuildObj,
+          });
+          _slider(sec, G, "postSink", {
+            label: "Post sink",
+            min: 0,
+            max: 0.5,
+            step: 0.01,
+            onChange: rebuildObj,
+          });
+          _separator(sec);
+          _slider(sec, G, "pathSegments", {
+            label: "Path segs",
+            min: 16,
+            max: 320,
+            step: 1,
+            onChange: rebuildObj,
+          });
+          _color(sec, G, "color", {
+            label: "Color",
+            onChange: rebuildObj,
+          });
+          _slider(sec, G, "roughness", {
+            label: "Roughness",
+            min: 0,
+            max: 1,
+            step: 0.01,
+            onChange: rebuildObj,
+          });
+          _slider(sec, G, "metalness", {
+            label: "Metalness",
+            min: 0,
+            max: 1,
+            step: 0.01,
+            onChange: rebuildObj,
+          });
+        }
+
+        // ── Fence (object params — mirrors v2 names) ──
+        const fenceSection = _section(body, "Fence", true);
+        {
+          const sec = fenceSection;
+          const F = PARAMS.fence;
+          _slider(sec, F, "height", {
+            label: "Height",
+            min: 0.35,
+            max: 4,
+            step: 0.05,
+            onChange: rebuildObj,
+          });
+          _slider(sec, F, "postSpacing", {
+            label: "Post gap",
+            min: 0.4,
+            max: 8,
+            step: 0.1,
+            onChange: rebuildObj,
+          });
+          _slider(sec, F, "postWidth", {
+            label: "Post W",
+            min: 0.02,
+            max: 0.3,
+            step: 0.01,
+            onChange: rebuildObj,
+          });
+          _slider(sec, F, "postDepth", {
+            label: "Post D",
+            min: 0.02,
+            max: 0.3,
+            step: 0.01,
+            onChange: rebuildObj,
+          });
+          _slider(sec, F, "railCount", {
+            label: "Rail count",
+            min: 1,
+            max: 6,
+            step: 1,
+            onChange: rebuildObj,
+          });
+          _slider(sec, F, "railThickness", {
+            label: "Rail thick",
+            min: 0.01,
+            max: 0.15,
+            step: 0.005,
+            onChange: rebuildObj,
+          });
+          _slider(sec, F, "pathSegments", {
+            label: "Path segs",
+            min: 16,
+            max: 320,
+            step: 1,
+            onChange: rebuildObj,
+          });
+          _color(sec, F, "color", {
+            label: "Color",
+            onChange: rebuildObj,
+          });
+          _slider(sec, F, "roughness", {
+            label: "Roughness",
+            min: 0,
+            max: 1,
+            step: 0.01,
+            onChange: rebuildObj,
+          });
+          _slider(sec, F, "metalness", {
+            label: "Metalness",
+            min: 0,
+            max: 1,
+            step: 0.01,
+            onChange: rebuildObj,
+          });
+        }
+
+        // ── Barrier (Jersey profile — mirrors v2 names) ──
+        const barrierSection = _section(body, "Barrier", true);
+        {
+          const sec = barrierSection;
+          const B = PARAMS.barrier;
+          _slider(sec, B, "height", {
+            label: "Height",
+            min: 0.2,
+            max: 2,
+            step: 0.01,
+            onChange: rebuildObj,
+          });
+          _slider(sec, B, "topWidth", {
+            label: "Top W",
+            min: 0.05,
+            max: 0.8,
+            step: 0.01,
+            onChange: rebuildObj,
+          });
+          _slider(sec, B, "bottomWidth", {
+            label: "Bottom W",
+            min: 0.1,
+            max: 1.2,
+            step: 0.01,
+            onChange: rebuildObj,
+          });
+          _slider(sec, B, "pathSegments", {
+            label: "Path segs",
+            min: 16,
+            max: 320,
+            step: 1,
+            onChange: rebuildObj,
+          });
+          _color(sec, B, "color", {
+            label: "Color",
+            onChange: rebuildObj,
+          });
+          _slider(sec, B, "roughness", {
+            label: "Roughness",
+            min: 0,
+            max: 1,
+            step: 0.01,
+            onChange: rebuildObj,
+          });
+          _slider(sec, B, "metalness", {
+            label: "Metalness",
+            min: 0,
+            max: 1,
+            step: 0.01,
+            onChange: rebuildObj,
+          });
+        }
+
+        // ── Kerb (chunked red/white — mirrors v2 names) ──
+        const kerbSection = _section(body, "Kerb", true);
+        {
+          const sec = kerbSection;
+          const K = PARAMS.kerb;
+          _dropdown(sec, K, "side", {
+            label: "Side",
+            options: { right: "Right", left: "Left" },
+            onChange: rebuildObj,
+          });
+          _slider(sec, K, "width", {
+            label: "Width",
+            min: 0.2,
+            max: 2,
+            step: 0.01,
+            onChange: rebuildObj,
+          });
+          _slider(sec, K, "height", {
+            label: "Height",
+            min: 0.02,
+            max: 0.5,
+            step: 0.005,
+            onChange: rebuildObj,
+          });
+          _slider(sec, K, "lipHeight", {
+            label: "Lip H",
+            min: 0,
+            max: 0.15,
+            step: 0.005,
+            onChange: rebuildObj,
+          });
+          _slider(sec, K, "stripeLength", {
+            label: "Stripe len",
+            min: 0.2,
+            max: 3,
+            step: 0.05,
+            onChange: rebuildObj,
+          });
+          _color(sec, K, "colorA", {
+            label: "Color A",
+            onChange: rebuildObj,
+          });
+          _color(sec, K, "colorB", {
+            label: "Color B",
+            onChange: rebuildObj,
+          });
+          _slider(sec, K, "roughness", {
+            label: "Roughness",
+            min: 0,
+            max: 1,
+            step: 0.01,
+            onChange: rebuildObj,
+          });
+          _slider(sec, K, "metalness", {
+            label: "Metalness",
+            min: 0,
+            max: 1,
+            step: 0.01,
+            onChange: rebuildObj,
+          });
+        }
+
+        syncObjectSections();
+
+        // ── Spline ──
+        {
+          const sec = _section(body, "Spline", true);
+          _toggle(sec, PARAMS.spline, "editMode", {
+            label: "Edit mode",
+            onChange: (v) => setSplineEditMode(v),
+          });
+          _toggle(sec, PARAMS.spline, "closed", {
+            label: "Closed",
+            onChange: () => rebuildSplineVisual(),
+          });
+          _toggle(sec, PARAMS.spline, "showHandles", {
+            label: "Handles",
+            onChange: () => rebuildSplineVisual(),
+          });
+          _toggle(sec, PARAMS.spline, "showHero", {
+            label: "Hero strip",
+            onChange: rebuildObj,
+          });
+          _separator(sec);
+          _button(sec, {
+            title: "Preset — Straight",
+            onClick: () => applySplinePreset("straight"),
+          });
+          _button(sec, {
+            title: "Preset — S-curve",
+            onClick: () => applySplinePreset("sCurve"),
+          });
+          _button(sec, {
+            title: "Preset — Tight 90°",
+            onClick: () => applySplinePreset("tight90"),
+          });
+          _button(sec, {
+            title: "Preset — Hairpin",
+            onClick: () => applySplinePreset("hairpin"),
+          });
+          _separator(sec);
+          _button(sec, {
+            title: "Undo last point (Ctrl+Z)",
+            onClick: undoLastPoint,
+          });
+          _button(sec, {
+            title: "Delete selected (Del)",
+            onClick: deleteSelectedPoint,
+          });
+          _button(sec, {
+            title: "Clear spline",
+            onClick: clearSpline,
+          });
+        }
+
+        // ── View ──
+        {
+          const sec = _section(body, "View", true);
+          _button(sec, {
+            title: "Camera — Hero strip",
+            onClick: () => frameCamera("hero"),
+          });
+          _button(sec, {
+            title: "Camera — Spline start",
+            onClick: () => frameCamera("splineStart"),
+          });
+          _button(sec, {
+            title: "Camera — Overview",
+            onClick: () => frameCamera("overview"),
+          });
+        }
+
         // ── Camera ──
         {
-          const sec = _section(body, "Camera", true);
+          const sec = _section(body, "Camera", false);
           _slider(sec, PARAMS.camera, "fov", {
             label: "FOV",
             min: 30,
