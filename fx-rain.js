@@ -110,12 +110,17 @@ export function createRainFX(scene, shared, _getTerrainHeight) {
   const length = uniform(2);
   const localTime = uniform(0);
   const visibleRatio = uniform(0);
+  // Separate float uniforms — vec2 uniform math was unreliable in TSL here.
+  const billboardX = uniform(0.707);
+  const billboardZ = uniform(-0.707);
 
   const material = new FolioMeshDefaultMaterial(lighting, {
     normalNode: vec3(0, 1, 0),
     transparent: true,
     wireframe: false,
-    hasCoreShadows: true,
+    side: THREE.DoubleSide,
+    depthWrite: false,
+    hasCoreShadows: false,
     hasDropShadows: false,
     hasLightBounce: false,
     hasFog: false,
@@ -126,7 +131,7 @@ export function createRainFX(scene, shared, _getTerrainHeight) {
     const newPosition = attribute("position").toVar();
     const offset = attribute("offset");
     const random = attribute("random");
-    const tangent = vec2(0.707, -0.707);
+    const inclineDir = vec2(0.707, -0.707);
 
     newPosition.xz.mulAssign(size);
     newPosition.xz.subAssign(center);
@@ -135,7 +140,9 @@ export function createRainFX(scene, shared, _getTerrainHeight) {
     newPosition.z.assign(mod(newPosition.z.add(halfSize), size).sub(halfSize));
     newPosition.xz.addAssign(center);
 
-    newPosition.xz.addAssign(tangent.mul(offset.x.mul(thickness)));
+    const halfWidth = offset.x.mul(thickness);
+    newPosition.x.addAssign(billboardX.mul(halfWidth));
+    newPosition.z.addAssign(billboardZ.mul(halfWidth));
 
     const progress = localTime.add(random).mod(1);
     newPosition.y.assign(elevation.add(length));
@@ -146,7 +153,7 @@ export function createRainFX(scene, shared, _getTerrainHeight) {
     const visible = step(visibleRatio, fract(random.mul(99)));
     newPosition.y.addAssign(visible.mul(99));
 
-    newPosition.xz.addAssign(tangent.mul(newPosition.y.mul(incline).mul(-1)));
+    newPosition.xz.addAssign(inclineDir.mul(newPosition.y.mul(incline).mul(-1)));
 
     return newPosition;
   })();
@@ -175,14 +182,40 @@ export function createRainFX(scene, shared, _getTerrainHeight) {
     speed,
   };
 
-  function updateOptimalArea() {
-    if (!camera) return;
-    const focus = controls
-      ? { x: controls.target.x, z: controls.target.z }
-      : null;
-    const optimal = computeOptimalArea(camera, focus);
+  function updateRainVolume() {
+    const radius = Math.max(10, shared.volume ?? 30);
+
+    if (controls) {
+      center.value.set(controls.target.x, controls.target.z);
+      size.value = radius * 2;
+      return;
+    }
+
+    if (!camera) {
+      center.value.set(0, 0);
+      size.value = radius * 2;
+      return;
+    }
+
+    const optimal = computeOptimalArea(camera, null);
     center.value.set(optimal.position.x, optimal.position.z);
-    size.value = optimal.radius * 2;
+    size.value = Math.max(radius * 2, optimal.radius * 2);
+  }
+
+  function updateBillboard() {
+    if (!camera) return;
+
+    const cx = controls ? controls.target.x : center.value.x;
+    const cz = controls ? controls.target.z : center.value.y;
+
+    const dx = camera.position.x - cx;
+    const dz = camera.position.z - cz;
+    const len = Math.hypot(dx, dz);
+
+    if (len > 1e-4) {
+      billboardX.value = -dz / len;
+      billboardZ.value = dx / len;
+    }
   }
 
   function update(dt, _elapsed, sh) {
@@ -196,23 +229,27 @@ export function createRainFX(scene, shared, _getTerrainHeight) {
     mesh.visible = visibleRatio.value > 0.00001;
     if (!mesh.visible) return;
 
-    updateOptimalArea();
+    updateRainVolume();
+    updateBillboard();
     localTime.value += dt * speed;
   }
 
   function setCamera(cam) {
     camera = cam;
-    updateOptimalArea();
+    updateRainVolume();
+    updateBillboard();
   }
 
   function setView(cam, ctrl) {
     camera = cam;
     controls = ctrl;
-    updateOptimalArea();
+    updateRainVolume();
+    updateBillboard();
   }
 
   function onResize() {
-    updateOptimalArea();
+    updateRainVolume();
+    updateBillboard();
   }
 
   function dispose(sc) {
@@ -222,7 +259,7 @@ export function createRainFX(scene, shared, _getTerrainHeight) {
   }
 
   applyWeatherBindings(state, shared);
-  updateOptimalArea();
+  updateRainVolume();
 
   return {
     update,
