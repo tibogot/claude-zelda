@@ -86,8 +86,10 @@ import {
 } from "../core/foliage/presetLoader.js";
 import { GrassManager } from "../render/foliage/grassManager.js";
 import { RevoGrassSystem } from "../render/revoGrass/revoGrassSystem.js";
+import { SnowSystem } from "../render/snow/snowSystem.js";
 import { GrassPaintSystem } from "../tools/foliage/grassPaintSystem.js";
 import { RevoGrassMaskPaintSystem } from "../tools/revoGrass/revoGrassMaskPaintSystem.js";
+import { SnowMaskPaintSystem } from "../tools/snow/snowMaskPaintSystem.js";
 import { CliffGrassPaintSystem } from "../tools/foliage/cliffGrassPaintSystem.js";
 import { PlayMode } from "../play/playMode.js";
 import { createV2AudioSystem } from "../audio/createV2AudioSystem.js";
@@ -179,6 +181,79 @@ async function probeModelsForFile(filename) {
       /* try next */
     }
   }
+  return null;
+}
+
+/**
+ * Pack playMode contact-point state into the SnowSystem's "wheelData" shape.
+ *
+ * Supported modes:
+ *   - car / lotus / vvv → 4 vehicle wheels + chassis (full car treatment).
+ *   - capsule / char    → 1 foot stamp at the player XZ; other 3 slots are
+ *                          tagged `touching = 0` so they don't carve.
+ *   - fly / rts         → returns `null` (no ground contact).
+ *
+ * Reuses module-scope scratch buffers — zero allocations per frame.
+ */
+const _snowWheelXZs = new Float32Array(8);
+const _snowWheelTouching = new Float32Array(4);
+const _snowChassisXZ = new THREE.Vector2();
+function _snowWheelData(playMode) {
+  const mode = playMode.moveMode;
+
+  if (mode === "car" || mode === "lotus" || mode === "vvv") {
+    const src = playMode._wheelWorldXZs;
+    if (!src) return null;
+    _snowWheelXZs[0] = src[0];
+    _snowWheelXZs[1] = src[1];
+    _snowWheelXZs[2] = src[2];
+    _snowWheelXZs[3] = src[3];
+    _snowWheelXZs[4] = src[4];
+    _snowWheelXZs[5] = src[5];
+    _snowWheelXZs[6] = src[6];
+    _snowWheelXZs[7] = src[7];
+    /**
+     * Per-wheel touching isn't tracked yet — use the chassis-level `carInAir`
+     * as a proxy. Refinement (carPhysics.lastSusp.contacts) is a later step.
+     */
+    const allTouching = playMode.carInAir ? 0 : 1;
+    _snowWheelTouching[0] = allTouching;
+    _snowWheelTouching[1] = allTouching;
+    _snowWheelTouching[2] = allTouching;
+    _snowWheelTouching[3] = allTouching;
+    _snowChassisXZ.set(playMode.playerPos.x, playMode.playerPos.z);
+    return {
+      wheelXZs: _snowWheelXZs,
+      wheelTouching: _snowWheelTouching,
+      chassisXZ: _snowChassisXZ,
+      chassisTouching: allTouching,
+    };
+  }
+
+  if (mode === "capsule" || mode === "char") {
+    /** Single foot stamp in slot 0; other slots inactive. */
+    const grounded = playMode.inAir ? 0 : 1;
+    _snowWheelXZs[0] = playMode.playerPos.x;
+    _snowWheelXZs[1] = playMode.playerPos.z;
+    _snowWheelXZs[2] = 0;
+    _snowWheelXZs[3] = 0;
+    _snowWheelXZs[4] = 0;
+    _snowWheelXZs[5] = 0;
+    _snowWheelXZs[6] = 0;
+    _snowWheelXZs[7] = 0;
+    _snowWheelTouching[0] = grounded;
+    _snowWheelTouching[1] = 0;
+    _snowWheelTouching[2] = 0;
+    _snowWheelTouching[3] = 0;
+    _snowChassisXZ.set(0, 0);
+    return {
+      wheelXZs: _snowWheelXZs,
+      wheelTouching: _snowWheelTouching,
+      chassisXZ: _snowChassisXZ,
+      chassisTouching: 0,
+    };
+  }
+
   return null;
 }
 
@@ -873,6 +948,7 @@ export async function startV2App(opts = {}) {
 
   const grassManager = new GrassManager({ scene, camera, config });
   const revoGrassSystem = new RevoGrassSystem({ scene, config });
+  const snowSystem = new SnowSystem({ scene, config });
   const grassPaintSystem = new GrassPaintSystem({
     toolState,
     grassManager,
@@ -881,6 +957,11 @@ export async function startV2App(opts = {}) {
   const revoGrassMaskPaintSystem = new RevoGrassMaskPaintSystem({
     toolState,
     mask: revoGrassSystem.mask,
+    config,
+  });
+  const snowMaskPaintSystem = new SnowMaskPaintSystem({
+    toolState,
+    mask: snowSystem.mask,
     config,
   });
   const cliffGrassPaintSystem = new CliffGrassPaintSystem({
@@ -1400,6 +1481,9 @@ export async function startV2App(opts = {}) {
     if (toolState.mode === "revoGrass" && toolState.revoGrass.enabled) {
       revoGrassSystem.syncFromState(toolState.revoGrass, sunDir);
     }
+    if (toolState.mode === "snow" && toolState.snow.enabled) {
+      snowSystem.syncFromState(toolState.snow);
+    }
     if (toolState.mode !== "cliffs") {
       deactivateCliffSelection();
     }
@@ -1609,6 +1693,7 @@ export async function startV2App(opts = {}) {
     _grassSaveDensity,
     _grassLoadDensity;
   let _revoGrassChanged, _revoGrassRebuild;
+  let _snowChanged, _snowRebuild;
   let _terrainSurfaceChanged,
     _tslTerrainSync,
     _autoCliffEditorChanged,
@@ -2024,6 +2109,23 @@ export async function startV2App(opts = {}) {
       await revoGrassSystem.rebuild(rp, sunDir);
       revoGrassSystem.syncFromState(rp, sunDir);
       await revoGrassSystem.precompile(renderer, camera);
+    }),
+    onSnowChanged: (_snowChanged = async () => {
+      const sp = toolState.snow;
+      if (sp.enabled) {
+        await snowSystem.ensureBuilt(sp);
+        snowSystem.syncFromState(sp);
+        await snowSystem.precompile(renderer, camera);
+      } else {
+        snowSystem.setEnabled(false);
+      }
+    }),
+    onSnowRebuild: (_snowRebuild = async () => {
+      const sp = toolState.snow;
+      if (!sp.enabled) return;
+      await snowSystem.rebuild(sp);
+      snowSystem.syncFromState(sp);
+      await snowSystem.precompile(renderer, camera);
     }),
     onTreeCastShadowChanged: (_treeCastShadowChanged = () => {
       for (let i = 0; i < toolState.treeSlots.length; i++) {
@@ -2828,6 +2930,7 @@ export async function startV2App(opts = {}) {
       toolState._billboardGrassExportData = () => billboardGrassStore.toJSON();
       toolState._revoGrassMaskExportData = () =>
         revoGrassSystem.mask.exportData();
+      toolState._snowMaskExportData = () => snowSystem.mask.exportData();
       toolState.propMaterialOverrides = propTextureLibrary.snapshotOverrides();
       const buf = serializeProject({
         terrainStore,
@@ -2856,6 +2959,7 @@ export async function startV2App(opts = {}) {
       delete toolState._decalExportData;
       delete toolState._billboardGrassExportData;
       delete toolState._revoGrassMaskExportData;
+      delete toolState._snowMaskExportData;
       const blob = new Blob([buf], { type: "application/octet-stream" });
       const ts = new Date().toISOString().replace(/[:.]/g, "-").slice(0, 19);
       downloadBlob(blob, `terrain-${ts}.v2terrain`);
@@ -2902,6 +3006,16 @@ export async function startV2App(opts = {}) {
           await revoGrassSystem.precompile(renderer, camera);
         } else {
           revoGrassSystem.setEnabled(false);
+        }
+        if (project.settings?.snowMask) {
+          snowSystem.mask.importData(project.settings.snowMask);
+        }
+        if (project.settings?.snow && toolState.snow.enabled) {
+          await snowSystem.rebuild(toolState.snow);
+          snowSystem.syncFromState(toolState.snow);
+          await snowSystem.precompile(renderer, camera);
+        } else {
+          snowSystem.setEnabled(false);
         }
         propTextureLibrary.applyOverrides(toolState.propMaterialOverrides);
         riverSystem.syncMaterial();
@@ -3419,6 +3533,22 @@ export async function startV2App(opts = {}) {
   grassManager.rebuildTerrainNormalTex(config.world.size);
   grassManager.precompile(renderer, camera);
 
+  /**
+   * Snow tile init — uses the engine's existing `globalHeightTex` (terrain Y)
+   * and `grassManager.windTex` (RepeatWrapping Float32 RGBA FBM noise) for the
+   * surface drift + glitter perlin/hash sampling. One texture, four channels.
+   */
+  await snowSystem.init(
+    renderer,
+    globalHeightTex,
+    grassManager.windTex,
+    toolState,
+    {},
+  );
+  if (toolState.snow?.enabled) {
+    await snowSystem.precompile(renderer, camera);
+  }
+
   await revoGrassSystem.init(renderer, globalHeightTex, sunDir, toolState, {
     geminiDensityTex: grassManager.densityTex,
   });
@@ -3590,6 +3720,7 @@ export async function startV2App(opts = {}) {
       toolState.mode === "billboardGrassPaint" ||
       toolState.mode === "grass" ||
       toolState.mode === "revoGrass" ||
+      toolState.mode === "snow" ||
       toolState.mode === "cliffGrass" ||
       toolState.mode === "barrier" ||
       toolState.mode === "hole" ||
@@ -3961,6 +4092,8 @@ export async function startV2App(opts = {}) {
       grassPaintSystem.beginStroke(hit.point, event);
     } else if (toolState.mode === "revoGrass") {
       revoGrassMaskPaintSystem.beginStroke(hit.point, event);
+    } else if (toolState.mode === "snow") {
+      snowMaskPaintSystem.beginStroke(hit.point, event);
     } else if (toolState.mode === "cliffGrass") {
       cliffGrassPaintSystem.beginStroke(hit.point, event);
     } else if (toolState.mode === "props") {
@@ -4060,6 +4193,8 @@ export async function startV2App(opts = {}) {
       grassPaintSystem.applyAt(hit.point, event);
     } else if (toolState.mode === "revoGrass") {
       revoGrassMaskPaintSystem.applyAt(hit.point, event);
+    } else if (toolState.mode === "snow") {
+      snowMaskPaintSystem.applyAt(hit.point, event);
     } else if (toolState.mode === "cliffGrass") {
       cliffGrassPaintSystem.applyAt(hit.point, event);
     } else if (toolState.mode === "props") {
@@ -4194,6 +4329,8 @@ export async function startV2App(opts = {}) {
       grassPaintSystem.endStroke();
     } else if (toolState.mode === "revoGrass") {
       revoGrassMaskPaintSystem.endStroke();
+    } else if (toolState.mode === "snow") {
+      snowMaskPaintSystem.endStroke();
     } else if (toolState.mode === "cliffGrass") {
       cliffGrassPaintSystem.endStroke();
     } else if (toolState.mode === "props") {
@@ -4213,6 +4350,7 @@ export async function startV2App(opts = {}) {
       return billboardGrassPaintSystem;
     if (toolState.mode === "grass") return grassPaintSystem;
     if (toolState.mode === "revoGrass") return revoGrassMaskPaintSystem;
+    if (toolState.mode === "snow") return snowMaskPaintSystem;
     if (toolState.mode === "cliffGrass") return cliffGrassPaintSystem;
     if (toolState.mode === "road") return roadSystem;
     if (toolState.mode === "fullRoad") return fullRoadSystem;
@@ -4735,6 +4873,17 @@ export async function startV2App(opts = {}) {
       revoGrassSystem.update(toolState.revoGrass, focusPos, camera, {
         playMode: playMode.active,
       });
+    }
+
+    /**
+     * Snow tile per-frame update. The anchor follows the same `focusPos` used by
+     * RevoGrass. Contact-point carving is fed by `_snowWheelData()`, which
+     * handles car/lotus/vvv (4 wheels + chassis) and capsule/char (1 foot
+     * stamp) modes. Editor mode and airborne modes pass null → no carving.
+     */
+    if (toolState.snow.enabled) {
+      const _wd = playMode.active ? _snowWheelData(playMode) : null;
+      snowSystem.update(toolState.snow, focusPos, _wd);
     }
 
     fleurSystem.update(
@@ -5616,6 +5765,30 @@ export async function startV2App(opts = {}) {
       const buf = await file.arrayBuffer();
       revoGrassSystem.mask.restoreSnapshot(new Uint8Array(buf));
     },
+    snowChanged() {
+      _snowChanged?.();
+    },
+    snowRebuild() {
+      return _snowRebuild?.();
+    },
+    snowMaskFill() {
+      snowSystem.mask.fillAccum();
+    },
+    snowMaskClear() {
+      snowSystem.mask.clearAccum();
+    },
+    snowMaskSave() {
+      const blob = new Blob([snowSystem.mask.getSnapshot()], {
+        type: "application/octet-stream",
+      });
+      downloadBlob(blob, "snow-mask.bin");
+    },
+    async snowMaskLoad() {
+      const file = await openFilePicker(".bin");
+      if (!file) return;
+      const buf = await file.arrayBuffer();
+      snowSystem.mask.restoreSnapshot(new Uint8Array(buf));
+    },
     terrainSurfaceChanged() {
       _terrainSurfaceChanged();
     },
@@ -5684,6 +5857,7 @@ export async function startV2App(opts = {}) {
       collectibleGizmo.dispose();
       transformControls.dispose();
       grassManager.dispose();
+      snowSystem.dispose();
       ambientFxStore.clear();
       roadSystem.dispose();
       fullRoadSystem.dispose();

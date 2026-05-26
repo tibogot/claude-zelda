@@ -1276,6 +1276,67 @@ export function createToolState() {
     revoGrassPaint: {
       erase: false,
     },
+    /**
+     * Snow tile — moving-window grid following player/camera.
+     * Surface = Snow010A PBR (color/rough/normal/AO/displacement) sampled
+     * tiled by world XZ. Vertex Y = terrainY + accumulation + fine PBR
+     * displacement − scrolling trail-map groove. Painted mask = artist input.
+     */
+    snow: {
+      enabled: false,
+      qualityPreset: "high",
+      subdivisions: 256,
+      tileSize: 110,
+      /** Accumulation. */
+      baseDepth: 0.1,
+      altitudeY0: 30,
+      altitudeY1: 200,
+      altitudeDepth: 0.6,
+      accumMaskEnabled: true,
+      paintedAccumStrength: 1.2,
+      /** Surface PBR (Snow010A). */
+      tileFreq: 0.18,
+      dispStrength: 0.06,
+      snowColorMul: 1.0,
+      colorBrightness: 1.0,
+      normalScale: 0.7,
+      /** Detail mapping (sample at two scales to break the obvious tile). */
+      detailFreqRatio: 0.18,
+      detailMix: 0.45,
+      /** Rim ridges (positive Y push along the sides of wheel ruts). */
+      rimRidgeScale: 0.35,
+      rimSampleOffset: 0.5,
+      /** Trail map (wheel ruts). */
+      trailWorldSize: 200,
+      trailScrollThreshold: 0.38,
+      trailGrooveScale: 1.5,
+      trailAlbedoCavity: 0.45,
+      trailRoughnessBoost: 0.55,
+      trailAoInGroove: 0.8,
+      trailStampStep: 0.15,
+      /** Additive heal rate per frame in normalised [0,1] units. 0 = trails permanent within the trail window. */
+      trailRegrowPerFrame: 0,
+      /** Wheel + chassis carving (play mode only). */
+      wheelEnabled: true,
+      wheelDepth: 0.5,
+      wheelRadius: 0.4,
+      wheelPushScale: 0.6,
+      chassisStampEnabled: false,
+      chassisDepth: 0.2,
+      chassisRadius: 1.2,
+      chassisPushScale: 0.35,
+      /** Alpha edge fade. */
+      fadeEdgeLow: 0.02,
+      fadeEdgeHigh: 0.25,
+      normalNeighbourShift: 0.35,
+      /** Glitter sparkle (cheap pow on the displacement-tex value). */
+      glitterIntensity: 1.6,
+      glitterScarcity: 280,
+      glitterFreq: 1.3,
+    },
+    snowPaint: {
+      erase: false,
+    },
     grass: {
       enabled: false,
       bladeHeight: 1.0,

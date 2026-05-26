@@ -1582,6 +1582,7 @@
               <option value="billboardGrassPaint">Billboard Grass (U)</option>
               <option value="grass">Grass (G)</option>
               <option value="revoGrass">Revo Grass (Y)</option>
+              <option value="snow">Snow</option>
               <option value="cliffGrass">Cliff Grass</option>
               <option value="road">Road</option>
               <option value="fullRoad">Full Road</option>
@@ -2278,6 +2279,9 @@
         const revoGrassPanel = document.getElementById("revo-grass-panel");
         if (revoGrassPanel)
           revoGrassPanel.style.display = mode === "revoGrass" ? "" : "none";
+        const snowPanel = document.getElementById("snow-panel");
+        if (snowPanel)
+          snowPanel.style.display = mode === "snow" ? "" : "none";
         const smartRoadPanel = document.getElementById("smartroad-panel");
         if (smartRoadPanel)
           smartRoadPanel.style.display = mode === "smartRoad" ? "" : "none";
@@ -9595,6 +9599,346 @@
         return panel;
       }
 
+      // === Folio-style snow tile (moving window around player/camera) ===
+      function buildSnowPanel(app) {
+        const panel = document.createElement("div");
+        panel.id = "snow-panel";
+        const sp = app.toolState.snow;
+        const sCh = () => app.snowChanged();
+        const sRb = () => {
+          app.snowRebuild();
+        };
+
+        const mainBody = _section(panel, "Snow");
+        _toggle(mainBody, sp, "enabled", { label: "Enabled", onChange: sCh });
+
+        const tileBody = _section(panel, "Tile", false);
+        _dropdown(tileBody, sp, "qualityPreset", {
+          label: "Quality",
+          options: {
+            "Low (16k tris)": "low",
+            "Medium (37k tris)": "medium",
+            "High (66k tris)": "high",
+            "Ultra (102k tris)": "ultra",
+          },
+          onChange: () => {
+            const presets = {
+              low: { subdivisions: 128, tileSize: 80 },
+              medium: { subdivisions: 192, tileSize: 96 },
+              high: { subdivisions: 256, tileSize: 110 },
+              ultra: { subdivisions: 320, tileSize: 128 },
+            };
+            const p = presets[sp.qualityPreset] ?? presets.high;
+            sp.subdivisions = p.subdivisions;
+            sp.tileSize = p.tileSize;
+            sRb();
+          },
+        });
+        _slider(tileBody, sp, "tileSize", {
+          label: "Size (m)",
+          min: 40,
+          max: 200,
+          step: 2,
+          onChange: sRb,
+        });
+        _slider(tileBody, sp, "subdivisions", {
+          label: "Subdivisions",
+          min: 64,
+          max: 384,
+          step: 16,
+          onChange: sRb,
+        });
+
+        const accumBody = _section(panel, "Accumulation", false);
+        _slider(accumBody, sp, "baseDepth", {
+          label: "Base depth (m)",
+          min: 0,
+          max: 2,
+          step: 0.01,
+          onChange: sCh,
+        });
+        _slider(accumBody, sp, "altitudeY0", {
+          label: "Altitude Y0",
+          min: -50,
+          max: 400,
+          step: 1,
+          onChange: sCh,
+        });
+        _slider(accumBody, sp, "altitudeY1", {
+          label: "Altitude Y1",
+          min: 50,
+          max: 800,
+          step: 1,
+          onChange: sCh,
+        });
+        _slider(accumBody, sp, "altitudeDepth", {
+          label: "Altitude depth",
+          min: 0,
+          max: 3,
+          step: 0.01,
+          onChange: sCh,
+        });
+
+        const surfaceBody = _section(panel, "Surface (PBR)", false);
+        _slider(surfaceBody, sp, "tileFreq", {
+          label: "Tile freq",
+          min: 0.02,
+          max: 1.0,
+          step: 0.005,
+          onChange: sCh,
+        });
+        _slider(surfaceBody, sp, "dispStrength", {
+          label: "Disp amp (m)",
+          min: 0,
+          max: 0.4,
+          step: 0.005,
+          onChange: sCh,
+        });
+        _slider(surfaceBody, sp, "detailFreqRatio", {
+          label: "Detail freq ratio",
+          min: 0.05,
+          max: 1.0,
+          step: 0.01,
+          onChange: sCh,
+        });
+        _slider(surfaceBody, sp, "detailMix", {
+          label: "Detail mix",
+          min: 0,
+          max: 1,
+          step: 0.01,
+          onChange: sCh,
+        });
+        _slider(surfaceBody, sp, "snowColorMul", {
+          label: "Color mul",
+          min: 0.3,
+          max: 1.5,
+          step: 0.01,
+          onChange: sCh,
+        });
+        _slider(surfaceBody, sp, "colorBrightness", {
+          label: "Brightness",
+          min: 0.4,
+          max: 2,
+          step: 0.01,
+          onChange: sCh,
+        });
+        _slider(surfaceBody, sp, "normalScale", {
+          label: "Normal scale",
+          min: 0.1,
+          max: 2.5,
+          step: 0.05,
+          onChange: sCh,
+        });
+        _slider(surfaceBody, sp, "fadeEdgeLow", {
+          label: "Fade edge low",
+          min: 0,
+          max: 1,
+          step: 0.005,
+          onChange: sCh,
+        });
+        _slider(surfaceBody, sp, "fadeEdgeHigh", {
+          label: "Fade edge high",
+          min: 0,
+          max: 2,
+          step: 0.01,
+          onChange: sCh,
+        });
+        _slider(surfaceBody, sp, "normalNeighbourShift", {
+          label: "Normal sample",
+          min: 0.05,
+          max: 1,
+          step: 0.01,
+          onChange: sCh,
+        });
+
+        const glitterBody = _section(panel, "Glitter", false);
+        _slider(glitterBody, sp, "glitterIntensity", {
+          label: "Intensity",
+          min: 0,
+          max: 4,
+          step: 0.02,
+          onChange: sCh,
+        });
+        _slider(glitterBody, sp, "glitterScarcity", {
+          label: "Scarcity (pow)",
+          min: 16,
+          max: 2000,
+          step: 8,
+          onChange: sCh,
+        });
+        _slider(glitterBody, sp, "glitterFreq", {
+          label: "Freq",
+          min: 0.1,
+          max: 5,
+          step: 0.05,
+          onChange: sCh,
+        });
+
+        const trailBody = _section(panel, "Trail (wheels)", false);
+        _toggle(trailBody, sp, "wheelEnabled", {
+          label: "Carving enabled",
+          onChange: sCh,
+        });
+        _slider(trailBody, sp, "trailWorldSize", {
+          label: "Window (m)",
+          min: 80,
+          max: 500,
+          step: 5,
+          onChange: sCh,
+        });
+        _slider(trailBody, sp, "trailGrooveScale", {
+          label: "Groove scale",
+          min: 0,
+          max: 4,
+          step: 0.02,
+          onChange: sCh,
+        });
+        _slider(trailBody, sp, "trailAlbedoCavity", {
+          label: "Groove cavity",
+          min: 0,
+          max: 1.5,
+          step: 0.02,
+          onChange: sCh,
+        });
+        _slider(trailBody, sp, "trailRoughnessBoost", {
+          label: "Groove rough",
+          min: 0,
+          max: 2,
+          step: 0.02,
+          onChange: sCh,
+        });
+        _slider(trailBody, sp, "trailAoInGroove", {
+          label: "Groove AO",
+          min: 0,
+          max: 2,
+          step: 0.02,
+          onChange: sCh,
+        });
+        _slider(trailBody, sp, "rimRidgeScale", {
+          label: "Rim ridge scale",
+          min: 0,
+          max: 2,
+          step: 0.02,
+          onChange: sCh,
+        });
+        _slider(trailBody, sp, "rimSampleOffset", {
+          label: "Rim sample (m)",
+          min: 0.2,
+          max: 5,
+          step: 0.05,
+          onChange: sCh,
+        });
+        _slider(trailBody, sp, "wheelDepth", {
+          label: "Wheel depth",
+          min: 0,
+          max: 1.5,
+          step: 0.01,
+          onChange: sCh,
+        });
+        _slider(trailBody, sp, "wheelRadius", {
+          label: "Wheel radius",
+          min: 0.1,
+          max: 1.5,
+          step: 0.01,
+          onChange: sCh,
+        });
+        _slider(trailBody, sp, "wheelPushScale", {
+          label: "Wheel push",
+          min: 0.1,
+          max: 2,
+          step: 0.01,
+          onChange: sCh,
+        });
+        _slider(trailBody, sp, "trailStampStep", {
+          label: "Stamp step (m)",
+          min: 0.05,
+          max: 0.5,
+          step: 0.01,
+          onChange: sCh,
+        });
+        _slider(trailBody, sp, "trailRegrowPerFrame", {
+          label: "Regrow / frame",
+          min: 0,
+          max: 0.02,
+          step: 0.0002,
+          onChange: sCh,
+        });
+        _toggle(trailBody, sp, "chassisStampEnabled", {
+          label: "Chassis drag",
+          onChange: sCh,
+        });
+        _slider(trailBody, sp, "chassisDepth", {
+          label: "Chassis depth",
+          min: 0,
+          max: 1,
+          step: 0.01,
+          onChange: sCh,
+        });
+        _slider(trailBody, sp, "chassisRadius", {
+          label: "Chassis radius",
+          min: 0.5,
+          max: 3,
+          step: 0.05,
+          onChange: sCh,
+        });
+        _slider(trailBody, sp, "chassisPushScale", {
+          label: "Chassis push",
+          min: 0.1,
+          max: 2,
+          step: 0.01,
+          onChange: sCh,
+        });
+
+        const brushBody = _section(panel, "Mask brush", false);
+        _slider(brushBody, app.toolState.brush, "radius", {
+          label: "Radius",
+          min: app.config.sculpt.brushMin,
+          max: app.config.sculpt.brushMax,
+          step: 0.5,
+        });
+        _slider(brushBody, app.toolState.brush, "strength", {
+          label: "Strength",
+          min: app.config.sculpt.strengthMin,
+          max: app.config.sculpt.strengthMax,
+          step: 0.05,
+        });
+        _info(brushBody, "Paint", "Click terrain — Alt = erase");
+        _toggle(brushBody, app.toolState.snowPaint, "erase", {
+          label: "Erase mode",
+        });
+
+        const maskBody = _section(panel, "Accumulation mask", false);
+        _toggle(maskBody, sp, "accumMaskEnabled", {
+          label: "Use painted mask",
+          onChange: sCh,
+        });
+        _slider(maskBody, sp, "paintedAccumStrength", {
+          label: "Mask strength",
+          min: 0,
+          max: 4,
+          step: 0.05,
+          onChange: sCh,
+        });
+        _button(maskBody, {
+          title: "Fill snow everywhere",
+          onClick: () => app.snowMaskFill(),
+        });
+        _button(maskBody, {
+          title: "Clear all snow",
+          onClick: () => app.snowMaskClear(),
+        });
+        _button(maskBody, {
+          title: "Save mask .bin",
+          onClick: () => app.snowMaskSave(),
+        });
+        _button(maskBody, {
+          title: "Load mask .bin",
+          onClick: () => app.snowMaskLoad(),
+        });
+
+        return panel;
+      }
+
       // === Build custom Grass panel (parity with v2/ui/grassTweakpane.js + Brush) ===
       function buildGrassPanel(app) {
         const panel = document.createElement("div");
@@ -12913,6 +13257,7 @@
           toolsTab.appendChild(buildSplinePanel(app));
           toolsTab.appendChild(buildGrassPanel(app));
           toolsTab.appendChild(buildRevoGrassPanel(app));
+          toolsTab.appendChild(buildSnowPanel(app));
           toolsTab.appendChild(buildRoadPanel(app));
           toolsTab.appendChild(buildFullRoadPanel(app));
           toolsTab.appendChild(buildSmartRoadPanel(app));
