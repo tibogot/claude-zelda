@@ -454,6 +454,19 @@
         BARRIER_DEFAULTS,
       } from "./objects/barrier.js";
       import { buildKerbMesh, KERB_DEFAULTS } from "./objects/kerb.js";
+      import {
+        buildWoodFenceMesh,
+        WOOD_FENCE_DEFAULTS,
+      } from "./objects/woodFence.js";
+      import {
+        buildWoodPlankFenceMesh,
+        WOOD_PLANK_FENCE_DEFAULTS,
+      } from "./objects/woodPlankFence.js";
+      import {
+        buildStreetLampMesh,
+        STREET_LAMP_DEFAULTS,
+        STREET_LAMP_HERO_POINTS,
+      } from "./objects/streetLamp.js";
 
       const PARAMS = {
         camera: { fov: 60, followDist: 8 },
@@ -504,6 +517,9 @@
         fence: { ...FENCE_DEFAULTS },
         barrier: { ...BARRIER_DEFAULTS },
         kerb: { ...KERB_DEFAULTS },
+        woodFence: { ...WOOD_FENCE_DEFAULTS },
+        woodPlankFence: { ...WOOD_PLANK_FENCE_DEFAULTS },
+        streetLamp: { ...STREET_LAMP_DEFAULTS },
         lab: { objectType: "guardrail" },
         spline: {
           closed: false,
@@ -727,6 +743,12 @@
               return PARAMS.barrier;
             case "kerb":
               return PARAMS.kerb;
+            case "woodFence":
+              return PARAMS.woodFence;
+            case "woodPlankFence":
+              return PARAMS.woodPlankFence;
+            case "streetLamp":
+              return PARAMS.streetLamp;
             default:
               return PARAMS.guardrail;
           }
@@ -746,6 +768,12 @@
               return buildBarrierMesh(opts);
             case "kerb":
               return buildKerbMesh(opts);
+            case "woodFence":
+              return buildWoodFenceMesh(opts);
+            case "woodPlankFence":
+              return buildWoodPlankFenceMesh(opts);
+            case "streetLamp":
+              return buildStreetLampMesh(opts);
             default:
               return buildGuardrailMesh(opts);
           }
@@ -776,6 +804,16 @@
           lab.pointMeshes = [];
         }
 
+        function getHeroPoints() {
+          return PARAMS.lab.objectType === "streetLamp"
+            ? STREET_LAMP_HERO_POINTS
+            : HERO_STRIP_POINTS;
+        }
+
+        function minSplinePointsForLab() {
+          return PARAMS.lab.objectType === "streetLamp" ? 1 : 2;
+        }
+
         function rebuildObjects() {
           if (lab.objectGroup) {
             scene.remove(lab.objectGroup);
@@ -790,7 +828,7 @@
 
           const params = getLabParams();
 
-          if (lab.points.length >= 2) {
+          if (lab.points.length >= minSplinePointsForLab()) {
             lab.objectGroup = buildLabObject({
               points: lab.points,
               closed: PARAMS.spline.closed,
@@ -804,7 +842,7 @@
 
           if (PARAMS.spline.showHero) {
             lab.heroGroup = buildLabObject({
-              points: HERO_STRIP_POINTS,
+              points: getHeroPoints(),
               closed: false,
               params,
             });
@@ -1435,6 +1473,12 @@
             type === "barrier" ? "" : "none";
           kerbSection.parentElement.style.display =
             type === "kerb" ? "" : "none";
+          woodFenceSection.parentElement.style.display =
+            type === "woodFence" ? "" : "none";
+          woodPlankFenceSection.parentElement.style.display =
+            type === "woodPlankFence" ? "" : "none";
+          streetLampSection.parentElement.style.display =
+            type === "streetLamp" ? "" : "none";
         }
 
         // Toggle show/hide.
@@ -1503,6 +1547,9 @@
               fence: "Fence",
               barrier: "Barrier",
               kerb: "Kerb",
+              woodFence: "Wood picket",
+              woodPlankFence: "Wood plank",
+              streetLamp: "Street lamp",
             },
             onChange: () => {
               syncObjectSections();
@@ -1800,6 +1847,479 @@
             min: 0,
             max: 1,
             step: 0.01,
+            onChange: rebuildObj,
+          });
+        }
+
+        // ── Wood picket (vertical boards — beach / garden style) ──
+        const woodFenceSection = _section(body, "Wood picket", true);
+        {
+          const sec = woodFenceSection;
+          const W = PARAMS.woodFence;
+          _slider(sec, W, "height", {
+            label: "Height",
+            min: 0.4,
+            max: 3,
+            step: 0.05,
+            onChange: rebuildObj,
+          });
+          _slider(sec, W, "postSpacing", {
+            label: "Post gap",
+            min: 0.8,
+            max: 6,
+            step: 0.1,
+            onChange: rebuildObj,
+          });
+          _slider(sec, W, "postWidth", {
+            label: "Post W",
+            min: 0.06,
+            max: 0.35,
+            step: 0.01,
+            onChange: rebuildObj,
+          });
+          _slider(sec, W, "postDepth", {
+            label: "Post D",
+            min: 0.05,
+            max: 0.3,
+            step: 0.01,
+            onChange: rebuildObj,
+          });
+          _separator(sec);
+          _slider(sec, W, "picketWidth", {
+            label: "Board W",
+            min: 0.04,
+            max: 0.25,
+            step: 0.005,
+            onChange: rebuildObj,
+          });
+          _slider(sec, W, "picketDepth", {
+            label: "Board D",
+            min: 0.02,
+            max: 0.12,
+            step: 0.005,
+            onChange: rebuildObj,
+          });
+          _slider(sec, W, "picketGap", {
+            label: "Board gap",
+            min: 0,
+            max: 0.15,
+            step: 0.005,
+            onChange: rebuildObj,
+          });
+          _slider(sec, W, "railCount", {
+            label: "Rail count",
+            min: 0,
+            max: 3,
+            step: 1,
+            onChange: rebuildObj,
+          });
+          _slider(sec, W, "railThickness", {
+            label: "Rail thick",
+            min: 0.03,
+            max: 0.14,
+            step: 0.005,
+            onChange: rebuildObj,
+          });
+          _separator(sec);
+          _slider(sec, W, "leanAmount", {
+            label: "Lean °",
+            min: 0,
+            max: 25,
+            step: 0.5,
+            onChange: rebuildObj,
+          });
+          _slider(sec, W, "leanRatio", {
+            label: "Lean ratio",
+            min: 0,
+            max: 1,
+            step: 0.01,
+            onChange: rebuildObj,
+          });
+          _slider(sec, W, "heightVariation", {
+            label: "H var",
+            min: 0,
+            max: 0.25,
+            step: 0.01,
+            onChange: rebuildObj,
+          });
+          _slider(sec, W, "colorVariation", {
+            label: "Color var",
+            min: 0,
+            max: 1,
+            step: 0.01,
+            onChange: rebuildObj,
+          });
+          _slider(sec, W, "seed", {
+            label: "Seed",
+            min: 0,
+            max: 9999,
+            step: 1,
+            onChange: rebuildObj,
+          });
+          _separator(sec);
+          _color(sec, W, "colorMain", {
+            label: "Wood A",
+            onChange: rebuildObj,
+          });
+          _color(sec, W, "colorAlt", {
+            label: "Wood B",
+            onChange: rebuildObj,
+          });
+          _slider(sec, W, "roughness", {
+            label: "Roughness",
+            min: 0,
+            max: 1,
+            step: 0.01,
+            onChange: rebuildObj,
+          });
+          _toggle(sec, W, "flatShading", {
+            label: "Flat shade",
+            onChange: rebuildObj,
+          });
+        }
+
+        // ── Wood plank (horizontal rails — ranch / cartoon style) ──
+        const woodPlankFenceSection = _section(body, "Wood plank", true);
+        {
+          const sec = woodPlankFenceSection;
+          const P = PARAMS.woodPlankFence;
+          _slider(sec, P, "height", {
+            label: "Height",
+            min: 0.5,
+            max: 3,
+            step: 0.05,
+            onChange: rebuildObj,
+          });
+          _slider(sec, P, "postSpacing", {
+            label: "Post gap",
+            min: 1,
+            max: 6,
+            step: 0.1,
+            onChange: rebuildObj,
+          });
+          _slider(sec, P, "postWidth", {
+            label: "Post W",
+            min: 0.08,
+            max: 0.35,
+            step: 0.01,
+            onChange: rebuildObj,
+          });
+          _slider(sec, P, "postDepth", {
+            label: "Post D",
+            min: 0.07,
+            max: 0.3,
+            step: 0.01,
+            onChange: rebuildObj,
+          });
+          _slider(sec, P, "postOverhang", {
+            label: "Post top+",
+            min: 0,
+            max: 0.5,
+            step: 0.01,
+            onChange: rebuildObj,
+          });
+          _separator(sec);
+          _slider(sec, P, "railCount", {
+            label: "Rail count",
+            min: 1,
+            max: 4,
+            step: 1,
+            onChange: rebuildObj,
+          });
+          _slider(sec, P, "railThickness", {
+            label: "Rail thick",
+            min: 0.04,
+            max: 0.2,
+            step: 0.005,
+            onChange: rebuildObj,
+          });
+          _slider(sec, P, "railDepth", {
+            label: "Rail depth",
+            min: 0.03,
+            max: 0.16,
+            step: 0.005,
+            onChange: rebuildObj,
+          });
+          _slider(sec, P, "railInset", {
+            label: "Rail inset",
+            min: 0,
+            max: 0.12,
+            step: 0.005,
+            onChange: rebuildObj,
+          });
+          _separator(sec);
+          _slider(sec, P, "leanAmount", {
+            label: "Rail slant",
+            min: 0,
+            max: 0.6,
+            step: 0.01,
+            onChange: rebuildObj,
+          });
+          _slider(sec, P, "leanRatio", {
+            label: "Slant ratio",
+            min: 0,
+            max: 1,
+            step: 0.01,
+            onChange: rebuildObj,
+          });
+          _slider(sec, P, "railYOffset", {
+            label: "Rail jitter",
+            min: 0,
+            max: 0.12,
+            step: 0.005,
+            onChange: rebuildObj,
+          });
+          _slider(sec, P, "colorVariation", {
+            label: "Color var",
+            min: 0,
+            max: 1,
+            step: 0.01,
+            onChange: rebuildObj,
+          });
+          _slider(sec, P, "seed", {
+            label: "Seed",
+            min: 0,
+            max: 9999,
+            step: 1,
+            onChange: rebuildObj,
+          });
+          _separator(sec);
+          _color(sec, P, "colorMain", {
+            label: "Wood A",
+            onChange: rebuildObj,
+          });
+          _color(sec, P, "colorAlt", {
+            label: "Wood B",
+            onChange: rebuildObj,
+          });
+          _slider(sec, P, "roughness", {
+            label: "Roughness",
+            min: 0,
+            max: 1,
+            step: 0.01,
+            onChange: rebuildObj,
+          });
+          _toggle(sec, P, "flatShading", {
+            label: "Flat shade",
+            onChange: rebuildObj,
+          });
+        }
+
+        // ── Street lamp (stylized — placement + silhouette) ──
+        const streetLampSection = _section(body, "Street lamp", true);
+        {
+          const sec = streetLampSection;
+          const L = PARAMS.streetLamp;
+          _slider(sec, L, "spacing", {
+            label: "Spacing",
+            min: 4,
+            max: 40,
+            step: 0.5,
+            onChange: rebuildObj,
+          });
+          _slider(sec, L, "sideOffset", {
+            label: "Side offset",
+            min: 0,
+            max: 8,
+            step: 0.1,
+            onChange: rebuildObj,
+          });
+          _dropdown(sec, L, "side", {
+            label: "Side",
+            options: { right: "Right", left: "Left" },
+            onChange: rebuildObj,
+          });
+          _separator(sec);
+          _slider(sec, L, "poleHeight", {
+            label: "Pole H",
+            min: 2,
+            max: 8,
+            step: 0.05,
+            onChange: rebuildObj,
+          });
+          _slider(sec, L, "poleRadiusBase", {
+            label: "Pole base R",
+            min: 0.04,
+            max: 0.25,
+            step: 0.005,
+            onChange: rebuildObj,
+          });
+          _slider(sec, L, "poleRadiusTop", {
+            label: "Pole top R",
+            min: 0.03,
+            max: 0.2,
+            step: 0.005,
+            onChange: rebuildObj,
+          });
+          _slider(sec, L, "baseWidth", {
+            label: "Base W",
+            min: 0.2,
+            max: 1,
+            step: 0.02,
+            onChange: rebuildObj,
+          });
+          _slider(sec, L, "baseHeight", {
+            label: "Base H",
+            min: 0.04,
+            max: 0.4,
+            step: 0.01,
+            onChange: rebuildObj,
+          });
+          _slider(sec, L, "collarScale", {
+            label: "Collar scale",
+            min: 1,
+            max: 2.2,
+            step: 0.05,
+            onChange: rebuildObj,
+          });
+          _separator(sec);
+          _slider(sec, L, "armLength", {
+            label: "Arm len",
+            min: 0.3,
+            max: 2.5,
+            step: 0.05,
+            onChange: rebuildObj,
+          });
+          _slider(sec, L, "armMountHeight", {
+            label: "Arm height",
+            min: 1.5,
+            max: 7,
+            step: 0.05,
+            onChange: rebuildObj,
+          });
+          _slider(sec, L, "armThickness", {
+            label: "Arm thick",
+            min: 0.04,
+            max: 0.18,
+            step: 0.005,
+            onChange: rebuildObj,
+          });
+          _slider(sec, L, "armPitch", {
+            label: "Arm pitch°",
+            min: -35,
+            max: 20,
+            step: 1,
+            onChange: rebuildObj,
+          });
+          _separator(sec);
+          _slider(sec, L, "headWidth", {
+            label: "Head W",
+            min: 0.2,
+            max: 1.2,
+            step: 0.02,
+            onChange: rebuildObj,
+          });
+          _slider(sec, L, "headHeight", {
+            label: "Head H",
+            min: 0.12,
+            max: 0.8,
+            step: 0.02,
+            onChange: rebuildObj,
+          });
+          _slider(sec, L, "headDepth", {
+            label: "Head D",
+            min: 0.15,
+            max: 0.9,
+            step: 0.02,
+            onChange: rebuildObj,
+          });
+          _slider(sec, L, "headDrop", {
+            label: "Head drop",
+            min: 0,
+            max: 0.35,
+            step: 0.01,
+            onChange: rebuildObj,
+          });
+          _slider(sec, L, "capHeight", {
+            label: "Cap H",
+            min: 0,
+            max: 0.35,
+            step: 0.01,
+            onChange: rebuildObj,
+          });
+          _slider(sec, L, "bulbSize", {
+            label: "Bulb size",
+            min: 0.08,
+            max: 0.5,
+            step: 0.01,
+            onChange: rebuildObj,
+          });
+          _separator(sec);
+          _color(sec, L, "emissiveColor", {
+            label: "Glow color",
+            onChange: rebuildObj,
+          });
+          _slider(sec, L, "emissiveIntensity", {
+            label: "Glow int",
+            min: 0,
+            max: 6,
+            step: 0.1,
+            onChange: rebuildObj,
+          });
+          _toggle(sec, L, "castLight", {
+            label: "Point light",
+            onChange: rebuildObj,
+          });
+          _slider(sec, L, "lightIntensity", {
+            label: "Light int",
+            min: 0,
+            max: 4,
+            step: 0.05,
+            onChange: rebuildObj,
+          });
+          _slider(sec, L, "lightDistance", {
+            label: "Light dist",
+            min: 4,
+            max: 40,
+            step: 1,
+            onChange: rebuildObj,
+          });
+          _separator(sec);
+          _color(sec, L, "colorPole", {
+            label: "Pole color",
+            onChange: rebuildObj,
+          });
+          _color(sec, L, "colorMetal", {
+            label: "Metal color",
+            onChange: rebuildObj,
+          });
+          _slider(sec, L, "roughness", {
+            label: "Roughness",
+            min: 0,
+            max: 1,
+            step: 0.01,
+            onChange: rebuildObj,
+          });
+          _slider(sec, L, "metalness", {
+            label: "Metalness",
+            min: 0,
+            max: 1,
+            step: 0.01,
+            onChange: rebuildObj,
+          });
+          _slider(sec, L, "leanAmount", {
+            label: "Lean °",
+            min: 0,
+            max: 8,
+            step: 0.25,
+            onChange: rebuildObj,
+          });
+          _slider(sec, L, "leanRatio", {
+            label: "Lean ratio",
+            min: 0,
+            max: 1,
+            step: 0.01,
+            onChange: rebuildObj,
+          });
+          _slider(sec, L, "seed", {
+            label: "Seed",
+            min: 0,
+            max: 9999,
+            step: 1,
+            onChange: rebuildObj,
+          });
+          _toggle(sec, L, "flatShading", {
+            label: "Flat shade",
             onChange: rebuildObj,
           });
         }

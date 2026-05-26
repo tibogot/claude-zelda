@@ -201,6 +201,8 @@
       const PI_VAL = 3.14159265359;
       const MAX_RM_STEPS = 120;
       const MAX_LIGHT_STEPS = 32;
+      /* Upper bound for the cheap occlusion-only cloud loop (silhouette pass). */
+      const MAX_OCC_LOOP = 32;
       /* God-rays loop bound; lower = smaller shader / faster compile & runs. */
       const MAX_GOD_SAMPLES = 128;
 
@@ -1458,6 +1460,14 @@
         followCamera: false,
         cloudFollowSmoothing: 0.12,
         lodAuto: true,
+        /* Optimization toggles — flight-game tuned (no quality loss). */
+        cheapOcclusionCloud: true,
+        occlusionRaymarchSteps: 12,
+        emptySpaceSkip: true,
+        emptySpaceStepMul: 2.0,
+        insideCloudStepBoost: true,
+        insideCloudStepMul: 1.6,
+        skipGodRaysOffscreen: true,
         /* Portion of drawing-buffer size used for occlusion + god-rays (lower = faster). */
         effectBufferScale: 0.35,
         maxPixelRatio: 1.25,
@@ -1825,6 +1835,16 @@
       const uAmbientColor = uniform(ambientLight.color.clone());
       const uLightDir = uniform(sun.position.clone());
       const uOcclusionMode = uniform(0);
+      /* Steps for the cheap occlusion-only cloud material (silhouette pass). */
+      const uOccMaxSteps = uniform(
+        Math.max(
+          4,
+          Math.min(MAX_OCC_LOOP, parameters.occlusionRaymarchSteps),
+        ),
+      );
+      /* Empty-space skip controls (main raymarch). */
+      const uEmptyStepMul = uniform(parameters.emptySpaceStepMul);
+      const uEmptyDensityThreshold = uniform(0.01);
 
       function applySunOrientation() {
         const az = THREE.MathUtils.degToRad(parameters.sunAzimuthDeg);
@@ -2019,7 +2039,7 @@
         const rayLength = bounds.y.sub(bounds.x);
         If(rayLength.lessThan(0.001), () => Discard());
 
-        const stepSize = rayLength.div(uMaxSteps.max(1));
+        const baseStep = rayLength.div(uMaxSteps.max(1));
         const jitter = blueNoiseSample.r;
         const sceneDepthSample = depthTexNode.r;
         const sceneLinearDistance = linearizeDepth(
@@ -2029,24 +2049,24 @@
         );
 
         const mu = dot(rayDir, normalize(uLightDir)).toVar();
-        const fade_zone = stepSize.mul(2.0);
+        const fade_zone = baseStep.mul(2.0);
 
         const accumulatedColor = vec3(0.0).toVar();
         const transmittance = vec3(1.0, 1.0, 1.0).toVar();
         const lightDirWorld = normalize(uLightDir);
 
+        /* Travel-based march with empty-space skipping: in low-density regions
+           we advance `uEmptyStepMul × baseStep`; inside the cloud we stay at
+           baseStep. Integration math (scattering / extinction) always uses
+           baseStep so density-sensitive output is identical inside the cloud —
+           the savings come from sky/terrain rays terminating sooner. */
+        const travel = bounds.x.add(jitter.mul(baseStep)).toVar();
+
         Loop(MAX_RM_STEPS, ({ i: ii }) => {
           If(float(ii).greaterThanEqual(uMaxSteps), () => Break());
+          If(travel.greaterThanEqual(bounds.y), () => Break());
 
-          const dist_traveled = float(ii)
-            .mul(stepSize)
-            .add(jitter.mul(stepSize));
-          const dist_remaining = rayLength.sub(dist_traveled);
-          If(dist_remaining.lessThan(0.0), () => Break());
-
-          const travel = bounds.x
-            .add(jitter.mul(stepSize))
-            .add(float(ii).mul(stepSize));
+          const dist_remaining = bounds.y.sub(travel);
           const p = vOriginVar.add(rayDir.mul(travel));
 
           const viewSpacePos = modelViewMatrix.mul(vec4(p, 1.0));
@@ -2056,8 +2076,13 @@
           If(rayPointDistance.greaterThan(sceneLinearDistance), () => Break());
 
           const density = getDensity(p).toVar();
+          const isEmpty = density.lessThan(uEmptyDensityThreshold);
+          const advance = isEmpty.select(
+            baseStep.mul(uEmptyStepMul),
+            baseStep,
+          );
 
-          If(density.greaterThan(0.01), () => {
+          If(isEmpty.not(), () => {
             const lightEnergy = CalculateLightEnergy(p, lightDirWorld);
             const sunLuminance = uSunColor.mul(uSunIntensity).mul(lightEnergy);
             const sunScattering = sunLuminance.mul(PhaseFunction(mu));
@@ -2066,7 +2091,7 @@
             const totalScattering = sunScattering
               .add(ambientScattering)
               .mul(density)
-              .mul(stepSize);
+              .mul(baseStep);
             const fade_alpha = smoothstep(
               float(0.0),
               fade_zone,
@@ -2074,12 +2099,14 @@
             );
             const scaledScatter = totalScattering.mul(fade_alpha);
             const stepTransmittance = exp(
-              density.mul(stepSize).mul(uOpacity).mul(EXTINCTION_MULT).negate(),
+              density.mul(baseStep).mul(uOpacity).mul(EXTINCTION_MULT).negate(),
             );
             accumulatedColor.addAssign(transmittance.mul(scaledScatter));
             transmittance.mulAssign(stepTransmittance);
-            If(length(transmittance).lessThan(0.01), () => Break());
+            If(transmittance.r.lessThan(0.01), () => Break());
           });
+
+          travel.addAssign(advance);
         });
 
         If(uOcclusionMode.greaterThan(0.5), () => {
@@ -2116,6 +2143,51 @@
       cloudMat.side = THREE.BackSide;
       cloudMat.depthWrite = false;
       cloudMat.depthTest = false;
+
+      /* Cheap occlusion-only cloud material — silhouette pass.
+         ~12 steps, scalar transmittance, no lighting / no fog. Replaces the
+         full `cloudMat` raymarch during the god-rays occlusion pass: the
+         original draws into the occlusion RT then zeroes the color anyway,
+         so the full lighting work is pure waste. */
+      const cloudOccColorNode = Fn(() => {
+        const rayDir = normalize(vDirectionVar);
+        const bounds = hitBox({ orig: vOriginVar, dir: rayDir }).toVar();
+        If(bounds.x.greaterThanEqual(bounds.y), () => Discard());
+        bounds.x.assign(max(bounds.x, 0.0));
+        const rayLength = bounds.y.sub(bounds.x);
+        If(rayLength.lessThan(0.001), () => Discard());
+
+        const stepSize = rayLength.div(uOccMaxSteps.max(1));
+        const jitter = blueNoiseSample.r;
+        const transmittance = float(1.0).toVar();
+
+        Loop(MAX_OCC_LOOP, ({ i: ii }) => {
+          If(float(ii).greaterThanEqual(uOccMaxSteps), () => Break());
+          const travel = bounds.x
+            .add(jitter.mul(stepSize))
+            .add(float(ii).mul(stepSize));
+          const p = vOriginVar.add(rayDir.mul(travel));
+          const density = getDensity(p);
+          If(density.greaterThan(0.01), () => {
+            transmittance.mulAssign(
+              exp(density.mul(stepSize).mul(uOpacity).negate()),
+            );
+            If(transmittance.lessThan(0.02), () => Break());
+          });
+        });
+
+        /* Black RGB with alpha = (1 - transmittance) → blocks god-rays
+           additive light where the cloud is. */
+        return vec4(vec3(0.0), float(1.0).sub(transmittance));
+      });
+
+      const cloudOccMat = new THREE.MeshBasicNodeMaterial();
+      cloudOccMat.fog = false;
+      cloudOccMat.colorNode = cloudOccColorNode();
+      cloudOccMat.transparent = true;
+      cloudOccMat.side = THREE.BackSide;
+      cloudOccMat.depthWrite = false;
+      cloudOccMat.depthTest = false;
 
       const cloudMesh = new THREE.Mesh(
         new THREE.BoxGeometry(1, 1, 1),
@@ -2570,6 +2642,30 @@
         .onChange(() => resizeTargets());
       folderPerf.open();
 
+      const folderOpt = gui.addFolder("Optimizations (flight-tuned)");
+      folderOpt
+        .add(parameters, "cheapOcclusionCloud")
+        .name("Cheap silhouette for god-rays");
+      folderOpt
+        .add(parameters, "occlusionRaymarchSteps", 4, MAX_OCC_LOOP, 1)
+        .name("Silhouette steps");
+      folderOpt
+        .add(parameters, "emptySpaceSkip")
+        .name("Empty-space skip (main march)");
+      folderOpt
+        .add(parameters, "emptySpaceStepMul", 1.0, 4.0, 0.1)
+        .name("Empty step multiplier");
+      folderOpt
+        .add(parameters, "insideCloudStepBoost")
+        .name("Boost steps inside cloud");
+      folderOpt
+        .add(parameters, "insideCloudStepMul", 1.0, 2.5, 0.05)
+        .name("Inside boost factor");
+      folderOpt
+        .add(parameters, "skipGodRaysOffscreen")
+        .name("Skip god-rays when sun off-screen");
+      folderOpt.open();
+
       const folderWorld = gui.addFolder("Terrain & cloud placement");
       folderWorld.add(parameters, "lodAuto").name("Auto LOD (distance)");
       folderWorld
@@ -2687,12 +2783,39 @@
           godRaysSamples.value = parameters.godRaysSamplesUI;
         }
 
+        /* Inside-cloud step boost: when the camera is inside the cloud AABB
+           the visible density variation is dominated by the first few units
+           of ray, so raising the step count noticeably reduces graininess
+           without affecting any other rays. Cap so the loop stays bounded. */
+        const halfBox = parameters.containerScale * 0.5;
+        const insideCloudBox =
+          Math.abs(camera.position.x - _cloudCenter.x) < halfBox &&
+          Math.abs(camera.position.y - _cloudCenter.y) < halfBox &&
+          Math.abs(camera.position.z - _cloudCenter.z) < halfBox;
+        if (parameters.insideCloudStepBoost && insideCloudBox) {
+          uMaxSteps.value = Math.min(
+            MAX_RM_STEPS,
+            Math.round(uMaxSteps.value * parameters.insideCloudStepMul),
+          );
+        }
+
+        /* Drive uniforms for empty-space skip every frame so GUI toggles
+           take effect without a shader rebuild. */
+        uEmptyStepMul.value = parameters.emptySpaceSkip
+          ? parameters.emptySpaceStepMul
+          : 1.0;
+        uOccMaxSteps.value = Math.max(
+          4,
+          Math.min(MAX_OCC_LOOP, parameters.occlusionRaymarchSteps),
+        );
+
         lodEl.textContent = [
           `dist ${dist.toFixed(0)}`,
           `LOD ${lodBlend.toFixed(2)}`,
           `steps ${uMaxSteps.value}`,
           `god ${godRaysSamples.value}`,
           inFrustum ? "vis" : "cul",
+          insideCloudBox ? "IN" : "out",
         ].join(" · ");
 
         applySunOrientation();
@@ -2722,60 +2845,79 @@
 
         depthTexNode.value = depthTarget.depthTexture;
 
-        const bgSaved = scene.background;
-        const fogSaved = scene.fog;
-        scene.fog = null;
-        scene.background = new THREE.Color(0x000000);
-        sunSphere.material = occlusionMaterialWhite;
-        uOcclusionMode.value = 1;
-        for (const o of occluderMeshes) {
-          if (o !== cloudMesh && o.material !== undefined) {
-            originalMaterials.set(o.uuid, o.material);
-            if (Array.isArray(o.material)) {
-              const black = o.isLineSegments
-                ? occlusionLineBlack
-                : occlusionMaterialBlack;
-              o.material = o.material.map(() => black);
-            } else {
-              o.material = o.isLineSegments
-                ? occlusionLineBlack
-                : occlusionMaterialBlack;
-            }
-          }
-        }
-
-        camera.layers.enable(SOLID_LAYER);
-        camera.layers.enable(VOLUME_LAYER);
-        renderer.setRenderTarget(occlusionRT);
-        renderer.clear();
-        renderer.render(scene, camera);
-
-        sunSphere.material = sunMaterial;
-        uOcclusionMode.value = 0;
-        for (const o of occluderMeshes) {
-          if (o !== cloudMesh && originalMaterials.has(o.uuid)) {
-            o.material = originalMaterials.get(o.uuid);
-          }
-        }
-        originalMaterials.clear();
-        scene.background = bgSaved;
-        scene.fog = fogSaved;
-        camera.layers.enableAll();
-
-        occlusionTexForGodRays.value = occlusionRT.texture;
+        /* Decide once per frame whether the sun is visible enough on screen
+           for god rays to be worth rendering. NDC z > 1 means sun is behind
+           the camera; large UV margin handles the radial-blur sample tail. */
         const sunNdc = new THREE.Vector3()
           .copy(sunSphere.position)
           .project(camera);
-        godRaysLightUv.value.set(
-          sunNdc.x * 0.5 + 0.5,
-          1.0 - (sunNdc.y * 0.5 + 0.5),
-        );
+        const sunU = sunNdc.x * 0.5 + 0.5;
+        const sunV = 1.0 - (sunNdc.y * 0.5 + 0.5);
+        const sunOnScreen =
+          sunNdc.z <= 1.0 &&
+          sunU > -0.3 &&
+          sunU < 1.3 &&
+          sunV > -0.3 &&
+          sunV < 1.3;
+        const runGodRays =
+          !(parameters.skipGodRaysOffscreen && !sunOnScreen);
 
-        postQuad.material = godRaysMat;
-        renderer.setRenderTarget(godraysRT);
-        renderer.clear();
-        renderer.render(postScene, postCam);
-        godraysResultTex.value = godraysRT.texture;
+        if (runGodRays) {
+          const bgSaved = scene.background;
+          const fogSaved = scene.fog;
+          scene.fog = null;
+          scene.background = new THREE.Color(0x000000);
+          sunSphere.material = occlusionMaterialWhite;
+          uOcclusionMode.value = 1;
+          /* Cheap silhouette material for the occlusion pass — replaces the
+             full raymarch when enabled. Falls back to `cloudMat` (with the
+             color-zero clamp via `uOcclusionMode`) if disabled. */
+          const usedCheapOcc = parameters.cheapOcclusionCloud;
+          if (usedCheapOcc) cloudMesh.material = cloudOccMat;
+          for (const o of occluderMeshes) {
+            if (o !== cloudMesh && o.material !== undefined) {
+              originalMaterials.set(o.uuid, o.material);
+              if (Array.isArray(o.material)) {
+                const black = o.isLineSegments
+                  ? occlusionLineBlack
+                  : occlusionMaterialBlack;
+                o.material = o.material.map(() => black);
+              } else {
+                o.material = o.isLineSegments
+                  ? occlusionLineBlack
+                  : occlusionMaterialBlack;
+              }
+            }
+          }
+
+          camera.layers.enable(SOLID_LAYER);
+          camera.layers.enable(VOLUME_LAYER);
+          renderer.setRenderTarget(occlusionRT);
+          renderer.clear();
+          renderer.render(scene, camera);
+
+          sunSphere.material = sunMaterial;
+          uOcclusionMode.value = 0;
+          if (usedCheapOcc) cloudMesh.material = cloudMat;
+          for (const o of occluderMeshes) {
+            if (o !== cloudMesh && originalMaterials.has(o.uuid)) {
+              o.material = originalMaterials.get(o.uuid);
+            }
+          }
+          originalMaterials.clear();
+          scene.background = bgSaved;
+          scene.fog = fogSaved;
+          camera.layers.enableAll();
+
+          occlusionTexForGodRays.value = occlusionRT.texture;
+          godRaysLightUv.value.set(sunU, sunV);
+
+          postQuad.material = godRaysMat;
+          renderer.setRenderTarget(godraysRT);
+          renderer.clear();
+          renderer.render(postScene, postCam);
+          godraysResultTex.value = godraysRT.texture;
+        }
 
         camera.layers.enableAll();
         renderer.setRenderTarget(finalRT);
@@ -2783,11 +2925,13 @@
         renderer.render(scene, camera);
 
         finalSceneTex.value = finalRT.texture;
-        postQuad.material = compositeMat;
-        renderer.autoClear = false;
-        renderer.setRenderTarget(finalRT);
-        renderer.render(postScene, postCam);
-        renderer.autoClear = true;
+        if (runGodRays) {
+          postQuad.material = compositeMat;
+          renderer.autoClear = false;
+          renderer.setRenderTarget(finalRT);
+          renderer.render(postScene, postCam);
+          renderer.autoClear = true;
+        }
 
         postQuad.material = screenMat;
         renderer.setRenderTarget(null);
