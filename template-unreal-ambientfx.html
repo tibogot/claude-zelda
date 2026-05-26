@@ -64,7 +64,9 @@
         position: fixed;
         top: 0;
         right: 0;
-        width: 300px;
+        width: var(--inspector-width, 300px);
+        min-width: 240px;
+        max-width: 70vw;
         height: 100vh;
         background: var(--bg-panel);
         border-left: 1px solid var(--border);
@@ -73,6 +75,32 @@
         overflow: hidden;
         z-index: 20;
         box-shadow: -2px 0 10px rgba(0, 0, 0, 0.3);
+      }
+      /* Drag-to-resize strip on the inspector's left edge. Wider than the
+         visible border so it's easy to grab without obscuring panel chrome. */
+      #inspector-resize-handle {
+        position: absolute;
+        top: 0;
+        left: -3px;
+        width: 8px;
+        height: 100%;
+        cursor: ew-resize;
+        z-index: 21;
+        background: transparent;
+        transition: background 0.15s;
+      }
+      #inspector-resize-handle:hover,
+      body.inspector-resizing #inspector-resize-handle {
+        background: var(--accent);
+        opacity: 0.6;
+      }
+      body.inspector-resizing {
+        cursor: ew-resize;
+        user-select: none;
+      }
+      body.inspector-hidden #inspector-resize-handle,
+      body.immersive #inspector-resize-handle {
+        display: none;
       }
       #inspector-header {
         display: flex;
@@ -336,6 +364,105 @@
         background: var(--border);
         margin: 6px 0;
       }
+      /* Texture picker (FX panels) */
+      .prop-tex-label {
+        font-size: 10px;
+        font-weight: 600;
+        text-transform: uppercase;
+        letter-spacing: 0.35px;
+        color: var(--text-dim);
+        padding: 4px 0 6px;
+      }
+      .prop-tex-gallery {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 8px;
+        padding: 0 0 8px;
+      }
+      .prop-tex-item {
+        display: flex;
+        flex-direction: column;
+        align-items: center;
+        gap: 3px;
+        width: 56px;
+      }
+      .prop-tex-item img {
+        width: 52px;
+        height: 52px;
+        object-fit: cover;
+        border-radius: var(--radius);
+        border: 2px solid var(--border);
+        cursor: pointer;
+        opacity: 0.75;
+        background: var(--bg-input);
+        transition:
+          opacity 0.15s,
+          border-color 0.15s;
+      }
+      .prop-tex-item img:hover {
+        opacity: 1;
+        border-color: var(--border-light);
+      }
+      .prop-tex-item img.active {
+        border-color: var(--accent);
+        opacity: 1;
+        box-shadow: 0 0 0 1px var(--accent);
+      }
+      .prop-tex-caption {
+        font-size: 9px;
+        line-height: 1.2;
+        font-family: var(--font-mono);
+        color: var(--text-dim);
+        text-align: center;
+        max-width: 56px;
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+        pointer-events: none;
+      }
+      .prop-tex-current {
+        font-size: 10px;
+        color: var(--text-dim);
+        padding: 2px 0 4px;
+        font-family: var(--font-mono);
+      }
+      .prop-tex-current b {
+        color: var(--text);
+        font-weight: 600;
+      }
+      /* Nested folder inside a section gets a subtle border */
+      .section-body .inspector-section {
+        border: 1px solid var(--border);
+        border-radius: var(--radius);
+        margin: 4px 0;
+        background: var(--bg-dark);
+      }
+      .section-body .inspector-section .section-header {
+        padding: 5px 8px;
+      }
+      .section-body .inspector-section .section-body {
+        padding: 4px 8px 8px;
+      }
+      #fx-label {
+        position: fixed;
+        top: 8px;
+        left: 8px;
+        z-index: 10;
+        font:
+          bold 12px/1.4 "SF Mono",
+          monospace;
+        padding: 5px 12px;
+        border-radius: 6px;
+        background: rgba(40, 40, 40, 0.7);
+        color: #7df;
+        pointer-events: none;
+        user-select: none;
+        backdrop-filter: blur(4px);
+      }
+      body.immersive #fx-label {
+        display: none;
+      }
+
       /* Custom scrollbar */
       #inspector-body::-webkit-scrollbar {
         width: 8px;
@@ -364,12 +491,14 @@
     </script>
   </head>
   <body>
+    <div id="fx-label">Ambient FX</div>
     <div id="info">
       Template &mdash; <span id="backend">loading…</span> &bull; WASD/Arrows
       move &bull; Space jump &bull; RMB drag (or F immersive) to look &bull;
-      <span id="cammode">FOLLOW</span> (Tab orbit)
+      <span id="cammode">ORBIT</span> (Tab follow)
     </div>
     <div id="inspector">
+      <div id="inspector-resize-handle" title="Drag to resize"></div>
       <div id="inspector-header">
         <span>Inspector</span>
         <div style="display: flex; gap: 4px">
@@ -380,12 +509,47 @@
       <div id="inspector-body"></div>
     </div>
     <script type="module">
-      import * as THREE from "three";
+      import * as THREE from "three/webgpu";
+      import {
+        float,
+        mx_noise_float,
+        positionWorld,
+        smoothstep,
+        time,
+        uniform,
+        vec3,
+      } from "three/tsl";
       import Stats from "stats-gl";
       import { OrbitControls } from "three/addons/controls/OrbitControls.js";
       import { SkyMesh } from "three/addons/objects/SkyMesh.js";
       import { CSMShadowNode } from "three/addons/csm/CSMShadowNode.js";
       import { createTileMaterial } from "./tileMaterial.js";
+
+      // ── Ambient FX modules (every effect from ambient-fx-editor.html) ──
+      import { createButterflyFX, buildButterflyUI } from "./fx-butterflies.js";
+      import { createEmberFX, buildEmberUI } from "./fx-embers.js";
+      import {
+        createFlowingLinesFX,
+        buildFlowingLinesUI,
+      } from "./fx-flowing-lines.js";
+      import {
+        createFloatingLeavesFX,
+        buildFloatingLeavesUI,
+      } from "./fx-floating-leaves.js";
+      import {
+        createGhostLeavesFX,
+        buildGhostLeavesUI,
+      } from "./fx-ghost-leaves.js";
+      import {
+        createLeavesPhysicsFX,
+        buildLeavesPhysicsUI,
+      } from "./fx-leaves-physics.js";
+      import { createDustFX, buildDustUI } from "./fx-dust.js";
+      import { createRainFX, buildRainUI } from "./fx-rain.js";
+      import {
+        createBillboardCloudFX,
+        buildBillboardCloudUI,
+      } from "./fx-billboard-clouds.js";
 
       const PARAMS = {
         camera: { fov: 60, followDist: 8 },
@@ -432,6 +596,40 @@
           lightMargin: 100,
           mapSize: 2048,
         },
+      };
+
+      // ── Ambient-FX shared environment (mirrors ambient-fx-editor's `shared`).
+      // FX modules read these every frame, so any UI control mutating them
+      // takes effect immediately without rebuilding the effect.
+      const env = {
+        effect: "none",
+        windX: 1.0,
+        windZ: 0.3,
+        windStrength: 1.0,
+        density: 1.0,
+        groundY: 0.0,
+        volume: 30, // spawn radius
+        showGround: true,
+        // timeOfDay isn't surfaced here — the template's sun/elevation
+        // controls already drive lighting + sky. We expose them in the
+        // Lights/Sky panels instead.
+        timeOfDay: 0.5,
+      };
+
+      // ── Terrain-side cloud shadows (procedural FBM drifting across the
+      // floor). Multiplied into the tile material's colorNode before
+      // lighting, so shadowed patches read as cooler/darker even under the
+      // sun. Purely visual / no 1:1 match with billboard cards above.
+      const cloudShadow = {
+        enabled: false,
+        intensity: 0.55,
+        coverage: 0.5,
+        softness: 0.18,
+        scale: 0.04,
+        speed: 2.5,
+        useSharedWind: true,
+        windX: 1.0,
+        windZ: 0.3,
       };
 
       // Capsule + camera tuning — same constants as v2/play/playMode.js.
@@ -497,7 +695,7 @@
         controls.enableDamping = true;
         controls.dampingFactor = 0.05;
         controls.maxPolarAngle = Math.PI * 0.49;
-        controls.enabled = false; // disabled in follow mode
+        controls.enabled = true; // orbit is the default mode
 
         // ── LIGHTS ──
         const sunDir = new THREE.Vector3();
@@ -610,6 +808,59 @@
         floor.receiveShadow = true;
         scene.add(floor);
 
+        // ── Cloud shadows on the floor ──
+        // Wraps tileMaterial's existing colorNode with a multiplicative
+        // 2-octave FBM mask sampled at world XZ, drifting with wind.
+        const csUniforms = {
+          enabled: uniform(cloudShadow.enabled ? 1.0 : 0.0),
+          intensity: uniform(cloudShadow.intensity),
+          coverage: uniform(cloudShadow.coverage),
+          softness: uniform(cloudShadow.softness),
+          scale: uniform(cloudShadow.scale),
+          speed: uniform(cloudShadow.speed),
+          wind: uniform(
+            new THREE.Vector2(cloudShadow.windX, cloudShadow.windZ),
+          ),
+        };
+        {
+          const baseColor = floorMat.colorNode;
+          const csDrift = csUniforms.wind.mul(time).mul(csUniforms.speed);
+          const csWXZ = positionWorld.xz.add(csDrift).mul(csUniforms.scale);
+          const csN1 = mx_noise_float(vec3(csWXZ.x, 0.0, csWXZ.y));
+          const csN2 = mx_noise_float(
+            vec3(csWXZ.x.mul(2.13), 1.0, csWXZ.y.mul(2.07)),
+          );
+          const csNoise01 = csN1
+            .mul(0.65)
+            .add(csN2.mul(0.35))
+            .mul(0.5)
+            .add(0.5);
+          const csLo = csUniforms.coverage.sub(csUniforms.softness);
+          const csHi = csUniforms.coverage.add(csUniforms.softness);
+          const csCover = smoothstep(csLo, csHi, csNoise01);
+          const csShadowAmount = csCover
+            .mul(csUniforms.intensity)
+            .mul(csUniforms.enabled);
+          floorMat.colorNode = baseColor.mul(float(1.0).sub(csShadowAmount));
+        }
+
+        // ── Ambient FX state ──
+        // The active effect (if any) lives in here. switchEffect() disposes
+        // the previous instance and rebuilds the FX-specific inspector
+        // section. update(dt, elapsed, env) is called every frame.
+        const fxLabelEl = document.getElementById("fx-label");
+        const fxState = {
+          active: null,
+          activeName: "none",
+          uiBody: null, // dynamic FX section's body container
+          uiSection: null, // dynamic FX section's root for disposal
+        };
+
+        // sampleHeight is the local-space height sampler. The FX modules
+        // expect a world-space sampler — but with sampleHeight() === 0 it
+        // doesn't matter. We still wire both for parity with the editor.
+        const terrainHeight = (x, z) => sampleHeight(x, z);
+
         // ── CAPSULE PLAYER (same shape + colors as v2/play/playMode.js) ──
         const capsuleGeo = new THREE.CapsuleGeometry(CAP_R, CAP_H, 4, 8);
         const capsuleMat = new THREE.MeshStandardMaterial({
@@ -630,7 +881,7 @@
           inAir: false,
           camYaw: 0,
           camPitch: 0.35,
-          mode: "follow", // "follow" | "orbit"
+          mode: "orbit", // "follow" | "orbit" — orbit is the default
           immersive: false,
           lastFacingX: 0,
           lastFacingZ: -1,
@@ -721,10 +972,12 @@
 
         // ── FRAME LOOP ──
         let lastT = performance.now() / 1000;
+        let elapsedTime = 0;
         renderer.setAnimationLoop(() => {
           const now = performance.now() / 1000;
           const dt = Math.min(now - lastT, 0.05);
           lastT = now;
+          elapsedTime += dt;
 
           // Movement input is camera-relative. In orbit mode, derive a yaw
           // from the camera → capsule vector so "forward" still feels right.
@@ -798,6 +1051,40 @@
           capsule.rotation.y =
             Math.atan2(state.lastFacingX, state.lastFacingZ) + Math.PI;
 
+          // Sync cloud shadow uniforms (live-edited from inspector).
+          csUniforms.enabled.value = cloudShadow.enabled ? 1.0 : 0.0;
+          csUniforms.intensity.value = cloudShadow.intensity;
+          csUniforms.coverage.value = cloudShadow.coverage;
+          csUniforms.softness.value = cloudShadow.softness;
+          csUniforms.scale.value = cloudShadow.scale;
+          csUniforms.speed.value = cloudShadow.speed;
+          if (cloudShadow.useSharedWind) {
+            csUniforms.wind.value.set(env.windX, env.windZ);
+          } else {
+            csUniforms.wind.value.set(cloudShadow.windX, cloudShadow.windZ);
+          }
+
+          // env.timeOfDay drives any FX that reads it (billboard clouds).
+          // Derive it from the current sun elevation so cloud sunset tint
+          // matches the SkyMesh.
+          {
+            const el = THREE.MathUtils.clamp(
+              PARAMS.light.sunElevation / 90,
+              0,
+              1,
+            );
+            env.timeOfDay = 0.25 + el * 0.5;
+          }
+
+          // Floor visibility tracks env.showGround (kept for parity with
+          // the original editor's "Show Ground" toggle).
+          floor.visible = env.showGround;
+
+          // Update active FX (every effect signature matches the editor).
+          if (fxState.active && fxState.active.update) {
+            fxState.active.update(dt, elapsedTime, env);
+          }
+
           // Camera.
           if (state.mode === "follow") {
             const followDist = PARAMS.camera.followDist;
@@ -828,7 +1115,183 @@
           camera.updateProjectionMatrix();
           renderer.setSize(innerWidth, innerHeight);
           if (csm?.mainFrustum) csm.updateFrustums();
+          if (fxState.active?.onResize) fxState.active.onResize();
         });
+
+        // ── Effect registry ───────────────────────────────────────────────
+        // Mirrors ambient-fx-editor.html, minus the editor-only Fireflies
+        // entry which has no module yet. Every other effect from the
+        // editor's dropdown is wired here with full UI parity.
+        const effects = {
+          Butterflies: {
+            create: () => createButterflyFX(scene, env),
+            buildUI: (folder, state) => buildButterflyUI(folder, state),
+            color: "#f7b",
+          },
+          Embers: {
+            create: () => createEmberFX(scene, env),
+            buildUI: (folder, state) => buildEmberUI(folder, state),
+            color: "#fa3",
+          },
+          "Flowing Lines": {
+            create: () => createFlowingLinesFX(scene, env),
+            buildUI: (folder, state) => buildFlowingLinesUI(folder, state),
+            color: "#adf",
+          },
+          "Floating Leaves": {
+            create: () => createFloatingLeavesFX(scene, env, terrainHeight),
+            buildUI: (folder, state) => buildFloatingLeavesUI(folder, state),
+            color: "#9f6",
+          },
+          "Falling Leaves": {
+            create: () => createGhostLeavesFX(scene, env),
+            buildUI: (folder, state) => buildGhostLeavesUI(folder, state),
+            color: "#e9a35a",
+          },
+          "Leaves (Physics)": {
+            create: () => {
+              // flatTerrain: clamp leaves to the template's flat floor
+              // (y = env.groundY) instead of the editor's bumpy procedural
+              // surface — otherwise leaves float / sink into the floor.
+              const fx = createLeavesPhysicsFX(scene, env, renderer, {
+                flatTerrain: true,
+              });
+              fx.setView(camera, controls);
+              fx.setTerrainHeight((x, z) => terrainHeight(x, z));
+
+              // ── Capsule-driven probe ──
+              // The FX ships with two probe modes: "mouse" (cursor) and
+              // "wasd" (drives a wireframe capsule with WASD keys). The
+              // player capsule is already on-screen and WASD-controlled,
+              // so we repurpose "wasd" to mean "track the player". Mouse
+              // mode still works as in the original editor.
+              const probe = fx.getProbe();
+              if (probe) {
+                probe.setVisible(false);
+                fx.params.showProbe = false;
+                fx.params.probeMode = "wasd";
+                probe.setMode("wasd");
+
+                const origProbeUpdate = probe.update.bind(probe);
+                probe.update = function (dt) {
+                  if (this.mode === "wasd") {
+                    // Snap probe to the capsule centre so leaves get
+                    // pushed by the player. Velocity is auto-derived
+                    // from the position delta, matching the FX's
+                    // existing push falloff math.
+                    this.prevPosition.copy(this.position);
+                    this.position.x = capsule.position.x;
+                    this.position.z = capsule.position.z;
+                    this.position.y =
+                      this.terrainHeight(
+                        this.position.x,
+                        this.position.z,
+                      ) + (this.groundYRef?.value ?? 0);
+                    if (dt > 0) {
+                      this.velocity
+                        .subVectors(this.position, this.prevPosition)
+                        .divideScalar(dt);
+                    } else {
+                      this.velocity.set(0, 0, 0);
+                    }
+                    if (this.gizmo.visible) {
+                      this.gizmo.position.set(
+                        this.position.x,
+                        this.position.y + 0.8 * this.radius,
+                        this.position.z,
+                      );
+                    }
+                  } else {
+                    origProbeUpdate(dt);
+                  }
+                };
+              }
+              return fx;
+            },
+            buildUI: (folder, state) => {
+              buildLeavesPhysicsUI(folder, state);
+              // Relabel the probe-mode dropdown so the dropdown matches
+              // the new behaviour (WASD wireframe → capsule player), and
+              // hide the WASD-speed slider since the capsule moves the
+              // probe now.
+              const root = folder.body;
+              if (!root) return;
+              root.querySelectorAll("select.prop-dropdown").forEach((sel) => {
+                const wasd = sel.querySelector('option[value="wasd"]');
+                if (wasd && /WASD/i.test(wasd.textContent)) {
+                  wasd.textContent = "Capsule";
+                }
+              });
+              root.querySelectorAll(".prop-row").forEach((row) => {
+                const lbl = row.querySelector(".prop-label");
+                if (lbl && /^WASD Speed$/i.test(lbl.textContent.trim())) {
+                  row.style.display = "none";
+                }
+              });
+            },
+            color: "#ffaa44",
+          },
+          Dust: {
+            create: () => {
+              const fx = createDustFX(scene, env);
+              fx.setView(camera, controls);
+              return fx;
+            },
+            buildUI: (folder, state) => buildDustUI(folder, state),
+            color: "#d8c8a4",
+          },
+          Rain: {
+            create: () => {
+              const rain = createRainFX(scene, env, terrainHeight);
+              rain.setView(camera, controls);
+              return rain;
+            },
+            buildUI: (folder, state) => buildRainUI(folder, state),
+            color: "#8cf",
+          },
+          "Billboard Clouds": {
+            create: () => {
+              const clouds = createBillboardCloudFX(scene, env);
+              clouds.setCamera(camera);
+              return clouds;
+            },
+            buildUI: (folder, state) => buildBillboardCloudUI(folder, state),
+            color: "#def",
+          },
+        };
+
+        // ── switchEffect: dispose previous, build new, rebuild FX panel ──
+        function switchEffect(name) {
+          if (fxState.active?.dispose) fxState.active.dispose(scene);
+          fxState.active = null;
+          fxState.activeName = name;
+          // Tear down the previous dynamic FX section, if any.
+          if (fxState.uiSection?.parentElement) {
+            fxState.uiSection.remove();
+          }
+          fxState.uiSection = null;
+          fxState.uiBody = null;
+
+          if (name === "none" || !effects[name]) {
+            fxLabelEl.textContent = "Ambient FX";
+            fxLabelEl.style.color = "#7df";
+            return;
+          }
+
+          fxState.active = effects[name].create();
+          fxLabelEl.textContent = `FX: ${name}`;
+          fxLabelEl.style.color = effects[name].color || "#7df";
+
+          // Rebuild a fresh inspector section dedicated to this effect, and
+          // hand it a Tweakpane-compatible folder so the existing build*UI
+          // functions plug in unchanged.
+          const insBody = document.getElementById("inspector-body");
+          const { section, body } = _sectionEx(insBody, `FX: ${name}`, true);
+          fxState.uiSection = section;
+          fxState.uiBody = body;
+          const folder = _makeTPFolder(body, section);
+          effects[name].buildUI(folder, fxState.active, env);
+        }
 
         // ── UI PANEL (v2/editor.html helpers) ──────────────────────────────
         buildInspector({
@@ -836,6 +1299,7 @@
           floorMat,
           updateSun,
           rebuildSkyEnv,
+          switchEffect,
         });
       }
 
@@ -861,7 +1325,7 @@
         if (decimals > 0) out = Number(out.toFixed(decimals));
         return Math.min(max, Math.max(min, out));
       }
-      function _section(parent, title, expanded = true) {
+      function _sectionEx(parent, title, expanded = true) {
         const sec = document.createElement("div");
         sec.className = "inspector-section";
         const hdr = document.createElement("div");
@@ -876,7 +1340,229 @@
         sec.appendChild(hdr);
         sec.appendChild(body);
         parent.appendChild(sec);
-        return body;
+        return { section: sec, body };
+      }
+      function _section(parent, title, expanded = true) {
+        return _sectionEx(parent, title, expanded).body;
+      }
+      function _select(parent, obj, key, opts) {
+        const { label, options, onChange } = opts;
+        const row = document.createElement("div");
+        row.className = "prop-row";
+        const cur = obj[key];
+        const opts2 = Object.entries(options)
+          .map(
+            ([k, v]) =>
+              `<option value="${v}" ${v === cur ? "selected" : ""}>${k}</option>`,
+          )
+          .join("");
+        row.innerHTML = `<span class="prop-label">${label}</span><div class="prop-value"><select class="prop-dropdown">${opts2}</select></div>`;
+        const sel = row.querySelector(".prop-dropdown");
+        sel.addEventListener("change", () => {
+          obj[key] = sel.value;
+          onChange?.(sel.value);
+        });
+        parent.appendChild(row);
+        return row;
+      }
+      // Texture picker — built-in thumbnails + custom file upload. Used by
+      // Dust / Falling Leaves / Leaves (Physics) so artists can hot-swap
+      // sprites from the inspector.
+      function _texturePicker(parent, opts) {
+        const {
+          label = "Texture",
+          builtins = [],
+          getCurrentPath = () => "",
+          getCurrentName = () => "",
+          onBuiltinSelect,
+          onCustomLoad,
+        } = opts;
+
+        const lbl = document.createElement("div");
+        lbl.className = "prop-tex-label";
+        lbl.textContent = label;
+        parent.appendChild(lbl);
+
+        const gallery = document.createElement("div");
+        gallery.className = "prop-tex-gallery";
+        parent.appendChild(gallery);
+
+        const imgs = [];
+        const current = document.createElement("div");
+        current.className = "prop-tex-current";
+
+        function refreshCurrent() {
+          const path = getCurrentPath();
+          const name = getCurrentName();
+          let txt;
+          if (name) txt = name;
+          else if (path) {
+            const parts = path.split("/");
+            txt = parts[parts.length - 1];
+          } else txt = "(none)";
+          current.innerHTML = `Loaded: <b>${txt}</b>`;
+        }
+
+        function syncActive() {
+          const p = getCurrentPath();
+          imgs.forEach((img, i) => {
+            img.classList.toggle("active", builtins[i].path === p);
+          });
+          refreshCurrent();
+        }
+
+        builtins.forEach((t) => {
+          const wrap = document.createElement("div");
+          wrap.className = "prop-tex-item";
+          const img = document.createElement("img");
+          img.src = t.path;
+          img.title = t.name;
+          img.alt = t.name;
+          img.addEventListener("click", () => {
+            onBuiltinSelect?.(t.path, t.name);
+            imgs.forEach((im) => im.classList.remove("active"));
+            img.classList.add("active");
+            refreshCurrent();
+          });
+          wrap.appendChild(img);
+          const cap = document.createElement("div");
+          cap.className = "prop-tex-caption";
+          cap.textContent = t.name;
+          wrap.appendChild(cap);
+          gallery.appendChild(wrap);
+          imgs.push(img);
+        });
+
+        parent.appendChild(current);
+
+        const upload = document.createElement("button");
+        upload.type = "button";
+        upload.className = "section-btn";
+        upload.textContent = "Load Custom PNG / JPG";
+        upload.addEventListener("click", () => {
+          const i = document.createElement("input");
+          i.type = "file";
+          i.accept = "image/*";
+          i.onchange = () => {
+            const file = i.files && i.files[0];
+            if (!file) return;
+            const reader = new FileReader();
+            reader.onload = (ev) => {
+              onCustomLoad?.(ev.target.result, file.name);
+              imgs.forEach((im) => im.classList.remove("active"));
+              refreshCurrent();
+            };
+            reader.readAsDataURL(file);
+          };
+          i.click();
+        });
+        parent.appendChild(upload);
+
+        syncActive();
+        return { refresh: syncActive };
+      }
+      // ── Tweakpane-compatible folder shim ──────────────────────────────
+      // Lets us reuse every existing fx-*.js buildUI() function unchanged.
+      // Dispatches addBinding() to the right widget based on value type or
+      // opts (boolean→toggle, hex string→color, options→select, number→
+      // slider, fallback string→text input/info). on('change'|'click', cb)
+      // chaining is preserved.
+      function _makeTPFolder(body, sectionRoot) {
+        const folder = {
+          body,
+          sectionRoot,
+
+          addBinding(obj, key, opts = {}) {
+            const value = obj[key];
+            const changeCbs = [];
+            const trigger = (v) =>
+              changeCbs.forEach((cb) => cb({ value: v }));
+
+            if (opts.options) {
+              _select(body, obj, key, {
+                label: opts.label || key,
+                options: opts.options,
+                onChange: trigger,
+              });
+            } else if (typeof value === "boolean") {
+              _toggle(body, obj, key, {
+                label: opts.label || key,
+                onChange: trigger,
+              });
+            } else if (typeof value === "number") {
+              _slider(body, obj, key, {
+                label: opts.label || key,
+                min: opts.min ?? 0,
+                max: opts.max ?? 1,
+                step: opts.step ?? 0.01,
+                onChange: trigger,
+              });
+            } else if (
+              typeof value === "string" &&
+              /^#[0-9a-f]{3,8}$/i.test(value)
+            ) {
+              _color(body, obj, key, {
+                label: opts.label || key,
+                onChange: trigger,
+              });
+            } else {
+              // Read-only-ish fallback: text input bound to the value.
+              const row = document.createElement("div");
+              row.className = "prop-row";
+              row.innerHTML = `<span class="prop-label">${opts.label || key}</span><div class="prop-value"><input class="prop-num-input" style="text-align:left;width:100%" value="${String(value)}"></div>`;
+              const inp = row.querySelector("input");
+              inp.addEventListener("change", () => {
+                obj[key] = inp.value;
+                trigger(inp.value);
+              });
+              body.appendChild(row);
+            }
+
+            return {
+              on(evt, cb) {
+                if (evt === "change") changeCbs.push(cb);
+                return this;
+              },
+            };
+          },
+
+          addBlade(opts) {
+            if (opts?.view === "separator") _separator(body);
+            return {};
+          },
+
+          addButton(opts) {
+            let clickCb = null;
+            _button(body, {
+              title: opts.title,
+              onClick: () => clickCb?.(),
+            });
+            return {
+              on(evt, cb) {
+                if (evt === "click") clickCb = cb;
+                return this;
+              },
+            };
+          },
+
+          addFolder(opts) {
+            const { section: sub, body: subBody } = _sectionEx(
+              body,
+              opts?.title || "Folder",
+              opts?.expanded !== false,
+            );
+            return _makeTPFolder(subBody, sub);
+          },
+
+          addTexturePicker(opts) {
+            return _texturePicker(body, opts);
+          },
+
+          dispose() {
+            if (sectionRoot && sectionRoot.parentElement) sectionRoot.remove();
+          },
+        };
+        return folder;
       }
       function _slider(parent, obj, key, opts) {
         const { label, min, max, step = 0.01, onChange } = opts;
@@ -967,7 +1653,13 @@
       }
 
       // === Build inspector panel ===
-      function buildInspector({ camera, floorMat, updateSun, rebuildSkyEnv }) {
+      function buildInspector({
+        camera,
+        floorMat,
+        updateSun,
+        rebuildSkyEnv,
+        switchEffect,
+      }) {
         const body = document.getElementById("inspector-body");
 
         // Toggle show/hide.
@@ -977,6 +1669,162 @@
             const hidden = document.body.classList.toggle("inspector-hidden");
             e.target.textContent = hidden ? "Show" : "Hide";
           });
+
+        // ── Drag-to-resize the inspector panel ──
+        // Width persists in localStorage so it survives reloads. Double-
+        // click the handle to reset to the default 300px.
+        {
+          const inspectorEl = document.getElementById("inspector");
+          const handle = document.getElementById("inspector-resize-handle");
+          const KEY = "inspectorWidth";
+          const MIN = 240;
+          const MAX_VW = 0.7;
+          const clamp = (w) =>
+            Math.max(MIN, Math.min(window.innerWidth * MAX_VW, w));
+          const applyWidth = (w) => {
+            document.documentElement.style.setProperty(
+              "--inspector-width",
+              clamp(w) + "px",
+            );
+          };
+          const saved = parseFloat(localStorage.getItem(KEY));
+          if (Number.isFinite(saved)) applyWidth(saved);
+
+          let dragging = false;
+          handle.addEventListener("pointerdown", (e) => {
+            dragging = true;
+            document.body.classList.add("inspector-resizing");
+            handle.setPointerCapture?.(e.pointerId);
+            e.preventDefault();
+          });
+          window.addEventListener("pointermove", (e) => {
+            if (!dragging) return;
+            // Right-anchored panel: width = (viewport right edge) - mouseX.
+            applyWidth(window.innerWidth - e.clientX);
+          });
+          const stopDrag = (e) => {
+            if (!dragging) return;
+            dragging = false;
+            document.body.classList.remove("inspector-resizing");
+            handle.releasePointerCapture?.(e.pointerId);
+            const w = parseFloat(
+              getComputedStyle(inspectorEl).width || "300",
+            );
+            if (Number.isFinite(w)) localStorage.setItem(KEY, String(w));
+          };
+          window.addEventListener("pointerup", stopDrag);
+          window.addEventListener("pointercancel", stopDrag);
+          handle.addEventListener("dblclick", () => {
+            document.documentElement.style.removeProperty(
+              "--inspector-width",
+            );
+            localStorage.removeItem(KEY);
+          });
+        }
+
+        // ── Effect selector ──
+        {
+          const sec = _section(body, "Effect", true);
+          _select(sec, env, "effect", {
+            label: "Effect",
+            options: {
+              None: "none",
+              Butterflies: "Butterflies",
+              Embers: "Embers",
+              "Flowing Lines": "Flowing Lines",
+              "Floating Leaves": "Floating Leaves",
+              "Falling Leaves": "Falling Leaves",
+              "Leaves (Physics)": "Leaves (Physics)",
+              Dust: "Dust",
+              Rain: "Rain",
+              "Billboard Clouds": "Billboard Clouds",
+            },
+            onChange: (v) => switchEffect(v),
+          });
+        }
+
+        // ── Environment (FX-side wind / spawn volume / density) ──
+        {
+          const sec = _section(body, "Environment", true);
+          _slider(sec, env, "windStrength", {
+            label: "Wind str",
+            min: 0,
+            max: 3,
+            step: 0.05,
+          });
+          _slider(sec, env, "windX", {
+            label: "Wind X",
+            min: -3,
+            max: 3,
+            step: 0.1,
+          });
+          _slider(sec, env, "windZ", {
+            label: "Wind Z",
+            min: -3,
+            max: 3,
+            step: 0.1,
+          });
+          _separator(sec);
+          _slider(sec, env, "density", {
+            label: "Density",
+            min: 0.1,
+            max: 3,
+            step: 0.1,
+          });
+          _slider(sec, env, "volume", {
+            label: "Volume rad",
+            min: 5,
+            max: 60,
+            step: 1,
+          });
+          _slider(sec, env, "groundY", {
+            label: "Ground Y",
+            min: -5,
+            max: 5,
+            step: 0.1,
+          });
+          _separator(sec);
+          _toggle(sec, env, "showGround", { label: "Show ground" });
+        }
+
+        // ── Cloud shadows (terrain side) ──
+        {
+          const sec = _section(body, "Cloud shadows", false);
+          _toggle(sec, cloudShadow, "enabled", { label: "Enabled" });
+          _slider(sec, cloudShadow, "intensity", {
+            label: "Intensity",
+            min: 0,
+            max: 1,
+            step: 0.01,
+          });
+          _slider(sec, cloudShadow, "coverage", {
+            label: "Coverage",
+            min: 0,
+            max: 1,
+            step: 0.01,
+          });
+          _slider(sec, cloudShadow, "softness", {
+            label: "Softness",
+            min: 0.005,
+            max: 0.5,
+            step: 0.005,
+          });
+          _slider(sec, cloudShadow, "scale", {
+            label: "Scale (freq)",
+            min: 0.005,
+            max: 0.2,
+            step: 0.005,
+          });
+          _slider(sec, cloudShadow, "speed", {
+            label: "Drift speed",
+            min: 0,
+            max: 10,
+            step: 0.1,
+          });
+          _toggle(sec, cloudShadow, "useSharedWind", {
+            label: "Use env wind",
+          });
+        }
 
         // ── Camera ──
         {

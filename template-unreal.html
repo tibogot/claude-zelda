@@ -64,7 +64,9 @@
         position: fixed;
         top: 0;
         right: 0;
-        width: 300px;
+        width: var(--inspector-width, 300px);
+        min-width: 240px;
+        max-width: 70vw;
         height: 100vh;
         background: var(--bg-panel);
         border-left: 1px solid var(--border);
@@ -73,6 +75,32 @@
         overflow: hidden;
         z-index: 20;
         box-shadow: -2px 0 10px rgba(0, 0, 0, 0.3);
+      }
+      /* Drag-to-resize strip on the inspector's left edge. Wider than the
+         visible border so it's easy to grab without obscuring panel chrome. */
+      #inspector-resize-handle {
+        position: absolute;
+        top: 0;
+        left: -3px;
+        width: 8px;
+        height: 100%;
+        cursor: ew-resize;
+        z-index: 21;
+        background: transparent;
+        transition: background 0.15s;
+      }
+      #inspector-resize-handle:hover,
+      body.inspector-resizing #inspector-resize-handle {
+        background: var(--accent);
+        opacity: 0.6;
+      }
+      body.inspector-resizing {
+        cursor: ew-resize;
+        user-select: none;
+      }
+      body.inspector-hidden #inspector-resize-handle,
+      body.immersive #inspector-resize-handle {
+        display: none;
       }
       #inspector-header {
         display: flex;
@@ -367,9 +395,10 @@
     <div id="info">
       Template &mdash; <span id="backend">loading…</span> &bull;
       WASD/Arrows move &bull; Space jump &bull; RMB drag (or F immersive) to look &bull;
-      <span id="cammode">FOLLOW</span> (Tab orbit)
+      <span id="cammode">ORBIT</span> (Tab follow)
     </div>
     <div id="inspector">
+      <div id="inspector-resize-handle" title="Drag to resize"></div>
       <div id="inspector-header">
         <span>Inspector</span>
         <div style="display: flex; gap: 4px">
@@ -493,7 +522,7 @@
         controls.enableDamping = true;
         controls.dampingFactor = 0.05;
         controls.maxPolarAngle = Math.PI * 0.49;
-        controls.enabled = false; // disabled in follow mode
+        controls.enabled = true; // orbit is the default mode
 
         // ── LIGHTS ──
         const sunDir = new THREE.Vector3();
@@ -630,7 +659,7 @@
           inAir: false,
           camYaw: 0,
           camPitch: 0.35,
-          mode: "follow", // "follow" | "orbit"
+          mode: "orbit", // "follow" | "orbit" — orbit is the default
           immersive: false,
           lastFacingX: 0,
           lastFacingZ: -1,
@@ -972,6 +1001,58 @@
           const hidden = document.body.classList.toggle("inspector-hidden");
           e.target.textContent = hidden ? "Show" : "Hide";
         });
+
+        // ── Drag-to-resize the inspector panel ──
+        // Width persists in localStorage so it survives reloads. Double-
+        // click the handle to reset to the default 300px.
+        {
+          const inspectorEl = document.getElementById("inspector");
+          const handle = document.getElementById("inspector-resize-handle");
+          const KEY = "inspectorWidth";
+          const MIN = 240;
+          const MAX_VW = 0.7;
+          const clamp = (w) =>
+            Math.max(MIN, Math.min(window.innerWidth * MAX_VW, w));
+          const applyWidth = (w) => {
+            document.documentElement.style.setProperty(
+              "--inspector-width",
+              clamp(w) + "px",
+            );
+          };
+          const saved = parseFloat(localStorage.getItem(KEY));
+          if (Number.isFinite(saved)) applyWidth(saved);
+
+          let dragging = false;
+          handle.addEventListener("pointerdown", (e) => {
+            dragging = true;
+            document.body.classList.add("inspector-resizing");
+            handle.setPointerCapture?.(e.pointerId);
+            e.preventDefault();
+          });
+          window.addEventListener("pointermove", (e) => {
+            if (!dragging) return;
+            // Right-anchored panel: width = (viewport right edge) - mouseX.
+            applyWidth(window.innerWidth - e.clientX);
+          });
+          const stopDrag = (e) => {
+            if (!dragging) return;
+            dragging = false;
+            document.body.classList.remove("inspector-resizing");
+            handle.releasePointerCapture?.(e.pointerId);
+            const w = parseFloat(
+              getComputedStyle(inspectorEl).width || "300",
+            );
+            if (Number.isFinite(w)) localStorage.setItem(KEY, String(w));
+          };
+          window.addEventListener("pointerup", stopDrag);
+          window.addEventListener("pointercancel", stopDrag);
+          handle.addEventListener("dblclick", () => {
+            document.documentElement.style.removeProperty(
+              "--inspector-width",
+            );
+            localStorage.removeItem(KEY);
+          });
+        }
 
         // ── Camera ──
         {

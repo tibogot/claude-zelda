@@ -257,7 +257,13 @@ class AgentProbe {
 //   — matching whatever the user actually sees.
 // ──────────────────────────────────────────────────────────────────────────────
 
-function buildTerrainHeightTSL(groundYUniform) {
+function buildTerrainHeightTSL(groundYUniform, flat = false) {
+  // `flat` skips the editor's bumpy sin/cos formula and clamps leaves to a
+  // flat ground at `groundY` — used by hosts (e.g. template-unreal-ambientfx)
+  // whose visible floor is a single plane at y = 0 + groundY.
+  if (flat) {
+    return () => groundYUniform.add(0);
+  }
   return (xz) => {
     const x = xz.x;
     const z = xz.y.negate();
@@ -286,7 +292,13 @@ function defaultTerrainHeight(x, z) {
 // Effect factory
 // ──────────────────────────────────────────────────────────────────────────────
 
-export function createLeavesPhysicsFX(scene, shared, renderer) {
+export function createLeavesPhysicsFX(scene, shared, renderer, options = {}) {
+  // ── Host options ─────────────────────────────────────────────────────
+  // flatTerrain: when true, the GPU compute kernel clamps leaves to a flat
+  //   ground at `shared.groundY` instead of the editor's procedural bumpy
+  //   surface. Use this for hosts (e.g. template-unreal-ambientfx) whose
+  //   visible floor is a single plane.
+  const useFlatTerrain = options?.flatTerrain === true;
   const params = {
     // String-typed so the inspector renders it as a dropdown (its addBinding
     // dispatches on value type before checking `opts.options`; a numeric
@@ -508,7 +520,7 @@ export function createLeavesPhysicsFX(scene, shared, renderer) {
     })();
 
     // ── Init compute: spread leaves in a sizeU × sizeU tile around origin ─
-    const terrainTSL = buildTerrainHeightTSL(groundYU);
+    const terrainTSL = buildTerrainHeightTSL(groundYU, useFlatTerrain);
 
     const init = Fn(() => {
       const position = positionBuffer.element(instanceIndex);
