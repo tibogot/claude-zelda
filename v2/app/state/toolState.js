@@ -1325,6 +1325,18 @@ export function createToolState() {
       chassisDepth: 0.2,
       chassisRadius: 1.2,
       chassisPushScale: 0.35,
+      /**
+       * Slope rejection — no snow on steep terrain (matches auto-cliff so
+       * snow fades out exactly where rock exposes). Uses the same
+       * 4-neighbour heightmap flatness as `chunkTerrainAutoCliff.js`.
+       * `slopeLinkToCliff` mirrors `autoCliff.slopeStart/slopeEnd` live.
+       */
+      slopeRejectEnabled: true,
+      slopeLinkToCliff: true,
+      slopeMin: 0.6,
+      slopeMax: 0.7,
+      slopeSoftness: 1.0,
+      slopeAffectsTrail: true,
       /** Alpha edge fade. */
       fadeEdgeLow: 0.02,
       fadeEdgeHigh: 0.25,

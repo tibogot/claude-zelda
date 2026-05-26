@@ -50,6 +50,7 @@ import {
   positionGeometry,
   positionWorld,
   smoothstep,
+  sqrt,
   step,
   texture,
   uniform,
@@ -186,6 +187,20 @@ function buildUniforms(sp) {
     uColorBrightness: uniform(sp.colorBrightness ?? 1.0),
     uNormalScale: uniform(sp.normalScale ?? 0.7),
 
+    /**
+     * Slope rejection (auto-cliff parity). `uSlopeMin/Max` are smoothstep
+     * edges on the heightmap-flatness signal (flat = 1, steep → 0) —
+     * identical formula to `chunkTerrainAutoCliff.getSlopeMask()`. When
+     * `slopeLinkToCliff` is on in toolState, main.js pushes
+     * `autoCliff.slopeStart/slopeEnd` straight into these uniforms via
+     * `applyCliffSlope()` so the snow-rock boundary stays glued.
+     */
+    uSlopeRejectEnabled: uniform(sp.slopeRejectEnabled !== false ? 1 : 0),
+    uSlopeMin: uniform(sp.slopeMin ?? 0.6),
+    uSlopeMax: uniform(sp.slopeMax ?? 0.7),
+    uSlopeSoftness: uniform(sp.slopeSoftness ?? 1.0),
+    uSlopeAffectsTrail: uniform(sp.slopeAffectsTrail !== false ? 1 : 0),
+
     /** Alpha edge fade (snow depth → opaque). */
     uFadeEdgeLow: uniform(sp.fadeEdgeLow ?? 0.02),
     uFadeEdgeHigh: uniform(sp.fadeEdgeHigh ?? 0.25),
@@ -214,7 +229,7 @@ function buildGeometry(cfg) {
  * Build the snow display `MeshStandardNodeMaterial`. All sampling happens
  * directly in the vertex / fragment shader — no offscreen elevation RT.
  */
-function buildMaterial(uniforms, heightTex, accumMaskTex, trailTexNode, pbr) {
+function buildMaterial(uniforms, heightTex, accumMaskTex, trailTexNode, pbr, htexRes) {
   const mat = new THREE.MeshStandardNodeMaterial({
     transparent: true,
     alphaTest: 0.05,
@@ -224,12 +239,44 @@ function buildMaterial(uniforms, heightTex, accumMaskTex, trailTexNode, pbr) {
   mat.envMapIntensity = 0.4;
 
   /**
+   * Slope mask — sampled ONCE per vertex (at the anchor point), then
+   * threaded through `sampleSnow` so all 3 normal-basis samples share it.
+   * Mirrors `chunkTerrainAutoCliff.getSlopeMask` exactly: same 4/htexRes
+   * neighbour step, same `1/(1+|grad|)` flatness, same smoothstep edges.
+   *
+   * Sharing across A/B/C is both faster and visually correct — auto-cliff
+   * samples slope over ~12.5 m (4 texels × terrainSize/htexRes) while the
+   * snow normal basis is only 0.35 m apart, so slope is effectively
+   * constant across the basis.
+   */
+  const heightTexStep = float(4.0 / htexRes);
+  const sampleSlopeMask = Fn(([worldXZ]) => {
+    const uv = worldXZ.div(uniforms.uTerrainSize).add(0.5);
+    const hR = texture(heightTex, uv.add(vec2(heightTexStep, float(0)))).r;
+    const hL = texture(heightTex, uv.add(vec2(heightTexStep.negate(), float(0)))).r;
+    const hU = texture(heightTex, uv.add(vec2(float(0), heightTexStep))).r;
+    const hD = texture(heightTex, uv.add(vec2(float(0), heightTexStep.negate()))).r;
+    const worldStepHM = heightTexStep.mul(uniforms.uTerrainSize);
+    const dhdx = hR.sub(hL).div(worldStepHM.mul(float(2)));
+    const dhdz = hU.sub(hD).div(worldStepHM.mul(float(2)));
+    const steepness = sqrt(dhdx.mul(dhdx).add(dhdz.mul(dhdz)));
+    const flatness = float(1).div(float(1).add(steepness));
+    const raw = smoothstep(uniforms.uSlopeMin, uniforms.uSlopeMax, flatness);
+    return mix(
+      float(1),
+      raw.pow(uniforms.uSlopeSoftness),
+      uniforms.uSlopeRejectEnabled,
+    );
+  });
+
+  /**
    * Compute the snow surface world Y at a given world XZ.
    *
    * Returns `vec2(worldY, snowDepth)` — depth is the total accumulation
-   * above terrain (used for the alpha edge fade).
+   * above terrain (used for the alpha edge fade). `slopeMask` is sampled
+   * once per vertex outside and passed in.
    */
-  const sampleSnow = Fn(([worldXZ]) => {
+  const sampleSnow = Fn(([worldXZ, slopeMask]) => {
     /** Terrain Y from the engine's global heightmap. */
     const terrainUV = worldXZ.div(uniforms.uTerrainSize).add(0.5);
     const terrainY = texture(heightTex, terrainUV).r;
@@ -251,11 +298,11 @@ function buildMaterial(uniforms, heightTex, accumMaskTex, trailTexNode, pbr) {
       .clamp(0, 1);
     const altitude = altRatio.mul(uniforms.uAltitudeDepth);
 
-    /** Coarse accumulation depth (artist-driven). */
+    /** Coarse accumulation depth (artist-driven), gated by slope rejection. */
     const accum = max(
       float(0),
       uniforms.uBaseDepth.add(painted).add(altitude),
-    );
+    ).mul(slopeMask);
 
     /**
      * Fine PBR displacement, two-scale detail-mapped to break the obvious
@@ -290,9 +337,16 @@ function buildMaterial(uniforms, heightTex, accumMaskTex, trailTexNode, pbr) {
     const trailR = texture(trailTexNode, trailUv).r;
     const neutral = float(TRAIL_NEUTRAL_F);
     const depHere = neutral.sub(trailR).max(0);
+    /**
+     * Trail features inherit the slope mask when `uSlopeAffectsTrail` is on
+     * — otherwise ruts visibly peek through where the snow itself has been
+     * rejected by the slope test.
+     */
+    const trailSlopeGate = mix(float(1), slopeMask, uniforms.uSlopeAffectsTrail);
     const trailGroove = depHere
       .mul(uniforms.uTrailGrooveScale)
-      .mul(trailMask);
+      .mul(trailMask)
+      .mul(trailSlopeGate);
 
     /**
      * Rim ridges — sample 4 trail neighbours `uRimSampleOffset` m away. If
@@ -311,7 +365,8 @@ function buildMaterial(uniforms, heightTex, accumMaskTex, trailTexNode, pbr) {
     const rim = depNbrMax.sub(depHere).max(0);
     const rimRidge = rim
       .mul(uniforms.uRimRidgeScale)
-      .mul(trailMask);
+      .mul(trailMask)
+      .mul(trailSlopeGate);
 
     const depth = max(
       float(0),
@@ -338,9 +393,11 @@ function buildMaterial(uniforms, heightTex, accumMaskTex, trailTexNode, pbr) {
     const worldXZ = localXZ.add(uniforms.uAnchorXZ);
 
     const shift = uniforms.uNormalNeighbourShift;
-    const sA = sampleSnow(worldXZ);
-    const sB = sampleSnow(worldXZ.add(vec2(shift, 0)));
-    const sC = sampleSnow(worldXZ.add(vec2(0, shift.negate())));
+    /** Slope mask computed once at the anchor, shared by all basis samples. */
+    const slopeMask = sampleSlopeMask(worldXZ);
+    const sA = sampleSnow(worldXZ, slopeMask);
+    const sB = sampleSnow(worldXZ.add(vec2(shift, 0)), slopeMask);
+    const sC = sampleSnow(worldXZ.add(vec2(0, shift.negate())), slopeMask);
 
     vSnowDepth.assign(sA.y);
 
@@ -496,6 +553,11 @@ export class SnowSystem {
     if (this._initialized) return;
     this._renderer = renderer;
     this._heightTex = heightTex;
+    /**
+     * `htexRes` matches `HTEX_RES` in main.js — used by slope-rejection
+     * sampling so the 4/htexRes neighbour step is identical to auto-cliff.
+     */
+    this._htexRes = _opts.htexRes ?? 512;
     this._pbr = await loadSnowPbr();
     this._initTrailGPU(renderer);
     this._initialized = true;
@@ -619,6 +681,7 @@ export class SnowSystem {
       this.mask.texture,
       this._trailDisplayTexNode,
       this._pbr,
+      this._htexRes,
     );
 
     this._mesh = new THREE.Mesh(this._geometry, this._material);
@@ -692,6 +755,19 @@ export class SnowSystem {
     u.uSnowColorMul.value = sp.snowColorMul ?? 1.0;
     u.uColorBrightness.value = sp.colorBrightness ?? 1.0;
     u.uNormalScale.value = sp.normalScale ?? 0.7;
+    u.uSlopeRejectEnabled.value = sp.slopeRejectEnabled !== false ? 1 : 0;
+    /**
+     * When linked, slopeMin/Max come from `applyCliffSlope` (main.js pushes
+     * the cliff values whenever they change). When unlinked, snow's own
+     * sliders drive the uniforms. Skipping the write in the linked path
+     * avoids overwriting freshly-installed cliff values.
+     */
+    if (!sp.slopeLinkToCliff) {
+      u.uSlopeMin.value = sp.slopeMin ?? 0.6;
+      u.uSlopeMax.value = sp.slopeMax ?? 0.7;
+    }
+    u.uSlopeSoftness.value = sp.slopeSoftness ?? 1.0;
+    u.uSlopeAffectsTrail.value = sp.slopeAffectsTrail !== false ? 1 : 0;
     u.uFadeEdgeLow.value = sp.fadeEdgeLow ?? 0.02;
     u.uFadeEdgeHigh.value = sp.fadeEdgeHigh ?? 0.25;
     u.uNormalNeighbourShift.value = sp.normalNeighbourShift ?? 0.35;
@@ -699,6 +775,17 @@ export class SnowSystem {
     u.uGlitterScarcity.value = sp.glitterScarcity ?? 280;
     u.uGlitterFreq.value = sp.glitterFreq ?? 1.3;
     this.setEnabled(sp.enabled);
+  }
+
+  /**
+   * Called by main.js whenever the auto-cliff slope sliders move. When the
+   * snow state has `slopeLinkToCliff` on, write the cliff values into the
+   * snow uniforms so the two systems stay glued. When unlinked, no-op.
+   */
+  applyCliffSlope(cliffSlopeStart, cliffSlopeEnd, linkActive) {
+    if (!this._uniforms || !linkActive) return;
+    this._uniforms.uSlopeMin.value = cliffSlopeStart;
+    this._uniforms.uSlopeMax.value = cliffSlopeEnd;
   }
 
   /**

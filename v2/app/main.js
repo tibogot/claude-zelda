@@ -1734,6 +1734,16 @@ export async function startV2App(opts = {}) {
     }),
     onAutoCliffChanged: (_autoCliffEditorChanged = (kind) => {
       syncCliffUniformsFromParams();
+      /**
+       * Keep snow's slope rejection glued to auto-cliff when the link
+       * toggle is on — one slider drives both, no drift.
+       */
+      const ac = toolState.autoCliff;
+      snowSystem.applyCliffSlope(
+        ac.slopeStart,
+        ac.slopeEnd,
+        !!toolState.snow.slopeLinkToCliff,
+      );
       if (kind === "toggle") invalidateSurfaceMaterials();
     }),
     onCliffSlotChanged: (_cliffTextureSlotChanged = () => {
@@ -2115,6 +2125,16 @@ export async function startV2App(opts = {}) {
       if (sp.enabled) {
         await snowSystem.ensureBuilt(sp);
         snowSystem.syncFromState(sp);
+        /**
+         * `syncFromState` leaves slopeMin/Max alone when the link is on, so
+         * push cliff values here to cover the link-toggle-on transition.
+         */
+        const ac = toolState.autoCliff;
+        snowSystem.applyCliffSlope(
+          ac.slopeStart,
+          ac.slopeEnd,
+          !!sp.slopeLinkToCliff,
+        );
         await snowSystem.precompile(renderer, camera);
       } else {
         snowSystem.setEnabled(false);
@@ -3543,7 +3563,13 @@ export async function startV2App(opts = {}) {
     globalHeightTex,
     grassManager.windTex,
     toolState,
-    {},
+    { htexRes: HTEX_RES },
+  );
+  /** Push initial cliff slope into snow if the link is on. */
+  snowSystem.applyCliffSlope(
+    toolState.autoCliff.slopeStart,
+    toolState.autoCliff.slopeEnd,
+    !!toolState.snow.slopeLinkToCliff,
   );
   if (toolState.snow?.enabled) {
     await snowSystem.precompile(renderer, camera);
