@@ -1468,11 +1468,11 @@ export async function startV2App(opts = {}) {
       toolState.paint.soloLayer = -1;
       syncSoloLayer();
     }
-    if (toolState.mode === "paint" && toolState.terrainSurface === "tile") {
-      toolState.terrainSurface = "tsl";
-      applyTerrainSurfaceFromToolState();
-      ui?.pane.refresh();
-    }
+    // Paint mode no longer auto-switches `tile` → `tsl`. The TSL/image splat
+    // shader is fragment-heavy (7 layer blends + height/normal blend + cliff)
+    // and tanks FPS on weaker GPUs. Users that want to see paint results
+    // visually can switch the Surface dropdown themselves; the painting still
+    // writes splat data either way.
     if (toolState.mode === "grass" && !toolState.grass.enabled) {
       toolState.grass.enabled = true;
       grassManager.syncUniforms(toolState.grass, sunDir);
