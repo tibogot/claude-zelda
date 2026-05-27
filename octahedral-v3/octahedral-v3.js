@@ -4,7 +4,7 @@
  */
 import * as THREE from "three";
 import {
-  Fn, normalize, sub, mul, add, div, abs, vec2, vec3, vec4, sign, dot, cross,
+  Fn, If, normalize, sub, mul, add, div, abs, vec2, vec3, vec4, sign, dot, cross,
   floor, fract, min, max, clamp, saturate, texture, cameraPosition,
   positionWorld, positionLocal, positionView, float, uniform, varying, select,
   length, negate, mix, smoothstep, fwidth, pow, sin, cos, normalWorld,
@@ -417,7 +417,8 @@ function createImpostorMaterials(textures, opts) {
   const uEdgeSmooth  = uniform(float(1.5));
   const uParallaxStr = uniform(float(0.0));
 
-  const uUseBary     = uniform(float(0));   // 0=dominant, 1=barycentric blend
+  const uUseBary     = uniform(float(0));   // 0=dominant, 1=bary — albedo/alpha only
+  const uNormRmBary  = uniform(float(0));   // 0=dominant, 1=bary — normals/R/M/AO (can ghost)
   const uUseParallax = uniform(float(0));   // 0=off, 1=on
   const uUseDither   = uniform(float(0));   // 0=hard, 1=dither cross-fade
 
@@ -570,21 +571,26 @@ function createImpostorMaterials(textures, opts) {
     return add(mul(frame, uCellFrac), add(uPadFrac, mul(clamped, uInnerFrac)));
   });
 
-  // ── Depth parallax (3-step iterative) — gated by uUseParallax ────────────
+  // ── Depth parallax (3-step iterative) — skipped entirely when uUseParallax=0 ──
   const depthParallax = Fn(([localUV, cellNorm, frame]) => {
-    const V = normalize(sub(cameraPosition, positionWorld));
-    const T = planeTangent(cellNorm);
-    const B = planeUp(cellNorm, T);
-    const VdotN = max(dot(V, cellNorm), float(0.3));
-    const eff = mul(uParallaxStr, uUseParallax);
-    const viewTS = div(vec2(dot(V, T), dot(V, B)), VdotN);
-    const d0 = texture(depthTex, getUV(localUV, frame)).r;
-    const uv1 = add(localUV, mul(viewTS, mul(sub(float(0.5), d0), eff)));
-    const d1 = texture(depthTex, getUV(uv1, frame)).r;
-    const uv2 = add(localUV, mul(viewTS, mul(sub(float(0.5), d1), eff)));
-    const d2 = texture(depthTex, getUV(uv2, frame)).r;
-    const uv3 = add(localUV, mul(viewTS, mul(sub(float(0.5), d2), eff)));
-    return getUV(uv3, frame);
+    const out = vec2(0).toVar();
+    If(uUseParallax.lessThan(float(0.5)), () => {
+      out.assign(getUV(localUV, frame));
+    }).Else(() => {
+      const V = normalize(sub(cameraPosition, positionWorld));
+      const T = planeTangent(cellNorm);
+      const B = planeUp(cellNorm, T);
+      const VdotN = max(dot(V, cellNorm), float(0.3));
+      const viewTS = div(vec2(dot(V, T), dot(V, B)), VdotN);
+      const d0 = texture(depthTex, getUV(localUV, frame)).r;
+      const uv1 = add(localUV, mul(viewTS, mul(sub(float(0.5), d0), uParallaxStr)));
+      const d1 = texture(depthTex, getUV(uv1, frame)).r;
+      const uv2 = add(localUV, mul(viewTS, mul(sub(float(0.5), d1), uParallaxStr)));
+      const d2 = texture(depthTex, getUV(uv2, frame)).r;
+      const uv3 = add(localUV, mul(viewTS, mul(sub(float(0.5), d2), uParallaxStr)));
+      out.assign(getUV(uv3, frame));
+    });
+    return out;
   });
 
   // ── Fragment: sample 3 cells, blend or pick dominant ─────────────────────
@@ -624,8 +630,8 @@ function createImpostorMaterials(textures, opts) {
   const ditAlpha = select(ditS1, c1.a, select(ditS2, c2.a, c3.a));
 
   // Selection logic:
-  //   dither path overrides everything when uUseDither
-  //   else: uUseBary chooses barycentric vs dominant
+  //   dither path overrides color when uUseDither
+  //   else: uUseBary chooses barycentric vs dominant for albedo/alpha only
   const baryOrDomRgb = mix(domRgb, baryRgb, uUseBary);
   const baryOrDomA   = mix(domAlpha, baryAlpha, uUseBary);
   const finalAlbedo  = mix(baryOrDomRgb, ditRgb,   uUseDither);
@@ -644,17 +650,17 @@ function createImpostorMaterials(textures, opts) {
   const wN3 = normalize(sub(mul(n3, 2.0), 1.0));
   const baryN = normalize(add(add(mul(wN1, nw1), mul(wN2, nw2)), mul(wN3, nw3)));
   const domN  = select(isDom1, wN1, select(isDom2, wN2, wN3));
-  const blendedWorldN = normalize(mix(domN, baryN, uUseBary));
+  const atlasN = normalize(mix(domN, baryN, uNormRmBary));
   // Normal strength = lerp from flat-up to atlas normal
-  const finalWorldN = normalize(mix(vec3(0, 1, 0), blendedWorldN, uNormStr));
+  const finalWorldN = normalize(mix(vec3(0, 1, 0), atlasN, uNormStr));
 
-  // Roughness / metalness
+  // Roughness / metalness — dominant by default (view-dependent per cell)
   const rm1 = texture(rmTex, puv1);
   const rm2 = texture(rmTex, puv2);
   const rm3 = texture(rmTex, puv3);
   const baryRM = add(add(mul(rm1.xy, nw1), mul(rm2.xy, nw2)), mul(rm3.xy, nw3));
   const domRM  = select(isDom1, rm1.xy, select(isDom2, rm2.xy, rm3.xy));
-  const finalRM = mix(domRM, baryRM, uUseBary);
+  const finalRM = mix(domRM, baryRM, uNormRmBary);
   const finalRough = clamp(finalRM.x, float(0.05), float(1));
   const finalMetal = clamp(finalRM.y, float(0), float(1));
 
@@ -663,7 +669,9 @@ function createImpostorMaterials(textures, opts) {
   const dep2 = texture(depthTex, puv2).r;
   const dep3 = texture(depthTex, puv3).r;
   const baryDepth = add(add(mul(dep1, nw1), mul(dep2, nw2)), mul(dep3, nw3));
-  const ao = saturate(sub(float(1), mul(float(0.5), baryDepth)));
+  const domDepth = select(isDom1, dep1, select(isDom2, dep2, dep3));
+  const atlasDepth = mix(domDepth, baryDepth, uNormRmBary);
+  const ao = saturate(sub(float(1), mul(float(0.5), atlasDepth)));
 
   // Translucency / back-lit SSS — only inside silhouette, scales with sun
   const viewDirW = normalize(sub(cameraPosition, positionWorld));
@@ -708,7 +716,7 @@ function createImpostorMaterials(textures, opts) {
     uniforms: {
       uSPS, uScale, uCenter, uTime,
       uNormStr, uAlphaCutoff, uEdgeSmooth, uParallaxStr,
-      uUseBary, uUseParallax, uUseDither,
+      uUseBary, uNormRmBary, uUseParallax, uUseDither,
       uFreeze, uFreezeDir,
       uWindAmp, uWindFreq,
       uTransAmt, uTransPow, uTransTint,
@@ -1356,6 +1364,7 @@ export async function run() {
     edgeSmooth: 1.5,
     parallaxStr: 0.05,
     dither: false,
+    normRmBary: false,
     alphaToCoverage: false,
     windAmp: 0.0,
     windFreq: 1.5,
@@ -1394,6 +1403,7 @@ export async function run() {
       impUniforms.uEdgeSmooth.value  = preset.edgeSmooth;
       impUniforms.uParallaxStr.value = P.parallaxStr;
       impUniforms.uUseBary.value     = preset.useBary;
+      impUniforms.uNormRmBary.value  = P.normRmBary ? 1 : 0;
       impUniforms.uUseParallax.value = preset.useParallax;
       impUniforms.uUseDither.value   = P.dither ? 1 : 0;
       impUniforms.uDebugMode.value   = P.debugMode;
@@ -1553,6 +1563,11 @@ export async function run() {
   ui._slider(fQual, P, "parallaxStr", { label: "Parallax depth", min: 0, max: 0.3, step: 0.005, onChange: syncParams });
   ui._slider(fQual, P, "normalStr", { label: "Normal strength", min: 0, max: 1, step: 0.02, onChange: syncParams });
   ui._toggle(fQual, P, "dither", { label: "Dither cross-fade", onChange: syncParams });
+  ui._toggle(fQual, P, "normRmBary", {
+    label: "Blend normals/R/M",
+    hint: "Barycentric normals & roughness can ghost at cell seams — leave off for foliage",
+    onChange: syncParams,
+  });
   ui._toggle(fQual, P, "alphaToCoverage", { label: "Alpha-to-coverage", onChange: syncParams });
 
   const fTree = ui._section(inspector, "Trees & foliage", false);
