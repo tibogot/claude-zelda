@@ -1,5 +1,5 @@
 import * as THREE from "three";
-import { renderOutput, uniform } from "three/tsl";
+import { renderOutput, texture, uniform } from "three/tsl";
 import { bloom } from "three/addons/tsl/display/BloomNode.js";
 import { fxaa } from "three/addons/tsl/display/FXAANode.js";
 import { sharpen } from "three/addons/tsl/display/SharpenNode.js";
@@ -49,11 +49,12 @@ import { createPolishUniforms, polish } from "./polishNode.js";
  *    to both `scenePassColor` and `n8aoNode.getTextureNode()` does not cause
  *    a double scene render.
  *
- * Caveats:
- *  - The volumetric cloud system in v2 renders directly to the backbuffer
- *    in its own pipeline. While clouds render a frame, post-FX is skipped
- *    for that frame (see `main.js` cloud branch). Routing the cloud final
- *    RT through the post pass is a future step.
+ * Cloud V3 integration:
+ *  When volumetric clouds V3 and post-FX are both active, `renderWithClouds()`
+ *  splits the frame into (1) cloud prepass, (2) solids-only linear beauty
+ *  (layer 0, no cloud raymarch), (3) cloud composite onto that RT, (4)
+ *  display chain to canvas. The standalone cloud path (`tryRenderFrame`) is
+ *  unchanged when post-FX is off.
  */
 export class PostFxPipeline {
   constructor({ renderer, scene, camera }) {
@@ -65,6 +66,11 @@ export class PostFxPipeline {
 
     /** Lazily created on first enable. */
     this._renderPipeline = null;
+    /** Split pipelines for Cloud V3 integration (linear beauty + display). */
+    this._linearPipeline = null;
+    this._displayPipeline = null;
+    this._linearRT = null;
+    this._linearTextureNode = null;
     this._scenePass = null;
     this._scenePassColor = null;
 
@@ -136,6 +142,8 @@ export class PostFxPipeline {
      */
     this._sharpenEnabled = false;
     this._sharpenNode = null;
+    /** Second sharpen node for the Cloud V3 display pipeline (separate graph). */
+    this._sharpenNodeDisplay = null;
     this._sharpenParams = {
       sharpness: 0.5,
       denoise: false,
@@ -329,12 +337,10 @@ export class PostFxPipeline {
     this._applyDofUniforms();
   }
 
-  /**
-   * `THREE.RenderPipeline` tracks renderer drawing buffer size internally —
-   * we don't need to forward `setSize`. Method kept for API symmetry / future
-   * effects that might need an explicit resize hook.
-   */
-  setSize(/* w, h */) {}
+  /** Resize the linear HDR RT used by `renderWithClouds()`. */
+  setSize(/* w, h */) {
+    this._resizeLinearRT();
+  }
 
   /** Render the post-processed frame. Caller must check `isActive()` first. */
   render() {
@@ -342,17 +348,66 @@ export class PostFxPipeline {
     this._renderPipeline.render();
   }
 
+  /**
+   * Cloud V3 + post-FX: prepass → solids linear chain → cloud composite →
+   * display chain. Caller must check `isActive()` first.
+   *
+   * @param {{ prepareFrame: Function, compositeOntoLinearHDR: Function }} cloudSystem
+   * @param {THREE.Vector3} anchorXZ
+   * @param {number} dtSec
+   */
+  renderWithClouds(cloudSystem, anchorXZ, dtSec) {
+    if (!this._renderPipeline || !cloudSystem) return;
+    this._ensureBuilt();
+
+    if (!cloudSystem.prepareFrame(anchorXZ, dtSec)) {
+      this.render();
+      return;
+    }
+
+    const { renderer, camera } = this;
+    const prevLayerMask = camera.layers.mask;
+    const prevTarget = renderer.getRenderTarget();
+    const prevAutoClear = renderer.autoClear;
+
+    try {
+      // Solids-only scene pass — exclude cloud layer 13 (raymarch happens once).
+      camera.layers.set(0);
+
+      this._resizeLinearRT();
+      renderer.setRenderTarget(this._linearRT);
+      renderer.clear();
+      this._linearPipeline.render();
+
+      cloudSystem.compositeOntoLinearHDR(renderer, this._linearRT);
+
+      renderer.setRenderTarget(null);
+      this._displayPipeline.render();
+    } finally {
+      camera.layers.mask = prevLayerMask;
+      renderer.setRenderTarget(prevTarget);
+      renderer.autoClear = prevAutoClear;
+    }
+  }
+
   dispose() {
     if (this._ssaoNode?.dispose) this._ssaoNode.dispose();
     if (this._bloomPass?.dispose) this._bloomPass.dispose();
     if (this._sharpenNode?.dispose) this._sharpenNode.dispose();
+    if (this._sharpenNodeDisplay?.dispose) this._sharpenNodeDisplay.dispose();
     if (this._dofNode?.dispose) this._dofNode.dispose();
+    this._linearRT?.dispose();
     this._renderPipeline = null;
+    this._linearPipeline = null;
+    this._displayPipeline = null;
+    this._linearRT = null;
+    this._linearTextureNode = null;
     this._scenePass = null;
     this._scenePassColor = null;
     this._bloomPass = null;
     this._ssaoNode = null;
     this._sharpenNode = null;
+    this._sharpenNodeDisplay = null;
     this._chromaticAberrationNode = null;
     this._dofNode = null;
     this._dofUniforms = null;
@@ -386,7 +441,30 @@ export class PostFxPipeline {
 
     if (this._ssaoEnabled) this._ensureSsaoBuilt();
 
+    this._linearRT = new THREE.RenderTarget(1, 1, {
+      depthBuffer: false,
+      type: THREE.HalfFloatType,
+      format: THREE.RGBAFormat,
+      minFilter: THREE.LinearFilter,
+      magFilter: THREE.LinearFilter,
+    });
+    this._linearTextureNode = texture(this._linearRT.texture);
+
+    this._linearPipeline = new THREE.RenderPipeline(renderer);
+    this._linearPipeline.outputColorTransform = false;
+
+    this._displayPipeline = new THREE.RenderPipeline(renderer);
+    this._displayPipeline.outputColorTransform = false;
+
+    this._resizeLinearRT();
     this._refreshOutputNode();
+  }
+
+  _resizeLinearRT() {
+    if (!this._linearRT || !this.renderer) return;
+    const size = new THREE.Vector2();
+    this.renderer.getDrawingBufferSize(size);
+    this._linearRT.setSize(size.x, size.y);
   }
 
   _ensureSsaoBuilt() {
@@ -508,37 +586,16 @@ export class PostFxPipeline {
     }
   }
 
-  _refreshOutputNode() {
-    if (!this._renderPipeline) return;
-
-    // Each refresh fully rebuilds any node that owns its own RTs / materials,
-    // because the upstream chain shape can change (e.g. bloom toggles,
-    // SSAO toggles) and these nodes store their input texture node at
-    // construction time. Disposing first prevents GPU memory leaks.
-    if (this._dofNode?.dispose) this._dofNode.dispose();
-    this._dofNode = null;
-    if (this._sharpenNode?.dispose) this._sharpenNode.dispose();
-    this._sharpenNode = null;
-    // ChromaticAberrationNode allocates no RTs — nothing to dispose.
-    this._chromaticAberrationNode = null;
-
-    // SSAO branch: when on, the n8ao node outputs a fully composited
-    // beauty + AO texture node — it replaces `scenePassColor` for
-    // downstream stages. Bloom still reads from raw `scenePassColor`
-    // (see class JSDoc for the rationale).
+  _buildLinearBeautyNode() {
     const sceneInput =
       this._ssaoEnabled && this._ssaoNode
         ? this._ssaoNode.getTextureNode()
         : this._scenePassColor;
 
-    // Linear-HDR composition (bloom adds in linear).
     let linearBeauty = this._bloomEnabled
       ? sceneInput.add(this._bloomPass)
       : sceneInput;
 
-    // DoF lives at the END of the linear chain (after bloom) so bright
-    // out-of-focus pixels produce real bokeh — including the bloom that
-    // would have lit up around them. Cinematic.
     if (this._dofEnabled && this._dofUniforms) {
       const viewZ = this._scenePass.getViewZNode();
       this._dofNode = dof(
@@ -551,26 +608,20 @@ export class PostFxPipeline {
       linearBeauty = this._dofNode;
     }
 
-    // Display-referred chain order:
-    //   1. renderOutput   — tonemap + sRGB encode
-    //   2. FXAA           — edge AA (sRGB input required)
-    //   3. Sharpen (RCAS) — counteract FXAA softening
-    //   4. CA             — lens fringe fringes the sharp+aliased edges
-    //   5. Polish         — grade + vignette + grain (last, so grain isn't AA'd)
-    let node = renderOutput(linearBeauty);
+    return linearBeauty;
+  }
+
+  _buildDisplayChain(inputNode) {
+    let node = renderOutput(inputNode);
+    let sharpenNode = null;
 
     if (this._fxaaEnabled) node = fxaa(node);
 
     if (this._sharpenEnabled) {
       const userSharpness = this._sharpenParams.sharpness;
-      // User slider 0..1 (low → high) → addon param 1..0 (none → max).
       const remapped = 1.0 - Math.max(0, Math.min(1, userSharpness));
-      this._sharpenNode = sharpen(
-        node,
-        remapped,
-        this._sharpenParams.denoise,
-      );
-      node = this._sharpenNode;
+      sharpenNode = sharpen(node, remapped, this._sharpenParams.denoise);
+      node = sharpenNode;
     }
 
     if (this._chromaticAberrationEnabled) {
@@ -587,7 +638,36 @@ export class PostFxPipeline {
       node = polish(node, this._polishUniforms);
     }
 
-    this._renderPipeline.outputNode = node;
+    return { node, sharpenNode };
+  }
+
+  _refreshOutputNode() {
+    if (!this._renderPipeline) return;
+
+    if (this._dofNode?.dispose) this._dofNode.dispose();
+    this._dofNode = null;
+    if (this._sharpenNode?.dispose) this._sharpenNode.dispose();
+    if (this._sharpenNodeDisplay?.dispose) this._sharpenNodeDisplay.dispose();
+    this._sharpenNode = null;
+    this._sharpenNodeDisplay = null;
+    this._chromaticAberrationNode = null;
+
+    const linearBeauty = this._buildLinearBeautyNode();
+    const mainDisplay = this._buildDisplayChain(linearBeauty);
+    this._sharpenNode = mainDisplay.sharpenNode;
+
+    this._renderPipeline.outputNode = mainDisplay.node;
     this._renderPipeline.needsUpdate = true;
+
+    if (this._linearPipeline) {
+      this._linearPipeline.outputNode = linearBeauty;
+      this._linearPipeline.needsUpdate = true;
+    }
+    if (this._displayPipeline && this._linearTextureNode) {
+      const cloudDisplay = this._buildDisplayChain(this._linearTextureNode);
+      this._sharpenNodeDisplay = cloudDisplay.sharpenNode;
+      this._displayPipeline.outputNode = cloudDisplay.node;
+      this._displayPipeline.needsUpdate = true;
+    }
   }
 }

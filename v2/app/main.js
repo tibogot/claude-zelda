@@ -4809,6 +4809,7 @@ export async function startV2App(opts = {}) {
     volumetricCloudSystem?.setDepthTargetSize?.();
     volumetricCloudSystemOptimized?.setDepthTargetSize?.();
     volumetricCloudSystemV3?.setDepthTargetSize?.();
+    postFxPipeline.setSize(rw, rh);
     if (csm?.mainFrustum && toolState.csm.enabled) csm.updateFrustums();
   }
   if (_uiContainer) {
@@ -5088,7 +5089,10 @@ export async function startV2App(opts = {}) {
     let didCloudRt = false;
     // Priority: V3 > Optimized > Classic. UI toggle exclusivity normally
     // ensures only one is enabled, but the priority chain is the safety net.
-    if (vcV3On) {
+    if (vcV3On && postFxPipeline.isActive()) {
+      postFxPipeline.renderWithClouds(oV3, cloudFollowAnchor, dtSec);
+      didCloudRt = true;
+    } else if (vcV3On) {
       didCloudRt = !!oV3?.tryRenderFrame?.(cloudFollowAnchor, dtSec);
     } else if (vcOptOn) {
       didCloudRt = !!oOpt?.tryRenderFrame?.(cloudFollowAnchor, dtSec);
@@ -5101,10 +5105,6 @@ export async function startV2App(opts = {}) {
       volumetricCloudSystem?.tryRenderFrame?.(cloudFollowAnchor, dtSec);
     }
     if (!didCloudRt) {
-      // Post-FX path is skipped while volumetric clouds composite directly to
-      // the backbuffer (their pipeline owns the final blit). When clouds did
-      // not render this frame, route through PostProcessing iff post-FX is
-      // active, otherwise the original direct render path stays free.
       if (postFxPipeline.isActive()) {
         postFxPipeline.render();
       } else {
@@ -5953,6 +5953,7 @@ export async function startV2App(opts = {}) {
       volumetricCloudSystem?.setDepthTargetSize?.();
       volumetricCloudSystemOptimized?.setDepthTargetSize?.();
       volumetricCloudSystemV3?.setDepthTargetSize?.();
+      postFxPipeline.setSize();
     },
     resetTemporalCloudHistory() {
       volumetricCloudSystemOptimized?.resetTemporalHistory?.();

@@ -1072,18 +1072,11 @@ export async function createVolumetricCloudSystemV3({
     uBakedMaskMode.value = p.bakedMaskMode ? 1 : 0;
   }
 
-  /**
-   * @param {THREE.Vector3} anchorXZ — world XZ anchor for follow smoothing.
-   * @param {number} dtSec — frame delta.
-   * @returns {boolean} true if this system rendered the frame (skip default render).
-   */
-  function tryRenderFrame(anchorXZ, dtSec) {
+  /** Whether god-rays should be composited this frame (set by prepareFrame). */
+  let runGodRaysThisFrame = false;
+
+  function syncFrameState(anchorXZ, dtSec) {
     const p = toolState.volumetricCloudV3;
-    if (!p.enabled) {
-      cloudMesh.visible = false;
-      sunSphere.visible = false;
-      return false;
-    }
     sunSphere.visible = true;
     syncUniformsFromToolState();
     updateSunDiscWorld();
@@ -1116,10 +1109,6 @@ export async function createVolumetricCloudSystemV3({
       godRaysSamples.value = p.godRaysSamplesUI ?? 64;
     }
 
-    /* Inside-cloud step boost: when the camera is inside the cloud AABB the
-       visible density variation is dominated by the first few units of ray,
-       so raising the step count noticeably reduces graininess without
-       affecting any other rays. */
     const halfBox = p.containerScale * 0.5;
     const insideCloudBox =
       Math.abs(camera.position.x - _cloudCenterWorld.x) < halfBox &&
@@ -1160,12 +1149,10 @@ export async function createVolumetricCloudSystemV3({
       uTextureOffset.value.y -= Math.floor(uTextureOffset.value.y);
       uTextureOffset.value.z -= Math.floor(uTextureOffset.value.z);
     }
+  }
 
-    /* --- Depth prepass (full-res). Selective per-mesh material swap on the
-       chunk terrain meshes only — those are heavy (full PBR / splatmap) but
-       don't use vertex displacement, so swapping them is safe. Foliage /
-       grass / plane / props keep their real materials so any `positionNode`
-       vertex displacement still applies and they write correct depth. */
+  function runDepthPrepass() {
+    const p = toolState.volumetricCloudV3;
     camera.layers.set(0);
     renderer.setRenderTarget(depthTarget);
     renderer.clear();
@@ -1191,15 +1178,10 @@ export async function createVolumetricCloudSystemV3({
       _originalMaterials.clear();
     }
     depthTexNode.value = depthTarget.depthTexture;
+  }
 
-    /* --- Sun-offscreen check: skip the entire god-rays pipeline if the sun
-       is outside the (expanded) viewport, since the radial blur converges to
-       a point that won't contribute anything visible.
-       The sun mesh is intentionally placed far in world space (default 8000)
-       and may sit beyond `camera.far`, which would cause `project()` to push
-       NDC z past 1. We therefore ignore z and test (a) that the sun is in
-       front of the camera via the world-forward dot product, and (b) that
-       the projected XY falls within the expanded screen rect. */
+  function runGodRayPasses() {
+    const p = toolState.volumetricCloudV3;
     _camForward.set(0, 0, -1).transformDirection(camera.matrixWorld);
     const sunDir = getSunDir();
     const sunInFront = _camForward.dot(sunDir) > 0;
@@ -1214,93 +1196,151 @@ export async function createVolumetricCloudSystemV3({
       sunV < 1.3;
     const runGodRays = !(p.skipGodRaysOffscreen && !sunOnScreen);
 
-    if (runGodRays) {
-      /* --- Occlusion mask pass: black scene + white sun + cloud silhouette */
-      const bgSaved = scene.background;
-      const fogSaved = scene.fog;
-      scene.fog = null;
-      scene.background = new THREE.Color(0x000000);
-      sunSphere.material = occlusionMaterialWhite;
-      uOcclusionMode.value = 1;
-      const usedCheapOcc = p.cheapOcclusionCloud;
-      if (usedCheapOcc) cloudMesh.material = cloudOccMat;
-      _originalMaterials.clear();
-      for (const o of getOccluderMeshes()) {
-        if (o !== cloudMesh && o !== sunSphere && o.material !== undefined) {
-          _originalMaterials.set(o.uuid, o.material);
-          if (Array.isArray(o.material)) {
-            const black = o.isLineSegments
-              ? occlusionLineBlack
-              : occlusionMaterialBlack;
-            o.material = o.material.map(() => black);
-          } else {
-            o.material = o.isLineSegments
-              ? occlusionLineBlack
-              : occlusionMaterialBlack;
-          }
+    if (!runGodRays) return false;
+
+    const bgSaved = scene.background;
+    const fogSaved = scene.fog;
+    scene.fog = null;
+    scene.background = new THREE.Color(0x000000);
+    sunSphere.material = occlusionMaterialWhite;
+    uOcclusionMode.value = 1;
+    const usedCheapOcc = p.cheapOcclusionCloud;
+    if (usedCheapOcc) cloudMesh.material = cloudOccMat;
+    _originalMaterials.clear();
+    for (const o of getOccluderMeshes()) {
+      if (o !== cloudMesh && o !== sunSphere && o.material !== undefined) {
+        _originalMaterials.set(o.uuid, o.material);
+        if (Array.isArray(o.material)) {
+          const black = o.isLineSegments
+            ? occlusionLineBlack
+            : occlusionMaterialBlack;
+          o.material = o.material.map(() => black);
+        } else {
+          o.material = o.isLineSegments
+            ? occlusionLineBlack
+            : occlusionMaterialBlack;
         }
       }
-
-      camera.layers.set(0);
-      camera.layers.enable(CLOUD_V3_LAYER);
-      renderer.setRenderTarget(occlusionRT);
-      renderer.clear();
-      renderer.render(scene, camera);
-
-      sunSphere.material = sunMaterial;
-      uOcclusionMode.value = 0;
-      if (usedCheapOcc) cloudMesh.material = cloudMat;
-      for (const o of getOccluderMeshes()) {
-        if (
-          o !== cloudMesh &&
-          o !== sunSphere &&
-          _originalMaterials.has(o.uuid)
-        ) {
-          o.material = _originalMaterials.get(o.uuid);
-        }
-      }
-      _originalMaterials.clear();
-      scene.background = bgSaved;
-      scene.fog = fogSaved;
-      camera.layers.enableAll();
-
-      occlusionTexForGodRays.value = occlusionRT.texture;
-      godRaysLightUv.value.set(sunU, sunV);
-
-      postQuad.material = godRaysMat;
-      renderer.setRenderTarget(godraysRT);
-      renderer.clear();
-      renderer.render(postScene, postCam);
-      godraysResultTex.value = godraysRT.texture;
     }
 
-    /* `sunSphere` was visible during the occlusion pass (it provided the
-       bright source for god-rays). Now hide it from the final beauty pass
-       if a sky mesh already draws its own sun — otherwise the cloud's disc
-       would visually duplicate it. God-rays still converge on the same
-       direction because that's baked into the occlusion mask above. */
+    camera.layers.set(0);
+    camera.layers.enable(CLOUD_V3_LAYER);
+    renderer.setRenderTarget(occlusionRT);
+    renderer.clear();
+    renderer.render(scene, camera);
+
+    sunSphere.material = sunMaterial;
+    uOcclusionMode.value = 0;
+    if (usedCheapOcc) cloudMesh.material = cloudMat;
+    for (const o of getOccluderMeshes()) {
+      if (
+        o !== cloudMesh &&
+        o !== sunSphere &&
+        _originalMaterials.has(o.uuid)
+      ) {
+        o.material = _originalMaterials.get(o.uuid);
+      }
+    }
+    _originalMaterials.clear();
+    scene.background = bgSaved;
+    scene.fog = fogSaved;
+    camera.layers.enableAll();
+
+    occlusionTexForGodRays.value = occlusionRT.texture;
+    godRaysLightUv.value.set(sunU, sunV);
+
+    postQuad.material = godRaysMat;
+    renderer.setRenderTarget(godraysRT);
+    renderer.clear();
+    renderer.render(postScene, postCam);
+    godraysResultTex.value = godraysRT.texture;
+    return true;
+  }
+
+  /**
+   * Depth prepass + god-ray mask/blur. Does NOT render beauty or touch the
+   * canvas. Call before the post-FX linear pass when integrating with
+   * `PostFxPipeline.renderWithClouds()`.
+   *
+   * @returns {boolean} false when clouds are disabled.
+   */
+  function prepareFrame(anchorXZ, dtSec) {
+    const p = toolState.volumetricCloudV3;
+    if (!p.enabled) {
+      cloudMesh.visible = false;
+      sunSphere.visible = false;
+      runGodRaysThisFrame = false;
+      return false;
+    }
+    syncFrameState(anchorXZ, dtSec);
+    runDepthPrepass();
+    runGodRaysThisFrame = runGodRayPasses();
+    return true;
+  }
+
+  function compositeGodRaysOnto(renderer, targetRT) {
+    if (!runGodRaysThisFrame) return;
+    postQuad.material = compositeMat;
+    renderer.autoClear = false;
+    renderer.setRenderTarget(targetRT);
+    renderer.render(postScene, postCam);
+    renderer.autoClear = true;
+  }
+
+  /**
+   * Raymarch the cloud volume (+ optional god-rays) onto an existing linear-HDR
+   * beauty buffer. Used by the post-FX integration path: solids are rendered
+   * by the post pipeline first; this adds clouds without a second full scene
+   * render or a canvas blit.
+   */
+  function compositeOntoLinearHDR(renderer, targetRT) {
+    const p = toolState.volumetricCloudV3;
+    if (!p.enabled) return;
+
     if (!p.showCloudSunDisc) sunSphere.visible = false;
 
-    /* --- Final scene render */
+    const prevLayerMask = camera.layers.mask;
+    if (cloudMesh.visible) {
+      camera.layers.set(CLOUD_V3_LAYER);
+      renderer.setRenderTarget(targetRT);
+      renderer.autoClear = false;
+      renderer.render(scene, camera);
+    }
+
+    compositeGodRaysOnto(renderer, targetRT);
+    camera.layers.mask = prevLayerMask;
+  }
+
+  function renderStandaloneBeauty() {
+    const p = toolState.volumetricCloudV3;
+    if (!p.showCloudSunDisc) sunSphere.visible = false;
+
     camera.layers.enableAll();
     renderer.setRenderTarget(finalRT);
     renderer.clear();
     renderer.render(scene, camera);
 
     finalSceneTex.value = finalRT.texture;
-    if (runGodRays) {
-      postQuad.material = compositeMat;
-      renderer.autoClear = false;
-      renderer.setRenderTarget(finalRT);
-      renderer.render(postScene, postCam);
-      renderer.autoClear = true;
-    }
+    compositeGodRaysOnto(renderer, finalRT);
+  }
 
+  function blitStandaloneToScreen() {
     postQuad.material = screenMat;
+    finalSceneTex.value = finalRT.texture;
     renderer.setRenderTarget(null);
     renderer.clear();
     renderer.render(postScene, postCam);
+  }
 
+  /**
+   * Standalone path (post-FX off): full cloud pipeline ending in a canvas blit.
+   *
+   * @returns {boolean} true — caller must skip the default renderer path.
+   */
+  function tryRenderFrame(anchorXZ, dtSec) {
+    if (!prepareFrame(anchorXZ, dtSec)) return false;
+    renderStandaloneBeauty();
+    blitStandaloneToScreen();
     return true;
   }
 
@@ -1335,6 +1375,8 @@ export async function createVolumetricCloudSystemV3({
   return {
     cloudMesh,
     sunSphere,
+    prepareFrame,
+    compositeOntoLinearHDR,
     tryRenderFrame,
     setDepthTargetSize: resizeAllRenderTargets,
     rebuildVolume: bakeVolume3D,
