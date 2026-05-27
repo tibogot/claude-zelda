@@ -1126,6 +1126,13 @@ export async function createVolumetricCloudSystemOptimized({
     renderer.render(postScene, postCam);
     godraysResultTex.value = godraysRT.texture;
 
+    /* `sunSphere` was visible during the occlusion pass (it provided the
+       bright source for god-rays). Now hide it from the final beauty pass
+       if a sky mesh already draws its own sun — otherwise the cloud's disc
+       would visually duplicate it. God-rays still converge on the same
+       direction because that's baked into the occlusion mask above. */
+    if (!p.showCloudSunDisc) sunSphere.visible = false;
+
     camera.layers.set(0);
     camera.layers.enable(SUN_OPT_LAYER);
     renderer.setRenderTarget(finalRT);

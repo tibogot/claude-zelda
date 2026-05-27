@@ -62,6 +62,15 @@ const VOLUMETRIC_CLOUD_DEFAULTS = {
    * displacement so their depth values stay correct.
    */
   useDepthPrepassOverride: true,
+  /**
+   * Render the cloud system's own bright `sunSphere` disc in the final
+   * scene pass. Defaults off because the v2 editor already has a sky mesh
+   * with its own sun — leaving this on duplicates the sun visually. The
+   * sun mesh is still rendered during the occlusion pass either way, so
+   * god-rays continue to work and converge on the same direction the sky
+   * draws its sun.
+   */
+  showCloudSunDisc: false,
 };
 
 export const V2_CONFIG = {
