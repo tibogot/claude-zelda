@@ -993,6 +993,7 @@ export async function createVolumetricCloudSystemV3({
   const _camViewProj = new THREE.Matrix4();
   const _cloudCenterWorld = new THREE.Vector3();
   const _sunNdc = new THREE.Vector3();
+  const _camForward = new THREE.Vector3();
   const _originalMaterials = new Map();
 
   function resizeAllRenderTargets() {
@@ -1193,12 +1194,20 @@ export async function createVolumetricCloudSystemV3({
 
     /* --- Sun-offscreen check: skip the entire god-rays pipeline if the sun
        is outside the (expanded) viewport, since the radial blur converges to
-       a point that won't contribute anything visible. */
+       a point that won't contribute anything visible.
+       The sun mesh is intentionally placed far in world space (default 8000)
+       and may sit beyond `camera.far`, which would cause `project()` to push
+       NDC z past 1. We therefore ignore z and test (a) that the sun is in
+       front of the camera via the world-forward dot product, and (b) that
+       the projected XY falls within the expanded screen rect. */
+    _camForward.set(0, 0, -1).transformDirection(camera.matrixWorld);
+    const sunDir = getSunDir();
+    const sunInFront = _camForward.dot(sunDir) > 0;
     _sunNdc.copy(sunSphere.position).project(camera);
     const sunU = _sunNdc.x * 0.5 + 0.5;
     const sunV = 1.0 - (_sunNdc.y * 0.5 + 0.5);
     const sunOnScreen =
-      _sunNdc.z <= 1.0 &&
+      sunInFront &&
       sunU > -0.3 &&
       sunU < 1.3 &&
       sunV > -0.3 &&
