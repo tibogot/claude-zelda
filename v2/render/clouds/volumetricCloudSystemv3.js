@@ -284,13 +284,18 @@ export async function createVolumetricCloudSystemV3({
     fog: false,
     toneMapped: false,
   });
-  /* Used as `scene.overrideMaterial` during the depth prepass to bypass real
-     shaders (terrain PBR, foliage, plane). Only depth values matter. */
-  const depthOnlyMat = new THREE.MeshBasicMaterial({
-    color: 0x000000,
-    fog: false,
-    toneMapped: false,
-  });
+  /* Selectively swapped onto terrain-chunk meshes (only) during the depth
+     prepass — those are heavy (full PBR / splatmap) but don't use vertex
+     displacement, so the swap is safe. Foliage / grass / plane keep their
+     real materials so any `positionNode` displacement still applies and
+     they write correct depth values.
+     `MeshBasicNodeMaterial` (Node variant) is the WebGPU-native path —
+     plain `MeshBasicMaterial` triggers WebGPU validation errors about
+     missing vertex buffer slot 1 when swapped onto chunk geometries. */
+  const depthOnlyMat = new THREE.MeshBasicNodeMaterial();
+  depthOnlyMat.fog = false;
+  depthOnlyMat.toneMapped = false;
+  depthOnlyMat.colorNode = vec4(0.0, 0.0, 0.0, 1.0);
 
   const postScene = new THREE.Scene();
   const postCam = new THREE.OrthographicCamera(-1, 1, 1, -1, 0, 1);
@@ -1155,15 +1160,35 @@ export async function createVolumetricCloudSystemV3({
       uTextureOffset.value.z -= Math.floor(uTextureOffset.value.z);
     }
 
-    /* --- Depth prepass (full-res). Override material bypasses real shaders. */
+    /* --- Depth prepass (full-res). Selective per-mesh material swap on the
+       chunk terrain meshes only — those are heavy (full PBR / splatmap) but
+       don't use vertex displacement, so swapping them is safe. Foliage /
+       grass / plane / props keep their real materials so any `positionNode`
+       vertex displacement still applies and they write correct depth. */
     camera.layers.set(0);
     renderer.setRenderTarget(depthTarget);
     renderer.clear();
-    const _scnOverrideSaved = scene.overrideMaterial;
-    if (p.useDepthPrepassOverride) scene.overrideMaterial = depthOnlyMat;
+    if (p.useDepthPrepassOverride) {
+      for (const o of getOccluderMeshes()) {
+        if (o !== cloudMesh && o !== sunSphere && o.material !== undefined) {
+          _originalMaterials.set(o.uuid, o.material);
+          if (Array.isArray(o.material)) {
+            o.material = o.material.map(() => depthOnlyMat);
+          } else {
+            o.material = depthOnlyMat;
+          }
+        }
+      }
+    }
     renderer.render(scene, camera);
-    if (p.useDepthPrepassOverride)
-      scene.overrideMaterial = _scnOverrideSaved;
+    if (p.useDepthPrepassOverride) {
+      for (const o of getOccluderMeshes()) {
+        if (_originalMaterials.has(o.uuid)) {
+          o.material = _originalMaterials.get(o.uuid);
+        }
+      }
+      _originalMaterials.clear();
+    }
     depthTexNode.value = depthTarget.depthTexture;
 
     /* --- Sun-offscreen check: skip the entire god-rays pipeline if the sun

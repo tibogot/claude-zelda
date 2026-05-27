@@ -8,7 +8,7 @@ import {
   floor, fract, min, max, clamp, saturate, texture, cameraPosition,
   positionWorld, positionLocal, positionView, float, uniform, varying, select,
   length, negate, mix, smoothstep, fwidth, pow, sin, cos, normalWorld,
-  tangentLocal, viewportCoordinate, uv,
+  tangentLocal, viewportCoordinate, uv, dFdx, dFdy, sqrt, step,
 } from "three/tsl";
 import { OrbitControls } from "three/addons/controls/OrbitControls.js";
 import { GLTFLoader } from "three/addons/loaders/GLTFLoader.js";
@@ -207,10 +207,65 @@ function dilateAtlasEdges(pixels, size, grid, iterations = 8) {
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
-//  Atlas bake — 4 passes (color, normal, RM, depth) — supersample 2× + AA
+//  Visualization helpers — produce display-friendly RGBA buffers from the
+//  packed data atlases. Atlases are packed efficiently for GPU use; for
+//  the dock/zoom previews we remap them into something a human can read.
+// ═══════════════════════════════════════════════════════════════════════════
+
+function buildVizPixels(source, mode) {
+  const out = new Uint8Array(source.length);
+  for (let i = 0; i < source.length; i += 4) {
+    switch (mode) {
+      case "normal":  // R = oct.x, G = oct.y, B = mid-gray fill
+        out[i    ] = source[i    ];
+        out[i + 1] = source[i + 1];
+        out[i + 2] = 128;
+        out[i + 3] = source[i + 3];
+        break;
+      case "depth":   // depth lives in source[i+2] of normalDepth
+        out[i    ] = source[i + 2];
+        out[i + 1] = source[i + 2];
+        out[i + 2] = source[i + 2];
+        out[i + 3] = source[i + 3];
+        break;
+      case "rm":      // R = rough, G = metal, B = Toksvig variance
+        out[i    ] = source[i    ];
+        out[i + 1] = source[i + 1];
+        out[i + 2] = source[i + 2];
+        out[i + 3] = 255;
+        break;
+      case "thickness":  // A channel of rmExtra
+        out[i    ] = source[i + 3];
+        out[i + 1] = source[i + 3];
+        out[i + 2] = source[i + 3];
+        out[i + 3] = 255;
+        break;
+      default:
+        out[i    ] = source[i    ];
+        out[i + 1] = source[i + 1];
+        out[i + 2] = source[i + 2];
+        out[i + 3] = source[i + 3];
+    }
+  }
+  return out;
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+//  Atlas bake — 5 passes (color, world-N, R/M, depth-front, depth-back)
+//  packed into 3 atlases:
+//    colorTex        : RGB color + alpha mask                  (sRGB)
+//    normalDepthTex  : oct(N).xy, depth-front in B, mask in A  (linear)
+//    rmExtraTex      : roughness, metalness, Toksvig-rho, thickness
+//  Per-cell tight bounds let each cell fill its tile (≈2× effective res
+//  for tall/narrow assets like trees vs. uniform sphere-fit).
+//  Toksvig variance comes from the length of the alpha-weighted average
+//  normal at each mip level → fed back into roughness at runtime to kill
+//  specular shimmer.
+//  Back-face depth − front-face depth → thickness for back-lit SSS.
 // ═══════════════════════════════════════════════════════════════════════════
 
 const BAKE_SPHERE_MARGIN = 1.02;
+const CELL_BOUND_MARGIN  = 0.04;   // ~4% radius padding around per-cell tight box
 
 async function bakeAtlases(renderer, meshData, opts) {
   const { grid, atlasSize, maxAniso, cellPad = 4, fullOctahedral = false } = opts;
@@ -219,7 +274,7 @@ async function bakeAtlases(renderer, meshData, opts) {
   const pad = cellPad;
   const innerCS = cs - pad * 2;
 
-  // Bounds
+  // ── Global bounds: sphere fit drives billboard scale ─────────────────
   const box = new THREE.Box3();
   for (const { geometry } of meshData) {
     geometry.computeBoundingBox();
@@ -230,13 +285,62 @@ async function bakeAtlases(renderer, meshData, opts) {
   const radius = sphere.radius * BAKE_SPHERE_MARGIN;
   const center = sphere.center.clone();
 
-  const ortho = new THREE.OrthographicCamera(-radius, radius, radius, -radius, 0.001, radius * 4);
-  const dir = new THREE.Vector3();
+  // ── Per-cell tight 2D bounds in (tangent, up) plane ─────────────────
+  // Projected per vertex, in radius units relative to center. Stored as
+  // (cx, cy, hx, hy). Bake camera frustum is shifted+shrunk to this box,
+  // and the shader does the inverse remap so atlas UV stays unit-square.
+  const cellTransforms = new Float32Array(grid * grid * 4);
+  {
+    const worldUpV = new THREE.Vector3(0, 1, 0);
+    const altUpV   = new THREE.Vector3(-1, 0, 0);
+    const tDir = new THREE.Vector3();
+    const tTan = new THREE.Vector3();
+    const tUp  = new THREE.Vector3();
+    const v    = new THREE.Vector3();
+    for (let gy = 0; gy < grid; gy++) {
+      for (let gx = 0; gx < grid; gx++) {
+        gridToDir(gx / (grid - 1), gy / (grid - 1), tDir);
+        const upRef = tDir.y > 0.999 ? altUpV : worldUpV;
+        tTan.crossVectors(upRef, tDir).normalize();
+        tUp.copy(worldUpV).addScaledVector(tDir, -tDir.dot(worldUpV));
+        if (tUp.lengthSq() < 1e-6) tUp.crossVectors(tDir, tTan).normalize();
+        else tUp.normalize();
+        let minT = Infinity, maxT = -Infinity, minU = Infinity, maxU = -Infinity;
+        for (const { geometry } of meshData) {
+          const pos = geometry.attributes.position;
+          for (let i = 0; i < pos.count; i++) {
+            v.fromBufferAttribute(pos, i).sub(center);
+            const pt = v.dot(tTan), pu = v.dot(tUp);
+            if (pt < minT) minT = pt;
+            if (pt > maxT) maxT = pt;
+            if (pu < minU) minU = pu;
+            if (pu > maxU) maxU = pu;
+          }
+        }
+        const cx = (minT + maxT) * 0.5 / radius;
+        const cy = (minU + maxU) * 0.5 / radius;
+        let hx = (maxT - minT) * 0.5 / radius + CELL_BOUND_MARGIN;
+        let hy = (maxU - minU) * 0.5 / radius + CELL_BOUND_MARGIN;
+        // Clamp to sphere radius; never let cell be degenerate
+        hx = Math.min(Math.max(hx, 0.05), 1.0);
+        hy = Math.min(Math.max(hy, 0.05), 1.0);
+        const ci = (gy * grid + gx) * 4;
+        cellTransforms[ci    ] = cx;
+        cellTransforms[ci + 1] = cy;
+        cellTransforms[ci + 2] = hx;
+        cellTransforms[ci + 3] = hy;
+      }
+    }
+  }
 
-  const colorScene = new THREE.Scene();
-  const normalScene = new THREE.Scene();
-  const rmScene = new THREE.Scene();
-  const depthScene = new THREE.Scene();
+  // ── Bake scenes ──────────────────────────────────────────────────────
+  const ortho = new THREE.OrthographicCamera(-radius, radius, radius, -radius, 0.001, radius * 4);
+
+  const colorScene      = new THREE.Scene();
+  const normalScene     = new THREE.Scene();
+  const rmScene         = new THREE.Scene();
+  const depthFrontScene = new THREE.Scene();
+  const depthBackScene  = new THREE.Scene();
 
   const BAKE_ALPHA = 0.02;
   const depthNear = radius;
@@ -261,7 +365,7 @@ async function bakeAtlases(renderer, meshData, opts) {
     });
     colorScene.add(new THREE.Mesh(geometry, colorMat));
 
-    // Normal — bake world-space normal with normal map applied
+    // World-space normal (with normal map T/B/N reconstruction)
     const alphaNode = material.map ? texture(material.map, uv()).a : float(1);
     let bakeNormal = normalWorld;
     if (material.normalMap && geometry.attributes.tangent) {
@@ -292,17 +396,25 @@ async function bakeAtlases(renderer, meshData, opts) {
     if (hasAlpha) rmMat.alphaTest = BAKE_ALPHA;
     rmScene.add(new THREE.Mesh(geometry.clone(), rmMat));
 
-    // Depth (linear 0..1 from near to far along view dir)
+    // Front depth (linear 0..1 from near→far along view dir)
     const depthVal = saturate(div(sub(negate(positionView.z), float(depthNear)), float(depthSpan)));
-    const dMat = new THREE.MeshBasicNodeMaterial({
-      side: THREE.DoubleSide,
+    const dMatF = new THREE.MeshBasicNodeMaterial({
+      side: THREE.FrontSide,
       colorNode: vec4(depthVal, depthVal, depthVal, alphaNode),
     });
-    if (hasAlpha) dMat.alphaTest = BAKE_ALPHA;
-    depthScene.add(new THREE.Mesh(geometry.clone(), dMat));
+    if (hasAlpha) dMatF.alphaTest = BAKE_ALPHA;
+    depthFrontScene.add(new THREE.Mesh(geometry.clone(), dMatF));
+
+    // Back depth → for thickness = back − front (back-lit SSS feed)
+    const dMatB = new THREE.MeshBasicNodeMaterial({
+      side: THREE.BackSide,
+      colorNode: vec4(depthVal, depthVal, depthVal, alphaNode),
+    });
+    if (hasAlpha) dMatB.alphaTest = BAKE_ALPHA;
+    depthBackScene.add(new THREE.Mesh(geometry.clone(), dMatB));
   }
 
-  // Supersample 2× then downsample
+  // Supersample 2× per cell then downsample for cheap AA
   const ssScale = 2;
   const ssCS = innerCS * ssScale;
   const cellRT = new THREE.RenderTarget(ssCS, ssCS, {
@@ -321,30 +433,60 @@ async function bakeAtlases(renderer, meshData, opts) {
   await renderer.compileAsync(colorScene, ortho);
   await renderer.compileAsync(normalScene, ortho);
   await renderer.compileAsync(rmScene, ortho);
-  await renderer.compileAsync(depthScene, ortho);
+  await renderer.compileAsync(depthFrontScene, ortho);
+  await renderer.compileAsync(depthBackScene, ortho);
 
-  const colorPixels = new Uint8Array(atlasSize * atlasSize * 4);
-  const normalPixels = new Uint8Array(atlasSize * atlasSize * 4);
-  const rmPixels = new Uint8Array(atlasSize * atlasSize * 4);
-  const depthPixels = new Uint8Array(atlasSize * atlasSize * 4);
+  const colorPixels      = new Uint8Array(atlasSize * atlasSize * 4);
+  const normalPixels     = new Uint8Array(atlasSize * atlasSize * 4);  // world-N RGB + mask
+  const rmPixels         = new Uint8Array(atlasSize * atlasSize * 4);
+  const depthFrontPixels = new Uint8Array(atlasSize * atlasSize * 4);
+  const depthBackPixels  = new Uint8Array(atlasSize * atlasSize * 4);
 
   const ssTightRow = ssCS * 4;
   const ssPaddedRow = Math.ceil(ssTightRow / 256) * 256;
   const ssFlipped = new Uint8Array(ssCS * ssCS * 4);
 
   const scenes = [
-    [colorScene, colorPixels],
-    [normalScene, normalPixels],
-    [rmScene, rmPixels],
-    [depthScene, depthPixels],
+    [colorScene,      colorPixels],
+    [normalScene,     normalPixels],
+    [rmScene,         rmPixels],
+    [depthFrontScene, depthFrontPixels],
+    [depthBackScene,  depthBackPixels],
   ];
+
+  // Per-cell camera basis + asymmetric ortho frustum (tight bounds).
+  // Camera basis must match shader's planeTangent/planeUp so the atlas
+  // axis-orientation lines up with what the shader expects to sample.
+  const worldUpV = new THREE.Vector3(0, 1, 0);
+  const altUpV   = new THREE.Vector3(-1, 0, 0);
+  const tDir = new THREE.Vector3();
+  const tTan = new THREE.Vector3();
+  const tUp  = new THREE.Vector3();
+  function setupCellCamera(gx, gy) {
+    gridToDir(gx / (grid - 1), gy / (grid - 1), tDir);
+    const upRef = tDir.y > 0.999 ? altUpV : worldUpV;
+    tTan.crossVectors(upRef, tDir).normalize();
+    tUp.copy(worldUpV).addScaledVector(tDir, -tDir.dot(worldUpV));
+    if (tUp.lengthSq() < 1e-6) tUp.crossVectors(tDir, tTan).normalize();
+    else tUp.normalize();
+    ortho.up.copy(tUp);
+    ortho.position.copy(center).addScaledVector(tDir, 2 * radius);
+    ortho.lookAt(center);
+
+    const ci = (gy * grid + gx) * 4;
+    const cx = cellTransforms[ci],     cy = cellTransforms[ci + 1];
+    const hx = cellTransforms[ci + 2], hy = cellTransforms[ci + 3];
+    ortho.left   = (cx - hx) * radius;
+    ortho.right  = (cx + hx) * radius;
+    ortho.top    = (cy + hy) * radius;
+    ortho.bottom = (cy - hy) * radius;
+    ortho.updateProjectionMatrix();
+    ortho.updateMatrixWorld(true);
+  }
 
   for (let gy = 0; gy < grid; gy++) {
     for (let gx = 0; gx < grid; gx++) {
-      gridToDir(gx / (grid - 1), gy / (grid - 1), dir);
-      ortho.position.copy(center).addScaledVector(dir, radius * 2);
-      ortho.lookAt(center);
-      ortho.updateMatrixWorld(true);
+      setupCellCamera(gx, gy);
 
       for (const [sc, dest] of scenes) {
         renderer.setRenderTarget(cellRT);
@@ -381,18 +523,118 @@ async function bakeAtlases(renderer, meshData, opts) {
 
   linearToSrgb(colorPixels);
 
-  dilateAtlasEdges(colorPixels,  atlasSize, grid, 8);
-  dilateAtlasEdges(normalPixels, atlasSize, grid, 8);
-  dilateAtlasEdges(rmPixels,     atlasSize, grid, 8);
-  dilateAtlasEdges(depthPixels,  atlasSize, grid, 8);
+  dilateAtlasEdges(colorPixels,      atlasSize, grid, 8);
+  dilateAtlasEdges(normalPixels,     atlasSize, grid, 8);
+  dilateAtlasEdges(rmPixels,         atlasSize, grid, 8);
+  dilateAtlasEdges(depthFrontPixels, atlasSize, grid, 8);
+  dilateAtlasEdges(depthBackPixels,  atlasSize, grid, 8);
+
+  // ── Mip generation in world-space RGB → then pack per-mip-level ─────
+  // The world-space normal mip stack is what we use to compute Toksvig
+  // rho. Mip averaging happens in 0..1 RGB which is equivalent to
+  // averaging the world-space N directly (linear).
+  const colorMips      = generatePerCellMipmaps(colorPixels,      atlasSize, grid);
+  const normalMips     = generatePerCellMipmaps(normalPixels,     atlasSize, grid);
+  const rmMips         = generatePerCellMipmaps(rmPixels,         atlasSize, grid);
+  const depthFrontMips = generatePerCellMipmaps(depthFrontPixels, atlasSize, grid);
+  const depthBackMips  = generatePerCellMipmaps(depthBackPixels,  atlasSize, grid);
+
+  // Build packed mip stacks
+  const normalDepthMips = [];
+  const rmExtraMips     = [];
+
+  // Per-pixel normal encoding is always full-octa-with-fold regardless of
+  // the cell-grid mode. Baked world normals can point any direction (back
+  // faces of geometry, double-sided foliage), so we can't use the hemi
+  // rotation. Decode is octNormalDecode in the shader, which inverts this.
+  function octEncode(nx, ny, nz) {
+    const l1 = (Math.abs(nx) + Math.abs(ny) + Math.abs(nz)) || 1e-8;
+    const ox = nx / l1, oz = nz / l1;
+    if (ny < 0) {
+      const u = (1 - Math.abs(oz)) * (ox >= 0 ? 1 : -1);
+      const v = (1 - Math.abs(ox)) * (oz >= 0 ? 1 : -1);
+      return [(u + 1) * 0.5, (v + 1) * 0.5];
+    }
+    return [(ox + 1) * 0.5, (oz + 1) * 0.5];
+  }
+
+  // Mip counts can differ if the stop-rule fires (when cells get below
+  // a few pixels). Use the shortest mip stack for the final atlas.
+  const numMips = Math.min(
+    normalMips.length, rmMips.length,
+    depthFrontMips.length, depthBackMips.length,
+  );
+
+  for (let L = 0; L < numMips; L++) {
+    const sz = atlasSize >> L;
+    const sz2 = sz * sz;
+    const nmip = normalMips[L];
+    const rmip = rmMips[L];
+    const dfmip = depthFrontMips[L];
+    const dbmip = depthBackMips[L];
+    const nd = new Uint8Array(sz2 * 4);
+    const re = new Uint8Array(sz2 * 4);
+    for (let i = 0; i < sz2; i++) {
+      const off = i * 4;
+      const mask = nmip[off + 3];
+      if (mask === 0) continue;
+      // Decode avg world normal (post alpha-weighted mip)
+      const nx = (nmip[off    ] / 255) * 2 - 1;
+      const ny = (nmip[off + 1] / 255) * 2 - 1;
+      const nz = (nmip[off + 2] / 255) * 2 - 1;
+      // Toksvig rho = length of avg N (<=1, < 1 means variance)
+      const rho = Math.min(1, Math.sqrt(nx*nx + ny*ny + nz*nz));
+      const inv = rho > 1e-6 ? 1 / rho : 0;
+      const [ou, ov] = octEncode(nx * inv, ny * inv, nz * inv);
+      nd[off    ] = Math.max(0, Math.min(255, Math.round(ou * 255)));
+      nd[off + 1] = Math.max(0, Math.min(255, Math.round(ov * 255)));
+      nd[off + 2] = dfmip[off];          // depth front (.r since baked grayscale)
+      nd[off + 3] = mask;
+
+      re[off    ] = rmip[off    ];        // roughness
+      re[off + 1] = rmip[off + 1];        // metalness
+      // Toksvig variance ∈ [0, 1] — large means many directions averaged →
+      // bump runtime roughness so high-mip impostor doesn't shimmer.
+      const variance = 1 - rho;
+      re[off + 2] = Math.round(variance * 255);
+      // Thickness = max(0, depthBack − depthFront), 0..1
+      const df = dfmip[off] / 255;
+      const db = dbmip[off] / 255;
+      const thickness = Math.max(0, Math.min(1, db - df));
+      re[off + 3] = Math.round(thickness * 255);
+    }
+    normalDepthMips.push(nd);
+    rmExtraMips.push(re);
+  }
+
+  // Build textures
+  const colorTex       = makeTexWithMips(colorMips.slice(0, numMips), atlasSize, maxAniso, true);
+  const normalDepthTex = makeTexWithMips(normalDepthMips, atlasSize, maxAniso, false);
+  const rmExtraTex     = makeTexWithMips(rmExtraMips,     atlasSize, maxAniso, false);
+
+  // Per-cell transform LUT: (cx, cy, hx, hy) per cell, float for precision
+  // (FloatType DataTexture is supported in WebGPU).
+  const cellLUTTex = new THREE.DataTexture(
+    cellTransforms,
+    grid, grid,
+    THREE.RGBAFormat,
+    THREE.FloatType,
+  );
+  cellLUTTex.magFilter = THREE.NearestFilter;
+  cellLUTTex.minFilter = THREE.NearestFilter;
+  cellLUTTex.wrapS = THREE.ClampToEdgeWrapping;
+  cellLUTTex.wrapT = THREE.ClampToEdgeWrapping;
+  cellLUTTex.generateMipmaps = false;
+  cellLUTTex.flipY = false;
+  cellLUTTex.needsUpdate = true;
 
   return {
-    colorTex:  makeTexWithMips(generatePerCellMipmaps(colorPixels,  atlasSize, grid), atlasSize, maxAniso, true),
-    normalTex: makeTexWithMips(generatePerCellMipmaps(normalPixels, atlasSize, grid), atlasSize, maxAniso, false),
-    rmTex:     makeTexWithMips(generatePerCellMipmaps(rmPixels,     atlasSize, grid), atlasSize, maxAniso, false),
-    depthTex:  makeTexWithMips(generatePerCellMipmaps(depthPixels,  atlasSize, grid), atlasSize, maxAniso, false),
-    colorPixels, normalPixels, rmPixels, depthPixels,
+    colorTex, normalDepthTex, rmExtraTex, cellLUTTex,
+    colorPixels,
+    normalDepthPixels: normalDepthMips[0],
+    rmExtraPixels:     rmExtraMips[0],
     radius, center, grid, atlasSize, cellPad: pad,
+    cellTransforms,
   };
 }
 
@@ -401,10 +643,10 @@ async function bakeAtlases(renderer, meshData, opts) {
 // ═══════════════════════════════════════════════════════════════════════════
 
 function createImpostorMaterials(textures, opts) {
-  const { colorTex, normalTex, rmTex, depthTex } = textures;
+  const { colorTex, normalDepthTex, rmExtraTex, cellLUTTex } = textures;
   const { impostorScale, gridVal, atlasSize, cellPad, fullOctahedral = false } = opts;
 
-  // ── Uniforms (shared between main + depth materials) ────────────────────
+  // ── Uniforms ─────────────────────────────────────────────────────────
   const uSPS         = uniform(float(gridVal));
   const uScale       = uniform(float(impostorScale));
   const uCenter      = uniform(new THREE.Vector3());
@@ -414,18 +656,20 @@ function createImpostorMaterials(textures, opts) {
   const uAlphaCutoff = uniform(float(0.5));
   const uEdgeSmooth  = uniform(float(1.5));
   const uParallaxStr = uniform(float(0.0));
+  const uToksvigStr  = uniform(float(1.0));   // specular-AA blend strength
 
-  const uUseBary     = uniform(float(0));   // 0=dominant, 1=barycentric blend
-  const uUseParallax = uniform(float(0));   // 0=off, 1=on
-  const uUseDither   = uniform(float(0));   // 0=hard, 1=dither cross-fade
+  const uUseBary     = uniform(float(0));
+  const uUseParallax = uniform(float(0));
+  const uUseDither   = uniform(float(0));
 
   const uFreeze      = uniform(float(0));
   const uFreezeDir   = uniform(new THREE.Vector3(0, 0, 1));
 
-  const uWindAmp     = uniform(float(0));   // 0 = no wind
+  const uWindAmp     = uniform(float(0));
   const uWindFreq    = uniform(float(1.5));
 
-  // Translucency (back-lit SSS — added via emissiveNode)
+  // Translucency / back-lit SSS (added via emissiveNode, gated by baked
+  // thickness so back-lighting only fires on actually-thin geometry)
   const uTransAmt    = uniform(float(0));
   const uTransPow    = uniform(float(3.0));
   const uTransTint   = uniform(new THREE.Vector3(0.9, 1.0, 0.7));
@@ -437,8 +681,7 @@ function createImpostorMaterials(textures, opts) {
   const uPadFrac     = uniform(float(cellPad / atlasSize));
   const uInnerFrac   = uniform(float(1 / gridVal - (2 * cellPad) / atlasSize));
 
-  // Debug
-  const uDebugMode   = uniform(float(0)); // 0=PBR, 1=normals, 2=raw atlas
+  const uDebugMode   = uniform(float(0));
 
   // Vertex→fragment varyings
   const vWeight = varying(vec4(0, 0, 0, 0), "vW");
@@ -449,21 +692,25 @@ function createImpostorMaterials(textures, opts) {
   const vUV2    = varying(vec2(0, 0), "vUV2");
   const vUV3    = varying(vec2(0, 0), "vUV3");
 
-  // ── Octa encode / decode (hemi or full) ──────────────────────────────────
+  // ── Safe sign: returns ±1 never 0 (kills exact-zero artifacts in
+  // full-octahedral encode/decode near axis-aligned directions).
+  const sSign = (x) => sub(mul(step(float(0), x), float(2)), float(1));
+
+  // ── Octa encode (dir → uv) and grid-index decode (gridXY → dir) ──────
   const encode = fullOctahedral
     ? Fn(([d]) => {
         const l1 = add(add(abs(d.x), abs(d.y)), abs(d.z));
         const ox = div(d.x, l1);
         const oz = div(d.z, l1);
-        const wrapX = mul(sub(float(1), abs(oz)), sign(d.x));
-        const wrapZ = mul(sub(float(1), abs(ox)), sign(d.z));
+        const wrapX = mul(sub(float(1), abs(oz)), sSign(d.x));
+        const wrapZ = mul(sub(float(1), abs(ox)), sSign(d.z));
         const isLower = d.y.lessThan(float(0));
         const uvX = select(isLower, wrapX, ox);
         const uvZ = select(isLower, wrapZ, oz);
         return mul(add(vec2(uvX, uvZ), float(1)), float(0.5));
       })
     : Fn(([d]) => {
-        const s = vec3(sign(d.x), sign(d.y), sign(d.z));
+        const s = vec3(sSign(d.x), sSign(d.y), sSign(d.z));
         const l1 = dot(d, s);
         const o = vec3(div(d.x, l1), div(d.y, l1), div(d.z, l1));
         return mul(vec2(add(1, add(o.x, o.z)), add(1, sub(o.z, o.x))), 0.5);
@@ -476,8 +723,8 @@ function createImpostorMaterials(textures, opts) {
         const oz = sub(mul(u.y, float(2)), float(1));
         const oy = sub(sub(float(1), abs(ox)), abs(oz));
         const isLower = oy.lessThan(float(0));
-        const unwrapX = mul(sub(float(1), abs(oz)), sign(ox));
-        const unwrapZ = mul(sub(float(1), abs(ox)), sign(oz));
+        const unwrapX = mul(sub(float(1), abs(oz)), sSign(ox));
+        const unwrapZ = mul(sub(float(1), abs(ox)), sSign(oz));
         const fx = select(isLower, unwrapX, ox);
         const fz = select(isLower, unwrapZ, oz);
         return normalize(vec3(fx, oy, fz));
@@ -490,7 +737,19 @@ function createImpostorMaterials(textures, opts) {
         return normalize(vec3(px, py, pz));
       });
 
-  // Build orthonormal frame on the cell plane
+  // ── Per-pixel oct-normal decode: atlas RG (0..1) → unit world normal ─
+  // Standard hemi-octa unfold (Cigolle et al). Re-folds the corners when
+  // the unprojected y is negative.
+  const octNormalDecode = Fn(([rg]) => {
+    const e = sub(mul(rg, float(2)), float(1));
+    const ny0 = sub(sub(float(1), abs(e.x)), abs(e.y));
+    const t = saturate(negate(ny0));
+    const nx = sub(e.x, mul(sSign(e.x), t));
+    const nz = sub(e.y, mul(sSign(e.y), t));
+    return normalize(vec3(nx, ny0, nz));
+  });
+
+  // ── Cell plane frame ─────────────────────────────────────────────────
   const planeTangent = Fn(([n]) => {
     const up = mix(vec3(0, 1, 0), vec3(-1, 0, 0),
       max(float(0), sign(sub(n.y, float(0.999)))));
@@ -500,22 +759,31 @@ function createImpostorMaterials(textures, opts) {
     const worldUp = vec3(0, 1, 0);
     const proj = sub(worldUp, mul(n, dot(n, worldUp)));
     const len = length(proj);
-    return select(len.lessThan(float(0.001)), t, normalize(proj));
+    // Fallback for top-down: cross(n, t) is always perpendicular to both,
+    // and to itself ≠ t (the previous fallback returned t which produced
+    // a degenerate per-cell plane).
+    const fb = normalize(cross(n, t));
+    return select(len.lessThan(float(0.001)), fb, normalize(proj));
   });
   const projectVert = Fn(([n]) => {
     const t = planeTangent(n);
     const up = planeUp(n, t);
     return add(mul(positionLocal.x, t), mul(positionLocal.y, up));
   });
-  const planeUV = Fn(([n, t, camL, vd]) => {
+  // Per-cell planar→atlas UV with tight bounds. pp is in radius units
+  // relative to model center. cellT = (cx, cy, hx, hy). The cell's atlas
+  // tile [0,1]² maps to the world rectangle (cx ± hx, cy ± hy) in the
+  // tangent/up plane.
+  const planeUVCell = Fn(([n, t, camL, vd, cellT]) => {
     const denom = dot(vd, n);
     const tt = mul(dot(negate(camL), n), div(1, denom));
     const hit = add(camL, mul(vd, tt));
     const upP = planeUp(n, t);
-    return add(vec2(dot(t, hit), dot(upP, hit)), float(0.5));
+    const pp = vec2(dot(t, hit), dot(upP, hit));
+    return add(div(sub(pp, cellT.xy), mul(float(2), cellT.zw)), float(0.5));
   });
 
-  // ── Vertex stage: billboard + cell triplet + wind ────────────────────────
+  // ── Vertex stage ─────────────────────────────────────────────────────
   const positionFn = Fn(() => {
     const nm1 = vec2(sub(uSPS, 1), sub(uSPS, 1));
     const camLocal = mul(sub(cameraPosition, uCenter), div(1, uScale));
@@ -523,9 +791,16 @@ function createImpostorMaterials(textures, opts) {
     const lookupDir = select(uFreeze.greaterThan(float(0.5)), uFreezeDir, faceDir);
 
     const bv = projectVert(faceDir);
-    const viewDir = normalize(sub(bv, camLocal));
+    // Unit fix: bv is in plane-local units (positionLocal ∈ ±0.5) but the
+    // billboard is scaled 2× radius at render time, so 0.5 plane-local =
+    // 1 radius unit. camLocal is already in radius units; scale bv to
+    // match so the ray-plane intersection lands in radius units. Without
+    // this, the OLD code under-mapped pp by 2× — masked by the matching
+    // pp+0.5 mapping but breaks per-cell tight bounds where cellLUT is
+    // stored in radius units.
+    const bvRadius = mul(bv, float(2));
+    const viewDir = normalize(sub(bvRadius, camLocal));
 
-    // Cell triplet (hemi octa barycentric)
     const grid = mul(encode(lookupDir), nm1);
     const gf = min(floor(grid), nm1);
     const fr = fract(grid);
@@ -543,15 +818,23 @@ function createImpostorMaterials(textures, opts) {
     const s3 = min(add(s1, vec2(1, 1)), nm1);
     vS1.assign(s1); vS2.assign(s2); vS3.assign(s3);
 
+    // Sample per-cell tight-bounds LUT (NEAREST) — divide by uSPS not nm1
+    // so the sample lands on the pixel center of the cell.
+    const lutUV1 = div(add(s1, float(0.5)), uSPS);
+    const lutUV2 = div(add(s2, float(0.5)), uSPS);
+    const lutUV3 = div(add(s3, float(0.5)), uSPS);
+    const ct1 = texture(cellLUTTex, lutUV1);
+    const ct2 = texture(cellLUTTex, lutUV2);
+    const ct3 = texture(cellLUTTex, lutUV3);
+
     const pn1 = decode(s1, nm1); const pt1 = planeTangent(pn1);
     const pn2 = decode(s2, nm1); const pt2 = planeTangent(pn2);
     const pn3 = decode(s3, nm1); const pt3 = planeTangent(pn3);
-    vUV1.assign(planeUV(pn1, pt1, camLocal, viewDir));
-    vUV2.assign(planeUV(pn2, pt2, camLocal, viewDir));
-    vUV3.assign(planeUV(pn3, pt3, camLocal, viewDir));
+    vUV1.assign(planeUVCell(pn1, pt1, camLocal, viewDir, ct1));
+    vUV2.assign(planeUVCell(pn2, pt2, camLocal, viewDir, ct2));
+    vUV3.assign(planeUVCell(pn3, pt3, camLocal, viewDir, ct3));
 
     // Wind sway — base-anchored, horizontal in local space
-    // heightW = 0 at bottom edge (localY = -0.5), 1 at top edge (localY = 0.5)
     const heightW = add(positionLocal.y, float(0.5));
     const phase = add(mul(uTime, uWindFreq), mul(uCenter.x, float(0.37)));
     const phaseZ = add(mul(uTime, mul(uWindFreq, float(0.83))), mul(uCenter.z, float(0.41)));
@@ -562,43 +845,60 @@ function createImpostorMaterials(textures, opts) {
     return add(bv, windOffset);
   });
 
-  // ── Atlas UV with padding ────────────────────────────────────────────────
+  // ── Atlas UV with padding ────────────────────────────────────────────
   const getUV = Fn(([uvf, frame]) => {
     const clamped = clamp(vec2(uvf.x, uvf.y), float(0), float(1));
     return add(mul(frame, uCellFrac), add(uPadFrac, mul(clamped, uInnerFrac)));
   });
 
-  // ── Depth parallax (3-step iterative) — gated by uUseParallax ────────────
-  const depthParallax = Fn(([localUV, cellNorm, frame]) => {
+  // ── Depth parallax (3 iters) — depth now lives in normalDepth.b ─────
+  // Uses textureGrad with the undisplaced UV's screen-space gradient so
+  // mip selection stays sharp even when the displaced UV changes rapidly.
+  const depthParallax = Fn(([localUV, cellNorm, frame, gradX, gradY]) => {
     const V = normalize(sub(cameraPosition, positionWorld));
     const T = planeTangent(cellNorm);
     const B = planeUp(cellNorm, T);
     const VdotN = max(dot(V, cellNorm), float(0.3));
     const eff = mul(uParallaxStr, uUseParallax);
     const viewTS = div(vec2(dot(V, T), dot(V, B)), VdotN);
-    const d0 = texture(depthTex, getUV(localUV, frame)).r;
+    const d0 = texture(normalDepthTex, getUV(localUV, frame)).grad(gradX, gradY).b;
     const uv1 = add(localUV, mul(viewTS, mul(sub(float(0.5), d0), eff)));
-    const d1 = texture(depthTex, getUV(uv1, frame)).r;
+    const d1 = texture(normalDepthTex, getUV(uv1, frame)).grad(gradX, gradY).b;
     const uv2 = add(localUV, mul(viewTS, mul(sub(float(0.5), d1), eff)));
-    const d2 = texture(depthTex, getUV(uv2, frame)).r;
+    const d2 = texture(normalDepthTex, getUV(uv2, frame)).grad(gradX, gradY).b;
     const uv3 = add(localUV, mul(viewTS, mul(sub(float(0.5), d2), eff)));
     return getUV(uv3, frame);
   });
 
-  // ── Fragment: sample 3 cells, blend or pick dominant ─────────────────────
+  // ── Fragment: base UVs + stable gradients for all subsequent samples ──
+  const baseAtlas1 = getUV(vUV1, vS1);
+  const baseAtlas2 = getUV(vUV2, vS2);
+  const baseAtlas3 = getUV(vUV3, vS3);
+  const g1x = dFdx(baseAtlas1), g1y = dFdy(baseAtlas1);
+  const g2x = dFdx(baseAtlas2), g2y = dFdy(baseAtlas2);
+  const g3x = dFdx(baseAtlas3), g3y = dFdy(baseAtlas3);
+
   const nm1f = vec2(sub(uSPS, 1), sub(uSPS, 1));
   const cn1 = decode(vS1, nm1f);
   const cn2 = decode(vS2, nm1f);
   const cn3 = decode(vS3, nm1f);
 
-  const puv1 = depthParallax(vUV1, cn1, vS1);
-  const puv2 = depthParallax(vUV2, cn2, vS2);
-  const puv3 = depthParallax(vUV3, cn3, vS3);
+  const puv1 = depthParallax(vUV1, cn1, vS1, g1x, g1y);
+  const puv2 = depthParallax(vUV2, cn2, vS2, g2x, g2y);
+  const puv3 = depthParallax(vUV3, cn3, vS3, g3x, g3y);
 
-  const c1 = texture(colorTex, puv1);
-  const c2 = texture(colorTex, puv2);
-  const c3 = texture(colorTex, puv3);
+  // ── Sample packed atlases with stable grads ─────────────────────────
+  const c1 = texture(colorTex, puv1).grad(g1x, g1y);
+  const c2 = texture(colorTex, puv2).grad(g2x, g2y);
+  const c3 = texture(colorTex, puv3).grad(g3x, g3y);
+  const nd1 = texture(normalDepthTex, puv1).grad(g1x, g1y);
+  const nd2 = texture(normalDepthTex, puv2).grad(g2x, g2y);
+  const nd3 = texture(normalDepthTex, puv3).grad(g3x, g3y);
+  const rx1 = texture(rmExtraTex, puv1).grad(g1x, g1y);
+  const rx2 = texture(rmExtraTex, puv2).grad(g2x, g2y);
+  const rx3 = texture(rmExtraTex, puv3).grad(g3x, g3y);
 
+  // ── Color blend: dominant / barycentric / dither ─────────────────────
   const isDom1 = vWeight.x.greaterThanEqual(vWeight.y).and(vWeight.x.greaterThanEqual(vWeight.z));
   const isDom2 = vWeight.y.greaterThanEqual(vWeight.z);
   const domAlpha = select(isDom1, c1.a, select(isDom2, c2.a, c3.a));
@@ -611,7 +911,6 @@ function createImpostorMaterials(textures, opts) {
   const baryRgb = add(add(mul(c1.rgb, nw1), mul(c2.rgb, nw2)), mul(c3.rgb, nw3));
   const baryAlpha = add(add(mul(c1.a, nw1), mul(c2.a, nw2)), mul(c3.a, nw3));
 
-  // Dither stochastic selection (alternative to soft blend)
   const px = viewportCoordinate.xy;
   const ign = fract(mul(float(52.9829189),
     fract(add(mul(float(0.06711056), px.x), mul(float(0.00583715), px.y)))));
@@ -621,67 +920,60 @@ function createImpostorMaterials(textures, opts) {
   const ditRgb = select(ditS1, c1.rgb, select(ditS2, c2.rgb, c3.rgb));
   const ditAlpha = select(ditS1, c1.a, select(ditS2, c2.a, c3.a));
 
-  // Selection logic:
-  //   dither path overrides everything when uUseDither
-  //   else: uUseBary chooses barycentric vs dominant
   const baryOrDomRgb = mix(domRgb, baryRgb, uUseBary);
   const baryOrDomA   = mix(domAlpha, baryAlpha, uUseBary);
   const finalAlbedo  = mix(baryOrDomRgb, ditRgb,   uUseDither);
   const finalAlphaR  = mix(baryOrDomA,   ditAlpha, uUseDither);
 
-  // Edge AA via fwidth on the chosen alpha (smoothstep around cutoff)
   const edgeW = mul(fwidth(finalAlphaR), uEdgeSmooth);
   const smoothAlpha = smoothstep(sub(uAlphaCutoff, edgeW), add(uAlphaCutoff, edgeW), finalAlphaR);
 
-  // Normals — bary or dominant
-  const n1 = texture(normalTex, puv1).xyz;
-  const n2 = texture(normalTex, puv2).xyz;
-  const n3 = texture(normalTex, puv3).xyz;
-  const wN1 = normalize(sub(mul(n1, 2.0), 1.0));
-  const wN2 = normalize(sub(mul(n2, 2.0), 1.0));
-  const wN3 = normalize(sub(mul(n3, 2.0), 1.0));
+  // ── Normals: oct-decode each cell, blend, mix toward flat-up by uNormStr
+  const wN1 = octNormalDecode(nd1.xy);
+  const wN2 = octNormalDecode(nd2.xy);
+  const wN3 = octNormalDecode(nd3.xy);
   const baryN = normalize(add(add(mul(wN1, nw1), mul(wN2, nw2)), mul(wN3, nw3)));
   const domN  = select(isDom1, wN1, select(isDom2, wN2, wN3));
   const blendedWorldN = normalize(mix(domN, baryN, uUseBary));
-  // Normal strength = lerp from flat-up to atlas normal
   const finalWorldN = normalize(mix(vec3(0, 1, 0), blendedWorldN, uNormStr));
 
-  // Roughness / metalness
-  const rm1 = texture(rmTex, puv1);
-  const rm2 = texture(rmTex, puv2);
-  const rm3 = texture(rmTex, puv3);
-  const baryRM = add(add(mul(rm1.xy, nw1), mul(rm2.xy, nw2)), mul(rm3.xy, nw3));
-  const domRM  = select(isDom1, rm1.xy, select(isDom2, rm2.xy, rm3.xy));
-  const finalRM = mix(domRM, baryRM, uUseBary);
-  const finalRough = clamp(finalRM.x, float(0.05), float(1));
-  const finalMetal = clamp(finalRM.y, float(0), float(1));
+  // ── R/M + Toksvig specular-AA + thickness ───────────────────────────
+  const baryRMT = add(add(mul(rx1, nw1), mul(rx2, nw2)), mul(rx3, nw3));
+  const domRMT  = select(isDom1, rx1, select(isDom2, rx2, rx3));
+  const finalRMT = mix(domRMT, baryRMT, uUseBary);
+  const baseRough = clamp(finalRMT.x, float(0.05), float(1));
+  const finalMetal = clamp(finalRMT.y, float(0), float(1));
+  const variance  = mul(finalRMT.z, uToksvigStr);
+  // Specular AA: σ²_modified = σ²_base + variance²  (variance ∈ [0,1]
+  // where 1 means "averaged normals collapsed to zero" — fully chaotic)
+  const finalRough = clamp(
+    sqrt(add(mul(baseRough, baseRough), mul(variance, variance))),
+    float(0.05), float(1));
+  const thickness = finalRMT.w;
 
-  // Depth-based AO
-  const dep1 = texture(depthTex, puv1).r;
-  const dep2 = texture(depthTex, puv2).r;
-  const dep3 = texture(depthTex, puv3).r;
-  const baryDepth = add(add(mul(dep1, nw1), mul(dep2, nw2)), mul(dep3, nw3));
+  // AO from packed depth (normalDepth.b)
+  const baryDepth = add(add(mul(nd1.b, nw1), mul(nd2.b, nw2)), mul(nd3.b, nw3));
   const ao = saturate(sub(float(1), mul(float(0.5), baryDepth)));
 
-  // Translucency / back-lit SSS — only inside silhouette, scales with sun
+  // Translucency — thickness gates the SSS so it only fires on thin parts
   const viewDirW = normalize(sub(cameraPosition, positionWorld));
   const backLit = pow(saturate(dot(viewDirW, negate(uSunDir))), uTransPow);
-  const translucency = mul(mul(mul(backLit, uTransAmt), mul(finalAlbedo, uTransTint)), uSunColor);
+  const translucency = mul(
+    mul(mul(mul(backLit, uTransAmt), thickness), mul(finalAlbedo, uTransTint)),
+    uSunColor);
 
-  // Debug overrides
+  // Debug
   const isNormViz = uDebugMode.greaterThan(float(0.5)).and(uDebugMode.lessThan(float(1.5)));
   const isRawViz  = uDebugMode.greaterThan(float(1.5));
   const normVizCol = mul(add(finalWorldN, float(1)), float(0.5));
   const displayColor = select(isRawViz, finalAlbedo, select(isNormViz, normVizCol, finalAlbedo));
   const displayEmissive = select(isRawViz, vec3(0, 0, 0), select(isNormViz, normVizCol, translucency));
 
-  // ── Main material (MeshStandardNodeMaterial — full scene lighting) ───────
+  // Main material
   const mainMat = new THREE.MeshStandardNodeMaterial();
   mainMat.side = THREE.FrontSide;
   mainMat.transparent = false;
   mainMat.alphaTest = 0.5;
-  // alphaToCoverage default OFF — when ON, MSAA stippling on the fwidth-smoothed
-  // alpha shatters foliage silhouettes without TAA to resolve. Toggle from GUI.
   mainMat.alphaToCoverage = false;
   mainMat.depthWrite = true;
   mainMat.positionNode  = positionFn();
@@ -693,11 +985,9 @@ function createImpostorMaterials(textures, opts) {
   mainMat.opacityNode   = smoothAlpha;
   mainMat.emissiveNode  = displayEmissive;
 
-  // Shadow casting — Renderer._getShadowNodes() picks these up per-draw and
-  // patches them onto the shared ShadowPassMaterial. cameraPosition during the
-  // shadow pass IS the sun position, so positionFn() orients the billboard
-  // toward the sun and the atlas alpha samples at the sun's view direction →
-  // the shadow silhouette matches what the sun actually sees.
+  // Shadow pass: re-orient billboard to the sun (cameraPosition during
+  // shadow render IS the sun), sample alpha at that view direction so the
+  // silhouette matches what the sun sees.
   mainMat.castShadowPositionNode = positionFn();
   mainMat.castShadowNode         = vec4(float(0), float(0), float(0), smoothAlpha);
 
@@ -705,7 +995,7 @@ function createImpostorMaterials(textures, opts) {
     mainMat,
     uniforms: {
       uSPS, uScale, uCenter, uTime,
-      uNormStr, uAlphaCutoff, uEdgeSmooth, uParallaxStr,
+      uNormStr, uAlphaCutoff, uEdgeSmooth, uParallaxStr, uToksvigStr,
       uUseBary, uUseParallax, uUseDither,
       uFreeze, uFreezeDir,
       uWindAmp, uWindFreq,
@@ -927,9 +1217,9 @@ export async function run() {
     }
     if (atlasResult) {
       atlasResult.colorTex.dispose();
-      atlasResult.normalTex.dispose();
-      atlasResult.rmTex.dispose();
-      atlasResult.depthTex.dispose();
+      atlasResult.normalDepthTex.dispose();
+      atlasResult.rmExtraTex.dispose();
+      atlasResult.cellLUTTex.dispose();
       atlasResult = null;
     }
     impUniforms = null;
@@ -1045,9 +1335,9 @@ export async function run() {
     }
     if (atlasResult) {
       atlasResult.colorTex.dispose();
-      atlasResult.normalTex.dispose();
-      atlasResult.rmTex.dispose();
-      atlasResult.depthTex.dispose();
+      atlasResult.normalDepthTex.dispose();
+      atlasResult.rmExtraTex.dispose();
+      atlasResult.cellLUTTex.dispose();
     }
 
     try {
@@ -1062,10 +1352,10 @@ export async function run() {
       loadSub.textContent = "Building impostor materials…";
       const built = createImpostorMaterials(
         {
-          colorTex:  atlasResult.colorTex,
-          normalTex: atlasResult.normalTex,
-          rmTex:     atlasResult.rmTex,
-          depthTex:  atlasResult.depthTex,
+          colorTex:       atlasResult.colorTex,
+          normalDepthTex: atlasResult.normalDepthTex,
+          rmExtraTex:     atlasResult.rmExtraTex,
+          cellLUTTex:     atlasResult.cellLUTTex,
         },
         {
           impostorScale: atlasResult.radius,
@@ -1220,10 +1510,10 @@ export async function run() {
       }
     };
 
-    drawLayer(atlasResult.colorPixels,  "dock-color",  true);
-    drawLayer(atlasResult.normalPixels, "dock-normal", true);
-    drawLayer(atlasResult.rmPixels,     "dock-rm",     true);
-    drawLayer(atlasResult.depthPixels,  "dock-depth",  true);
+    drawLayer(atlasResult.colorPixels,                                            "dock-color",  true);
+    drawLayer(atlasResult.normalVizCache ||= buildVizPixels(atlasResult.normalDepthPixels, "normal"),    "dock-normal", true);
+    drawLayer(atlasResult.rmVizCache     ||= buildVizPixels(atlasResult.rmExtraPixels,     "rm"),        "dock-rm",     true);
+    drawLayer(atlasResult.depthVizCache  ||= buildVizPixels(atlasResult.normalDepthPixels, "depth"),     "dock-depth",  true);
   }
 
   function openZoomFromEvent(e, pixels, label) {
@@ -1269,10 +1559,10 @@ export async function run() {
 
   function attachDockHandlers() {
     const pairs = [
-      ["dock-color",  () => atlasResult?.colorPixels,  "Color"],
-      ["dock-normal", () => atlasResult?.normalPixels, "Normal"],
-      ["dock-rm",     () => atlasResult?.rmPixels,     "R/M"],
-      ["dock-depth",  () => atlasResult?.depthPixels,  "Depth"],
+      ["dock-color",  () => atlasResult?.colorPixels,                                            "Color"],
+      ["dock-normal", () => atlasResult && (atlasResult.normalVizCache ||= buildVizPixels(atlasResult.normalDepthPixels, "normal")), "Oct-Normal"],
+      ["dock-rm",     () => atlasResult && (atlasResult.rmVizCache     ||= buildVizPixels(atlasResult.rmExtraPixels,     "rm")),     "R/M/Toksvig"],
+      ["dock-depth",  () => atlasResult && (atlasResult.depthVizCache  ||= buildVizPixels(atlasResult.normalDepthPixels, "depth")),  "Depth"],
     ];
     for (const [id, getPx, label] of pairs) {
       const el = $(id);
@@ -1347,6 +1637,7 @@ export async function run() {
     alphaCutoff: 0.5,
     edgeSmooth: 1.5,
     parallaxStr: 0.05,
+    toksvigStr: 1.0,
     dither: false,
     alphaToCoverage: false,
     windAmp: 0.0,
@@ -1385,6 +1676,7 @@ export async function run() {
       impUniforms.uAlphaCutoff.value = P.alphaCutoff;
       impUniforms.uEdgeSmooth.value  = preset.edgeSmooth;
       impUniforms.uParallaxStr.value = P.parallaxStr;
+      impUniforms.uToksvigStr.value  = P.toksvigStr;
       impUniforms.uUseBary.value     = preset.useBary;
       impUniforms.uUseParallax.value = preset.useParallax;
       impUniforms.uUseDither.value   = P.dither ? 1 : 0;
@@ -1544,6 +1836,7 @@ export async function run() {
   ui._slider(fQual, P, "alphaCutoff", { label: "Alpha cutoff", min: 0.05, max: 0.95, step: 0.01, onChange: syncParams });
   ui._slider(fQual, P, "parallaxStr", { label: "Parallax depth", min: 0, max: 0.3, step: 0.005, onChange: syncParams });
   ui._slider(fQual, P, "normalStr", { label: "Normal strength", min: 0, max: 1, step: 0.02, onChange: syncParams });
+  ui._slider(fQual, P, "toksvigStr", { label: "Spec AA (Toksvig)", min: 0, max: 2, step: 0.05, onChange: syncParams });
   ui._toggle(fQual, P, "dither", { label: "Dither cross-fade", onChange: syncParams });
   ui._toggle(fQual, P, "alphaToCoverage", { label: "Alpha-to-coverage", onChange: syncParams });
 
@@ -1604,10 +1897,9 @@ export async function run() {
         `${currentModelName}_${label}_${P.grid}x${P.grid}.png`);
     },
   });
-  mkExport("colorPixels", "color");
-  mkExport("normalPixels", "normal");
-  mkExport("rmPixels", "rm");
-  mkExport("depthPixels", "depth");
+  mkExport("colorPixels",       "color");
+  mkExport("normalDepthPixels", "normal+depth");
+  mkExport("rmExtraPixels",     "rm+toksvig+thick");
 
   document.getElementById("btn-load")?.addEventListener("click", () => fileInput.click());
   document.getElementById("btn-rebake")?.addEventListener("click", () => rebake());

@@ -246,6 +246,16 @@ export async function createVolumetricCloudSystemOptimized({
     fog: false,
     toneMapped: false,
   });
+  /* Used in the depth prepass when `useDepthPrepassOverride` is on — only
+     swapped onto chunk-terrain meshes so foliage / grass / plane keep their
+     `positionNode` vertex displacement and write correct depth.
+     `MeshBasicNodeMaterial` (Node variant) is the WebGPU-native path —
+     plain `MeshBasicMaterial` triggers WebGPU validation errors about
+     missing vertex buffer slot 1 when swapped onto chunk geometries. */
+  const depthOnlyMat = new THREE.MeshBasicNodeMaterial();
+  depthOnlyMat.fog = false;
+  depthOnlyMat.toneMapped = false;
+  depthOnlyMat.colorNode = vec4(0.0, 0.0, 0.0, 1.0);
 
   const postScene = new THREE.Scene();
   const postCam = new THREE.OrthographicCamera(-1, 1, 1, -1, 0, 1);
@@ -1030,10 +1040,35 @@ export async function createVolumetricCloudSystemOptimized({
       uTextureOffset.value.z -= Math.floor(uTextureOffset.value.z);
     }
 
+    /* --- Depth prepass (full-res). Optional selective per-mesh material
+       swap on the terrain-chunk meshes only — those are heavy (full PBR /
+       splatmap) but don't use vertex displacement, so swapping them is
+       safe. Foliage / grass / plane keep their real materials. */
     camera.layers.set(0);
     renderer.setRenderTarget(depthTarget);
     renderer.clear();
+    const _depthPrepassSwaps = new Map();
+    if (p.useDepthPrepassOverride) {
+      for (const o of getOccluderMeshes()) {
+        if (o !== cloudMesh && o !== sunSphere && o.material !== undefined) {
+          _depthPrepassSwaps.set(o.uuid, o.material);
+          if (Array.isArray(o.material)) {
+            o.material = o.material.map(() => depthOnlyMat);
+          } else {
+            o.material = depthOnlyMat;
+          }
+        }
+      }
+    }
     renderer.render(scene, camera);
+    if (_depthPrepassSwaps.size > 0) {
+      for (const o of getOccluderMeshes()) {
+        if (_depthPrepassSwaps.has(o.uuid)) {
+          o.material = _depthPrepassSwaps.get(o.uuid);
+        }
+      }
+      _depthPrepassSwaps.clear();
+    }
     depthTexNode.value = depthTarget.depthTexture;
 
     _originalMaterials.clear();
@@ -1184,6 +1219,7 @@ export async function createVolumetricCloudSystemOptimized({
     occlusionMaterialBlack.dispose();
     occlusionLineBlack.dispose();
     occlusionMaterialWhite.dispose();
+    depthOnlyMat.dispose();
     depthTarget.dispose();
     occlusionRT.dispose();
     godraysRT.dispose();

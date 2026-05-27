@@ -55,6 +55,13 @@ const VOLUMETRIC_CLOUD_DEFAULTS = {
   sunMeshDistance: 8000,
   sunDiscRadius: 260,
   frustumDimGodRays: false,
+  /**
+   * Skip real PBR / foliage / plane shaders during the depth prepass —
+   * swap only the heavy terrain-chunk materials with a basic depth-write
+   * material. Foliage / grass / plane keep their `positionNode` vertex
+   * displacement so their depth values stay correct.
+   */
+  useDepthPrepassOverride: true,
 };
 
 export const V2_CONFIG = {
@@ -337,8 +344,6 @@ export const V2_CONFIG = {
     insideCloudStepMul: 1.6,
     /** Skip occlusion + god-rays render when the sun is outside the expanded viewport. */
     skipGodRaysOffscreen: true,
-    /** Use a cheap override material during the depth prepass. */
-    useDepthPrepassOverride: true,
     /** Use a baked 3D-texture mask instead of analytical SDF math. */
     bakedMaskMode: true,
     /** Bake size for the mask volume (powers-of-two friendly; 64 ≈ 25ms bake). */
