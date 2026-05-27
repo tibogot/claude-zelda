@@ -310,6 +310,40 @@ export const V2_CONFIG = {
     temporalEnabled: true,
     temporalBlendFactor: 0.92,
   },
+  /**
+   * V3 — flight-game tuned (`v2/render/clouds/volumetricCloudSystemv3.js`).
+   * Full-resolution cloud (no half-res RT, no TAA) so mountain silhouettes
+   * stay crisp and there is no ghosting at flight speeds. Optimizations:
+   *   - Cheap occlusion-only cloud material for god-rays silhouette.
+   *   - Empty-space skipping in the main raymarch.
+   *   - Inside-cloud step boost when the camera is inside the AABB.
+   *   - Sun-offscreen skip for the occlusion + god-rays pass.
+   *   - Depth-prepass override material (skips real shaders).
+   *   - Baked mask volume via uniform-branch (one sample vs two + math).
+   */
+  volumetricCloudV3: {
+    ...VOLUMETRIC_CLOUD_DEFAULTS,
+    /** Cheap silhouette material during god-rays occlusion pass. */
+    cheapOcclusionCloud: true,
+    /** Steps for the cheap occlusion material (≤32, shader loop cap). */
+    occlusionRaymarchSteps: 12,
+    /** Sky / terrain rays advance faster in low-density regions. */
+    emptySpaceSkip: true,
+    /** Multiplier for empty-space step size (1.0 = disabled, 2.0 = ~half steps in empty space). */
+    emptySpaceStepMul: 2.0,
+    /** Boost raymarch steps when camera is inside the cloud AABB. */
+    insideCloudStepBoost: true,
+    /** Multiplier for step count when inside the cloud (capped at MAX_RM_STEPS). */
+    insideCloudStepMul: 1.6,
+    /** Skip occlusion + god-rays render when the sun is outside the expanded viewport. */
+    skipGodRaysOffscreen: true,
+    /** Use a cheap override material during the depth prepass. */
+    useDepthPrepassOverride: true,
+    /** Use a baked 3D-texture mask instead of analytical SDF math. */
+    bakedMaskMode: true,
+    /** Bake size for the mask volume (powers-of-two friendly; 64 ≈ 25ms bake). */
+    maskBakeSize: 64,
+  },
 };
 
 export function getChunkCountPerAxis(config = V2_CONFIG) {

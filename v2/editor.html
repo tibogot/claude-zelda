@@ -11647,12 +11647,17 @@
         const _vcRegenVol = () => app.rebuildVolumetricCloudVolume();
         const _vcRegenMask = () => app.rebuildVolumetricCloudMasks();
         let vcOptEnToggle = null;
+        let vcV3EnToggle = null;
         const vcClassicEnToggle = _toggle(vcBody, vc, "enabled", {
           label: "Enabled",
           onChange() {
             if (vc.enabled && ts.volumetricCloudOptimized.enabled) {
               ts.volumetricCloudOptimized.enabled = false;
               vcOptEnToggle?.refresh?.();
+            }
+            if (vc.enabled && ts.volumetricCloudV3.enabled) {
+              ts.volumetricCloudV3.enabled = false;
+              vcV3EnToggle?.refresh?.();
             }
           },
         });
@@ -11989,6 +11994,10 @@
             if (vcOpt.enabled && ts.volumetricCloud.enabled) {
               ts.volumetricCloud.enabled = false;
               vcClassicEnToggle?.refresh?.();
+            }
+            if (vcOpt.enabled && ts.volumetricCloudV3.enabled) {
+              ts.volumetricCloudV3.enabled = false;
+              vcV3EnToggle?.refresh?.();
             }
           },
         });
@@ -12335,6 +12344,405 @@
           step: 0.001,
         });
         _slider(vcOptPost, vcOpt, "godRaysWeight", {
+          label: "God rays weight",
+          min: 0,
+          max: 1,
+          step: 0.01,
+        });
+
+        // --- Volumetric clouds V3 (flight-tuned) — `volumetricCloudSystemv3.js` ---
+        const vcV3Body = _section(
+          container,
+          "Volumetric clouds (V3 flight)",
+          false,
+        );
+        const vcV3 = ts.volumetricCloudV3;
+        const _vcV3RegenVol = () => app.rebuildVolumetricCloudVolumeV3?.();
+        const _vcV3RegenMask = () => app.rebuildVolumetricCloudMasksV3?.();
+        const _vcV3RebakeMask = () => app.rebuildVolumetricCloudMaskVolumeV3?.();
+        const _vcV3ScheduleMaskBake = () =>
+          app.scheduleVolumetricCloudMaskBakeV3?.();
+        vcV3EnToggle = _toggle(vcV3Body, vcV3, "enabled", {
+          label: "Enabled",
+          onChange() {
+            if (vcV3.enabled && ts.volumetricCloud.enabled) {
+              ts.volumetricCloud.enabled = false;
+              vcClassicEnToggle?.refresh?.();
+            }
+            if (vcV3.enabled && ts.volumetricCloudOptimized.enabled) {
+              ts.volumetricCloudOptimized.enabled = false;
+              vcOptEnToggle?.refresh?.();
+            }
+          },
+        });
+
+        const vcV3Opt = _section(vcV3Body, "Optimizations (flight-tuned)", true);
+        _toggle(vcV3Opt, vcV3, "cheapOcclusionCloud", {
+          label: "Cheap silhouette for god-rays",
+        });
+        _slider(vcV3Opt, vcV3, "occlusionRaymarchSteps", {
+          label: "Silhouette steps",
+          min: 4,
+          max: 32,
+          step: 1,
+        });
+        _toggle(vcV3Opt, vcV3, "emptySpaceSkip", {
+          label: "Empty-space skip (main march)",
+        });
+        _slider(vcV3Opt, vcV3, "emptySpaceStepMul", {
+          label: "Empty step multiplier",
+          min: 1,
+          max: 4,
+          step: 0.1,
+        });
+        _toggle(vcV3Opt, vcV3, "insideCloudStepBoost", {
+          label: "Boost steps inside cloud",
+        });
+        _slider(vcV3Opt, vcV3, "insideCloudStepMul", {
+          label: "Inside boost factor",
+          min: 1,
+          max: 2.5,
+          step: 0.05,
+        });
+        _toggle(vcV3Opt, vcV3, "skipGodRaysOffscreen", {
+          label: "Skip god-rays when sun off-screen",
+        });
+        _toggle(vcV3Opt, vcV3, "useDepthPrepassOverride", {
+          label: "Cheap depth prepass (override material)",
+        });
+        _toggle(vcV3Opt, vcV3, "bakedMaskMode", {
+          label: "Bake mask → 1 sample instead of 2",
+          onChange: () => {
+            if (vcV3.bakedMaskMode) _vcV3RebakeMask();
+          },
+        });
+        _dropdown(vcV3Opt, vcV3, "maskBakeSize", {
+          label: "Mask bake resolution",
+          options: { 32: 32, 48: 48, 64: 64, 96: 96, 128: 128 },
+          onChange: () => {
+            if (vcV3.bakedMaskMode) _vcV3RebakeMask();
+          },
+        });
+
+        const vcV3Gen = _section(
+          vcV3Body,
+          "Texture generation (CPU regenerate)",
+          false,
+        );
+        _dropdown(vcV3Gen, vcV3, "textureSize", {
+          label: "Texture resolution",
+          options: { 32: 32, 64: 64, 96: 96, 128: 128, 256: 256 },
+        });
+        _slider(vcV3Gen, vcV3, "cloudCoverage", {
+          label: "Coverage / threshold",
+          min: 0,
+          max: 1,
+          step: 0.01,
+        });
+        _slider(vcV3Gen, vcV3, "cloudSoftness", {
+          label: "Edge softness",
+          min: 0,
+          max: 0.5,
+          step: 0.005,
+        });
+        _slider(vcV3Gen, vcV3, "noiseScale", {
+          label: "Scale (zoom)",
+          min: 0.1,
+          max: 20,
+          step: 0.1,
+        });
+        _slider(vcV3Gen, vcV3, "octaves", {
+          label: "Octaves (detail)",
+          min: 1,
+          max: 8,
+          step: 1,
+        });
+        _slider(vcV3Gen, vcV3, "persistence", {
+          label: "Persistence",
+          min: 0.1,
+          max: 1,
+          step: 0.01,
+        });
+        _slider(vcV3Gen, vcV3, "lacunarity", {
+          label: "Lacunarity",
+          min: 1.1,
+          max: 4,
+          step: 0.1,
+        });
+        _slider(vcV3Gen, vcV3, "noiseIntensity", {
+          label: "Noise intensity",
+          min: 0.1,
+          max: 5,
+          step: 0.05,
+        });
+        _slider(vcV3Gen, vcV3, "seed", {
+          label: "Seed",
+          min: 0,
+          max: 1000,
+          step: 0.01,
+        });
+        const vcV3GenBtns = document.createElement("div");
+        vcV3GenBtns.style.padding = "4px 0";
+        vcV3Gen.appendChild(vcV3GenBtns);
+        _button(vcV3GenBtns, {
+          title: "▶ Generate new 3D texture",
+          onClick: _vcV3RegenVol,
+        });
+
+        const vcV3Shape = _section(vcV3Body, "Cloud shape (real-time)", false);
+        _slider(vcV3Shape, vcV3, "textureTiling", {
+          label: "Tiling",
+          min: 1,
+          max: 10,
+          step: 1,
+        });
+
+        const vcV3Mat = _section(
+          vcV3Body,
+          "Material & rendering (real-time)",
+          false,
+        );
+        _slider(vcV3Mat, vcV3, "densityThreshold", {
+          label: "Density threshold",
+          min: 0,
+          max: 1,
+          step: 0.01,
+        });
+        _slider(vcV3Mat, vcV3, "densityMultiplier", {
+          label: "Density multiplier",
+          min: 0,
+          max: 100,
+          step: 0.1,
+        });
+        _slider(vcV3Mat, vcV3, "opacity", {
+          label: "Overall opacity",
+          min: 0,
+          max: 20,
+          step: 0.1,
+        });
+        _slider(vcV3Mat, vcV3, "raymarchSteps", {
+          label: "Quality (steps)",
+          min: 10,
+          max: 120,
+          step: 1,
+        });
+        _slider(vcV3Mat, vcV3, "lightSteps", {
+          label: "Internal shadow quality",
+          min: 0,
+          max: 32,
+          step: 1,
+        });
+        _slider(vcV3Mat, vcV3, "containerScale", {
+          label: "Container scale",
+          min: 1,
+          max: 10000,
+          step: 1,
+        });
+
+        const vcV3Mask = _section(vcV3Body, "Cloud shape (mask)", false);
+        _toggle(vcV3Mask, vcV3, "visualizeMask", { label: "Visualize mask" });
+        _slider(vcV3Mask, vcV3, "maskSeed", {
+          label: "Mask seed",
+          min: 0,
+          max: 100,
+          step: 1,
+          onChange: _vcV3RegenMask,
+        });
+        _slider(vcV3Mask, vcV3, "frequenciaRuido", {
+          label: "Noise frequency",
+          min: 0.1,
+          max: 10,
+          step: 0.1,
+          onChange: _vcV3RegenMask,
+        });
+        _slider(vcV3Mask, vcV3, "raio", {
+          label: "Mask radius",
+          min: 0.1,
+          max: 0.7,
+          step: 0.01,
+          onChange: _vcV3ScheduleMaskBake,
+        });
+        _slider(vcV3Mask, vcV3, "maskSoftness", {
+          label: "Mask edge softness",
+          min: 0,
+          max: 0.5,
+          step: 0.005,
+          onChange: _vcV3ScheduleMaskBake,
+        });
+        _slider(vcV3Mask, vcV3, "forcaRuido", {
+          label: "Noise strength (deform.)",
+          min: 0,
+          max: 0.5,
+          step: 0.01,
+          onChange: _vcV3ScheduleMaskBake,
+        });
+        const vcV3Flat = _section(vcV3Mask, "Flattening", false);
+        _slider(vcV3Flat, vcV3, "achatamentoCima", {
+          label: "Top (Y+)",
+          min: 0.1,
+          max: 2,
+          step: 0.05,
+          onChange: _vcV3ScheduleMaskBake,
+        });
+        _slider(vcV3Flat, vcV3, "achatamentoBaixo", {
+          label: "Bottom (Y−)",
+          min: 0.1,
+          max: 2,
+          step: 0.05,
+          onChange: _vcV3ScheduleMaskBake,
+        });
+        _slider(vcV3Flat, vcV3, "achatamentoXpos", {
+          label: "Right (X+)",
+          min: 0.1,
+          max: 2,
+          step: 0.05,
+          onChange: _vcV3ScheduleMaskBake,
+        });
+        _slider(vcV3Flat, vcV3, "achatamentoXneg", {
+          label: "Left (X−)",
+          min: 0.1,
+          max: 2,
+          step: 0.05,
+          onChange: _vcV3ScheduleMaskBake,
+        });
+        _slider(vcV3Flat, vcV3, "achatamentoZpos", {
+          label: "Front (Z+)",
+          min: 0.1,
+          max: 2,
+          step: 0.05,
+          onChange: _vcV3ScheduleMaskBake,
+        });
+        _slider(vcV3Flat, vcV3, "achatamentoZneg", {
+          label: "Back (Z−)",
+          min: 0.1,
+          max: 2,
+          step: 0.05,
+          onChange: _vcV3ScheduleMaskBake,
+        });
+        const vcV3Det = _section(vcV3Mask, "Detail noise", false);
+        _slider(vcV3Det, vcV3, "seedDetalhe", {
+          label: "Detail seed",
+          min: 0,
+          max: 100,
+          step: 1,
+          onChange: _vcV3RegenMask,
+        });
+        _slider(vcV3Det, vcV3, "frequenciaRuidoDetalhe", {
+          label: "Detail frequency",
+          min: 0.1,
+          max: 25,
+          step: 0.1,
+          onChange: _vcV3RegenMask,
+        });
+        _slider(vcV3Det, vcV3, "forcaRuidoDetalhe", {
+          label: "Detail strength",
+          min: 0,
+          max: 0.1,
+          step: 0.001,
+          onChange: _vcV3ScheduleMaskBake,
+        });
+
+        const vcV3Anim = _section(vcV3Body, "Texture animation", false);
+        _toggle(vcV3Anim, vcV3, "isAnimating", { label: "▶ Animate cloud" });
+        _slider(vcV3Anim, vcV3, "animationSpeedX", {
+          label: "Speed X",
+          min: -0.2,
+          max: 0.2,
+          step: 0.001,
+        });
+        _slider(vcV3Anim, vcV3, "animationSpeedY", {
+          label: "Speed Y",
+          min: -0.2,
+          max: 0.2,
+          step: 0.001,
+        });
+        _slider(vcV3Anim, vcV3, "animationSpeedZ", {
+          label: "Speed Z",
+          min: -0.2,
+          max: 0.2,
+          step: 0.001,
+        });
+
+        const vcV3Place = _section(vcV3Body, "Placement & volume LOD", false);
+        _toggle(vcV3Place, vcV3, "lodAuto", { label: "Auto LOD (distance)" });
+        _toggle(vcV3Place, vcV3, "followCamera", {
+          label: "Follow anchor XZ (pivot / car)",
+        });
+        _toggle(vcV3Place, vcV3, "lodFrustumCull", {
+          label: "Frustum cull volume",
+        });
+        _slider(vcV3Place, vcV3, "cloudFollowSmoothing", {
+          label: "Follow smoothing",
+          min: 0.02,
+          max: 0.5,
+          step: 0.01,
+        });
+        _slider(vcV3Place, vcV3, "cloudHeightY", {
+          label: "Cloud height Y",
+          min: 80,
+          max: 600,
+          step: 1,
+        });
+        const vcV3BtnRow = document.createElement("div");
+        vcV3BtnRow.style.padding = "4px 0";
+        vcV3Place.appendChild(vcV3BtnRow);
+        _button(vcV3BtnRow, {
+          title: "Rebuild shape masks (CPU)",
+          onClick: _vcV3RegenMask,
+        });
+
+        const vcV3Post = _section(
+          vcV3Body,
+          "Sun disc & god rays (superjet)",
+          false,
+        );
+        _slider(vcV3Post, vcV3, "sunMeshDistance", {
+          label: "Sun mesh distance",
+          min: 3500,
+          max: 16000,
+          step: 50,
+        });
+        _slider(vcV3Post, vcV3, "sunDiscRadius", {
+          label: "Sun disc radius",
+          min: 80,
+          max: 650,
+          step: 5,
+        });
+        _slider(vcV3Post, vcV3, "effectBufferScale", {
+          label: "Occlusion / god-rays scale",
+          min: 0.2,
+          max: 1,
+          step: 0.05,
+          onChange: () => app.resizeVolumetricCloudTargets?.(),
+        });
+        _toggle(vcV3Post, vcV3, "frustumDimGodRays", {
+          label: "Dim god-rays when volume culled",
+        });
+        _slider(vcV3Post, vcV3, "godRaysExposureUI", {
+          label: "God rays exposure",
+          min: 0,
+          max: 1,
+          step: 0.01,
+        });
+        _slider(vcV3Post, vcV3, "godRaysSamplesUI", {
+          label: "God rays samples (base)",
+          min: 10,
+          max: 128,
+          step: 1,
+        });
+        _slider(vcV3Post, vcV3, "godRaysDensity", {
+          label: "God rays density",
+          min: 0,
+          max: 1,
+          step: 0.01,
+        });
+        _slider(vcV3Post, vcV3, "godRaysDecay", {
+          label: "God rays decay",
+          min: 0.8,
+          max: 1,
+          step: 0.001,
+        });
+        _slider(vcV3Post, vcV3, "godRaysWeight", {
           label: "God rays weight",
           min: 0,
           max: 1,

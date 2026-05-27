@@ -159,6 +159,7 @@ import { createLeafFxStore } from "../core/ambientfx/leafFxStore.js";
 import { BorderMountains } from "../render/terrain/borderMountains.js";
 import { createVolumetricCloudSystem } from "../render/clouds/volumetricCloudSystem.js";
 import { createVolumetricCloudSystemOptimized } from "../render/clouds/volumetricCloudSystemv2.js";
+import { createVolumetricCloudSystemV3 } from "../render/clouds/volumetricCloudSystemv3.js";
 import { PostFxPipeline } from "../render/post/postFxPipeline.js";
 
 // Returned by `getTerrainHeight` whenever the sampled XZ is over a painted
@@ -3691,8 +3692,10 @@ export async function startV2App(opts = {}) {
   // render loop / API methods below already null-check with `?.`.
   let volumetricCloudSystem = null;
   let volumetricCloudSystemOptimized = null;
+  let volumetricCloudSystemV3 = null;
   let _vcInitPromise = null;
   let _vcOptInitPromise = null;
+  let _vcV3InitPromise = null;
   function ensureVolumetricCloudSystem() {
     if (volumetricCloudSystem || _vcInitPromise) return _vcInitPromise;
     _vcInitPromise = createVolumetricCloudSystem({
@@ -3733,6 +3736,26 @@ export async function startV2App(opts = {}) {
         console.warn("[V2] Volumetric cloud (optimized) failed to init:", err);
       });
     return _vcOptInitPromise;
+  }
+  function ensureVolumetricCloudSystemV3() {
+    if (volumetricCloudSystemV3 || _vcV3InitPromise) return _vcV3InitPromise;
+    _vcV3InitPromise = createVolumetricCloudSystemV3({
+      renderer,
+      scene,
+      camera,
+      toolState,
+      getSunDir: () => sunDir,
+      sun,
+      hemi,
+      getOccluderMeshes: () => chunkStream.raycastMeshes(),
+    })
+      .then((sys) => {
+        volumetricCloudSystemV3 = sys;
+      })
+      .catch((err) => {
+        console.warn("[V2] Volumetric cloud V3 failed to init:", err);
+      });
+    return _vcV3InitPromise;
   }
 
   function updatePointer(event) {
@@ -4785,6 +4808,7 @@ export async function startV2App(opts = {}) {
     renderer.setSize(rw, rh);
     volumetricCloudSystem?.setDepthTargetSize?.();
     volumetricCloudSystemOptimized?.setDepthTargetSize?.();
+    volumetricCloudSystemV3?.setDepthTargetSize?.();
     if (csm?.mainFrustum && toolState.csm.enabled) csm.updateFrustums();
   }
   if (_uiContainer) {
@@ -5040,26 +5064,41 @@ export async function startV2App(opts = {}) {
 
     const vcOn = toolState.volumetricCloud.enabled;
     const vcOptOn = toolState.volumetricCloudOptimized.enabled;
+    const vcV3On = toolState.volumetricCloudV3.enabled;
     if (vcOn && !volumetricCloudSystem) ensureVolumetricCloudSystem();
     if (vcOptOn && !volumetricCloudSystemOptimized)
       ensureVolumetricCloudSystemOptimized();
+    if (vcV3On && !volumetricCloudSystemV3) ensureVolumetricCloudSystemV3();
     const oOpt = volumetricCloudSystemOptimized;
+    const oV3 = volumetricCloudSystemV3;
     if (!vcOptOn) {
       if (oOpt?.cloudMesh) oOpt.cloudMesh.visible = false;
       if (oOpt?.sunSphere) oOpt.sunSphere.visible = false;
     }
+    if (!vcV3On) {
+      if (oV3?.cloudMesh) oV3.cloudMesh.visible = false;
+      if (oV3?.sunSphere) oV3.sunSphere.visible = false;
+    }
+    // v1 doesn't expose `sunSphere`; its hide path lives inside its own
+    // tryRenderFrame. Pre-emptively call it when another cloud system is the
+    // active renderer so its meshes don't leak into that system's final pass.
+    if (!vcOn && volumetricCloudSystem && (vcOptOn || vcV3On)) {
+      volumetricCloudSystem.tryRenderFrame(cloudFollowAnchor, dtSec);
+    }
     let didCloudRt = false;
-    if (vcOptOn) {
+    // Priority: V3 > Optimized > Classic. UI toggle exclusivity normally
+    // ensures only one is enabled, but the priority chain is the safety net.
+    if (vcV3On) {
+      didCloudRt = !!oV3?.tryRenderFrame?.(cloudFollowAnchor, dtSec);
+    } else if (vcOptOn) {
       didCloudRt = !!oOpt?.tryRenderFrame?.(cloudFollowAnchor, dtSec);
+    } else if (vcOn) {
+      didCloudRt = !!volumetricCloudSystem?.tryRenderFrame?.(
+        cloudFollowAnchor,
+        dtSec,
+      );
     } else {
-      if (!vcOn) {
-        volumetricCloudSystem?.tryRenderFrame?.(cloudFollowAnchor, dtSec);
-      } else {
-        didCloudRt = !!volumetricCloudSystem?.tryRenderFrame?.(
-          cloudFollowAnchor,
-          dtSec,
-        );
-      }
+      volumetricCloudSystem?.tryRenderFrame?.(cloudFollowAnchor, dtSec);
     }
     if (!didCloudRt) {
       // Post-FX path is skipped while volumetric clouds composite directly to
@@ -5898,9 +5937,22 @@ export async function startV2App(opts = {}) {
     rebuildVolumetricCloudMasksOptimized() {
       volumetricCloudSystemOptimized?.rebuildMaskTextures?.();
     },
+    rebuildVolumetricCloudVolumeV3() {
+      volumetricCloudSystemV3?.rebuildVolume?.();
+    },
+    rebuildVolumetricCloudMasksV3() {
+      volumetricCloudSystemV3?.rebuildMaskTextures?.();
+    },
+    rebuildVolumetricCloudMaskVolumeV3() {
+      volumetricCloudSystemV3?.rebuildMaskVolume?.();
+    },
+    scheduleVolumetricCloudMaskBakeV3() {
+      volumetricCloudSystemV3?.scheduleMaskBake?.();
+    },
     resizeVolumetricCloudTargets() {
       volumetricCloudSystem?.setDepthTargetSize?.();
       volumetricCloudSystemOptimized?.setDepthTargetSize?.();
+      volumetricCloudSystemV3?.setDepthTargetSize?.();
     },
     resetTemporalCloudHistory() {
       volumetricCloudSystemOptimized?.resetTemporalHistory?.();
@@ -5926,6 +5978,8 @@ export async function startV2App(opts = {}) {
       volumetricCloudSystem = null;
       volumetricCloudSystemOptimized?.dispose?.();
       volumetricCloudSystemOptimized = null;
+      volumetricCloudSystemV3?.dispose?.();
+      volumetricCloudSystemV3 = null;
       ui?.dispose?.();
       chunkStream.dispose();
       treeLodRenderer.dispose();

@@ -258,6 +258,10 @@ export function createToolState() {
       ...V2_CONFIG.volumetricCloudOptimized,
       seed: Math.random() * 1000,
     },
+    volumetricCloudV3: {
+      ...V2_CONFIG.volumetricCloudV3,
+      seed: Math.random() * 1000,
+    },
     playSmoke: {
       enabled: true,
       emitRate: 48,
