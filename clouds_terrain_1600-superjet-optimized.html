@@ -2138,30 +2138,19 @@
         return smoothstep(float(0.0), u_mask_softness, sdf);
       });
 
-      /* Analytical mask — original behaviour (two angular mask samples + SDF
-         math per call). Used by `cloudOccMat` and by `cloudMatA` (toggle off). */
-      const getDensityAnalytical = Fn(([p]) => {
-        const maskFactor = getMaskFactor(p);
-        const texCoord = p
-          .add(0.5)
-          .mul(uTextureTiling)
-          .add(uTextureOffset)
-          .fract();
-        const noiseDensity = volumeTex.sample(texCoord).r;
-        const visualize = u_mask_visualize.greaterThan(0.5);
-        const finalDensity = visualize.select(float(1.0), noiseDensity);
-        const passThresh = visualize.or(
-          noiseDensity.greaterThanEqual(uDensityThreshold),
-        );
-        const contrib = finalDensity.mul(uDensityMultiplier).mul(maskFactor);
-        const inner = passThresh.select(contrib, float(0));
-        return maskFactor.greaterThan(0.0).select(inner, float(0));
-      });
+      /* `uBakedMaskMode` uniform — when 1, mask comes from a pre-baked 3D
+         texture (one sample); when 0, computed analytically (two samples +
+         SDF math). Branch is uniform across all pixels so the GPU only runs
+         the chosen path. */
+      const uBakedMaskMode = uniform(parameters.bakedMaskMode ? 1 : 0);
 
-      /* Baked-mask variant — single 3D-texture lookup replaces the analytical
-         path; everything downstream is identical. Used by `cloudMatB`. */
-      const getDensityBaked = Fn(([p]) => {
-        const maskFactor = maskVolumeTex.sample(p.add(0.5)).r;
+      const getDensity = Fn(([p]) => {
+        const maskFactor = float(0.0).toVar();
+        If(uBakedMaskMode.greaterThan(0.5), () => {
+          maskFactor.assign(maskVolumeTex.sample(p.add(0.5)).r);
+        }).Else(() => {
+          maskFactor.assign(getMaskFactor(p));
+        });
         const texCoord = p
           .add(0.5)
           .mul(uTextureTiling)
@@ -2523,40 +2512,67 @@
       maskFolder
         .add(parameters, "raio", 0.1, 0.7, 0.01)
         .name("Mask Radius")
-        .onChange((v) => (u_mask_raio.value = v));
+        .onChange((v) => {
+          u_mask_raio.value = v;
+          scheduleMaskBake();
+        });
       maskFolder
         .add(parameters, "maskSoftness", 0.0, 0.5, 0.005)
         .name("Edge Softness")
-        .onChange((v) => (u_mask_softness.value = v));
+        .onChange((v) => {
+          u_mask_softness.value = v;
+          scheduleMaskBake();
+        });
       maskFolder
         .add(parameters, "forcaRuido", 0, 0.5, 0.01)
         .name("Noise Strength (Deform.)")
-        .onChange((v) => (u_mask_forcaRuido.value = v));
+        .onChange((v) => {
+          u_mask_forcaRuido.value = v;
+          scheduleMaskBake();
+        });
       const flatFolder = maskFolder.addFolder("Flattening");
       flatFolder
         .add(parameters, "achatamentoCima", 0.1, 2.0, 0.05)
         .name("Top (Y+)")
-        .onChange((v) => (u_mask_achatamentoCima.value = v));
+        .onChange((v) => {
+          u_mask_achatamentoCima.value = v;
+          scheduleMaskBake();
+        });
       flatFolder
         .add(parameters, "achatamentoBaixo", 0.1, 2.0, 0.05)
         .name("Bottom (Y-)")
-        .onChange((v) => (u_mask_achatamentoBaixo.value = v));
+        .onChange((v) => {
+          u_mask_achatamentoBaixo.value = v;
+          scheduleMaskBake();
+        });
       flatFolder
         .add(parameters, "achatamentoXpos", 0.1, 2.0, 0.05)
         .name("Right (X+)")
-        .onChange((v) => (u_mask_achatamentoXpos.value = v));
+        .onChange((v) => {
+          u_mask_achatamentoXpos.value = v;
+          scheduleMaskBake();
+        });
       flatFolder
         .add(parameters, "achatamentoXneg", 0.1, 2.0, 0.05)
         .name("Left (X-)")
-        .onChange((v) => (u_mask_achatamentoXneg.value = v));
+        .onChange((v) => {
+          u_mask_achatamentoXneg.value = v;
+          scheduleMaskBake();
+        });
       flatFolder
         .add(parameters, "achatamentoZpos", 0.1, 2.0, 0.05)
         .name("Front (Z+)")
-        .onChange((v) => (u_mask_achatamentoZpos.value = v));
+        .onChange((v) => {
+          u_mask_achatamentoZpos.value = v;
+          scheduleMaskBake();
+        });
       flatFolder
         .add(parameters, "achatamentoZneg", 0.1, 2.0, 0.05)
         .name("Back (Z-)")
-        .onChange((v) => (u_mask_achatamentoZneg.value = v));
+        .onChange((v) => {
+          u_mask_achatamentoZneg.value = v;
+          scheduleMaskBake();
+        });
       const detailFolder = maskFolder.addFolder("Detail Noise");
       detailFolder
         .add(parameters, "seedDetalhe", 0, 100, 1)
@@ -2569,7 +2585,10 @@
       detailFolder
         .add(parameters, "forcaRuidoDetalhe", 0, 0.1, 0.001)
         .name("Detail Strength")
-        .onChange((v) => (u_mask_forcaRuidoDetalhe.value = v));
+        .onChange((v) => {
+          u_mask_forcaRuidoDetalhe.value = v;
+          scheduleMaskBake();
+        });
       maskFolder.open();
 
       const folderAnim = gui.addFolder("Texture Animation");
@@ -2838,6 +2857,21 @@
       folderOpt
         .add(parameters, "skipGodRaysOffscreen")
         .name("Skip god-rays when sun off-screen");
+      folderOpt
+        .add(parameters, "useDepthPrepassOverride")
+        .name("Cheap depth prepass (override material)");
+      folderOpt
+        .add(parameters, "bakedMaskMode")
+        .name("Bake mask → 1 sample instead of 2")
+        .onChange((v) => {
+          if (v) bakeMaskVolume3D();
+        });
+      folderOpt
+        .add(parameters, "maskBakeSize", [32, 48, 64, 96, 128])
+        .name("Mask bake resolution")
+        .onChange(() => {
+          if (parameters.bakedMaskMode) bakeMaskVolume3D();
+        });
       folderOpt.open();
 
       const folderWorld = gui.addFolder("Terrain & cloud placement");
@@ -2982,6 +3016,7 @@
           4,
           Math.min(MAX_OCC_LOOP, parameters.occlusionRaymarchSteps),
         );
+        uBakedMaskMode.value = parameters.bakedMaskMode ? 1 : 0;
 
         lodEl.textContent = [
           `dist ${dist.toFixed(0)}`,
@@ -3015,7 +3050,16 @@
         camera.layers.set(SOLID_LAYER);
         renderer.setRenderTarget(depthTarget);
         renderer.clear();
+        /* Bypass real materials during depth prepass — saves all the PBR /
+           foliage / plane shader work since we only need depth values. */
+        const _scnOverrideSaved = scene.overrideMaterial;
+        if (parameters.useDepthPrepassOverride) {
+          scene.overrideMaterial = depthOnlyMat;
+        }
         renderer.render(scene, camera);
+        if (parameters.useDepthPrepassOverride) {
+          scene.overrideMaterial = _scnOverrideSaved;
+        }
 
         depthTexNode.value = depthTarget.depthTexture;
 
