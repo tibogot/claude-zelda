@@ -467,6 +467,10 @@
         STREET_LAMP_DEFAULTS,
         STREET_LAMP_HERO_POINTS,
       } from "./objects/streetLamp.js";
+      import {
+        buildSidewalkMesh,
+        SIDEWALK_DEFAULTS,
+      } from "./objects/sidewalk.js";
 
       const PARAMS = {
         camera: { fov: 60, followDist: 8 },
@@ -520,6 +524,7 @@
         woodFence: { ...WOOD_FENCE_DEFAULTS },
         woodPlankFence: { ...WOOD_PLANK_FENCE_DEFAULTS },
         streetLamp: { ...STREET_LAMP_DEFAULTS },
+        sidewalk: { ...SIDEWALK_DEFAULTS, _map: null },
         lab: { objectType: "guardrail" },
         spline: {
           closed: false,
@@ -749,6 +754,8 @@
               return PARAMS.woodPlankFence;
             case "streetLamp":
               return PARAMS.streetLamp;
+            case "sidewalk":
+              return { ...PARAMS.sidewalk, map: PARAMS.sidewalk._map ?? null };
             default:
               return PARAMS.guardrail;
           }
@@ -774,6 +781,8 @@
               return buildWoodPlankFenceMesh(opts);
             case "streetLamp":
               return buildStreetLampMesh(opts);
+            case "sidewalk":
+              return buildSidewalkMesh(opts);
             default:
               return buildGuardrailMesh(opts);
           }
@@ -1479,6 +1488,8 @@
             type === "woodPlankFence" ? "" : "none";
           streetLampSection.parentElement.style.display =
             type === "streetLamp" ? "" : "none";
+          sidewalkSection.parentElement.style.display =
+            type === "sidewalk" ? "" : "none";
         }
 
         // Toggle show/hide.
@@ -1550,6 +1561,7 @@
               woodFence: "Wood picket",
               woodPlankFence: "Wood plank",
               streetLamp: "Street lamp",
+              sidewalk: "Sidewalk",
             },
             onChange: () => {
               syncObjectSections();
@@ -2322,6 +2334,114 @@
             label: "Flat shade",
             onChange: rebuildObj,
           });
+        }
+
+        // ── Sidewalk (wide slab ribbon — UVs for image texture) ──
+        const sidewalkSection = _section(body, "Sidewalk", true);
+        {
+          const sec = sidewalkSection;
+          const S = PARAMS.sidewalk;
+          _dropdown(sec, S, "side", {
+            label: "Side",
+            options: { right: "Right", left: "Left" },
+            onChange: rebuildObj,
+          });
+          _slider(sec, S, "sideOffset", {
+            label: "Side offset",
+            min: 0,
+            max: 12,
+            step: 0.1,
+            onChange: rebuildObj,
+          });
+          _slider(sec, S, "width", {
+            label: "Width",
+            min: 1,
+            max: 12,
+            step: 0.1,
+            onChange: rebuildObj,
+          });
+          _slider(sec, S, "thickness", {
+            label: "Thickness",
+            min: 0.02,
+            max: 0.5,
+            step: 0.01,
+            onChange: rebuildObj,
+          });
+          _slider(sec, S, "yOffset", {
+            label: "Y offset",
+            min: 0,
+            max: 0.2,
+            step: 0.002,
+            onChange: rebuildObj,
+          });
+          _slider(sec, S, "pathSegments", {
+            label: "Path segs",
+            min: 16,
+            max: 320,
+            step: 1,
+            onChange: rebuildObj,
+          });
+          _separator(sec);
+          _slider(sec, S, "uvRepeatAlong", {
+            label: "UV along (m)",
+            min: 0.5,
+            max: 10,
+            step: 0.1,
+            onChange: rebuildObj,
+          });
+          _slider(sec, S, "uvRepeatAcross", {
+            label: "UV across (m)",
+            min: 0.5,
+            max: 10,
+            step: 0.1,
+            onChange: rebuildObj,
+          });
+          _color(sec, S, "color", {
+            label: "Color",
+            onChange: rebuildObj,
+          });
+          _slider(sec, S, "roughness", {
+            label: "Roughness",
+            min: 0,
+            max: 1,
+            step: 0.01,
+            onChange: rebuildObj,
+          });
+          _slider(sec, S, "metalness", {
+            label: "Metalness",
+            min: 0,
+            max: 1,
+            step: 0.01,
+            onChange: rebuildObj,
+          });
+          _separator(sec);
+          {
+            const row = document.createElement("div");
+            row.className = "prop-row";
+            row.innerHTML =
+              '<span class="prop-label">Texture</span><div class="prop-value"><input type="file" accept="image/*" class="prop-file"></div>';
+            const fileInp = row.querySelector(".prop-file");
+            fileInp.addEventListener("change", () => {
+              const file = fileInp.files?.[0];
+              if (!file) return;
+              const blobUrl = URL.createObjectURL(file);
+              if (S._map) S._map.dispose();
+              new THREE.TextureLoader().load(
+                blobUrl,
+                (tex) => {
+                  URL.revokeObjectURL(blobUrl);
+                  tex.wrapS = THREE.RepeatWrapping;
+                  tex.wrapT = THREE.RepeatWrapping;
+                  tex.colorSpace = THREE.SRGBColorSpace;
+                  S._map = tex;
+                  rebuildObj();
+                },
+                undefined,
+                () => URL.revokeObjectURL(blobUrl),
+              );
+            });
+            sec.appendChild(row);
+          }
         }
 
         syncObjectSections();

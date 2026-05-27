@@ -1420,6 +1420,13 @@
         fog: false,
         toneMapped: false,
       });
+      /* Used as `scene.overrideMaterial` during the depth prepass so terrain /
+         foliage / plane shaders are bypassed — only depth values matter. */
+      const depthOnlyMat = new THREE.MeshBasicMaterial({
+        color: 0x000000,
+        fog: false,
+        toneMapped: false,
+      });
 
       const postScene = new THREE.Scene();
       const postCam = new THREE.OrthographicCamera(-1, 1, 1, -1, 0, 1);
@@ -1468,6 +1475,15 @@
         insideCloudStepBoost: true,
         insideCloudStepMul: 1.6,
         skipGodRaysOffscreen: true,
+        /* Render depth prepass with a cheap override material — terrain /
+           foliage / plane PBR shaders are wasted work when we only need depth. */
+        useDepthPrepassOverride: true,
+        /* Bake the analytical cloud mask shape (`getMaskFactor`) into a single
+           3D texture so the main raymarch reads one sample instead of two
+           (mask + detailMask) plus the SDF math. Mask params still tweakable;
+           changes trigger a quick re-bake. Toggle off for live-slider editing. */
+        bakedMaskMode: true,
+        maskBakeSize: 64,
         /* Portion of drawing-buffer size used for occlusion + god-rays (lower = faster). */
         effectBufferScale: 0.35,
         maxPixelRatio: 1.25,
@@ -1895,7 +1911,143 @@
         );
         maskTex.value = maskTexture;
         detailMaskTex.value = detailMaskTexture;
+        /* Underlying noise generators changed → volume bake is stale. */
+        bakeMaskVolume3D();
       }
+
+      /* Baked mask 3D texture — pre-computes the analytical mask shape
+         (`getMaskFactor`) at every voxel so the main raymarch reads ONE
+         texture sample instead of two-samples + SDF math per step. */
+      let maskVolumeTexture = new THREE.Data3DTexture(
+        new Uint8Array(8),
+        2,
+        2,
+        2,
+      );
+      maskVolumeTexture.format = THREE.RedFormat;
+      maskVolumeTexture.minFilter = THREE.LinearFilter;
+      maskVolumeTexture.magFilter = THREE.LinearFilter;
+      maskVolumeTexture.needsUpdate = true;
+      const maskVolumeTex = texture3D(maskVolumeTexture, null, 0);
+
+      /* Builds a (seed, freq)-keyed noise generator matching the one inside
+         `buildMaskTexture3D` so the bake can call it directly (no need to
+         trilinear-sample the existing maskTexture data on the CPU). */
+      function makeMaskNoiseGen(seed) {
+        const rnd = createSeededRandom(seed);
+        const perm = new Uint8Array(256);
+        for (let i = 0; i < 256; i++) perm[i] = i;
+        for (let i = 255; i > 0; i--) {
+          const j = Math.floor(rnd() * (i + 1));
+          [perm[i], perm[j]] = [perm[j], perm[i]];
+        }
+        const permTable = new Uint8Array(512);
+        for (let i = 0; i < 256; i++)
+          permTable[i] = permTable[i + 256] = perm[i];
+        return createNoiseGeneratorFromPermutation(permTable);
+      }
+
+      function bakeMaskVolume3D() {
+        const p = parameters;
+        const size = Math.max(16, Math.min(192, Math.round(p.maskBakeSize)));
+        const data = new Uint8Array(size * size * size);
+        const noiseGenMain = makeMaskNoiseGen(p.maskSeed);
+        const noiseGenDet = makeMaskNoiseGen(p.seedDetalhe);
+        const _v = new THREE.Vector3();
+
+        let idx = 0;
+        for (let z = 0; z < size; z++) {
+          for (let y = 0; y < size; y++) {
+            for (let x = 0; x < size; x++) {
+              const px = x / (size - 1) - 0.5;
+              const py = y / (size - 1) - 0.5;
+              const pz = z / (size - 1) - 0.5;
+
+              const sy = Math.max(
+                0.05,
+                (p.achatamentoCima + p.achatamentoBaixo) * 0.5 +
+                  Math.sign(py) *
+                    (p.achatamentoCima - p.achatamentoBaixo) *
+                    0.5,
+              );
+              const sx = Math.max(
+                0.05,
+                (p.achatamentoXpos + p.achatamentoXneg) * 0.5 +
+                  Math.sign(px) *
+                    (p.achatamentoXpos - p.achatamentoXneg) *
+                    0.5,
+              );
+              const sz = Math.max(
+                0.05,
+                (p.achatamentoZpos + p.achatamentoZneg) * 0.5 +
+                  Math.sign(pz) *
+                    (p.achatamentoZpos - p.achatamentoZneg) *
+                    0.5,
+              );
+
+              const dx = px / sx;
+              const dy = py / sy;
+              const dz = pz / sz;
+              const dist = Math.sqrt(dx * dx + dy * dy + dz * dz);
+
+              const ex = dx + 0.0001;
+              const ey = dy + 0.0001;
+              const ez = dz + 0.0001;
+              const len = Math.sqrt(ex * ex + ey * ey + ez * ez);
+              const dirX = ex / len;
+              const dirY = ey / len;
+              const dirZ = ez / len;
+
+              const nP = noiseGenMain(
+                _v.set(
+                  dirX * p.frequenciaRuido,
+                  dirY * p.frequenciaRuido,
+                  dirZ * p.frequenciaRuido,
+                ),
+              );
+              const nD = noiseGenDet(
+                _v.set(
+                  dirX * p.frequenciaRuidoDetalhe,
+                  dirY * p.frequenciaRuidoDetalhe,
+                  dirZ * p.frequenciaRuidoDetalhe,
+                ),
+              );
+
+              const sdf =
+                p.raio + nP * p.forcaRuido + nD * p.forcaRuidoDetalhe - dist;
+              const t = Math.max(
+                0,
+                Math.min(1, sdf / Math.max(1e-5, p.maskSoftness)),
+              );
+              const factor = t * t * (3 - 2 * t);
+              data[idx++] = Math.floor(factor * 255);
+            }
+          }
+        }
+
+        if (maskVolumeTexture) maskVolumeTexture.dispose();
+        maskVolumeTexture = new THREE.Data3DTexture(data, size, size, size);
+        maskVolumeTexture.format = THREE.RedFormat;
+        maskVolumeTexture.minFilter = THREE.LinearFilter;
+        maskVolumeTexture.magFilter = THREE.LinearFilter;
+        maskVolumeTexture.unpackAlignment = 1;
+        maskVolumeTexture.needsUpdate = true;
+        maskVolumeTex.value = maskVolumeTexture;
+      }
+
+      /* Debounce slider drags — rebakes 80ms after the last change so a
+         continuous slider scrub doesn't trigger 60 bakes per second. */
+      let _maskBakeTimer = 0;
+      function scheduleMaskBake() {
+        if (!parameters.bakedMaskMode) return;
+        if (_maskBakeTimer) clearTimeout(_maskBakeTimer);
+        _maskBakeTimer = setTimeout(() => {
+          _maskBakeTimer = 0;
+          bakeMaskVolume3D();
+        }, 80);
+      }
+
+      bakeMaskVolume3D();
 
       const hitBox = Fn(({ orig, dir }) => {
         const box_min = vec3(-0.5);
@@ -1986,8 +2138,30 @@
         return smoothstep(float(0.0), u_mask_softness, sdf);
       });
 
-      const getDensity = Fn(([p]) => {
+      /* Analytical mask — original behaviour (two angular mask samples + SDF
+         math per call). Used by `cloudOccMat` and by `cloudMatA` (toggle off). */
+      const getDensityAnalytical = Fn(([p]) => {
         const maskFactor = getMaskFactor(p);
+        const texCoord = p
+          .add(0.5)
+          .mul(uTextureTiling)
+          .add(uTextureOffset)
+          .fract();
+        const noiseDensity = volumeTex.sample(texCoord).r;
+        const visualize = u_mask_visualize.greaterThan(0.5);
+        const finalDensity = visualize.select(float(1.0), noiseDensity);
+        const passThresh = visualize.or(
+          noiseDensity.greaterThanEqual(uDensityThreshold),
+        );
+        const contrib = finalDensity.mul(uDensityMultiplier).mul(maskFactor);
+        const inner = passThresh.select(contrib, float(0));
+        return maskFactor.greaterThan(0.0).select(inner, float(0));
+      });
+
+      /* Baked-mask variant — single 3D-texture lookup replaces the analytical
+         path; everything downstream is identical. Used by `cloudMatB`. */
+      const getDensityBaked = Fn(([p]) => {
+        const maskFactor = maskVolumeTex.sample(p.add(0.5)).r;
         const texCoord = p
           .add(0.5)
           .mul(uTextureTiling)
