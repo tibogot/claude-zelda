@@ -1,0 +1,1068 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Forest — octahedral v3 fly-through</title>
+    <script src="https://unpkg.com/lucide@latest/dist/umd/lucide.js"></script>
+    <script type="importmap">
+      {
+        "imports": {
+          "three": "https://cdn.jsdelivr.net/npm/three@0.183.1/build/three.webgpu.js",
+          "three/webgpu": "https://cdn.jsdelivr.net/npm/three@0.183.1/build/three.webgpu.js",
+          "three/tsl": "https://cdn.jsdelivr.net/npm/three@0.183.1/build/three.tsl.js",
+          "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.183.1/examples/jsm/"
+        }
+      }
+    </script>
+    <style>
+      *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+      :root {
+        --bg-darkest: #1a1a1a;
+        --bg-dark: #222222;
+        --bg-panel: #2a2a2a;
+        --bg-item: #333333;
+        --bg-hover: #3a3a3a;
+        --bg-input: #1e1e1e;
+        --border: #3c3c3c;
+        --border-light: #4a4a4a;
+        --text: #cccccc;
+        --text-dim: #888888;
+        --text-bright: #e0e0e0;
+        --accent: #4a9eff;
+        --accent-dim: #2a6fbb;
+        --green: #5cb85c;
+        --orange: #e8912d;
+        --red: #d9534f;
+        --font: "Segoe UI", system-ui, -apple-system, sans-serif;
+        --font-mono: "Cascadia Code", "Fira Code", "Consolas", monospace;
+        --radius: 4px;
+        --right-w: 300px;
+        --bottom-h: 72px;
+        --toolbar-h: 36px;
+        --status-h: 22px;
+      }
+
+      html, body {
+        height: 100%;
+        overflow: hidden;
+        font-family: var(--font);
+        font-size: 13px;
+        color: var(--text);
+        background: var(--bg-darkest);
+        user-select: none;
+      }
+
+      #app {
+        display: grid;
+        grid-template-columns: 1fr 4px var(--right-w);
+        grid-template-rows: var(--toolbar-h) 1fr 4px var(--bottom-h);
+        height: calc(100% - var(--status-h));
+        width: 100%;
+      }
+
+      .splitter { background: var(--bg-darkest); position: relative; z-index: 20; }
+      .splitter::after { content: ""; position: absolute; transition: background 0.15s; }
+      .splitter:hover::after, .splitter.active::after { background: var(--accent); }
+      .splitter-h { cursor: col-resize; }
+      .splitter-h::after { top: 0; bottom: 0; left: 1px; width: 2px; }
+      .splitter-v { cursor: row-resize; }
+      .splitter-v::after { left: 0; right: 0; top: 1px; height: 2px; }
+      #splitter-right { grid-column: 2; grid-row: 2 / -1; }
+      #splitter-bottom { grid-column: 1; grid-row: 3; }
+
+      #toolbar {
+        grid-column: 1 / -1;
+        grid-row: 1;
+        background: var(--bg-dark);
+        border-bottom: 1px solid var(--border);
+        display: flex;
+        align-items: center;
+        padding: 0 8px;
+        gap: 8px;
+      }
+      .toolbar-title {
+        font-weight: 700;
+        font-size: 12px;
+        color: var(--accent);
+        letter-spacing: 0.06em;
+      }
+      .toolbar-sep { color: var(--border-light); }
+      .toolbar-model {
+        font-weight: 600;
+        font-size: 12px;
+        color: var(--text-bright);
+        max-width: 180px;
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+      }
+      .pill {
+        padding: 2px 8px;
+        background: var(--bg-input);
+        border: 1px solid var(--border);
+        border-radius: 3px;
+        font-size: 10px;
+        font-weight: 600;
+        color: var(--text-dim);
+        letter-spacing: 0.03em;
+      }
+      .pill.on { color: var(--green); border-color: rgba(92,184,92,0.35); background: rgba(92,184,92,0.1); }
+      .pill.warn { color: var(--orange); border-color: rgba(232,145,45,0.35); background: rgba(232,145,45,0.1); }
+      .pill.bad { color: var(--red); border-color: rgba(217,83,79,0.35); background: rgba(217,83,79,0.1); }
+      .toolbar-spacer { flex: 1; }
+      .toolbar-btn {
+        display: flex;
+        align-items: center;
+        gap: 5px;
+        padding: 4px 10px;
+        height: 28px;
+        background: var(--bg-item);
+        border: 1px solid var(--border);
+        border-radius: var(--radius);
+        color: var(--text-dim);
+        cursor: pointer;
+        font-size: 11px;
+        font-family: var(--font);
+      }
+      .toolbar-btn:hover { background: var(--bg-hover); color: var(--text-bright); border-color: var(--border-light); }
+      .toolbar-btn i { width: 14px; height: 14px; }
+      .toolbar-btn.primary { background: var(--accent-dim); border-color: var(--accent); color: #fff; }
+      .toolbar-btn.primary:hover { background: var(--accent); }
+
+      #viewport {
+        grid-column: 1;
+        grid-row: 2;
+        background: var(--bg-darkest);
+        position: relative;
+        overflow: hidden;
+        min-width: 0;
+      }
+      #viewport canvas {
+        position: absolute;
+        inset: 0;
+        display: block;
+        width: 100%;
+        height: 100%;
+        outline: none;
+      }
+
+      #right-panel {
+        grid-column: 3;
+        grid-row: 2 / -1;
+        background: var(--bg-panel);
+        border-left: 1px solid var(--border);
+        display: flex;
+        flex-direction: column;
+        overflow: hidden;
+        min-width: 0;
+      }
+      .panel-header {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        padding: 6px 10px;
+        height: 32px;
+        min-height: 32px;
+        background: var(--bg-dark);
+        border-bottom: 1px solid var(--border);
+        font-size: 11px;
+        font-weight: 600;
+        letter-spacing: 0.4px;
+        text-transform: uppercase;
+        color: var(--text-dim);
+      }
+      #inspector-scroll {
+        flex: 1;
+        overflow-y: auto;
+        padding-bottom: 16px;
+      }
+
+      #bottom-panel {
+        grid-column: 1;
+        grid-row: 4;
+        background: var(--bg-panel);
+        border-top: 1px solid var(--border);
+        display: flex;
+        align-items: center;
+        padding: 0 12px;
+        gap: 20px;
+        font-size: 11px;
+        overflow-x: auto;
+        min-width: 0;
+      }
+      .stat-group { display: flex; gap: 6px; align-items: baseline; white-space: nowrap; }
+      .stat-lbl { color: var(--text-dim); text-transform: uppercase; letter-spacing: 0.05em; font-size: 9px; }
+      .stat-val { color: var(--accent); font-weight: 600; font-family: var(--font-mono); }
+      .stat-val.g { color: var(--green); }
+      .stat-val.w { color: var(--orange); }
+
+      .status-bar {
+        position: fixed;
+        bottom: 0;
+        left: 0;
+        right: 0;
+        height: var(--status-h);
+        background: var(--bg-dark);
+        border-top: 1px solid var(--border);
+        display: flex;
+        align-items: center;
+        padding: 0 10px;
+        gap: 16px;
+        font-size: 10px;
+        color: var(--text-dim);
+        z-index: 100;
+      }
+      .status-bar kbd {
+        display: inline-block;
+        padding: 0 4px;
+        background: var(--bg-input);
+        border: 1px solid var(--border-light);
+        border-radius: 2px;
+        font-family: var(--font-mono);
+        font-size: 9px;
+        color: var(--accent);
+        margin-right: 2px;
+      }
+
+      .inspector-section { border-bottom: 1px solid var(--border); }
+      .section-header {
+        display: flex;
+        align-items: center;
+        gap: 6px;
+        padding: 6px 12px;
+        cursor: pointer;
+        font-size: 11px;
+        font-weight: 600;
+        text-transform: uppercase;
+        letter-spacing: 0.4px;
+        color: var(--text-dim);
+      }
+      .section-header:hover { background: var(--bg-hover); }
+      .section-header .section-arrow { width: 14px; height: 14px; transition: transform 0.15s; flex-shrink: 0; }
+      .section-header.collapsed .section-arrow { transform: rotate(-90deg); }
+      .section-body { padding: 6px 12px 10px; }
+      .section-body.hidden { display: none; }
+      .prop-row { display: flex; align-items: center; gap: 8px; padding: 3px 0; min-height: 26px; }
+      .prop-label { width: 90px; min-width: 90px; font-size: 11px; color: var(--text-dim); text-align: right; padding-right: 4px; }
+      .prop-value { flex: 1; display: flex; gap: 4px; align-items: center; min-width: 0; }
+      .prop-slider-wrap { flex: 1; display: flex; align-items: center; gap: 6px; min-width: 0; }
+      .prop-num-input, .prop-text-input {
+        height: 22px;
+        background: var(--bg-input);
+        border: 1px solid var(--border);
+        border-radius: var(--radius);
+        padding: 0 5px;
+        color: var(--text);
+        font-size: 11px;
+        font-family: var(--font-mono);
+        outline: none;
+      }
+      .prop-num-input { width: 64px; flex-shrink: 0; text-align: right; }
+      .prop-text-input { flex: 1; min-width: 0; font-family: var(--font); }
+      .prop-num-input:focus, .prop-text-input:focus { border-color: var(--accent); }
+      .prop-slider {
+        flex: 1; height: 4px; -webkit-appearance: none; appearance: none;
+        background: var(--bg-input); border-radius: 2px; outline: none;
+      }
+      .prop-slider::-webkit-slider-thumb {
+        -webkit-appearance: none; width: 12px; height: 12px; border-radius: 50%;
+        background: var(--accent); cursor: pointer;
+      }
+      .prop-dropdown {
+        flex: 1; height: 22px; background: var(--bg-input); border: 1px solid var(--border);
+        border-radius: var(--radius); padding: 0 6px; color: var(--text); font-size: 12px;
+        font-family: var(--font); outline: none; cursor: pointer; min-width: 0;
+      }
+      .prop-color-wrap { display: flex; align-items: center; gap: 6px; flex: 1; }
+      .prop-color {
+        width: 22px; height: 22px; border-radius: var(--radius); border: 1px solid var(--border);
+        cursor: pointer; padding: 0; -webkit-appearance: none; appearance: none;
+      }
+      .prop-color::-webkit-color-swatch-wrapper { padding: 0; }
+      .prop-color::-webkit-color-swatch { border: none; border-radius: 2px; }
+      .prop-slider-val { font-size: 11px; color: var(--text-dim); font-family: var(--font-mono); }
+      .prop-toggle {
+        width: 14px; height: 14px; border: 1px solid var(--border-light); border-radius: 3px;
+        background: var(--bg-input); cursor: pointer; display: flex; align-items: center;
+        justify-content: center; padding: 0; color: transparent;
+      }
+      .prop-toggle.checked { background: var(--accent); border-color: var(--accent); color: white; }
+      .prop-toggle svg { width: 10px; height: 10px; }
+      .section-btn {
+        display: flex; align-items: center; justify-content: center; gap: 4px;
+        width: 100%; height: 26px; margin-top: 4px;
+        background: var(--bg-item); border: 1px solid var(--border); border-radius: var(--radius);
+        color: var(--text-dim); cursor: pointer; font-size: 11px; font-family: var(--font);
+      }
+      .section-btn:hover { background: var(--bg-hover); color: var(--text); border-color: var(--border-light); }
+      .section-separator { height: 1px; background: var(--border); margin: 6px 0; }
+      .info-row { display: flex; align-items: center; gap: 8px; padding: 3px 0; min-height: 26px; }
+      .info-label { width: 90px; min-width: 90px; font-size: 11px; color: var(--text-dim); text-align: right; padding-right: 4px; }
+      .info-value { flex: 1; font-size: 12px; color: var(--text); font-family: var(--font-mono); }
+      .prop-hint {
+        font-size: 9px;
+        color: var(--text-dim);
+        line-height: 1.35;
+        padding: 2px 0 4px;
+      }
+      .prop-file-input {
+        flex: 1;
+        font-size: 10px;
+        color: var(--text-dim);
+        min-width: 0;
+      }
+
+      #loading {
+        position: absolute; inset: 0;
+        background: rgba(6, 6, 12, 0.88);
+        display: none; align-items: center; justify-content: center;
+        flex-direction: column; gap: 14px;
+        z-index: 50;
+        color: var(--accent);
+        font-size: 13px; font-weight: 500;
+        backdrop-filter: blur(4px);
+      }
+      #loading.show { display: flex; }
+      .spinner {
+        width: 32px; height: 32px;
+        border: 2px solid rgba(74,158,255,0.15);
+        border-top-color: var(--accent);
+        border-radius: 50%;
+        animation: spin 0.8s linear infinite;
+      }
+      @keyframes spin { to { transform: rotate(360deg); } }
+      #loading-sub { font-size: 11px; color: var(--text-dim); max-width: 80%; text-align: center; }
+
+      #app.ui-hidden #right-panel,
+      #app.ui-hidden #bottom-panel,
+      #app.ui-hidden .splitter,
+      #app.ui-hidden #toolbar .toolbar-extra { display: none !important; }
+      #app.ui-hidden { grid-template-columns: 1fr; grid-template-rows: var(--toolbar-h) 1fr; }
+      #app.ui-hidden #viewport { grid-column: 1; grid-row: 2; }
+
+      ::-webkit-scrollbar { width: 8px; height: 8px; }
+      ::-webkit-scrollbar-track { background: transparent; }
+      ::-webkit-scrollbar-thumb { background: var(--border); border-radius: 4px; }
+      ::-webkit-scrollbar-thumb:hover { background: var(--border-light); }
+    </style>
+  </head>
+  <body>
+    <div id="app">
+      <div id="toolbar">
+        <span class="toolbar-title">FOREST · v3</span>
+        <span class="toolbar-sep toolbar-extra">│</span>
+        <span class="toolbar-model toolbar-extra" id="tb-model">—</span>
+        <span class="toolbar-sep toolbar-extra">│</span>
+        <span class="pill toolbar-extra" id="tb-quality">High</span>
+        <span class="pill toolbar-extra" id="tb-atlas">2048 / 12</span>
+        <span class="pill on toolbar-extra" id="tb-status">Loading…</span>
+        <span class="toolbar-spacer"></span>
+        <button type="button" class="toolbar-btn toolbar-extra" id="btn-load" title="Load GLB from disk">
+          <i data-lucide="folder-open"></i> Load GLB
+        </button>
+        <button type="button" class="toolbar-btn primary toolbar-extra" id="btn-rebake" title="Rebake forest [B]">
+          <i data-lucide="refresh-cw"></i> Rebake
+        </button>
+        <button type="button" class="toolbar-btn toolbar-extra" id="btn-hide-ui" title="Hide UI [H]">
+          <i data-lucide="panel-right-close"></i>
+        </button>
+      </div>
+
+      <div id="viewport">
+        <div id="loading" aria-live="polite">
+          <div class="spinner"></div>
+          <span id="loading-msg">Baking v3 atlas…</span>
+          <div id="loading-sub"></div>
+        </div>
+      </div>
+
+      <div id="splitter-right" class="splitter splitter-h"></div>
+
+      <div id="right-panel">
+        <div class="panel-header"><span>Inspector</span></div>
+        <div id="inspector-scroll"></div>
+      </div>
+
+      <div id="splitter-bottom" class="splitter splitter-v"></div>
+
+      <div id="bottom-panel">
+        <div class="stat-group"><span class="stat-lbl">FPS</span><span class="stat-val g" id="s-fps">—</span></div>
+        <div class="stat-group"><span class="stat-lbl">LOD0</span><span class="stat-val" id="s-lod0">—</span></div>
+        <div class="stat-group"><span class="stat-lbl">LOD1</span><span class="stat-val" id="s-lod1">—</span></div>
+        <div class="stat-group"><span class="stat-lbl">LOD2</span><span class="stat-val" id="s-lod2">—</span></div>
+        <div class="stat-group"><span class="stat-lbl">Trees</span><span class="stat-val w" id="s-trees">—</span></div>
+        <div class="stat-group"><span class="stat-lbl">Cam</span><span class="stat-val" id="s-cam">—</span></div>
+      </div>
+    </div>
+
+    <div class="status-bar">
+      <span><kbd>H</kbd> toggle UI</span>
+      <span><kbd>B</kbd> rebake</span>
+      <span>Orbit to explore · exclusive LOD (one draw per tree)</span>
+    </div>
+
+    <input type="file" id="model-file-input" accept=".glb,.gltf" hidden />
+
+    <script type="module">
+      import * as THREE from "three";
+      import { pass } from "three/tsl";
+      import { OrbitControls } from "three/addons/controls/OrbitControls.js";
+      import { GLTFLoader } from "three/addons/loaders/GLTFLoader.js";
+      import { DRACOLoader } from "three/addons/loaders/DRACOLoader.js";
+      import { createOctahedralImpostorForestV3 } from "./octahedralForestV3.js";
+      import { loadV3State, QUALITY_PRESETS } from "./octahedral-v3/octahedral-core.js";
+      import { createUiHelpers, initSplitters } from "./octahedral-v3/custom-ui.js";
+
+      lucide.createIcons();
+
+      const MODEL_PRESETS = {
+        "Pine 2": "models/pine2.glb",
+        Tree: "models/tree.glb",
+        "Pine transformed": "models/pine-transformed.glb",
+        "Pine 3": "models/pine3.glb",
+        Palm: "models/realistic_palm_tree_4_free.glb",
+        Flower: "models/low_poly_flower-transformed.glb",
+        Rock: "models/rock__game_asset.glb",
+        "TorusKnot (debug)": "__torusknot__",
+      };
+
+      const ATLAS_OPTS = {
+        "1024 × 6": "1024_6",
+        "1024 × 8": "1024_8",
+        "2048 × 12": "2048_12",
+        "2048 × 16": "2048_16",
+        "4096 × 8": "4096_8",
+        "4096 × 12": "4096_12",
+      };
+
+      const v3Saved = loadV3State();
+
+      const dracoLoader = new DRACOLoader();
+      dracoLoader.setDecoderPath(
+        "https://www.gstatic.com/draco/versioned/decoders/1.5.6/",
+      );
+      const gltfLoader = new GLTFLoader();
+      gltfLoader.setDRACOLoader(dracoLoader);
+
+      const PARAMS = {
+        modelKey: "Pine 2",
+        customModelPath: "",
+        atlasQuality: "2048_12",
+        sunAzimuth: 225,
+        sunElevation: 56,
+        sunIntensity: 1.8,
+        ambIntensity: 0.8,
+        exposure: 1.0,
+        quality: v3Saved.quality ?? "High",
+        normalStrength: v3Saved.normalStr ?? 1.0,
+        alphaCutoff: 0.1,
+        edgeSmoothScale: v3Saved.edgeSmooth ?? 1.5,
+        parallaxStrength: v3Saved.parallaxStr ?? 0.05,
+        normRmBary: v3Saved.normRmBary ?? false,
+        cellDither: v3Saved.dither ?? false,
+        translucency: v3Saved.translucency ?? 0.08,
+        translucencyPower: v3Saved.translucencyPower ?? 3,
+        impostorWindAmp: v3Saved.windAmp ?? 0.04,
+        impostorWindFreq: v3Saved.windFreq ?? 1.5,
+        nearWindStrength: 0.3,
+        nearWindSpeed: 1.0,
+        lod0Visible: true,
+        lod1Visible: true,
+        lod2Visible: true,
+        lodDistance: 45,
+        fadeRange: 8,
+        lodDither: 0,
+        fogEnabled: true,
+        fogNear: 28,
+        fogFar: 170,
+        fogColor: "#87ceeb",
+      };
+
+      const viewport = document.getElementById("viewport");
+      const loadingEl = document.getElementById("loading");
+      const loadingMsg = document.getElementById("loading-msg");
+      const loadingSub = document.getElementById("loading-sub");
+      const fileInput = document.getElementById("model-file-input");
+
+      const renderer = new THREE.WebGPURenderer({
+        antialias: true,
+        requiredLimits: { maxStorageBuffersInVertexStage: 3 },
+      });
+      await renderer.init();
+      renderer.toneMapping = THREE.ACESFilmicToneMapping;
+      renderer.toneMappingExposure = PARAMS.exposure;
+      viewport.appendChild(renderer.domElement);
+
+      const scene = new THREE.Scene();
+      scene.background = new THREE.Color(0x87ceeb);
+      let forest = null;
+
+      const _fogColorThree = new THREE.Color();
+      let sceneFog = null;
+
+      function applyAtmosphere() {
+        _fogColorThree.setStyle(PARAMS.fogColor);
+        if (PARAMS.fogEnabled) {
+          if (!sceneFog) sceneFog = new THREE.Fog(_fogColorThree, 1, 2);
+          scene.fog = sceneFog;
+          sceneFog.color.copy(_fogColorThree);
+          sceneFog.near = PARAMS.fogNear;
+          sceneFog.far = Math.max(PARAMS.fogFar, PARAMS.fogNear + 1);
+          scene.background.copy(_fogColorThree);
+        } else {
+          scene.fog = null;
+          scene.background.setStyle(PARAMS.fogColor);
+        }
+      }
+
+      applyAtmosphere();
+
+      const camera = new THREE.PerspectiveCamera(60, 1, 0.5, 5000);
+      camera.position.set(0, 4, 18);
+
+      const controls = new OrbitControls(camera, renderer.domElement);
+      controls.target.set(0, 2, 0);
+      controls.enableDamping = true;
+      controls.dampingFactor = 0.05;
+
+      const groundGeo = new THREE.PlaneGeometry(200, 200);
+      const groundMat = new THREE.MeshStandardMaterial({
+        color: 0x6b8e4e,
+        roughness: 0.9,
+        metalness: 0,
+        fog: true,
+      });
+      const ground = new THREE.Mesh(groundGeo, groundMat);
+      ground.rotation.x = -Math.PI / 2;
+      ground.receiveShadow = true;
+      scene.add(ground);
+
+      const dirLight = new THREE.DirectionalLight(0xffeedd, 1.2);
+      dirLight.position.set(10, 20, 10);
+      dirLight.castShadow = true;
+      dirLight.shadow.mapSize.width = 2048;
+      dirLight.shadow.mapSize.height = 2048;
+      dirLight.shadow.camera.near = 0.5;
+      dirLight.shadow.camera.far = 150;
+      dirLight.shadow.camera.left = dirLight.shadow.camera.bottom = -50;
+      dirLight.shadow.camera.right = dirLight.shadow.camera.top = 50;
+      dirLight.shadow.bias = -0.0001;
+      scene.add(dirLight);
+
+      const hemiLight = new THREE.HemisphereLight(0x4080a0, 0x203020, 0.5);
+      scene.add(hemiLight);
+
+      const ambLight = new THREE.AmbientLight(0x8090b0, 0.8);
+      scene.add(ambLight);
+
+      renderer.shadowMap.enabled = true;
+      renderer.shadowMap.type = THREE.PCFSoftShadowMap;
+
+      function applySunToScene() {
+        const az = (PARAMS.sunAzimuth * Math.PI) / 180;
+        const el = (PARAMS.sunElevation * Math.PI) / 180;
+        dirLight.position.set(
+          Math.cos(el) * Math.sin(az),
+          Math.sin(el),
+          Math.cos(el) * Math.cos(az),
+        );
+        dirLight.intensity = PARAMS.sunIntensity;
+        ambLight.intensity = PARAMS.ambIntensity;
+      }
+
+      function applyLightingToForest() {
+        if (!forest) return;
+        const az = (PARAMS.sunAzimuth * Math.PI) / 180;
+        const el = (PARAMS.sunElevation * Math.PI) / 180;
+        const dir = new THREE.Vector3(
+          Math.cos(el) * Math.sin(az),
+          Math.sin(el),
+          Math.cos(el) * Math.cos(az),
+        ).normalize();
+        forest.updateSunDir(dir);
+        forest.updateSunColor(
+          new THREE.Vector3(
+            dirLight.color.r * PARAMS.sunIntensity,
+            dirLight.color.g * PARAMS.sunIntensity,
+            dirLight.color.b * PARAMS.sunIntensity,
+          ),
+        );
+        forest.setNormalStrength(PARAMS.normalStrength);
+        forest.setAlphaCutoff(PARAMS.alphaCutoff);
+        forest.setEdgeSmoothScale(PARAMS.edgeSmoothScale);
+        forest.setParallaxStrength(PARAMS.parallaxStrength);
+        forest.setQualityPreset(PARAMS.quality);
+        forest.setNormRmBary(PARAMS.normRmBary);
+        forest.setCellDither(PARAMS.cellDither);
+        forest.setTranslucency(PARAMS.translucency, PARAMS.translucencyPower);
+        forest.setImpostorWind(PARAMS.impostorWindAmp, PARAMS.impostorWindFreq);
+        forest.setLodDither(PARAMS.lodDither);
+        renderer.toneMappingExposure = PARAMS.exposure;
+      }
+
+      applySunToScene();
+
+      const projMat = new THREE.Matrix4();
+      const frustum = new THREE.Frustum();
+
+      function getQuality() {
+        const [ts, sps] = PARAMS.atlasQuality.split("_");
+        return { textureSize: +ts, spritesPerSide: +sps };
+      }
+
+      function getModelSource() {
+        const custom = PARAMS.customModelPath.trim();
+        if (custom) return custom;
+        return MODEL_PRESETS[PARAMS.modelKey] ?? MODEL_PRESETS["Pine 2"];
+      }
+
+      function updateTopbar() {
+        const modelLabel = PARAMS.customModelPath.trim() || PARAMS.modelKey;
+        document.getElementById("tb-model").textContent = modelLabel;
+        document.getElementById("tb-quality").textContent = PARAMS.quality;
+        const [ts, sps] = PARAMS.atlasQuality.split("_");
+        document.getElementById("tb-atlas").textContent = `${ts} / ${sps}`;
+      }
+
+      function setStatus(text, kind = "on") {
+        const el = document.getElementById("tb-status");
+        el.textContent = text;
+        el.className = "pill toolbar-extra " + kind;
+      }
+
+      function setLoading(show, msg = "", sub = "") {
+        loadingEl.classList.toggle("show", show);
+        if (msg) loadingMsg.textContent = msg;
+        loadingSub.textContent = sub;
+      }
+
+      async function getModelConfig() {
+        if (fileInput.files && fileInput.files[0]) {
+          const url = URL.createObjectURL(fileInput.files[0]);
+          try {
+            const gltf = await new Promise((res, rej) =>
+              gltfLoader.load(url, res, undefined, rej),
+            );
+            gltf.scene.updateMatrixWorld(true);
+            return { modelScene: gltf.scene };
+          } finally {
+            URL.revokeObjectURL(url);
+          }
+        }
+        const source = getModelSource();
+        if (source === "__torusknot__") {
+          const geo = new THREE.TorusKnotGeometry(1, 0.35, 128, 20);
+          geo.computeBoundingBox();
+          const mat = new THREE.MeshStandardMaterial({
+            color: 0x22cc55,
+            roughness: 0.45,
+            metalness: 0.05,
+          });
+          const mesh = new THREE.Mesh(geo, mat);
+          mesh.position.y = -geo.boundingBox.min.y;
+          const group = new THREE.Group();
+          group.add(mesh);
+          group.updateMatrixWorld(true);
+          return { modelScene: group };
+        }
+        return { modelPath: source };
+      }
+
+      async function loadForest() {
+        setLoading(true, "Baking v3 atlas…", getModelSource());
+        setStatus("Baking…", "warn");
+        if (forest) {
+          forest.dispose();
+          scene.remove(forest.group);
+          forest = null;
+        }
+        try {
+          const modelConfig = await getModelConfig();
+          const quality = getQuality();
+          forest = await createOctahedralImpostorForestV3(
+            renderer,
+            dirLight,
+            {
+              ...modelConfig,
+              treeCount: 80,
+              treeScale: 1.5,
+              lodDistance: PARAMS.lodDistance,
+              radius: 80,
+              minRadius: 12,
+              centerPosition: [0, 0, 0],
+              getTerrainHeight: () => 0,
+              impostorSettings: {
+                ...quality,
+                quality: PARAMS.quality,
+                alphaCutoff: PARAMS.alphaCutoff,
+                edgeSmoothScale: PARAMS.edgeSmoothScale,
+                alphaTest: 0.05,
+                fadeRange: PARAMS.fadeRange,
+                lodDither: PARAMS.lodDither,
+                lod2Distance: 120,
+                normalStrength: PARAMS.normalStrength,
+                parallaxStrength: PARAMS.parallaxStrength,
+                normRmBary: PARAMS.normRmBary,
+                cellDither: PARAMS.cellDither,
+                translucency: PARAMS.translucency,
+                translucencyPower: PARAMS.translucencyPower,
+                windAmp: PARAMS.impostorWindAmp,
+                windFreq: PARAMS.impostorWindFreq,
+                exclusiveLod: true,
+              },
+            },
+          );
+          scene.add(forest.group);
+          forest.setLodVisible(0, PARAMS.lod0Visible);
+          forest.setLodVisible(1, PARAMS.lod1Visible);
+          forest.setLodVisible(2, PARAMS.lod2Visible);
+          applyLightingToForest();
+          applyAtmosphere();
+          forest.setWindStrength(PARAMS.nearWindStrength);
+          forest.setWindSpeed(PARAMS.nearWindSpeed);
+          updateTopbar();
+          setStatus("Ready", "on");
+        } catch (e) {
+          console.error("Forest failed:", e);
+          setStatus("Error", "bad");
+          loadingSub.textContent = e.message || String(e);
+        } finally {
+          setLoading(false);
+        }
+      }
+
+      function syncForestLighting() {
+        applySunToScene();
+        applyLightingToForest();
+      }
+
+      function resize() {
+        const w = viewport.clientWidth;
+        const h = viewport.clientHeight;
+        if (w < 1 || h < 1) return;
+        camera.aspect = w / h;
+        camera.updateProjectionMatrix();
+        renderer.setSize(w, h);
+        renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
+      }
+
+      resize();
+      window.addEventListener("resize", resize);
+      initSplitters();
+
+      await loadForest();
+
+      const renderPipeline = new THREE.RenderPipeline(renderer);
+      renderPipeline.outputNode = pass(scene, camera);
+      await renderer.compileAsync(scene, camera);
+
+      let fpsAcc = 0;
+      let fpsFrames = 0;
+      let fpsLast = performance.now();
+
+      renderer.setAnimationLoop(() => {
+        controls.update();
+        if (forest) {
+          projMat.multiplyMatrices(
+            camera.projectionMatrix,
+            camera.matrixWorldInverse,
+          );
+          frustum.setFromProjectionMatrix(projMat);
+          forest.update(camera, frustum);
+          syncForestLighting();
+
+          const counts = forest.getLodCounts();
+          document.getElementById("s-lod0").textContent = String(counts.near);
+          document.getElementById("s-lod1").textContent = String(counts.lod1);
+          document.getElementById("s-lod2").textContent = String(counts.lod2);
+          document.getElementById("s-trees").textContent = String(
+            forest.getPlacementCount(),
+          );
+        }
+
+        const dist = camera.position.distanceTo(controls.target);
+        document.getElementById("s-cam").textContent = dist.toFixed(1) + "m";
+
+        renderPipeline.render();
+
+        fpsFrames++;
+        const now = performance.now();
+        fpsAcc += now - fpsLast;
+        fpsLast = now;
+        if (fpsAcc >= 500) {
+          document.getElementById("s-fps").textContent = String(
+            Math.round((fpsFrames * 1000) / fpsAcc),
+          );
+          fpsAcc = 0;
+          fpsFrames = 0;
+        }
+      });
+
+      // ── Custom inspector UI ────────────────────────────────────────────────
+      const inspector = document.getElementById("inspector-scroll");
+      const ui = createUiHelpers();
+
+      function _textInput(parent, obj, key, opts) {
+        const { label, placeholder, onChange, hint } = opts;
+        const row = document.createElement("div");
+        row.className = "prop-row";
+        if (hint) row.title = hint;
+        row.innerHTML = `<span class="prop-label">${label}</span><div class="prop-value"><input type="text" class="prop-text-input" placeholder="${placeholder ?? ""}"></div>`;
+        const inp = row.querySelector(".prop-text-input");
+        inp.value = obj[key] ?? "";
+        inp.addEventListener("change", () => {
+          obj[key] = inp.value;
+          onChange?.();
+        });
+        parent.appendChild(row);
+        return inp;
+      }
+
+      const modelOpts = {};
+      for (const k of Object.keys(MODEL_PRESETS)) modelOpts[k] = k;
+      const atlasOpts = { ...ATLAS_OPTS };
+      const qualOpts = {};
+      for (const k of Object.keys(QUALITY_PRESETS)) qualOpts[k] = k;
+
+      const fModel = ui._section(inspector, "Model & atlas");
+      ui._dropdown(fModel, PARAMS, "modelKey", {
+        label: "Preset",
+        options: modelOpts,
+        onChange: () => {
+          updateTopbar();
+        },
+      });
+      _textInput(fModel, PARAMS, "customModelPath", {
+        label: "Custom path",
+        placeholder: "models/foo.glb",
+        hint: "Overrides preset when set",
+        onChange: updateTopbar,
+      });
+      ui._button(fModel, {
+        title: "Load GLB from disk…",
+        onClick: () => fileInput.click(),
+      });
+      ui._separator(fModel);
+      ui._dropdown(fModel, PARAMS, "atlasQuality", {
+        label: "Atlas size",
+        options: atlasOpts,
+        onChange: updateTopbar,
+      });
+      ui._button(fModel, {
+        title: "Rebake forest [B]",
+        onClick: () => loadForest().catch(console.error),
+      });
+
+      const fQual = ui._section(inspector, "Impostor quality");
+      ui._dropdown(fQual, PARAMS, "quality", {
+        label: "Preset",
+        options: qualOpts,
+        onChange: syncForestLighting,
+      });
+      ui._slider(fQual, PARAMS, "alphaCutoff", {
+        label: "Alpha cutoff",
+        min: 0.01,
+        max: 0.5,
+        step: 0.01,
+        onChange: syncForestLighting,
+      });
+      ui._slider(fQual, PARAMS, "normalStrength", {
+        label: "Normal strength",
+        min: 0,
+        max: 1,
+        step: 0.02,
+        onChange: syncForestLighting,
+      });
+      ui._slider(fQual, PARAMS, "edgeSmoothScale", {
+        label: "Edge smooth",
+        min: 0,
+        max: 4,
+        step: 0.1,
+        onChange: syncForestLighting,
+      });
+      ui._slider(fQual, PARAMS, "parallaxStrength", {
+        label: "Parallax",
+        min: 0,
+        max: 0.2,
+        step: 0.005,
+        onChange: syncForestLighting,
+      });
+      ui._toggle(fQual, PARAMS, "normRmBary", {
+        label: "Bary normals/R/M",
+        onChange: syncForestLighting,
+      });
+      ui._toggle(fQual, PARAMS, "cellDither", {
+        label: "Cell dither",
+        onChange: syncForestLighting,
+      });
+      ui._slider(fQual, PARAMS, "translucency", {
+        label: "Translucency",
+        min: 0,
+        max: 0.5,
+        step: 0.01,
+        onChange: syncForestLighting,
+      });
+      ui._slider(fQual, PARAMS, "translucencyPower", {
+        label: "SSS sharpness",
+        min: 1,
+        max: 12,
+        step: 0.5,
+        onChange: syncForestLighting,
+      });
+
+      const fWind = ui._section(inspector, "Wind");
+      ui._slider(fWind, PARAMS, "nearWindStrength", {
+        label: "Mesh strength",
+        min: 0,
+        max: 1,
+        step: 0.02,
+        onChange: () => forest?.setWindStrength(PARAMS.nearWindStrength),
+      });
+      ui._slider(fWind, PARAMS, "nearWindSpeed", {
+        label: "Mesh speed",
+        min: 0.2,
+        max: 3,
+        step: 0.05,
+        onChange: () => forest?.setWindSpeed(PARAMS.nearWindSpeed),
+      });
+      ui._slider(fWind, PARAMS, "impostorWindAmp", {
+        label: "Impostor amp",
+        min: 0,
+        max: 0.15,
+        step: 0.005,
+        onChange: syncForestLighting,
+      });
+      ui._slider(fWind, PARAMS, "impostorWindFreq", {
+        label: "Impostor freq",
+        min: 0.2,
+        max: 4,
+        step: 0.05,
+        onChange: syncForestLighting,
+      });
+
+      const fSun = ui._section(inspector, "Lighting");
+      ui._slider(fSun, PARAMS, "sunAzimuth", {
+        label: "Sun azimuth",
+        min: 0,
+        max: 360,
+        step: 1,
+        onChange: syncForestLighting,
+      });
+      ui._slider(fSun, PARAMS, "sunElevation", {
+        label: "Sun elevation",
+        min: 0,
+        max: 90,
+        step: 0.5,
+        onChange: syncForestLighting,
+      });
+      ui._slider(fSun, PARAMS, "sunIntensity", {
+        label: "Sun intensity",
+        min: 0,
+        max: 5,
+        step: 0.05,
+        onChange: syncForestLighting,
+      });
+      ui._slider(fSun, PARAMS, "ambIntensity", {
+        label: "Ambient",
+        min: 0,
+        max: 3,
+        step: 0.05,
+        onChange: syncForestLighting,
+      });
+      ui._slider(fSun, PARAMS, "exposure", {
+        label: "Exposure",
+        min: 0.2,
+        max: 2.5,
+        step: 0.05,
+        onChange: syncForestLighting,
+      });
+
+      const fLod = ui._section(inspector, "LOD");
+      ui._slider(fLod, PARAMS, "lodDistance", {
+        label: "Mesh → impostor",
+        min: 12,
+        max: 120,
+        step: 1,
+        onChange: () => forest?.setLodDistance(PARAMS.lodDistance),
+      });
+      const lodHint = document.createElement("div");
+      lodHint.className = "prop-hint";
+      lodHint.textContent =
+        "Exclusive LOD — one representation per tree. Mega impostor at 120 m.";
+      fLod.appendChild(lodHint);
+      ui._toggle(fLod, PARAMS, "lod0Visible", {
+        label: "Show LOD0 mesh",
+        onChange: () => forest?.setLodVisible(0, PARAMS.lod0Visible),
+      });
+      ui._toggle(fLod, PARAMS, "lod1Visible", {
+        label: "Show LOD1 impostor",
+        onChange: () => forest?.setLodVisible(1, PARAMS.lod1Visible),
+      });
+      ui._toggle(fLod, PARAMS, "lod2Visible", {
+        label: "Show LOD2 mega",
+        onChange: () => forest?.setLodVisible(2, PARAMS.lod2Visible),
+      });
+
+      const fAtmo = ui._section(inspector, "Atmosphere");
+      ui._toggle(fAtmo, PARAMS, "fogEnabled", {
+        label: "Distance fog",
+        onChange: applyAtmosphere,
+      });
+      ui._slider(fAtmo, PARAMS, "fogNear", {
+        label: "Fog near",
+        min: 0,
+        max: 120,
+        step: 1,
+        onChange: applyAtmosphere,
+      });
+      ui._slider(fAtmo, PARAMS, "fogFar", {
+        label: "Fog far",
+        min: 20,
+        max: 400,
+        step: 2,
+        onChange: applyAtmosphere,
+      });
+      ui._color(fAtmo, PARAMS, "fogColor", {
+        label: "Fog / sky",
+        onChange: applyAtmosphere,
+      });
+
+      updateTopbar();
+
+      document.getElementById("btn-rebake").addEventListener("click", () => {
+        loadForest().catch(console.error);
+      });
+      document.getElementById("btn-load").addEventListener("click", () => {
+        fileInput.click();
+      });
+      fileInput.addEventListener("change", () => {
+        if (fileInput.files?.[0]) {
+          PARAMS.customModelPath = fileInput.files[0].name;
+          updateTopbar();
+          loadForest().catch(console.error);
+        }
+      });
+
+      let uiHidden = false;
+      function toggleUi() {
+        uiHidden = !uiHidden;
+        document.getElementById("app").classList.toggle("ui-hidden", uiHidden);
+        const btn = document.getElementById("btn-hide-ui");
+        btn.innerHTML = uiHidden
+          ? '<i data-lucide="panel-right-open"></i>'
+          : '<i data-lucide="panel-right-close"></i>';
+        lucide.createIcons({ nodes: [btn] });
+        requestAnimationFrame(resize);
+      }
+      document.getElementById("btn-hide-ui").addEventListener("click", toggleUi);
+
+      window.addEventListener("keydown", (e) => {
+        if (e.target.matches("input, select, textarea")) return;
+        if (e.key === "h" || e.key === "H") toggleUi();
+        if (e.key === "b" || e.key === "B") loadForest().catch(console.error);
+      });
+    </script>
+  </body>
+</html>
