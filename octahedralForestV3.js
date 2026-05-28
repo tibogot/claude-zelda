@@ -145,8 +145,7 @@ export async function createOctahedralImpostorForestV3(
   } = opts;
 
   const skipNear = skipNearMeshes === true;
-  const useFixed =
-    Array.isArray(fixedPlacements) && fixedPlacements.length > 0;
+  const useFixed = Array.isArray(fixedPlacements) && fixedPlacements.length > 0;
   const capExtra =
     typeof placementCapacity === "number" && placementCapacity > 0
       ? Math.floor(placementCapacity)
@@ -262,8 +261,7 @@ export async function createOctahedralImpostorForestV3(
       const isLeaf =
         mat0?.transparent ||
         /leaf|leave|foliage|canopy|frond|branch/i.test(name) ||
-        (mat0?.map &&
-          (mat0?.side === THREE.DoubleSide || mat0?.alphaTest > 0));
+        (mat0?.map && (mat0?.side === THREE.DoubleSide || mat0?.alphaTest > 0));
 
       g.computeBoundingBox();
       const geoMinY = g.boundingBox.min.y;
@@ -523,11 +521,7 @@ export async function createOctahedralImpostorForestV3(
   initImpostorUniforms(impostorPack.uniforms);
   const impostorMat = impostorPack.mainMat;
 
-  const impostorMesh = new THREE.InstancedMesh(
-    planeGeo,
-    impostorMat,
-    capacity,
-  );
+  const impostorMesh = new THREE.InstancedMesh(planeGeo, impostorMat, capacity);
   impostorMesh.castShadow = false;
   impostorMesh.frustumCulled = false;
   impostorMesh.count = 0;
@@ -572,9 +566,17 @@ export async function createOctahedralImpostorForestV3(
   group.add(megaMesh);
 
   const _compactNear = new Float32Array(capacity * 16);
-  const _cullSphere = new THREE.Sphere(new THREE.Vector3(), impostorScale * 0.5);
+  const _cullSphere = new THREE.Sphere(
+    new THREE.Vector3(),
+    impostorScale * 0.5,
+  );
 
-  let innerDistSq, outerDistSq, inner2DistSq, outer2DistSq, lodDistSq, lod2DistSq;
+  let innerDistSq,
+    outerDistSq,
+    inner2DistSq,
+    outer2DistSq,
+    lodDistSq,
+    lod2DistSq;
   function _recomputeThresholds() {
     lodDistSq = _lodDist ** 2;
     lod2DistSq = _lod2Dist ** 2;

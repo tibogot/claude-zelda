@@ -59,7 +59,9 @@ export function createInstancedImpostorMaterials(textures, opts) {
   } = opts;
 
   if (!centersStorage) {
-    throw new Error("[octahedral-core] centersStorage required for instanced impostor");
+    throw new Error(
+      "[octahedral-core] centersStorage required for instanced impostor",
+    );
   }
 
   const centerNode = centersStorage.element(instanceIndex).xyz;
@@ -235,11 +237,20 @@ export function createInstancedImpostorMaterials(textures, opts) {
       const VdotN = max(dot(V, cellNorm), float(0.3));
       const viewTS = div(vec2(dot(V, T), dot(V, B)), VdotN);
       const d0 = texture(depthTex, getUV(localUV, frame)).r;
-      const uv1 = add(localUV, mul(viewTS, mul(sub(float(0.5), d0), uParallaxStr)));
+      const uv1 = add(
+        localUV,
+        mul(viewTS, mul(sub(float(0.5), d0), uParallaxStr)),
+      );
       const d1 = texture(depthTex, getUV(uv1, frame)).r;
-      const uv2 = add(localUV, mul(viewTS, mul(sub(float(0.5), d1), uParallaxStr)));
+      const uv2 = add(
+        localUV,
+        mul(viewTS, mul(sub(float(0.5), d1), uParallaxStr)),
+      );
       const d2 = texture(depthTex, getUV(uv2, frame)).r;
-      const uv3 = add(localUV, mul(viewTS, mul(sub(float(0.5), d2), uParallaxStr)));
+      const uv3 = add(
+        localUV,
+        mul(viewTS, mul(sub(float(0.5), d2), uParallaxStr)),
+      );
       out.assign(getUV(uv3, frame));
     });
     return out;
@@ -269,7 +280,10 @@ export function createInstancedImpostorMaterials(textures, opts) {
   const nw1 = div(vWeight.x, max(wSum, float(0.001)));
   const nw2 = div(vWeight.y, max(wSum, float(0.001)));
   const nw3 = div(vWeight.z, max(wSum, float(0.001)));
-  const baryRgb = add(add(mul(c1.rgb, nw1), mul(c2.rgb, nw2)), mul(c3.rgb, nw3));
+  const baryRgb = add(
+    add(mul(c1.rgb, nw1), mul(c2.rgb, nw2)),
+    mul(c3.rgb, nw3),
+  );
   const baryAlpha = add(add(mul(c1.a, nw1), mul(c2.a, nw2)), mul(c3.a, nw3));
 
   const px = viewportCoordinate.xy;
@@ -315,7 +329,11 @@ export function createInstancedImpostorMaterials(textures, opts) {
       ),
     ),
   );
-  const ditheredAlpha = select(lodIgn.greaterThan(fadeTSoft), float(0.0), smoothAlpha);
+  const ditheredAlpha = select(
+    lodIgn.greaterThan(fadeTSoft),
+    float(0.0),
+    smoothAlpha,
+  );
   const rampLegacy = smoothstep(sub(uLodDist, uFadeRange), uLodDist, dist);
   const legacyAlphaOut = mul(ditheredAlpha, rampLegacy);
   const finalOpacity = mix(smoothAlphaOut, legacyAlphaOut, uLodDither);
@@ -326,7 +344,9 @@ export function createInstancedImpostorMaterials(textures, opts) {
   const wN1 = normalize(sub(mul(n1, 2.0), 1.0));
   const wN2 = normalize(sub(mul(n2, 2.0), 1.0));
   const wN3 = normalize(sub(mul(n3, 2.0), 1.0));
-  const baryN = normalize(add(add(mul(wN1, nw1), mul(wN2, nw2)), mul(wN3, nw3)));
+  const baryN = normalize(
+    add(add(mul(wN1, nw1), mul(wN2, nw2)), mul(wN3, nw3)),
+  );
   const domN = select(isDom1, wN1, select(isDom2, wN2, wN3));
   const atlasN = normalize(mix(domN, baryN, uNormRmBary));
   const finalWorldN = normalize(mix(vec3(0, 1, 0), atlasN, uNormStr));
