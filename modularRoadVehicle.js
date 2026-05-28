@@ -72,6 +72,16 @@ export const WALL = {
   clampPenFrac: 0.4,
 };
 
+/** Chassis-vs-solids (guardrails) collision via the solids BVH. A ring of
+ *  spheres around the chassis is pushed out of the nearest surface. */
+export const SOLID = {
+  enabled: true,
+  radius: 0.55,
+  stiffness: 260000,
+  damper: 12000,
+  clampPenFrac: 0.5,
+};
+
 /* ----------------------------------------------------------------------- */
 /* Rigid body — 6-DOF, force/torque accumulators                            */
 /* ----------------------------------------------------------------------- */
@@ -184,9 +194,12 @@ class Tire {
     this._wheelRight = new THREE.Vector3();
     this._steerQuat = new THREE.Quaternion();
     this._F = new THREE.Vector3();
+    this._down = new THREE.Vector3();
+    this._rayO = new THREE.Vector3();
+    this._bestP = new THREE.Vector3();
   }
 
-  apply(body, dt, steerAngle, throttle, handbrake, raycaster, collidables) {
+  apply(body, dt, steerAngle, throttle, handbrake, castGround) {
     this.worldPos.copy(this.localPos).applyQuaternion(body.quat).add(body.pos);
     this._up.set(0, 1, 0).applyQuaternion(body.quat);
     this._fwd.set(0, 0, 1).applyQuaternion(body.quat);
@@ -202,30 +215,30 @@ class Tire {
 
     const pad = TIRE.rayPadAbove;
     const fwdBias = TIRE.rayForwardBias * WHEEL.radius;
-    raycaster.ray.direction.copy(this._up).multiplyScalar(-1);
-    raycaster.far = TIRE.rayLength + pad;
+    const far = TIRE.rayLength + pad;
+    this._down.copy(this._up).multiplyScalar(-1);
 
     let bestDist = Infinity;
     let bestPoint = null;
-    const sample = (ox, dirVec, off) => {
-      raycaster.ray.origin.copy(this.worldPos).addScaledVector(this._up, pad);
-      if (dirVec) raycaster.ray.origin.addScaledVector(dirVec, off);
-      const hits = raycaster.intersectObjects(collidables, false);
-      if (hits.length > 0 && hits[0].distance < bestDist) {
-        bestDist = hits[0].distance;
-        bestPoint = hits[0].point;
+    const sample = (dirVec, off) => {
+      this._rayO.copy(this.worldPos).addScaledVector(this._up, pad);
+      if (dirVec) this._rayO.addScaledVector(dirVec, off);
+      const hit = castGround(this._rayO, this._down, far);
+      if (hit && hit.distance < bestDist) {
+        bestDist = hit.distance;
+        bestPoint = this._bestP.copy(hit.point);
       }
     };
 
-    sample(0, null, 0);
+    sample(null, 0);
     if (fwdBias > 1e-4) {
-      sample(0, this._wheelFwd, fwdBias);
-      sample(0, this._wheelFwd, -fwdBias);
+      sample(this._wheelFwd, fwdBias);
+      sample(this._wheelFwd, -fwdBias);
     }
     const latBias = TIRE.rayLateralBias * WHEEL.thickness * 0.5;
     if (latBias > 1e-4) {
-      sample(0, this._wheelRight, latBias);
-      sample(0, this._wheelRight, -latBias);
+      sample(this._wheelRight, latBias);
+      sample(this._wheelRight, -latBias);
     }
 
     this.lastSuspension.set(0, 0, 0);
@@ -314,6 +327,8 @@ export class Vehicle {
     this.collidables = [];
     this.walls = [];
     this.wallBoxes = [];
+    this.groundBvh = null;
+    this.solidsBvh = null;
     this.enabled = false;
     this.spawnPos = new THREE.Vector3(0, 0.7, -4);
     this.spawnQuat = new THREE.Quaternion().setFromAxisAngle(new THREE.Vector3(0, 1, 0), Math.PI);
@@ -331,6 +346,17 @@ export class Vehicle {
     this._initScratch();
 
     this.raycaster = new THREE.Raycaster();
+    this._bvhRay = new THREE.Ray();
+    this._castGround = (origin, dir, far) => {
+      if (this.groundBvh && this.groundBvh.baked) {
+        return this.groundBvh.raycastFirst(origin, dir, far);
+      }
+      this.raycaster.ray.origin.copy(origin);
+      this.raycaster.ray.direction.copy(dir);
+      this.raycaster.far = far;
+      const hits = this.raycaster.intersectObjects(this.collidables, false);
+      return hits.length ? hits[0] : null;
+    };
     this.SUBSTEPS = 4;
     this.respawn();
   }
@@ -396,6 +422,12 @@ export class Vehicle {
       { pos: new THREE.Vector3(), dir: new THREE.Vector3(-1, 0, 0) },
     ];
     for (let i = 0; i < 8; i++) this.CHASSIS_CORNERS.push(new THREE.Vector3());
+    this.SOLID_SAMPLES = [];
+    for (let i = 0; i < 6; i++) this.SOLID_SAMPLES.push(new THREE.Vector3());
+    this._sphC = new THREE.Vector3();
+    this._sphN = new THREE.Vector3();
+    this._sphV = new THREE.Vector3();
+    this._sphF = new THREE.Vector3();
     this._refreshLocalFrames();
 
     this.CORNER_SPRING = 180000;
@@ -439,6 +471,10 @@ export class Vehicle {
     this.PROBE_LOCALS[1].pos.set(0, 0, -hl);
     this.PROBE_LOCALS[2].pos.set(hw, 0, 0);
     this.PROBE_LOCALS[3].pos.set(-hw, 0, 0);
+    // Ring of side spheres (mid-height) used for solids/guardrail collision.
+    const s = this.SOLID_SAMPLES;
+    s[0].set(hw, 0, hl * 0.6); s[1].set(hw, 0, 0); s[2].set(hw, 0, -hl * 0.6);
+    s[3].set(-hw, 0, hl * 0.6); s[4].set(-hw, 0, 0); s[5].set(-hw, 0, -hl * 0.6);
   }
 
   /** Re-derive inertia + local frames + visual box after mass/size edits. */
@@ -457,6 +493,12 @@ export class Vehicle {
     this.walls = walls.slice();
     for (const w of this.walls) w.updateMatrixWorld(true);
     this.wallBoxes = this.walls.map((w) => new THREE.Box3().setFromObject(w));
+  }
+
+  /** Attach baked BVHs. `ground` drives wheel probes; `solids` blocks the chassis. */
+  setBvh(ground, solids) {
+    this.groundBvh = ground || null;
+    this.solidsBvh = solids || null;
   }
 
   setSpawn(pos, quat) {
@@ -502,9 +544,10 @@ export class Vehicle {
       this._gravityF.set(0, -GRAVITY * body.mass, 0);
       body.addForce(this._gravityF);
       for (const tire of this.tires) {
-        tire.apply(body, subDt, steerAngle, this.input.throttle, this.input.handbrake, this.raycaster, this.collidables);
+        tire.apply(body, subDt, steerAngle, this.input.throttle, this.input.handbrake, this._castGround);
       }
       if (this.walls.length) this._applyWallProbes();
+      if (SOLID.enabled && this.solidsBvh && this.solidsBvh.baked) this._resolveSolids();
       this._applyChassisGroundContact();
       this._applyStabilizer();
       body.integrate(subDt);
@@ -570,6 +613,33 @@ export class Vehicle {
       if (pen > WALL.probeRange * WALL.clampPenFrac) {
         const vInto = body.vel.dot(this._probeDirW);
         if (vInto > 0) body.vel.addScaledVector(this._probeDirW, -vInto);
+      }
+    }
+  }
+
+  _resolveSolids() {
+    const body = this.body;
+    const r = SOLID.radius;
+    for (const sp of this.SOLID_SAMPLES) {
+      this._sphC.copy(sp).applyQuaternion(body.quat).add(body.pos);
+      const res = this.solidsBvh.closestPointToPoint(this._sphC.x, this._sphC.y, this._sphC.z, r);
+      if (!res) continue;
+      const pen = r - res.distance;
+      if (pen <= 0) continue;
+      this._sphN.set(this._sphC.x - res.x, this._sphC.y - res.y, this._sphC.z - res.z);
+      const d = this._sphN.length();
+      if (d < 1e-6) continue;
+      this._sphN.multiplyScalar(1 / d); // outward (away from surface)
+      body.getVelocityAtPoint(this._sphC, this._sphV);
+      const inward = -this._sphV.dot(this._sphN); // >0 → moving into the surface
+      const dampMag = Math.max(0, inward) * SOLID.damper;
+      const forceMag = pen * SOLID.stiffness + dampMag;
+      this._sphF.copy(this._sphN).multiplyScalar(forceMag);
+      body.addForceAtPoint(this._sphF, this._sphC);
+      // Kill remaining inward velocity on deep penetration to stop tunneling.
+      if (pen > r * SOLID.clampPenFrac) {
+        const vInto = body.vel.dot(this._sphN);
+        if (vInto < 0) body.vel.addScaledVector(this._sphN, -vInto);
       }
     }
   }

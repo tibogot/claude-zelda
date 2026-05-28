@@ -522,7 +522,8 @@
           "three": "https://cdn.jsdelivr.net/npm/three@0.184.0/build/three.webgpu.js",
           "three/webgpu": "https://cdn.jsdelivr.net/npm/three@0.184.0/build/three.webgpu.js",
           "three/tsl": "https://cdn.jsdelivr.net/npm/three@0.184.0/build/three.tsl.js",
-          "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.184.0/examples/jsm/"
+          "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.184.0/examples/jsm/",
+          "three-mesh-bvh": "https://cdn.jsdelivr.net/npm/three-mesh-bvh@0.9.9/build/index.module.js"
         }
       }
     </script>
@@ -548,6 +549,7 @@
           </button>
           <button id="road-flip" class="palette-btn" type="button">Flip L/R (R)</button>
           <button id="road-undo" class="palette-btn" type="button">Undo</button>
+          <button id="road-rebake" class="palette-btn" type="button">Rebake collision</button>
           <button id="road-demo" class="palette-btn" type="button">Demo</button>
           <button id="road-clear" class="palette-btn" type="button">Clear</button>
         </div>
@@ -579,7 +581,9 @@
       } from "./modularRoadMaterial.js";
       import { ModularRoadBuilder, buildRoadPaletteUI } from "./modularRoadBuilder.js";
       import { roadParams, pieceParams, guardrailParams } from "./modularRoadKit.js";
-      import { Vehicle, TIRE, CHASSIS } from "./modularRoadVehicle.js";
+      import { Vehicle, TIRE, CHASSIS, SOLID } from "./modularRoadVehicle.js";
+      import { RoadBvh } from "./modularRoadBvh.js";
+      import { buildParkour } from "./modularRoadParkour.js";
 
       const PARAMS = {
         camera: { fov: 60 },
@@ -779,6 +783,51 @@
         // ── VEHICLE (test drive) ──
         const vehicle = new Vehicle({ scene });
 
+        // BVH colliders, (re)baked on demand. Track + parkour are static while driving.
+        const deckBvh = new RoadBvh(); // road/parkour decks + ground → wheel probes
+        const solidsBvh = new RoadBvh(); // guardrails + walls → chassis collision
+        vehicle.setBvh(deckBvh, solidsBvh);
+
+        // ── OBSTACLE PARKOUR (recreated from the Lotus VVV lab) ──
+        const parkour = buildParkour();
+        scene.add(parkour.group);
+        const obstacleParams = { enabled: false };
+
+        // Collision debug wireframe (rebuilt on every bake).
+        const debugGroup = new THREE.Group();
+        debugGroup.visible = false;
+        scene.add(debugGroup);
+        let _deckWire = null;
+        let _solidsWire = null;
+        function refreshCollisionDebug() {
+          if (!debugGroup.visible) return;
+          if (_deckWire) { debugGroup.remove(_deckWire); _deckWire.geometry.dispose(); _deckWire = null; }
+          if (_solidsWire) { debugGroup.remove(_solidsWire); _solidsWire.geometry.dispose(); _solidsWire = null; }
+          if (deckBvh.geometry) {
+            _deckWire = new THREE.Mesh(deckBvh.geometry.clone(), new THREE.MeshBasicMaterial({ color: 0x39ff88, wireframe: true, transparent: true, opacity: 0.35 }));
+            debugGroup.add(_deckWire);
+          }
+          if (solidsBvh.geometry) {
+            _solidsWire = new THREE.Mesh(solidsBvh.geometry.clone(), new THREE.MeshBasicMaterial({ color: 0xff5060, wireframe: true, transparent: true, opacity: 0.5 }));
+            debugGroup.add(_solidsWire);
+          }
+        }
+
+        function bakeCollision() {
+          scene.updateMatrixWorld(true);
+          const decks = builder.pieces.map((p) => p.mesh);
+          decks.push(floor);
+          const solids = builder.pieces.map((p) => p.railMesh).filter(Boolean);
+          if (obstacleParams.enabled) {
+            decks.push(...parkour.deckMeshes);
+            solids.push(...parkour.wallMeshes);
+          }
+          deckBvh.bakeFromMeshes(decks);
+          solidsBvh.bakeFromMeshes(solids);
+          refreshCollisionDebug();
+          paletteUi?.refreshStatus?.();
+        }
+
         // ── BUILD MODE TOGGLE (orbit vs place, only relevant in build mode) ──
         const buildBtn = document.getElementById("build-mode-toggle");
         const camModeEl = document.getElementById("cammode");
@@ -817,14 +866,14 @@
             : "LMB place &bull; MMB orbit &bull; <kbd>1</kbd>–<kbd>7</kbd> pick &bull; R flip &bull; Backspace undo";
           builder.setGhostVisible(!on && state.buildMode);
           if (on) {
-            // Feed the placed road decks (+ ground) as wheel collidables. The
-            // guardrails are NOT used as walls: their per-piece AABB spans the
-            // whole curved piece, so AABB depenetration would wrongly shove the
-            // car. The low kerb is part of the road mesh, so wheels still ride it.
+            // Bake a deck BVH (wheel probes) and a solids BVH (guardrail
+            // collision) from the current track. Decks + ground go to the
+            // deck tree; guardrails go to the solids tree so the chassis is
+            // blocked without the false AABB shoves we had before.
+            bakeCollision();
             const collidables = builder.pieces.map((p) => p.mesh);
             collidables.push(floor);
-            scene.updateMatrixWorld(true);
-            vehicle.setColliders(collidables, []);
+            vehicle.setColliders(collidables, []); // raycaster fallback only
             spawnOnTrack();
           }
           vehicle.setEnabled(on);
@@ -833,6 +882,15 @@
           syncOrbitButtons();
         }
         driveBtn.addEventListener("click", () => setDriveMode(state.mode !== "drive"));
+
+        // Manual collision rebake — bake the current track/parkour into the BVHs.
+        const rebakeBtn = document.getElementById("road-rebake");
+        rebakeBtn?.addEventListener("click", () => {
+          bakeCollision();
+          const tris = deckBvh.triCount + solidsBvh.triCount;
+          rebakeBtn.textContent = `Rebaked (${tris.toLocaleString()} tris)`;
+          setTimeout(() => (rebakeBtn.textContent = "Rebake collision"), 1400);
+        });
 
         // ── PLACE ON LMB (build mode only) ──
         renderer.domElement.addEventListener("pointerdown", (e) => {
@@ -901,7 +959,22 @@
         }
 
         // ── INSPECTOR ──
-        buildInspector({ camera, floorMat, roadMat, builder, vehicle, updateSun, rebuildSkyEnv });
+        buildInspector({
+          camera, floorMat, roadMat, builder, vehicle, updateSun, rebuildSkyEnv,
+          obstacleParams, parkour, bakeCollision, debugGroup, refreshCollisionDebug,
+          goToParkour: () => {
+            if (state.mode !== "drive") setDriveMode(true);
+            vehicle.setSpawn(
+              new THREE.Vector3(parkour.spawn.pos.x, parkour.spawn.pos.y + TIRE.restLength + 0.15, parkour.spawn.pos.z),
+              new THREE.Quaternion().setFromAxisAngle(new THREE.Vector3(0, 1, 0), parkour.spawn.yaw),
+            );
+            vehicle.respawn();
+          },
+          goToTrack: () => {
+            spawnOnTrack();
+            vehicle.respawn();
+          },
+        });
 
         // ── LOOP ──
         let lastT = performance.now() / 1000;
@@ -1029,8 +1102,20 @@
         div.className = "section-separator";
         parent.appendChild(div);
       }
+      function _button(parent, label, onClick) {
+        const row = document.createElement("div");
+        row.className = "prop-row";
+        row.innerHTML = `<button class="palette-btn palette-btn-wide" type="button">${label}</button>`;
+        row.querySelector("button").addEventListener("click", onClick);
+        parent.appendChild(row);
+        return row;
+      }
 
-      function buildInspector({ camera, floorMat, roadMat, builder, vehicle, updateSun, rebuildSkyEnv }) {
+      function buildInspector({
+        camera, floorMat, roadMat, builder, vehicle, updateSun, rebuildSkyEnv,
+        obstacleParams, parkour, bakeCollision, debugGroup, refreshCollisionDebug,
+        goToParkour, goToTrack,
+      }) {
         const body = document.getElementById("inspector-body");
         document.getElementById("inspector-toggle").addEventListener("click", (e) => {
           const hidden = document.body.classList.toggle("inspector-hidden");
@@ -1086,7 +1171,30 @@
           _slider(sec, TIRE, "stabilizerStrength", { label: "Anti-roll", min: 0, max: 30000, step: 200 });
           _separator(sec);
           _slider(sec, CHASSIS, "mass", { label: "Mass (kg)", min: 400, max: 4000, step: 50, onChange: () => vehicle.rebuildBody() });
+          _separator(sec);
+          _toggle(sec, SOLID, "enabled", { label: "Guardrail collision" });
+          _slider(sec, SOLID, "radius", { label: "Collide radius", min: 0.2, max: 1.2, step: 0.05 });
+          _slider(sec, SOLID, "stiffness", { label: "Collide stiff", min: 50000, max: 600000, step: 5000 });
           _toggle(sec, { v: false }, "v", { label: "Force arrows", onChange: (on) => vehicle.setArrowsVisible(on) });
+        }
+
+        // ── Test obstacles + collision debug ──
+        {
+          const sec = _section(body, "Test obstacles & debug", false);
+          _toggle(sec, obstacleParams, "enabled", {
+            label: "Obstacle parkour",
+            onChange: (on) => {
+              parkour.group.visible = on;
+              bakeCollision();
+            },
+          });
+          _button(sec, "Go to parkour", () => goToParkour());
+          _button(sec, "Go to track start", () => goToTrack());
+          _separator(sec);
+          _toggle(sec, debugGroup, "visible", {
+            label: "Show collision mesh",
+            onChange: (on) => (on ? bakeCollision() : refreshCollisionDebug()),
+          });
         }
 
         // ── Guardrail (W-beam + posts on top of the kerbs) ──
