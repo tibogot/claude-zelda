@@ -792,6 +792,7 @@
       import { RoadBvh } from "./modularRoadBvh.js";
       import { buildParkour } from "./modularRoadParkour.js";
       import { PropManager, PROP_CATALOG } from "./modularRoadProps.js";
+      import { ModularRoadTireMarks } from "./modularRoadTireMarks.js";
 
       const PARAMS = {
         camera: { fov: 60 },
@@ -1018,6 +1019,7 @@
         // ── VEHICLE (test drive) ──
         const vehicle = new Vehicle({ scene });
         vehicle.setArrowsVisible(true); // force arrows on by default (physics tuning)
+        const tireMarks = new ModularRoadTireMarks(scene);
 
         // BVH colliders, (re)baked on demand. Track + parkour are static while driving.
         const deckBvh = new RoadBvh(); // road/parkour decks + ground → wheel probes
@@ -1158,8 +1160,10 @@
             collidables.push(floor);
             vehicle.setColliders(collidables, []); // raycaster fallback only
             spawnOnTrack();
+            tireMarks.reset();
           }
           vehicle.setEnabled(on);
+          if (!on) tireMarks.reset();
           state.orbitInDrive = false;
           controls.enabled = !on; // chase cam drives in drive mode
           syncOrbitButtons();
@@ -1197,7 +1201,10 @@
             return;
           }
           if (state.mode === "drive") {
-            if (e.code === "KeyR") vehicle.respawn();
+            if (e.code === "KeyR") {
+              vehicle.respawn();
+              tireMarks.reset();
+            }
             if (e.code === "KeyF") vehicle.flipUpright();
             if (e.code === "Tab") {
               e.preventDefault();
@@ -1335,6 +1342,7 @@
               if (parkour.deckMovers.length) rebakeDeckWithMovers();
             }
             vehicle.update(dt, readControls());
+            tireMarks.update(vehicle);
             updateChaseCamera(dt);
             driveHud.innerHTML = `${vehicle.speedKmh.toFixed(0)} km/h · ${vehicle.groundedCount}/4 grip`;
           } else {
