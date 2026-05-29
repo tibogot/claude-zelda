@@ -1,5 +1,5 @@
 import * as THREE from "three";
-import { MeshBVH } from "three-mesh-bvh";
+import { MeshBVH, getTriangleHitPointInfo } from "three-mesh-bvh";
 
 /**
  * RoadBvh — a merged, double-sided MeshBVH baked from an arbitrary set of
@@ -21,6 +21,8 @@ const _triA = new THREE.Vector3();
 const _triB = new THREE.Vector3();
 const _triC = new THREE.Vector3();
 const _v = new THREE.Vector3();
+const _hitTriInfo = {};
+const _hitNormal = new THREE.Vector3();
 
 export class RoadBvh {
   constructor() {
@@ -87,14 +89,34 @@ export class RoadBvh {
     return true;
   }
 
-  /** First hit along a ray (filtered to `far`). Returns the raw bvh hit or null. */
+  /** Face normal at a hit (geometry is baked in world space). */
+  _normalAtHit(point, faceIndex, outNormal) {
+    const fi = faceIndex;
+    if (fi < 0 || !this.geometry) {
+      outNormal.set(0, 1, 0);
+      return outNormal;
+    }
+    getTriangleHitPointInfo(point, this.geometry, fi, _hitTriInfo);
+    outNormal.copy(_hitTriInfo.face.normal);
+    if (outNormal.lengthSq() < 1e-12) outNormal.set(0, 1, 0);
+    else outNormal.normalize();
+    return outNormal;
+  }
+
+  /** First hit along a ray (filtered to `far`). Returns point, distance, faceIndex, normal. */
   raycastFirst(origin, dir, far = Infinity) {
     if (!this.baked) return null;
     _ray.origin.copy(origin);
     _ray.direction.copy(dir);
     const hit = this._bvh.raycastFirst(_ray, THREE.DoubleSide);
-    if (hit && hit.distance <= far) return hit;
-    return null;
+    if (!hit || hit.distance > far) return null;
+    this._normalAtHit(hit.point, hit.faceIndex, _hitNormal);
+    return {
+      point: hit.point.clone(),
+      distance: hit.distance,
+      faceIndex: hit.faceIndex,
+      normal: _hitNormal.clone(),
+    };
   }
 
   /** Nearest surface point within `maxDist`, or null. */
@@ -116,20 +138,7 @@ export class RoadBvh {
   closestPointWithNormal(px, py, pz, maxDist, outNormal) {
     const res = this.closestPointToPoint(px, py, pz, maxDist);
     if (!res) return null;
-    const fi = _closestTarget.faceIndex;
-    const index = this.geometry.getIndex();
-    const pos = this.geometry.getAttribute("position");
-    if (fi < 0 || !index || !pos) {
-      outNormal.set(0, 1, 0);
-      return res;
-    }
-    const ia = index.getX(fi * 3);
-    const ib = index.getX(fi * 3 + 1);
-    const ic = index.getX(fi * 3 + 2);
-    _triA.fromBufferAttribute(pos, ia);
-    _triB.fromBufferAttribute(pos, ib).sub(_triA);
-    _triC.fromBufferAttribute(pos, ic).sub(_triA);
-    outNormal.crossVectors(_triB, _triC).normalize();
+    this._normalAtHit(_closestTarget.point, _closestTarget.faceIndex, outNormal);
     // Orient toward the query point so it points "out of" the surface.
     if ((px - res.x) * outNormal.x + (py - res.y) * outNormal.y + (pz - res.z) * outNormal.z < 0) {
       outNormal.negate();

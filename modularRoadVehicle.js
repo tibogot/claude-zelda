@@ -3,9 +3,9 @@ import * as THREE from "three";
 /**
  * VVV-pattern raycast vehicle — recreated (not imported) from the Lotus VVV
  * physics lab so it can be tuned independently. A 6-DOF rigid body with four
- * raycast wheel probes (suspension + lateral grip + longitudinal drive),
- * chassis corner ground-contact fallback, optional wall probes, and an
- * anti-roll stabilizer.
+ * multi-ray wheel probes (tire ring + optional sphere sweep), oriented-box
+ * chassis collision vs the solids BVH, deck contact for elevated track, and
+ * surface-aligned stabilizer.
  *
  * All tuning lives in the exported mutable objects below; build a UI against
  * them and the changes take effect live. Dimension/mass edits need
@@ -33,8 +33,15 @@ export const WHEEL_LOCAL = [
 export const TIRE = {
   rayLength: 1.0,
   rayPadAbove: 0.6,
+  /** Legacy forward/lateral offsets — used only when rayRingCount < 3. */
   rayForwardBias: 0.6,
   rayLateralBias: 1.0,
+  /** Rays around the bottom semicircle of the tire (longitudinal × vertical plane). */
+  rayRingCount: 10,
+  rayRingScale: 0.92, // × wheel radius
+  /** Swept-sphere cast along the probe (catches ramp lips between discrete rays). */
+  useSphereSweep: true,
+  sphereSweepScale: 0.88, // × wheel radius
   suspVisSmooth: 12,
   restLength: 0.55,
   springStrength: 65000,
@@ -126,11 +133,12 @@ export const WALL = {
   clampPenFrac: 0.4,
 };
 
-/** Chassis-vs-solids (guardrails) collision via the solids BVH. A ring of
- *  spheres around the chassis is pushed out of the nearest surface. */
+/** Chassis-vs-solids (guardrails, ramp walls) via the solids BVH. Samples the
+ *  oriented chassis box (8 corners + 12 edge midpoints + 6 face centres) and
+ *  pushes each point out of the nearest surface within `radius`. */
 export const SOLID = {
   enabled: true,
-  radius: 0.55,
+  radius: 0.4, // search distance per box sample (m)
   stiffness: 260000,
   damper: 12000,
   clampPenFrac: 0.5,
@@ -252,11 +260,88 @@ class Tire {
     this._F = new THREE.Vector3();
     this._down = new THREE.Vector3();
     this._rayO = new THREE.Vector3();
+    this._rayOff = new THREE.Vector3();
     this._bestP = new THREE.Vector3();
     this._bestN = new THREE.Vector3(0, 1, 0);
   }
 
-  apply(body, dt, steerAngle, throttle, handbrake, castGround, driveScale = 1) {
+  /** Cast rays + optional sphere sweep; keep the closest ground hit. */
+  _probeGround(castGround, castSphereSweep, pad, far) {
+    const fwdBias = TIRE.rayForwardBias * WHEEL.radius;
+    const latBias = TIRE.rayLateralBias * WHEEL.thickness * 0.5;
+    const ringN = Math.round(TIRE.rayRingCount);
+    const ringR = WHEEL.radius * TIRE.rayRingScale;
+
+    let bestDist = Infinity;
+    let bestPoint = null;
+
+    const consider = (hit) => {
+      if (!hit || hit.distance >= bestDist) return;
+      bestDist = hit.distance;
+      if (hit.point?.isVector3) this._bestP.copy(hit.point);
+      else if (hit.point) this._bestP.set(hit.point.x, hit.point.y, hit.point.z);
+      bestPoint = this._bestP;
+      if (hit.normal?.isVector3) this._bestN.copy(hit.normal);
+      else if (hit.normal) this._bestN.set(hit.normal.x, hit.normal.y, hit.normal.z);
+      else if (hit.face?.normal) this._bestN.copy(hit.face.normal);
+      else this._bestN.set(0, 1, 0);
+    };
+
+    const sample = (dirVec, off) => {
+      this._rayO.copy(this.worldPos).addScaledVector(this._up, pad);
+      if (dirVec) this._rayO.addScaledVector(dirVec, off);
+      consider(castGround(this._rayO, this._down, far));
+    };
+
+    if (ringN >= 3) {
+      // Bottom semicircle: rear → underside → front (in the wheel fwd/down plane).
+      for (let i = 0; i < ringN; i++) {
+        const a = Math.PI * (i / (ringN - 1));
+        const ca = Math.cos(a);
+        const sa = Math.sin(a);
+        this._rayO.copy(this.worldPos).addScaledVector(this._up, pad);
+        this._rayO.addScaledVector(this._wheelFwd, ca * ringR);
+        this._rayO.addScaledVector(this._down, sa * ringR);
+        consider(castGround(this._rayO, this._down, far));
+      }
+    } else {
+      sample(null, 0);
+      if (fwdBias > 1e-4) {
+        sample(this._wheelFwd, fwdBias);
+        sample(this._wheelFwd, -fwdBias);
+      }
+      if (latBias > 1e-4) {
+        sample(this._wheelRight, latBias);
+        sample(this._wheelRight, -latBias);
+      }
+    }
+
+    if (TIRE.useSphereSweep && castSphereSweep) {
+      this._rayO.copy(this.worldPos).addScaledVector(this._up, pad);
+      const sr = WHEEL.radius * TIRE.sphereSweepScale;
+      const sh = castSphereSweep(
+        this._rayO.x,
+        this._rayO.y,
+        this._rayO.z,
+        sr,
+        this._down.x,
+        this._down.y,
+        this._down.z,
+        far,
+      );
+      if (sh) {
+        consider({
+          distance: sh.distance,
+          point: sh.point,
+          normal: sh.normal,
+        });
+      }
+    }
+
+    return bestDist === Infinity ? null : { dist: bestDist, point: bestPoint };
+  }
+
+  apply(body, dt, steerAngle, throttle, handbrake, castGround, castSphereSweep, driveScale = 1) {
     this.worldPos.copy(this.localPos).applyQuaternion(body.quat).add(body.pos);
     this._up.set(0, 1, 0).applyQuaternion(body.quat);
     this._fwd.set(0, 0, 1).applyQuaternion(body.quat);
@@ -271,48 +356,25 @@ class Tire {
     }
 
     const pad = TIRE.rayPadAbove;
-    const fwdBias = TIRE.rayForwardBias * WHEEL.radius;
     const far = TIRE.rayLength + pad;
     this._down.copy(this._up).multiplyScalar(-1);
 
-    let bestDist = Infinity;
-    let bestPoint = null;
-    const sample = (dirVec, off) => {
-      this._rayO.copy(this.worldPos).addScaledVector(this._up, pad);
-      if (dirVec) this._rayO.addScaledVector(dirVec, off);
-      const hit = castGround(this._rayO, this._down, far);
-      if (hit && hit.distance < bestDist) {
-        bestDist = hit.distance;
-        bestPoint = this._bestP.copy(hit.point);
-        if (hit.face && hit.face.normal) this._bestN.copy(hit.face.normal);
-        else this._bestN.set(0, 1, 0);
-      }
-    };
-
-    sample(null, 0);
-    if (fwdBias > 1e-4) {
-      sample(this._wheelFwd, fwdBias);
-      sample(this._wheelFwd, -fwdBias);
-    }
-    const latBias = TIRE.rayLateralBias * WHEEL.thickness * 0.5;
-    if (latBias > 1e-4) {
-      sample(this._wheelRight, latBias);
-      sample(this._wheelRight, -latBias);
-    }
+    const probe = this._probeGround(castGround, castSphereSweep, pad, far);
 
     this.lastSuspension.set(0, 0, 0);
     this.lastSteering.set(0, 0, 0);
     this.lastAccel.set(0, 0, 0);
 
-    if (bestDist === Infinity) {
+    if (!probe) {
       this.grounded = false;
       this.compression = 0;
       this.hitDistance = TIRE.rayLength;
       return;
     }
 
+    const bestDist = probe.dist;
     this.grounded = true;
-    this.hitPoint.copy(bestPoint);
+    this.hitPoint.copy(probe.point);
     this.hitNormal.copy(this._bestN);
     if (this.hitNormal.dot(this._up) < 0) this.hitNormal.negate();
     if (this.hitNormal.lengthSq() < 1e-8) this.hitNormal.copy(this._up);
@@ -442,6 +504,12 @@ export class Vehicle {
       const hits = this.raycaster.intersectObjects(this.collidables, false);
       return hits.length ? hits[0] : null;
     };
+    this._castSphereSweep = (ox, oy, oz, radius, dx, dy, dz, maxDist) => {
+      if (this.groundBvh && this.groundBvh.baked) {
+        return this.groundBvh.spherecast(ox, oy, oz, radius, dx, dy, dz, maxDist);
+      }
+      return null;
+    };
     this.SUBSTEPS = 4;
     this.respawn();
   }
@@ -507,8 +575,9 @@ export class Vehicle {
       { pos: new THREE.Vector3(), dir: new THREE.Vector3(-1, 0, 0) },
     ];
     for (let i = 0; i < 8; i++) this.CHASSIS_CORNERS.push(new THREE.Vector3());
-    this.SOLID_SAMPLES = [];
-    for (let i = 0; i < 6; i++) this.SOLID_SAMPLES.push(new THREE.Vector3());
+    /** Oriented box samples for solids BVH — corners + edge mids + face centres. */
+    this.SOLID_BOX_SAMPLES = [];
+    for (let i = 0; i < 26; i++) this.SOLID_BOX_SAMPLES.push(new THREE.Vector3());
     this._sphC = new THREE.Vector3();
     this._sphN = new THREE.Vector3();
     this._sphV = new THREE.Vector3();
@@ -565,10 +634,23 @@ export class Vehicle {
     this.PROBE_LOCALS[1].pos.set(0, 0, -hl);
     this.PROBE_LOCALS[2].pos.set(hw, 0, 0);
     this.PROBE_LOCALS[3].pos.set(-hw, 0, 0);
-    // Ring of side spheres (mid-height) used for solids/guardrail collision.
-    const s = this.SOLID_SAMPLES;
-    s[0].set(hw, 0, hl * 0.6); s[1].set(hw, 0, 0); s[2].set(hw, 0, -hl * 0.6);
-    s[3].set(-hw, 0, hl * 0.6); s[4].set(-hw, 0, 0); s[5].set(-hw, 0, -hl * 0.6);
+    // Oriented chassis box — 8 corners, 12 edge midpoints, 6 face centres.
+    const sb = this.SOLID_BOX_SAMPLES;
+    for (let i = 0; i < 8; i++) sb[i].copy(c[i]);
+    const edgePairs = [
+      [0, 1], [2, 3], [4, 5], [6, 7],
+      [0, 2], [1, 3], [4, 6], [5, 7],
+      [0, 4], [1, 5], [2, 6], [3, 7],
+    ];
+    for (let i = 0; i < 12; i++) {
+      sb[8 + i].copy(c[edgePairs[i][0]]).add(c[edgePairs[i][1]]).multiplyScalar(0.5);
+    }
+    sb[20].set(0, 0, hl); // front
+    sb[21].set(0, 0, -hl); // rear
+    sb[22].set(-hw, 0, 0); // left
+    sb[23].set(hw, 0, 0); // right
+    sb[24].set(0, hh, 0); // top
+    sb[25].set(0, -hh, 0); // bottom
   }
 
   /** Re-derive inertia + local frames + visual box after mass/size edits. */
@@ -673,7 +755,16 @@ export class Vehicle {
       this._applyAero();
       for (const tire of this.tires) {
         const driveScale = tire.isFront ? fScale : rScale;
-        tire.apply(body, subDt, steerAngle, this.input.throttle, this.input.handbrake, this._castGround, driveScale);
+        tire.apply(
+          body,
+          subDt,
+          steerAngle,
+          this.input.throttle,
+          this.input.handbrake,
+          this._castGround,
+          this._castSphereSweep,
+          driveScale,
+        );
       }
       if (this.walls.length) this._applyWallProbes();
       if (SOLID.enabled && this.solidsBvh && this.solidsBvh.baked) this._resolveSolids();
@@ -818,23 +909,20 @@ export class Vehicle {
   _resolveSolids() {
     const body = this.body;
     const r = SOLID.radius;
-    for (const sp of this.SOLID_SAMPLES) {
+    for (const sp of this.SOLID_BOX_SAMPLES) {
       this._sphC.copy(sp).applyQuaternion(body.quat).add(body.pos);
-      const res = this.solidsBvh.closestPointToPoint(this._sphC.x, this._sphC.y, this._sphC.z, r);
+      const res = this.solidsBvh.closestPointWithNormal(
+        this._sphC.x, this._sphC.y, this._sphC.z, r, this._sphN,
+      );
       if (!res) continue;
       const pen = r - res.distance;
       if (pen <= 0) continue;
-      this._sphN.set(this._sphC.x - res.x, this._sphC.y - res.y, this._sphC.z - res.z);
-      const d = this._sphN.length();
-      if (d < 1e-6) continue;
-      this._sphN.multiplyScalar(1 / d); // outward (away from surface)
       body.getVelocityAtPoint(this._sphC, this._sphV);
-      const inward = -this._sphV.dot(this._sphN); // >0 → moving into the surface
+      const inward = -this._sphV.dot(this._sphN);
       const dampMag = Math.max(0, inward) * SOLID.damper;
       const forceMag = pen * SOLID.stiffness + dampMag;
       this._sphF.copy(this._sphN).multiplyScalar(forceMag);
       body.addForceAtPoint(this._sphF, this._sphC);
-      // Kill remaining inward velocity on deep penetration to stop tunneling.
       if (pen > r * SOLID.clampPenFrac) {
         const vInto = body.vel.dot(this._sphN);
         if (vInto < 0) body.vel.addScaledVector(this._sphN, -vInto);
