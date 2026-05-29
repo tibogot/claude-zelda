@@ -492,6 +492,8 @@ export class Vehicle {
     this.wallBoxes = [];
     this.groundBvh = null;
     this.solidsBvh = null;
+    /** @type {import("./modularRoadParkour.js").ParkourMover[]} */
+    this.dynamicMovers = [];
     this.enabled = false;
     this.spawnPos = new THREE.Vector3(0, 0.7, -4);
     this.spawnQuat = new THREE.Quaternion().setFromAxisAngle(new THREE.Vector3(0, 1, 0), Math.PI);
@@ -619,6 +621,7 @@ export class Vehicle {
     this.BOTTOM_CORNERS = [0, 1, 4, 5];
     this._aeroF = new THREE.Vector3();
     this._aeroUp = new THREE.Vector3();
+    this._surfV = new THREE.Vector3();
     this._probeOrigin = new THREE.Vector3();
     this._probeDirW = new THREE.Vector3();
     this._probeVel = new THREE.Vector3();
@@ -700,6 +703,11 @@ export class Vehicle {
   setBvh(ground, solids) {
     this.groundBvh = ground || null;
     this.solidsBvh = solids || null;
+  }
+
+  /** Moving parkour solids — each mover rebakes its own BVH and pushes via surface velocity. */
+  setDynamicMovers(movers) {
+    this.dynamicMovers = movers ? movers.slice() : [];
   }
 
   setSpawn(pos, quat) {
@@ -932,25 +940,44 @@ export class Vehicle {
   }
 
   _resolveSolids() {
+    if (SOLID.enabled && this.solidsBvh?.baked) this._resolveSolidBvh(this.solidsBvh, null);
+    for (const mover of this.dynamicMovers) {
+      if (mover.bvh?.baked) this._resolveSolidBvh(mover.bvh, (p, out) => mover.velocityAt(p, out));
+    }
+  }
+
+  _resolveSolidBvh(bvh, surfaceVelFn) {
     const body = this.body;
     const r = SOLID.radius;
     for (const sp of this.SOLID_BOX_SAMPLES) {
       this._geomToWorld(sp, this._sphC);
-      const res = this.solidsBvh.closestPointWithNormal(
+      const res = bvh.closestPointWithNormal(
         this._sphC.x, this._sphC.y, this._sphC.z, r, this._sphN,
       );
       if (!res) continue;
       const pen = r - res.distance;
       if (pen <= 0) continue;
       body.getVelocityAtPoint(this._sphC, this._sphV);
+      if (surfaceVelFn) {
+        surfaceVelFn(this._sphC, this._surfV);
+        this._sphV.sub(this._surfV);
+      }
       const inward = -this._sphV.dot(this._sphN);
       const dampMag = Math.max(0, inward) * SOLID.damper;
       const forceMag = pen * SOLID.stiffness + dampMag;
       this._sphF.copy(this._sphN).multiplyScalar(forceMag);
       body.addForceAtPoint(this._sphF, this._sphC);
+      if (surfaceVelFn && pen > 0.02) {
+        surfaceVelFn(this._sphC, this._surfV);
+        body.vel.addScaledVector(this._surfV, Math.min(0.4, pen * 1.8));
+      }
       if (pen > r * SOLID.clampPenFrac) {
         const vInto = body.vel.dot(this._sphN);
         if (vInto < 0) body.vel.addScaledVector(this._sphN, -vInto);
+        if (surfaceVelFn) {
+          surfaceVelFn(this._sphC, this._surfV);
+          body.vel.addScaledVector(this._surfV, 0.12);
+        }
       }
     }
   }

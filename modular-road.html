@@ -756,9 +756,10 @@
           </div>
           <div id="road-status">0 placed</div>
           <div id="build-hints">
-            Pieces auto-snap to the open end. <kbd>N</kbd> new chain anywhere (even air)
-            &bull; <kbd>Q</kbd>/<kbd>E</kbd> rotate free ghost &bull; <kbd>LMB</kbd> or
-            <kbd>Enter</kbd> place &bull; <kbd>MMB</kbd> orbit &bull; <kbd>R</kbd> flip curve.
+            Pieces auto-snap to the open end. <kbd>N</kbd> new chain + placement gizmo
+            &bull; drag <kbd>Y</kbd> axis for height &bull; <kbd>W</kbd> move
+            <kbd>Shift+E</kbd> rotate &bull; <kbd>Q</kbd>/<kbd>E</kbd> yaw nudge
+            &bull; <kbd>LMB</kbd>/<kbd>Enter</kbd> place.
           </div>
         </div>
       </div>
@@ -988,16 +989,20 @@
           railMaterial: railMat,
           shellMaterial: shellMat,
           decorMaterial: decorMat,
+          camera,
+          domElement: renderer.domElement,
+          orbit: controls,
           isBuildMode: () => state.mode === "build" && state.buildMode,
           onChange: () => paletteUi?.refreshStatus(),
         });
         paletteUi = buildRoadPaletteUI(builder, {
           propCatalog: PROP_CATALOG,
           onAddProp: (id) => props.add(id),
-          onEdgesChange: () => builder.rebuildAll(),
+          onEdgesChange: () => bakeCollision(),
         });
 
         function beginFreeChain() {
+          props.deselect();
           builder.beginNewChain(controls.target.clone());
           paletteUi?.refreshStatus();
         }
@@ -1024,6 +1029,11 @@
         scene.add(parkour.group);
         const obstacleParams = { enabled: true };
         parkour.group.visible = obstacleParams.enabled;
+
+        function syncParkourMovers() {
+          vehicle.setDynamicMovers(obstacleParams.enabled ? parkour.movers : []);
+        }
+        syncParkourMovers();
 
         // ── FREE-PLACEMENT PROPS (gizmo) ──
         const props = new PropManager({
@@ -1067,7 +1077,7 @@
           const solids = [];
           for (const p of builder.pieces) {
             if (p.railMesh) solids.push(p.railMesh);
-            if (p.shellMesh) solids.push(p.shellMesh); // tunnel walls/roof block the chassis
+            if (p.shellMesh) solids.push(p.shellMesh);
           }
           if (obstacleParams.enabled) {
             decks.push(...parkour.deckMeshes);
@@ -1080,6 +1090,22 @@
           solidsBvh.bakeFromMeshes(solids);
           refreshCollisionDebug();
           paletteUi?.refreshStatus?.();
+        }
+
+        /** Rebake wheel deck BVH including moving elevator platform. */
+        function rebakeDeckWithMovers() {
+          scene.updateMatrixWorld(true);
+          const decks = builder.pieces
+            .map((p) => p.mesh)
+            .filter((m) => !m.userData.noCollision);
+          decks.push(floor);
+          if (obstacleParams.enabled) {
+            decks.push(...parkour.deckMeshes);
+            for (const dm of parkour.deckMovers) decks.push(dm.mesh);
+          }
+          const propCol = props.collisionMeshes();
+          decks.push(...propCol.deck);
+          deckBvh.bakeFromMeshes(decks);
         }
 
         // ── BUILD MODE TOGGLE (orbit vs place, only relevant in build mode) ──
@@ -1117,15 +1143,15 @@
           camModeEl.textContent = on ? "DRIVE" : state.buildMode ? "BUILD" : "ORBIT";
           modeHint.innerHTML = on
             ? "WASD drive &bull; in air: W/S pitch, A/D roll, Q/E spin &bull; Space handbrake &bull; F flip upright &bull; R respawn &bull; Tab orbit cam"
-            : "LMB place &bull; N new chain &bull; Q/E rotate ghost &bull; <kbd>1</kbd>–<kbd>0</kbd>/<kbd>c</kbd> pick &bull; R flip &bull; Backspace undo";
+            : "LMB place &bull; N new chain + gizmo &bull; W move Shift+E rotate &bull; 1–0 pick &bull; R flip &bull; Backspace undo";
           builder.setGhostVisible(!on && state.buildMode);
           props.setEnabled(!on); // gizmo/selection only outside drive mode
           if (on) {
-            // Bake a deck BVH (wheel probes) and a solids BVH (guardrail
-            // collision) from the current track. Decks + ground go to the
-            // deck tree; guardrails go to the solids tree so the chassis is
-            // blocked without the false AABB shoves we had before.
             bakeCollision();
+            if (obstacleParams.enabled) {
+              parkour.update(0);
+              if (parkour.deckMovers.length) rebakeDeckWithMovers();
+            }
             const collidables = builder.pieces
               .map((p) => p.mesh)
               .filter((m) => !m.userData.noCollision);
@@ -1152,32 +1178,11 @@
         // ── PLACE ON LMB (build mode only) ──
         renderer.domElement.addEventListener("pointerdown", (e) => {
           if (e.button !== 0 || state.mode !== "build" || !state.buildMode) return;
-          if (props.isUsingGizmo()) return; // grabbing a prop gizmo handle, not placing road
+          if (props.isUsingGizmo() || builder.isUsingPlacementGizmo()) return;
           builder.place();
           paletteUi.refreshStatus();
         });
         renderer.domElement.addEventListener("contextmenu", (e) => e.preventDefault());
-
-        const _placeRay = new THREE.Raycaster();
-        const _placeNdc = new THREE.Vector2();
-        const _placeHit = new THREE.Vector3();
-        const _placePlane = new THREE.Plane(new THREE.Vector3(0, 1, 0), 0);
-        function updateFreePlacementFromPointer(e) {
-          if (!builder.freePlaceMode || state.mode !== "build" || !state.buildMode) return;
-          const rect = renderer.domElement.getBoundingClientRect();
-          _placeNdc.x = ((e.clientX - rect.left) / rect.width) * 2 - 1;
-          _placeNdc.y = -((e.clientY - rect.top) / rect.height) * 2 + 1;
-          _placeRay.setFromCamera(_placeNdc, camera);
-          _placePlane.constant = -controls.target.y;
-          if (_placeRay.ray.intersectPlane(_placePlane, _placeHit)) {
-            builder.setFreePlacement(_placeHit, builder.freeYaw);
-            return;
-          }
-          const dist = Math.max(8, camera.position.distanceTo(controls.target));
-          _placeHit.copy(_placeRay.ray.origin).addScaledVector(_placeRay.ray.direction, dist);
-          builder.setFreePlacement(_placeHit, builder.freeYaw);
-        }
-        renderer.domElement.addEventListener("pointermove", updateFreePlacementFromPointer);
 
         // ── INPUT ──
         const keys = Object.create(null);
@@ -1325,6 +1330,10 @@
           const dt = Math.min(now - lastT, 0.05);
           lastT = now;
           if (state.mode === "drive") {
+            if (obstacleParams.enabled) {
+              parkour.update(dt);
+              if (parkour.deckMovers.length) rebakeDeckWithMovers();
+            }
             vehicle.update(dt, readControls());
             updateChaseCamera(dt);
             driveHud.innerHTML = `${vehicle.speedKmh.toFixed(0)} km/h · ${vehicle.groundedCount}/4 grip`;
@@ -1580,6 +1589,7 @@
             label: "Obstacle parkour",
             onChange: (on) => {
               parkour.group.visible = on;
+              syncParkourMovers();
               bakeCollision();
             },
           });

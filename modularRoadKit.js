@@ -30,6 +30,7 @@ export const roadParams = {
  * follows slopes/curves in 3D. Built as a separate metal mesh per piece.
  */
 export const guardrailParams = {
+  /** Kerbs + W-beam guardrails on new pieces when true; flat deck when false. */
   enabled: true,
   beamHeight: 0.8, // vertical height of the W-beam (m)
   beamDepth: 0.1, // lateral thickness of the beam (m)
@@ -86,11 +87,24 @@ export const pieceParams = {
  * plane. The deck top sits at y = 0; rails rise to +railHeight; the slab extends
  * down to -thickness. Each point carries a `zone`: 0 = side/underside,
  * 1 = drivable deck, 2 = rail top.
+ * @param {object} p road cross-section params
+ * @param {boolean} [withKerbs=true] false = flat deck only (no raised kerbs)
  * @returns {{ pts: {x:number,y:number,zone:number}[], hw:number }}
  */
-export function buildProfile(p = roadParams) {
+export function buildProfile(p = roadParams, withKerbs = true) {
   const hw = p.width / 2;
   const t = Math.max(0.05, p.thickness);
+
+  if (!withKerbs) {
+    const pts = [
+      { x: -hw, y: 0, zone: 1 },
+      { x: hw, y: 0, zone: 1 },
+      { x: hw, y: -t, zone: 0 },
+      { x: -hw, y: -t, zone: 0 },
+    ];
+    return { pts, hw };
+  }
+
   const rw = Math.min(Math.max(0.0, p.railWidth), hw * 0.45);
   const rh = Math.max(0.0, p.railHeight);
 
@@ -1022,22 +1036,19 @@ export function initialConnector() {
  * @param {string} pieceId
  * @param {THREE.Matrix4} currentConnector
  * @param {object} [pp] piece params snapshot
- * @param {object} [rp] road params snapshot
+ * @param {object} [gp] guardrail params snapshot
+ * @param {boolean} [edges] kerbs + guardrails; defaults to gp.enabled
  */
-export function buildPiece(pieceId, currentConnector, pp = pieceParams, rp = roadParams, gp = guardrailParams) {
+export function buildPiece(pieceId, currentConnector, pp = pieceParams, rp = roadParams, gp = guardrailParams, edges = gp.enabled) {
   const def = PIECE_BY_ID.get(pieceId);
   if (!def) throw new Error(`Unknown road piece: ${pieceId}`);
 
   const points = def.points(pp);
   const frames = computeFrames(points, _up);
   if (def.roll) applyRoll(frames, def.roll, pp);
-  const profileData = buildProfile(rp);
-  // Always build a valid (non-empty) sweep so the renderer never sees an empty
-  // geometry. `noMesh` pieces (gap spacer) keep this geometry but the builder
-  // hides the mesh and excludes it from collision — it only advances the
-  // connector across empty space. They also carry no guardrails.
+  const profileData = buildProfile(rp, edges);
   const geometry = buildSweepGeometry(frames, profileData);
-  const railGeometry = def.noMesh ? null : buildGuardrailGeometry(frames, profileData, gp, rp);
+  const railGeometry = edges && !def.noMesh ? buildGuardrailGeometry(frames, profileData, gp, rp) : null;
   const shellGeometry = def.shell ? buildTunnelGeometry(frames, profileData, pp) : null;
   const decorGeometry = def.game ? buildGameDecorGeometry(frames, profileData, def.game) : null;
 

@@ -1,4 +1,5 @@
 import * as THREE from "three";
+import { TransformControls } from "three/addons/controls/TransformControls.js";
 import {
   PIECE_CATALOG,
   PIECE_BY_ID,
@@ -24,15 +25,30 @@ export class ModularRoadBuilder {
    * @param {THREE.Material} [o.railMaterial] shared guardrail material
    * @param {THREE.Material} [o.shellMaterial] shared tunnel-shell material
    * @param {THREE.Material} [o.decorMaterial] start/finish/checkpoint decor
+   * @param {THREE.Camera} [o.camera] for free-placement gizmo
+   * @param {HTMLElement} [o.domElement] canvas element for gizmo input
+   * @param {import("three/addons/controls/OrbitControls.js").OrbitControls} [o.orbit]
    * @param {() => boolean} [o.isBuildMode]
    * @param {() => void} [o.onChange]
    */
-  constructor({ scene, material, railMaterial = null, shellMaterial = null, decorMaterial = null, isBuildMode = () => true, onChange = null }) {
+  constructor({
+    scene,
+    material,
+    railMaterial = null,
+    shellMaterial = null,
+    decorMaterial = null,
+    camera = null,
+    domElement = null,
+    orbit = null,
+    isBuildMode = () => true,
+    onChange = null,
+  }) {
     this.scene = scene;
     this.material = material;
     this.railMaterial = railMaterial;
     this.shellMaterial = shellMaterial;
     this.decorMaterial = decorMaterial;
+    this.orbit = orbit;
     this.isBuildMode = isBuildMode;
     this.onChange = onChange;
 
@@ -61,6 +77,25 @@ export class ModularRoadBuilder {
     this.ghost.name = "ModularRoadGhost";
     this.ghost.matrixAutoUpdate = false;
     scene.add(this.ghost);
+
+    /** Pivot + gizmo for free-chain placement (N). */
+    this.placementPivot = new THREE.Object3D();
+    this.placementPivot.name = "RoadPlacementPivot";
+    scene.add(this.placementPivot);
+    this.placementGizmo = null;
+    if (camera && domElement) {
+      this.placementGizmo = new TransformControls(camera, domElement);
+      this.placementGizmo.setMode("translate");
+      this.placementGizmo.setSpace("world");
+      this.placementGizmo.enabled = false;
+      this.placementGizmo.visible = false;
+      this.placementGizmo.size = 1.15;
+      scene.add(this.placementGizmo.getHelper());
+      this.placementGizmo.addEventListener("dragging-changed", (e) => {
+        if (this.orbit) this.orbit.enabled = !e.value && this.isBuildMode();
+      });
+      this.placementGizmo.addEventListener("change", () => this._onPlacementGizmoChange());
+    }
 
     this.refreshGhost();
   }
@@ -91,19 +126,64 @@ export class ModularRoadBuilder {
     this._notify();
   }
 
-  /** Start a disconnected chain — ghost moves with the pointer / orbit target. */
+  /** Start a disconnected chain — ghost follows the placement gizmo. */
   beginNewChain(atPos = null, yaw = null) {
     this.freePlaceMode = true;
     if (yaw != null) this.freeYaw = yaw;
     if (atPos) this._freePos.copy(atPos);
+    else if (this.orbit?.target) this._freePos.copy(this.orbit.target);
     this._applyFreeConnector();
+    this._showPlacementGizmo();
     this.refreshGhost();
     this._notify();
+  }
+
+  setPlacementGizmoMode(mode) {
+    if (!this.placementGizmo || !this.freePlaceMode) return;
+    this.placementGizmo.setMode(mode);
+    this._notify();
+  }
+
+  /** True while dragging / hovering the free-placement gizmo (suppress LMB place). */
+  isUsingPlacementGizmo() {
+    return (
+      this.freePlaceMode &&
+      this.placementGizmo &&
+      (this.placementGizmo.dragging || this.placementGizmo.axis != null)
+    );
+  }
+
+  _showPlacementGizmo() {
+    if (!this.placementGizmo) return;
+    this.placementPivot.position.copy(this._freePos);
+    this.placementPivot.rotation.set(0, this.freeYaw, 0);
+    this.placementGizmo.attach(this.placementPivot);
+    this.placementGizmo.setMode("translate");
+    this.placementGizmo.enabled = true;
+    this.placementGizmo.visible = true;
+  }
+
+  _hidePlacementGizmo() {
+    if (!this.placementGizmo) return;
+    this.placementGizmo.detach();
+    this.placementGizmo.enabled = false;
+    this.placementGizmo.visible = false;
+  }
+
+  _onPlacementGizmoChange() {
+    if (!this.freePlaceMode) return;
+    this._freePos.copy(this.placementPivot.position);
+    this.freeYaw = this.placementPivot.rotation.y;
+    this.placementPivot.rotation.set(0, this.freeYaw, 0);
+    this._applyFreeConnector();
+    this.refreshGhost();
   }
 
   setFreePlacement(pos, yaw) {
     this._freePos.copy(pos);
     if (yaw !== undefined) this.freeYaw = yaw;
+    this.placementPivot.position.copy(this._freePos);
+    this.placementPivot.rotation.set(0, this.freeYaw, 0);
     this._applyFreeConnector();
     this.refreshGhost();
   }
@@ -111,6 +191,7 @@ export class ModularRoadBuilder {
   rotateFreeYaw(delta) {
     if (!this.freePlaceMode) return;
     this.freeYaw += delta;
+    this.placementPivot.rotation.set(0, this.freeYaw, 0);
     this._applyFreeConnector();
     this.refreshGhost();
   }
@@ -128,6 +209,8 @@ export class ModularRoadBuilder {
       this.currentConnector,
       pieceParams,
       roadParams,
+      guardrailParams,
+      guardrailParams.enabled,
     );
     this.ghost.geometry.dispose();
     this.ghost.geometry = geometry;
@@ -136,7 +219,10 @@ export class ModularRoadBuilder {
   }
 
   setGhostVisible(v) {
-    this.ghost.visible = v && this.isBuildMode();
+    const on = v && this.isBuildMode();
+    this.ghost.visible = on;
+    if (on && this.freePlaceMode) this._showPlacementGizmo();
+    else this._hidePlacementGizmo();
   }
 
   _makeMesh(geometry, material, world) {
@@ -152,12 +238,14 @@ export class ModularRoadBuilder {
   /** Place the active piece onto the open end. */
   place() {
     const connectorIn = this.currentConnector.clone();
+    const edges = guardrailParams.enabled;
     const built = buildPiece(
       this.activePieceId,
       connectorIn,
       pieceParams,
       roadParams,
       guardrailParams,
+      edges,
     );
     const mesh = this._makeMesh(built.geometry, this.material, built.world);
     mesh.userData.pieceId = this.activePieceId;
@@ -182,6 +270,7 @@ export class ModularRoadBuilder {
     this.pieces.push({
       id: this.activePieceId,
       pp: this._snapshotParams(),
+      edges,
       mesh,
       railMesh,
       shellMesh,
@@ -191,6 +280,7 @@ export class ModularRoadBuilder {
     });
     this.currentConnector = built.connectorOut.clone();
     this.freePlaceMode = false;
+    this._hidePlacementGizmo();
     this.refreshGhost();
     this._notify();
     return mesh;
@@ -229,6 +319,7 @@ export class ModularRoadBuilder {
     for (const p of this.pieces) this._removePiece(p);
     this.pieces = [];
     this.freePlaceMode = false;
+    this._hidePlacementGizmo();
     this.currentConnector = initialConnector();
     this.refreshGhost();
     this._notify();
@@ -240,7 +331,8 @@ export class ModularRoadBuilder {
    */
   rebuildAll() {
     for (const p of this.pieces) {
-      const built = buildPiece(p.id, p.connectorIn, p.pp, roadParams, guardrailParams);
+      const edges = p.edges ?? true;
+      const built = buildPiece(p.id, p.connectorIn, p.pp, roadParams, guardrailParams, edges);
       p.mesh.geometry.dispose();
       p.mesh.geometry = built.geometry;
       p.mesh.matrix.copy(built.world);
@@ -318,6 +410,10 @@ export class ModularRoadBuilder {
 
   dispose() {
     this.clear();
+    this._hidePlacementGizmo();
+    this.placementGizmo?.dispose();
+    this.scene.remove(this.placementGizmo?.getHelper());
+    this.scene.remove(this.placementPivot);
     this.scene.remove(this.ghost);
     this.ghost.geometry.dispose();
     this.ghostMat.dispose();
@@ -515,7 +611,7 @@ export function buildRoadPaletteUI(builder, opts = {}) {
       const curveIds = new Set(["curve", "banked", "scurve", "spiral"]);
       statusEl.textContent = `${builder.count} placed · ${label}${
         curveIds.has(builder.activePieceId) ? " (" + dir + ")" : ""
-      }${builder.freePlaceMode ? " · free place (Q/E rotate)" : ""}`;
+      }${builder.freePlaceMode ? " · gizmo: W move · Shift+E rotate · Q/E yaw" : ""}`;
     }
     for (const [key, btn] of pieceTiles) {
       const isProp = key.endsWith(":prop");
@@ -551,6 +647,7 @@ export function buildRoadPaletteUI(builder, opts = {}) {
   edgesBtn?.addEventListener("click", () => {
     guardrailParams.enabled = !guardrailParams.enabled;
     syncEdgesBtn();
+    builder.refreshGhost();
     onEdgesChange?.();
   });
   syncEdgesBtn();
@@ -600,7 +697,11 @@ export function buildRoadPaletteUI(builder, opts = {}) {
       builder.rotateFreeYaw(Math.PI / 12);
       refreshStatus();
     } else if (e.code === "KeyE" && builder.freePlaceMode && builder.isBuildMode()) {
-      builder.rotateFreeYaw(-Math.PI / 12);
+      if (e.shiftKey) builder.setPlacementGizmoMode("rotate");
+      else builder.rotateFreeYaw(-Math.PI / 12);
+      refreshStatus();
+    } else if (e.code === "KeyW" && builder.freePlaceMode && builder.isBuildMode()) {
+      builder.setPlacementGizmoMode("translate");
       refreshStatus();
     } else if (e.code === "Enter" || e.code === "Space") {
       if (builder.isBuildMode()) {
