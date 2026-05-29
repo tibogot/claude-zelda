@@ -862,7 +862,7 @@
           driveHud.style.display = on ? "" : "none";
           camModeEl.textContent = on ? "DRIVE" : state.buildMode ? "BUILD" : "ORBIT";
           modeHint.innerHTML = on
-            ? "WASD drive &bull; in air: W/S pitch, A/D roll &bull; Space handbrake &bull; F flip upright &bull; R respawn &bull; Tab orbit cam"
+            ? "WASD drive &bull; in air: W/S pitch, A/D roll, Q/E spin &bull; Space handbrake &bull; F flip upright &bull; R respawn &bull; Tab orbit cam"
             : "LMB place &bull; MMB orbit &bull; <kbd>1</kbd>–<kbd>0</kbd>/<kbd>c</kbd> pick &bull; R flip &bull; Backspace undo";
           builder.setGhostVisible(!on && state.buildMode);
           if (on) {
@@ -928,34 +928,91 @@
           const right = keys.KeyD || keys.ArrowRight ? 1 : 0;
           const fwd = keys.KeyW || keys.ArrowUp ? 1 : 0;
           const back = keys.KeyS || keys.ArrowDown ? 1 : 0;
-          return { steerTarget: left - right, throttle: fwd - back, handbrake: !!keys.Space };
+          const spinR = keys.KeyE ? 1 : 0;
+          const spinL = keys.KeyQ ? 1 : 0;
+          return { steerTarget: left - right, throttle: fwd - back, handbrake: !!keys.Space, yaw: spinR - spinL };
         }
 
-        // ── CHASE CAMERA ──
-        const CAM_OFFSET = new THREE.Vector3(0, 3.2, -7.5);
-        const _camTarget = new THREE.Vector3();
+        // ── CHASE CAMERA (velocity-oriented) ──
+        // The camera trails the car's *travel direction* (from velocity), NOT the
+        // car's orientation. So mid-air spins/rolls don't whip the view around —
+        // it stays behind where the car is actually going — and the look tilts up
+        // when climbing / down when falling so you can see the landing.
+        const CAM = {
+          dist: 7.5,        // trail distance behind the heading
+          height: 3.2,      // height above the car
+          lookAhead: 5.5,   // how far ahead (along travel) to aim
+          lookUp: 1.2,      // raise the look target a touch
+          minSpeed: 3.0,    // below this, fall back to the car's facing
+          maxLookPitch: 0.85, // clamp so we never look fully straight up/down
+          headingLerp: 4.0, // how fast the trailing heading reorients
+          lookLerp: 5.0,    // how fast the look direction tracks velocity
+          posLerp: 7.0,     // camera position smoothing
+        };
+        const _camHeading = new THREE.Vector3(0, 0, 1); // horizontal trail heading
+        const _camLookDir = new THREE.Vector3(0, 0, 1); // 3D look direction
         const _camDesired = new THREE.Vector3();
         const _camLook = new THREE.Vector3();
-        const _yawQuat = new THREE.Quaternion();
-        const _yawEuler = new THREE.Euler(0, 0, 0, "YXZ");
-        function yawOnly(q) {
-          const siny = 2 * (q.w * q.y + q.z * q.x);
-          const cosy = 1 - 2 * (q.y * q.y + q.x * q.x);
-          return Math.atan2(siny, cosy);
-        }
+        const _camV = new THREE.Vector3();
+        const _camFwd = new THREE.Vector3();
+        const _camTgtH = new THREE.Vector3();
+        const _worldUp = new THREE.Vector3(0, 1, 0);
+        let _camInit = false;
         function updateChaseCamera(dt) {
           if (state.orbitInDrive) {
             controls.target.copy(vehicle.body.pos);
             controls.update();
             return;
           }
-          _yawEuler.y = yawOnly(vehicle.body.quat);
-          _yawQuat.setFromEuler(_yawEuler);
-          _camTarget.copy(CAM_OFFSET).applyQuaternion(_yawQuat);
-          _camDesired.copy(vehicle.body.pos).add(_camTarget);
-          const k = 1 - Math.exp(-6 * dt);
-          camera.position.lerp(_camDesired, k);
-          _camLook.copy(vehicle.body.pos).add(new THREE.Vector3(0, 0.8, 0));
+          const pos = vehicle.body.pos;
+          const v = vehicle.body.vel;
+          const speed = v.length();
+          const grounded = vehicle.groundedCount > 0;
+          _camFwd.set(0, 0, 1).applyQuaternion(vehicle.body.quat); // car facing (fallback)
+          const reversing = grounded && v.dot(_camFwd) < -0.5;
+
+          // 3D look direction: travel dir when moving, else the car's facing.
+          if (speed > CAM.minSpeed && !reversing) _camV.copy(v).multiplyScalar(1 / speed);
+          else _camV.copy(_camFwd);
+
+          // Horizontal trail heading: from velocity when moving forward; the car's
+          // facing on the ground; held steady in the air at low horizontal speed
+          // (so a flat spin or a near-vertical climb doesn't spin the camera).
+          const hSpeed = Math.hypot(v.x, v.z);
+          if (hSpeed > CAM.minSpeed && !reversing) {
+            _camTgtH.set(v.x, 0, v.z).multiplyScalar(1 / hSpeed);
+          } else if (grounded) {
+            _camTgtH.set(_camFwd.x, 0, _camFwd.z);
+            if (_camTgtH.lengthSq() > 1e-6) _camTgtH.normalize();
+            else _camTgtH.copy(_camHeading);
+          } else {
+            _camTgtH.copy(_camHeading);
+          }
+
+          if (!_camInit) {
+            _camHeading.copy(_camTgtH);
+            _camLookDir.copy(_camV);
+            _camInit = true;
+          }
+
+          const kh = 1 - Math.exp(-CAM.headingLerp * dt);
+          _camHeading.lerp(_camTgtH, kh);
+          if (_camHeading.lengthSq() < 1e-6) _camHeading.copy(_camTgtH);
+          _camHeading.normalize();
+
+          const kl = 1 - Math.exp(-CAM.lookLerp * dt);
+          _camLookDir.lerp(_camV, kl);
+          if (_camLookDir.y > CAM.maxLookPitch) _camLookDir.y = CAM.maxLookPitch;
+          else if (_camLookDir.y < -CAM.maxLookPitch) _camLookDir.y = -CAM.maxLookPitch;
+          if (_camLookDir.lengthSq() < 1e-6) _camLookDir.copy(_camV);
+          _camLookDir.normalize();
+
+          _camDesired.copy(pos).addScaledVector(_camHeading, -CAM.dist).addScaledVector(_worldUp, CAM.height);
+          const kp = 1 - Math.exp(-CAM.posLerp * dt);
+          camera.position.lerp(_camDesired, kp);
+
+          _camLook.copy(pos).addScaledVector(_camLookDir, CAM.lookAhead);
+          _camLook.y += CAM.lookUp;
           camera.lookAt(_camLook);
         }
 
@@ -1208,8 +1265,10 @@
           _separator(sec);
           _slider(sec, TIRE, "stabilizerStrength", { label: "Surface align", min: 0, max: 30000, step: 200 });
           _slider(sec, TIRE, "stabilizerDamp", { label: "Align damp", min: 0, max: 8000, step: 100 });
-          _slider(sec, TIRE, "airControl", { label: "Air control", min: 0, max: 15000, step: 250 });
-          _slider(sec, TIRE, "airAngularDamp", { label: "Air spin damp", min: 0, max: 5000, step: 100 });
+          _slider(sec, TIRE, "airControl", { label: "Air pitch/roll", min: 0, max: 15000, step: 250 });
+          _slider(sec, TIRE, "airYawControl", { label: "Air spin (Q/E)", min: 0, max: 15000, step: 250 });
+          _slider(sec, TIRE, "airAngularDamp", { label: "Air tilt damp", min: 0, max: 5000, step: 100 });
+          _slider(sec, TIRE, "airYawDamp", { label: "Air spin damp", min: 0, max: 5000, step: 50 });
           _separator(sec);
           _slider(sec, AERO, "drag", { label: "Aero drag", min: 0, max: 3, step: 0.05 });
           _slider(sec, AERO, "downforce", { label: "Downforce", min: 0, max: 12, step: 0.25 });

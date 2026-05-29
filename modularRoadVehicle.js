@@ -73,9 +73,13 @@ export const TIRE = {
   // fighting toward world-up); `stabilizerDamp` damps the roll/pitch rate.
   stabilizerStrength: 9000,
   stabilizerDamp: 2600,
-  // Airborne control: gentle tumble damping + player torque (W/S pitch, A/D roll).
+  // Airborne control: gentle tumble damping + player torque (W/S pitch, A/D roll,
+  // Q/E yaw spin). Yaw is damped far less (`airYawDamp`) than pitch/roll so a
+  // flat spin actually carries once you start it.
   airAngularDamp: 1400,
   airControl: 5000,
+  airYawControl: 4500,
+  airYawDamp: 250,
 };
 
 /** Drivetrain. `layout` picks which axle(s) get engine torque; for AWD,
@@ -416,7 +420,7 @@ export class Vehicle {
 
     this.body = new RigidBody({ mass: CHASSIS.mass, size: CHASSIS });
     this.tires = WHEEL_LOCAL.map((w) => new Tire({ name: w.name, localPos: w.pos, steer: w.steer, drive: w.drive }));
-    this.input = { steer: 0, throttle: 0, handbrake: false };
+    this.input = { steer: 0, throttle: 0, handbrake: false, yaw: 0 };
 
     this.group = new THREE.Group();
     this.group.name = "Vehicle";
@@ -631,6 +635,7 @@ export class Vehicle {
     this.input.steer += ((controls.steerTarget ?? 0) - this.input.steer) * k;
     this.input.throttle = controls.throttle ?? 0;
     this.input.handbrake = !!controls.handbrake;
+    this.input.yaw = controls.yaw ?? 0;
 
     this._physicsStep(dt);
     this._depenetrateFromWalls();
@@ -705,14 +710,19 @@ export class Vehicle {
       this._stabTorque.addScaledVector(this._stabWTilt, -TIRE.stabilizerDamp);
       body.torqueAccum.add(this._stabTorque);
     } else {
-      // Airborne: gentle tumble damping + player air control.
-      this._stabTorque.copy(body.angVel).multiplyScalar(-TIRE.airAngularDamp);
+      // Airborne: damp pitch/roll firmly but yaw lightly (so a flat spin carries),
+      // plus player air control — W/S pitch, A/D roll, Q/E yaw spin.
+      const wYaw = body.angVel.dot(this._stabUp);
+      this._stabWTilt.copy(body.angVel).addScaledVector(this._stabUp, -wYaw);
+      this._stabTorque.copy(this._stabWTilt).multiplyScalar(-TIRE.airAngularDamp);
+      this._stabTorque.addScaledVector(this._stabUp, -wYaw * TIRE.airYawDamp);
       if (TIRE.airControl > 0) {
         this._airRight.set(1, 0, 0).applyQuaternion(body.quat);
         this._airFwd.set(0, 0, 1).applyQuaternion(body.quat);
         this._stabTorque.addScaledVector(this._airRight, -this.input.throttle * TIRE.airControl);
         this._stabTorque.addScaledVector(this._airFwd, this.input.steer * TIRE.airControl);
       }
+      this._stabTorque.addScaledVector(this._stabUp, this.input.yaw * TIRE.airYawControl);
       body.torqueAccum.add(this._stabTorque);
     }
   }
