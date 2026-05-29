@@ -2,7 +2,7 @@ import * as THREE from "three";
 import { RoadBvh } from "./modularRoadBvh.js";
 
 /**
- * Obstacle parkour — large static ramps/steps/banks plus moving solids that
+ * Obstacle parkour — large static ramps/steps/banks/curved ramps plus moving solids
  * shove the car (spinning bars, sliding gates). Static decks go to the deck
  * BVH; static + dynamic obstacle meshes go to the solids BVH (dynamic rebaked
  * each frame while driving).
@@ -52,6 +52,85 @@ function bankGeometry(w, l, bankRad) {
   quad([hw, 0, -hl], [hw, H, -hl], [hw, H, hl], [hw, 0, hl]);
   tri([-hw, 0, -hl], [-hw, 0, hl], [hw, H, hl]);
   tri([-hw, 0, -hl], [hw, H, hl], [hw, H, -hl]);
+  const geo = new THREE.BufferGeometry();
+  geo.setAttribute("position", new THREE.Float32BufferAttribute(pos, 3));
+  geo.computeVertexNormals();
+  geo.computeBoundingSphere();
+  return geo;
+}
+
+/**
+ * Curved drive ramp: starts at local (0,0,0) heading −Z, turns by `angleDeg`
+ * (curveDir ±1), rises to `rise` with smoothstep. Low edge at y = 0.
+ */
+function curveRampGeometry(w, radius, angleDeg, rise, curveDir = 1, segments = 32) {
+  const R = Math.max(4, radius);
+  const A = THREE.MathUtils.degToRad(Math.min(120, Math.max(15, angleDeg)));
+  const dir = curveDir >= 0 ? 1 : -1;
+  const hw = w / 2;
+  const n = Math.max(8, segments);
+  const center = new THREE.Vector3(dir * R, 0, 0);
+  const radius0 = new THREE.Vector3(-dir * R, 0, 0);
+
+  const centerline = [];
+  const rights = [];
+  const _off = new THREE.Vector3();
+  const _tan = new THREE.Vector3();
+  const _up = new THREE.Vector3(0, 1, 0);
+  const _right = new THREE.Vector3();
+
+  for (let i = 0; i <= n; i++) {
+    const t = i / n;
+    const phi = A * t;
+    const sm = t * t * (3 - 2 * t);
+    _off.copy(radius0).applyAxisAngle(_up, -dir * phi);
+    centerline.push(new THREE.Vector3(center.x + _off.x, rise * sm, center.z + _off.z));
+  }
+
+  for (let i = 0; i <= n; i++) {
+    const prev = centerline[Math.max(0, i - 1)];
+    const next = centerline[Math.min(n, i + 1)];
+    _tan.subVectors(next, prev);
+    if (_tan.lengthSq() < 1e-10) _right.set(dir, 0, 0);
+    else {
+      _tan.normalize();
+      _right.crossVectors(_up, _tan);
+      if (_right.lengthSq() < 1e-10) _right.set(1, 0, 0);
+      else _right.normalize();
+    }
+    rights.push(_right.clone());
+  }
+
+  const pos = [];
+  const quad = (a, b, c, d) => {
+    pos.push(a.x, a.y, a.z, b.x, b.y, b.z, c.x, c.y, c.z);
+    pos.push(a.x, a.y, a.z, c.x, c.y, c.z, d.x, d.y, d.z);
+  };
+  const tri = (a, b, c) => pos.push(a.x, a.y, a.z, b.x, b.y, b.z, c.x, c.y, c.z);
+
+  const L = (i, side) => {
+    const p = centerline[i];
+    const r = rights[i];
+    return new THREE.Vector3(p.x + r.x * hw * side, p.y, p.z + r.z * hw * side);
+  };
+  const ground = (v) => new THREE.Vector3(v.x, 0, v.z);
+
+  for (let i = 0; i < n; i++) {
+    quad(L(i, -1), L(i, 1), L(i + 1, 1), L(i + 1, -1));
+  }
+  for (let i = 0; i < n; i++) {
+    const lt0 = L(i, -1);
+    const lt1 = L(i + 1, -1);
+    quad(lt0, lt1, ground(lt1), ground(lt0));
+    const rt0 = L(i, 1);
+    const rt1 = L(i + 1, 1);
+    quad(rt0, ground(rt0), ground(rt1), rt1);
+  }
+  tri(L(0, -1), L(0, 1), ground(L(0, 1)));
+  tri(L(0, -1), ground(L(0, 1)), ground(L(0, -1)));
+  tri(L(n, -1), ground(L(n, -1)), ground(L(n, 1)));
+  tri(L(n, -1), ground(L(n, 1)), L(n, 1));
+
   const geo = new THREE.BufferGeometry();
   geo.setAttribute("position", new THREE.Float32BufferAttribute(pos, 3));
   geo.computeVertexNormals();
@@ -178,6 +257,34 @@ export function buildParkour({ offset = new THREE.Vector3(100, 0, 0) } = {}) {
     return m;
   }
 
+  function addCurveRamp({
+    x,
+    z,
+    w = 12,
+    radius = 16,
+    angleDeg = 75,
+    rise = 5,
+    curveDir = 1,
+    yawDeg = 0,
+    segments = 32,
+    color = 0x7a6248,
+  }) {
+    const yaw = THREE.MathUtils.degToRad(yawDeg);
+    const m = new THREE.Mesh(
+      curveRampGeometry(w, radius, angleDeg, rise, curveDir, segments),
+      _matRamp(color),
+    );
+    m.rotation.order = "YXZ";
+    m.rotation.y = yaw;
+    m.position.set(x, 0, z);
+    m.castShadow = true;
+    m.receiveShadow = true;
+    group.add(m);
+    deckMeshes.push(m);
+    wallMeshes.push(m);
+    return m;
+  }
+
   function addStep({ x, z, w, h, l, color = 0x5e7a48 }) {
     const m = new THREE.Mesh(new THREE.BoxGeometry(w, h, l), _matRamp(color));
     m.position.set(x, h / 2, z);
@@ -227,6 +334,30 @@ export function buildParkour({ offset = new THREE.Vector3(100, 0, 0) } = {}) {
     const color = new THREE.Color().setHSL(0.085, 0.42, tint).getHex();
     addRamp({ x: -42 + i * 21, z: 48, w: 12, l: 22, angleDeg: slopeAngles[i], color });
   }
+
+  // ── CURVED RAMPS — left wing (arc climb + turn) ──
+  addCurveRamp({
+    x: -58,
+    z: 34,
+    w: 10,
+    radius: 12,
+    angleDeg: 72,
+    rise: 4.5,
+    curveDir: 1,
+    segments: 28,
+    color: 0x8a7050,
+  });
+  addCurveRamp({
+    x: -58,
+    z: -10,
+    w: 16,
+    radius: 26,
+    angleDeg: 92,
+    rise: 9,
+    curveDir: 1,
+    segments: 40,
+    color: 0x6a5840,
+  });
 
   // ── MEGA KICKER + LANDING (centre lane, clear of slope ends) ──
   addRamp({ x: 0, z: 14, w: 16, l: 14, angleDeg: 38, color: 0xd97a3a });
