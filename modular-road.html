@@ -718,7 +718,8 @@
           "three/webgpu": "https://cdn.jsdelivr.net/npm/three@0.184.0/build/three.webgpu.js",
           "three/tsl": "https://cdn.jsdelivr.net/npm/three@0.184.0/build/three.tsl.js",
           "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.184.0/examples/jsm/",
-          "three-mesh-bvh": "https://cdn.jsdelivr.net/npm/three-mesh-bvh@0.9.9/build/index.module.js"
+          "three-mesh-bvh": "https://cdn.jsdelivr.net/npm/three-mesh-bvh@0.9.9/build/index.module.js",
+          "howler": "https://esm.sh/howler@2.2.4"
         }
       }
     </script>
@@ -793,6 +794,12 @@
       import { buildParkour } from "./modularRoadParkour.js";
       import { PropManager, PROP_CATALOG } from "./modularRoadProps.js";
       import { ModularRoadTireMarks } from "./modularRoadTireMarks.js";
+      import {
+        createModularRoadAudioSystem,
+        setupModularRoadVehicleAudio,
+        DEFAULT_MIXER,
+        DEFAULT_VEHICLE_AUDIO_SETTINGS,
+      } from "./modularRoadVehicleAudio.js";
 
       const PARAMS = {
         camera: { fov: 60 },
@@ -837,6 +844,8 @@
           cloudElevation: 0.5,
           meshScale: 10000,
         },
+        audio: structuredClone(DEFAULT_MIXER),
+        vehicleAudio: structuredClone(DEFAULT_VEHICLE_AUDIO_SETTINGS),
       };
 
       function sunDirectionFromAngles(azDeg, elDeg, target = new THREE.Vector3()) {
@@ -1228,6 +1237,25 @@
           return { steerTarget: left - right, throttle: fwd - back, handbrake: !!keys.Space, yaw: spinR - spinL };
         }
 
+        // ── VEHICLE AUDIO (Howler mixer + driving layers) ──
+        const audioSystem = createModularRoadAudioSystem({ mixerState: PARAMS.audio });
+        let disposeVehicleAudio = setupModularRoadVehicleAudio(audioSystem, {
+          vehicle,
+          settings: PARAMS.vehicleAudio,
+          getKeys: () => keys,
+        });
+        function rebuildVehicleAudio() {
+          if (disposeVehicleAudio) disposeVehicleAudio();
+          disposeVehicleAudio = setupModularRoadVehicleAudio(audioSystem, {
+            vehicle,
+            settings: PARAMS.vehicleAudio,
+            getKeys: () => keys,
+          });
+        }
+        const unlockAudio = () => audioSystem.unlock();
+        window.addEventListener("pointerdown", unlockAudio, { once: false, passive: true });
+        window.addEventListener("keydown", unlockAudio, { once: false, passive: true });
+
         // ── CHASE CAMERA (velocity-oriented) ──
         // The camera trails the car's *travel direction* (from velocity), NOT the
         // car's orientation. So mid-air spins/rolls don't whip the view around —
@@ -1315,7 +1343,7 @@
         buildInspector({
           camera, floorMat, roadMat, builder, vehicle, updateSun, rebuildSkyEnv,
           obstacleParams, parkour, bakeCollision, debugGroup, refreshCollisionDebug,
-          props,
+          props, rebuildVehicleAudio,
           goToParkour: () => {
             if (state.mode !== "drive") setDriveMode(true);
             vehicle.setSpawn(
@@ -1348,6 +1376,7 @@
           } else {
             controls.update();
           }
+          audioSystem.update(dt);
           renderer.render(scene, camera);
         });
         window.addEventListener("resize", () => {
@@ -1500,7 +1529,7 @@
       function buildInspector({
         camera, floorMat, roadMat, builder, vehicle, updateSun, rebuildSkyEnv,
         obstacleParams, parkour, bakeCollision, debugGroup, refreshCollisionDebug,
-        props,
+        props, rebuildVehicleAudio,
         goToParkour, goToTrack,
       }) {
         const body = document.getElementById("inspector-body");
@@ -1588,6 +1617,25 @@
           _slider(sec, SOLID, "radius", { label: "Box sample reach", min: 0.15, max: 1.2, step: 0.05 });
           _slider(sec, SOLID, "stiffness", { label: "Collide stiff", min: 50000, max: 600000, step: 5000 });
           _toggle(sec, { v: true }, "v", { label: "Force arrows", onChange: (on) => vehicle.setArrowsVisible(on) });
+        }
+
+        // ── Audio mixer + vehicle layers ──
+        {
+          const sec = _section(body, "Audio (mixer)", false);
+          const mixer = PARAMS.audio;
+          _toggle(sec, mixer, "muteAll", { label: "Mute all" });
+          _slider(sec, mixer.buses.master, "volume", { label: "Master", min: 0, max: 1, step: 0.01 });
+          _slider(sec, mixer.buses.vehicle, "volume", { label: "Vehicle bus", min: 0, max: 1, step: 0.01 });
+          _toggle(sec, mixer.buses.vehicle, "mute", { label: "Mute vehicle" });
+          _separator(sec);
+          const va = PARAMS.vehicleAudio;
+          _toggle(sec, va, "enabled", { label: "Drive audio" });
+          _slider(sec, va, "engineMul", { label: "Engine gain", min: 0, max: 2, step: 0.05 });
+          _slider(sec, va, "windMul", { label: "Wind gain", min: 0, max: 1.5, step: 0.05 });
+          _slider(sec, va, "wheelsMul", { label: "Wheels gain", min: 0, max: 1.5, step: 0.05 });
+          _slider(sec, va, "driftBrakeMul", { label: "Handbrake / drift", min: 0, max: 1.5, step: 0.05 });
+          _slider(sec, va, "enginePitchMax", { label: "Engine pitch max", min: 1, max: 4, step: 0.05 });
+          _button(sec, "Rebuild audio layers", () => rebuildVehicleAudio());
         }
 
         // ── Test obstacles + collision debug ──
