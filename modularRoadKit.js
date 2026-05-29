@@ -16,7 +16,7 @@ const _up = new V3(0, 1, 0);
 
 /** Shared cross-section appearance — edit via UI, then call onChange to rebuild. */
 export const roadParams = {
-  width: 11, // outer kerb-to-kerb deck width (m)
+  width: 16, // outer kerb-to-kerb deck width (m)
   thickness: 0.8, // slab depth below the deck (m) — this is the "depth"
   railWidth: 0.5, // kerb width on each side (m)
   railHeight: 0.22, // kerb height above the deck (m) — low; guardrail sits on top
@@ -31,7 +31,7 @@ export const roadParams = {
  */
 export const guardrailParams = {
   enabled: true,
-  beamHeight: 0.3, // vertical height of the W-beam (m)
+  beamHeight: 0.8, // vertical height of the W-beam (m)
   beamDepth: 0.1, // lateral thickness of the beam (m)
   beamGap: 0.16, // gap from kerb top to beam bottom (m)
   crownFrac: 0.22, // depth of the central W indent (fraction of beamDepth)
@@ -60,6 +60,18 @@ export const pieceParams = {
   // Twist / barrel roll (straight centreline that rolls):
   twistLength: 26,
   twistTurns: 1, // full 360° rolls over the length
+  // Spiral / helix (constant-radius turn that also climbs):
+  spiralRadius: 18,
+  spiralAngle: 180, // degrees of arc (allow multi-turn for a true helix)
+  spiralRise: 10, // total height gained over the arc (m)
+  // Gap spacer (invisible air gap that drifts forward & drops):
+  gapLength: 22, // forward run across the gap (m)
+  gapDrop: 6, // height lost across the gap (m)
+  // Landing ramp (enters pitched down, eases to level):
+  landLength: 16,
+  landAngle: 30, // entry down-pitch (deg)
+  // Tunnel shell:
+  tunnelHeight: 7, // interior clearance from deck to crown (m)
   onChange: null,
 };
 
@@ -343,6 +355,68 @@ export function buildGuardrailGeometry(frames, profileData = buildProfile(), gp 
 }
 
 /* ----------------------------------------------------------------------- */
+/* Tunnel shell (open arch swept along the frames)                          */
+/* ----------------------------------------------------------------------- */
+
+/**
+ * Tunnel shell — vertical side walls plus a semicircular crown, swept along the
+ * piece frames and left open underneath so the deck stays drivable. Built as a
+ * single surface (rendered double-sided) and baked into the SOLIDS BVH, so the
+ * chassis is blocked by the walls/roof while the wheels still probe the deck.
+ */
+export function buildTunnelGeometry(frames, profileData = buildProfile(), pp = pieceParams) {
+  const hw = profileData.hw;
+  const xo = hw + 0.4; // walls sit just outside the deck edge
+  const apex = Math.max(xo + 1.2, pp.tunnelHeight); // crown clearance above the deck
+  const springY = Math.max(0.6, apex - xo); // wall height where the arch springs
+  const arcSteps = 16;
+
+  // Cross-section from left base, up the wall, over the arch, down the right wall.
+  const prof = [
+    { x: -xo, y: 0 },
+    { x: -xo, y: springY },
+  ];
+  for (let k = 1; k <= arcSteps; k++) {
+    const a = Math.PI * (1 - k / arcSteps); // PI (left springline) → 0 (right springline)
+    prof.push({ x: Math.cos(a) * xo, y: springY + Math.sin(a) * xo });
+  }
+  prof.push({ x: xo, y: 0 });
+
+  const F = frames.length;
+  const P = prof.length;
+  const along = new Float32Array(F);
+  for (let i = 1; i < F; i++) along[i] = along[i - 1] + frames[i].pos.distanceTo(frames[i - 1].pos);
+
+  const positions = [];
+  const uvs = [];
+  const indices = [];
+  const p = new V3();
+  for (let i = 0; i < F; i++) {
+    const fr = frames[i];
+    for (let j = 0; j < P; j++) {
+      const pr = prof[j];
+      p.copy(fr.pos).addScaledVector(fr.right, pr.x).addScaledVector(fr.up, pr.y);
+      positions.push(p.x, p.y, p.z);
+      uvs.push(along[i] * 0.12, j / (P - 1));
+    }
+  }
+  for (let i = 0; i < F - 1; i++) {
+    const r0 = i * P;
+    const r1 = (i + 1) * P;
+    for (let j = 0; j < P - 1; j++) {
+      indices.push(r0 + j, r1 + j, r0 + j + 1, r0 + j + 1, r1 + j, r1 + j + 1);
+    }
+  }
+  const geo = new THREE.BufferGeometry();
+  geo.setAttribute("position", new THREE.Float32BufferAttribute(positions, 3));
+  geo.setAttribute("uv", new THREE.Float32BufferAttribute(uvs, 2));
+  geo.setIndex(indices);
+  geo.computeVertexNormals();
+  geo.computeBoundingSphere();
+  return geo;
+}
+
+/* ----------------------------------------------------------------------- */
 /* Piece centerlines                                                        */
 /* ----------------------------------------------------------------------- */
 
@@ -504,6 +578,65 @@ function twistRoll(t, pp) {
   return 2 * Math.PI * Math.max(1, Math.round(pp.twistTurns)) * t;
 }
 
+/**
+ * Spiral / helix: a constant-radius turn that also climbs at a steady rate, so
+ * consecutive spirals stack into a continuous helix (great for gaining the
+ * height a loop or big jump needs). Direction follows curveDir.
+ */
+function spiralPoints(pp) {
+  const R = Math.max(3, pp.spiralRadius);
+  const A = THREE.MathUtils.degToRad(THREE.MathUtils.clamp(pp.spiralAngle, 5, 1080));
+  const dir = pp.curveDir >= 0 ? 1 : -1;
+  const rise = pp.spiralRise;
+  const n = Math.max(6, Math.ceil((R * A) / roadParams.segLen));
+  const center = new V3(dir * R, 0, 0);
+  const radius0 = new V3(-dir * R, 0, 0); // origin - center
+  const pts = [];
+  for (let i = 0; i <= n; i++) {
+    const tt = i / n;
+    const pt = center.clone().add(rotateY(radius0, -dir * A * tt));
+    pt.y = rise * tt; // rotateY preserves y, so set the climb after
+    pts.push(pt);
+  }
+  return pts;
+}
+
+/**
+ * Gap spacer: an *invisible* centreline that drifts forward and drops on a
+ * parabola (level at entry). It builds no road — it only advances the open
+ * connector across empty space and downward, so a landing ramp can be snapped
+ * roughly where a jumped car comes back down.
+ */
+function gapPoints(pp) {
+  const L = Math.max(4, pp.gapLength);
+  const drop = pp.gapDrop;
+  const n = Math.max(4, Math.ceil(L / roadParams.segLen));
+  const pts = [];
+  for (let i = 0; i <= n; i++) {
+    const tt = i / n;
+    pts.push(new V3(0, -drop * tt * tt, -L * tt));
+  }
+  return pts;
+}
+
+/** Landing ramp: enters pitched down at landAngle and eases to level at the exit. */
+function landingPoints(pp) {
+  const L = Math.max(2, pp.landLength);
+  const ang = THREE.MathUtils.degToRad(THREE.MathUtils.clamp(pp.landAngle, 0, 80));
+  const n = Math.max(2, Math.ceil(L / roadParams.segLen));
+  const ds = L / n;
+  const cur = new V3(0, 0, 0);
+  const pts = [cur.clone()];
+  for (let i = 1; i <= n; i++) {
+    const u = 1 - i / n; // 1 at entry → 0 at exit
+    const ph = -ang * u * u; // pitched down at entry, level at exit
+    cur.y += Math.sin(ph) * ds;
+    cur.z += -Math.cos(ph) * ds;
+    pts.push(cur.clone());
+  }
+  return pts;
+}
+
 /** @type {{id:string,label:string,hint:string,swatch:string,key:string,points:(pp:any)=>THREE.Vector3[]}[]} */
 export const PIECE_CATALOG = [
   {
@@ -598,6 +731,40 @@ export const PIECE_CATALOG = [
     points: twistPoints,
     roll: twistRoll,
   },
+  {
+    id: "tunnel",
+    label: "Tunnel",
+    hint: "Enclosed straight (arch)",
+    swatch: "#7f8c8d",
+    key: "t",
+    points: straightPoints,
+    shell: true,
+  },
+  {
+    id: "spiral",
+    label: "Spiral / helix",
+    hint: "Climbing turn — stack to gain height",
+    swatch: "#2980b9",
+    key: "h",
+    points: spiralPoints,
+  },
+  {
+    id: "gap",
+    label: "Gap spacer",
+    hint: "Invisible air gap (drops) — land beyond",
+    swatch: "#34495e",
+    key: "g",
+    points: gapPoints,
+    noMesh: true,
+  },
+  {
+    id: "landing",
+    label: "Landing ramp",
+    hint: "Down-pitch easing to flat",
+    swatch: "#c0392b",
+    key: "l",
+    points: landingPoints,
+  },
 ];
 
 export const PIECE_BY_ID = new Map(PIECE_CATALOG.map((p) => [p.id, p]));
@@ -642,8 +809,13 @@ export function buildPiece(pieceId, currentConnector, pp = pieceParams, rp = roa
   const frames = computeFrames(points, _up);
   if (def.roll) applyRoll(frames, def.roll, pp);
   const profileData = buildProfile(rp);
+  // Always build a valid (non-empty) sweep so the renderer never sees an empty
+  // geometry. `noMesh` pieces (gap spacer) keep this geometry but the builder
+  // hides the mesh and excludes it from collision — it only advances the
+  // connector across empty space. They also carry no guardrails.
   const geometry = buildSweepGeometry(frames, profileData);
-  const railGeometry = buildGuardrailGeometry(frames, profileData, gp, rp);
+  const railGeometry = def.noMesh ? null : buildGuardrailGeometry(frames, profileData, gp, rp);
+  const shellGeometry = def.shell ? buildTunnelGeometry(frames, profileData, pp) : null;
 
   const f0 = frames[0];
   const fN = frames[frames.length - 1];
@@ -655,5 +827,5 @@ export function buildPiece(pieceId, currentConnector, pp = pieceParams, rp = roa
   const world = currentConnector.clone().multiply(entryLocal.clone().invert());
   const connectorOut = world.clone().multiply(exitLocal);
 
-  return { def, geometry, railGeometry, world, connectorOut };
+  return { def, geometry, railGeometry, shellGeometry, world, connectorOut };
 }

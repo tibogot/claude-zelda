@@ -21,18 +21,20 @@ export class ModularRoadBuilder {
    * @param {THREE.Scene} o.scene
    * @param {THREE.Material} o.material shared road material
    * @param {THREE.Material} [o.railMaterial] shared guardrail material
+   * @param {THREE.Material} [o.shellMaterial] shared tunnel-shell material
    * @param {() => boolean} [o.isBuildMode]
    * @param {() => void} [o.onChange]
    */
-  constructor({ scene, material, railMaterial = null, isBuildMode = () => true, onChange = null }) {
+  constructor({ scene, material, railMaterial = null, shellMaterial = null, isBuildMode = () => true, onChange = null }) {
     this.scene = scene;
     this.material = material;
     this.railMaterial = railMaterial;
+    this.shellMaterial = shellMaterial;
     this.isBuildMode = isBuildMode;
     this.onChange = onChange;
 
     this.activePieceId = PIECE_CATALOG[0].id;
-    /** @type {{id:string, pp:object, mesh:THREE.Mesh, railMesh:THREE.Mesh|null, connectorOut:THREE.Matrix4}[]} */
+    /** @type {{id:string, pp:object, mesh:THREE.Mesh, railMesh:THREE.Mesh|null, shellMesh:THREE.Mesh|null, connectorOut:THREE.Matrix4}[]} */
     this.pieces = [];
     this.currentConnector = initialConnector();
 
@@ -120,9 +122,19 @@ export class ModularRoadBuilder {
     );
     const mesh = this._makeMesh(built.geometry, this.material, built.world);
     mesh.userData.pieceId = this.activePieceId;
+    if (built.def.noMesh) {
+      // Gap spacer: keep a valid geometry (so the renderer is happy) but hide it
+      // and flag it so the collision bake skips it — it's just empty air.
+      mesh.visible = false;
+      mesh.userData.noCollision = true;
+    }
     const railMesh =
       built.railGeometry && this.railMaterial
         ? this._makeMesh(built.railGeometry, this.railMaterial, built.world)
+        : null;
+    const shellMesh =
+      built.shellGeometry && this.shellMaterial
+        ? this._makeMesh(built.shellGeometry, this.shellMaterial, built.world)
         : null;
 
     this.pieces.push({
@@ -130,6 +142,7 @@ export class ModularRoadBuilder {
       pp: this._snapshotParams(),
       mesh,
       railMesh,
+      shellMesh,
       connectorOut: built.connectorOut.clone(),
     });
     this.currentConnector = built.connectorOut.clone();
@@ -144,6 +157,10 @@ export class ModularRoadBuilder {
     if (p.railMesh) {
       this.root.remove(p.railMesh);
       p.railMesh.geometry.dispose();
+    }
+    if (p.shellMesh) {
+      this.root.remove(p.shellMesh);
+      p.shellMesh.geometry.dispose();
     }
   }
 
@@ -191,6 +208,20 @@ export class ModularRoadBuilder {
         this.root.remove(p.railMesh);
         p.railMesh.geometry.dispose();
         p.railMesh = null;
+      }
+
+      if (built.shellGeometry && this.shellMaterial) {
+        if (p.shellMesh) {
+          p.shellMesh.geometry.dispose();
+          p.shellMesh.geometry = built.shellGeometry;
+          p.shellMesh.matrix.copy(built.world);
+        } else {
+          p.shellMesh = this._makeMesh(built.shellGeometry, this.shellMaterial, built.world);
+        }
+      } else if (p.shellMesh) {
+        this.root.remove(p.shellMesh);
+        p.shellMesh.geometry.dispose();
+        p.shellMesh = null;
       }
 
       p.connectorOut = built.connectorOut.clone();

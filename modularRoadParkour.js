@@ -10,6 +10,78 @@ import * as THREE from "three";
  * from `wallMeshes` (→ solids BVH for chassis collision), plus a sensible
  * `spawn` (world position + heading) to teleport the car into the arena.
  */
+
+/* ----------------------------------------------------------------------- */
+/* Ramp / bank geometry (triangular prisms — not tilted boxes)             */
+/* ----------------------------------------------------------------------- */
+
+/**
+ * Drive ramp: low edge at y=0, z=0 (local); rises toward -Z.
+ * @param {number} w width (X)
+ * @param {number} l run length (Z)
+ * @param {number} angleRad pitch angle
+ */
+function rampGeometry(w, l, angleRad) {
+  const H = l * Math.sin(angleRad);
+  const hw = w / 2;
+  const zN = 0; // low approach edge
+  const zF = -l; // high back edge
+  const Al = [-hw, 0, zN],
+    Bl = [-hw, 0, zF],
+    Cl = [-hw, H, zF];
+  const Ar = [hw, 0, zN],
+    Br = [hw, 0, zF],
+    Cr = [hw, H, zF];
+  const pos = [];
+  const quad = (a, b, c, d) => pos.push(...a, ...b, ...c, ...a, ...c, ...d);
+  const tri = (a, b, c) => pos.push(...a, ...b, ...c);
+  quad(Al, Ar, Cr, Cl); // sloped deck
+  quad(Al, Bl, Br, Ar); // bottom
+  quad(Bl, Cl, Cr, Br); // vertical back
+  tri(Al, Cl, Bl); // left cap
+  tri(Ar, Br, Cr); // right cap
+  const geo = new THREE.BufferGeometry();
+  geo.setAttribute("position", new THREE.Float32BufferAttribute(pos, 3));
+  geo.computeVertexNormals();
+  geo.computeBoundingSphere();
+  return geo;
+}
+
+/**
+ * Banked deck: low edge at y=0, x=-w/2; rises toward +X.
+ * @param {number} w width (X) — lateral span of the bank
+ * @param {number} l length (Z)
+ * @param {number} bankRad bank angle
+ */
+function bankGeometry(w, l, bankRad) {
+  const H = w * Math.sin(bankRad);
+  const hw = w / 2;
+  const hl = l / 2;
+  const xL = -hw; // low side
+  const xH = hw; // high side
+  const zN = -hl;
+  const zF = hl;
+  const pos = [];
+  const quad = (a, b, c, d) => pos.push(...a, ...b, ...c, ...a, ...c, ...d);
+  const tri = (a, b, c) => pos.push(...a, ...b, ...c);
+  // Sloped top (CCW when viewed from above-right).
+  quad(
+    [xL, 0, zN],
+    [xL, 0, zF],
+    [xH, H, zF],
+    [xH, H, zN],
+  );
+  quad([xL, 0, zN], [xH, 0, zN], [xH, 0, zF], [xL, 0, zF]); // bottom
+  quad([xH, 0, zN], [xH, H, zN], [xH, H, zF], [xH, 0, zF]); // high vertical cap
+  tri([xL, 0, zN], [xL, 0, zF], [xH, H, zF]);
+  tri([xL, 0, zN], [xH, H, zF], [xH, H, zN]);
+  const geo = new THREE.BufferGeometry();
+  geo.setAttribute("position", new THREE.Float32BufferAttribute(pos, 3));
+  geo.computeVertexNormals();
+  geo.computeBoundingSphere();
+  return geo;
+}
+
 export function buildParkour({ offset = new THREE.Vector3(60, 0, 0) } = {}) {
   const group = new THREE.Group();
   group.name = "Parkour";
@@ -24,19 +96,21 @@ export function buildParkour({ offset = new THREE.Vector3(60, 0, 0) } = {}) {
   const _matWall = (color) =>
     new THREE.MeshStandardMaterial({ color, roughness: 0.7, side: THREE.DoubleSide });
 
-  /** Pitched ramp. Low edge sits at (x, 0, z); ramp tilts up in +Z. */
+  /** Pitched ramp wedge. (x, z) = centre of the low approach edge; drive in from +Z. */
   function addRamp({ x, z, w = 5, l = 8, angleDeg = 20, yawDeg = 0, color = 0x6a5436 }) {
     const angle = THREE.MathUtils.degToRad(angleDeg);
     const yaw = THREE.MathUtils.degToRad(yawDeg);
-    const m = new THREE.Mesh(new THREE.BoxGeometry(w, 0.4, l), _matRamp(color));
+    const geo = rampGeometry(w, l, angle);
+    const m = new THREE.Mesh(geo, _matRamp(color));
     m.rotation.order = "YXZ";
     m.rotation.y = yaw;
-    m.rotation.x = -angle;
-    m.position.set(x, (Math.sin(angle) * l) / 2, z + (Math.cos(angle) * l) / 2);
+    // Geometry low edge sits at local z=0; place that point at world (x, 0, z).
+    m.position.set(x, 0, z);
     m.castShadow = true;
     m.receiveShadow = true;
     group.add(m);
-    deckMeshes.push(m);
+    deckMeshes.push(m); // sloped deck → wheel probes
+    wallMeshes.push(m); // back face + side caps → chassis (solids BVH)
     return m;
   }
 
@@ -62,16 +136,17 @@ export function buildParkour({ offset = new THREE.Vector3(60, 0, 0) } = {}) {
     return m;
   }
 
-  /** Laterally-tilted slope (banked turn). +X side is the low edge at y=0. */
+  /** Laterally banked wedge. Centre at (x, z); low side is -X, high side is +X. */
   function addBank({ x, z, w, l, bankDeg, color = 0x3a5060 }) {
     const bank = THREE.MathUtils.degToRad(bankDeg);
-    const m = new THREE.Mesh(new THREE.BoxGeometry(w, 0.4, l), _matRamp(color));
-    m.rotation.z = -bank;
-    m.position.set(x, (Math.sin(bank) * w) / 2, z);
+    const geo = bankGeometry(w, l, bank);
+    const m = new THREE.Mesh(geo, _matRamp(color));
+    m.position.set(x, 0, z);
     m.castShadow = true;
     m.receiveShadow = true;
     group.add(m);
     deckMeshes.push(m);
+    wallMeshes.push(m);
     return m;
   }
 

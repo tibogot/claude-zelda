@@ -109,6 +109,16 @@ export function createGuardrailMaterial(opts = {}) {
   });
 }
 
+/** Plain concrete shell material for tunnels (rendered double-sided). */
+export function createTunnelMaterial(opts = {}) {
+  return new THREE.MeshStandardMaterial({
+    color: lin(opts.color ?? 0x5b6168),
+    roughness: opts.roughness ?? 0.92,
+    metalness: opts.metalness ?? 0.0,
+    side: THREE.DoubleSide,
+  });
+}
+
 /** Apply hex colors / numeric uniforms from a plain params object. */
 export function syncRoadUniforms(mat, p) {
   const u = mat._roadUniforms;

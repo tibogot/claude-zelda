@@ -577,6 +577,7 @@
       import {
         createRoadMaterial,
         createGuardrailMaterial,
+        createTunnelMaterial,
         syncRoadUniforms,
       } from "./modularRoadMaterial.js";
       import { ModularRoadBuilder, buildRoadPaletteUI } from "./modularRoadBuilder.js";
@@ -584,6 +585,7 @@
       import { Vehicle, TIRE, CHASSIS, SOLID, DECK, AERO, DRIVETRAIN } from "./modularRoadVehicle.js";
       import { RoadBvh } from "./modularRoadBvh.js";
       import { buildParkour } from "./modularRoadParkour.js";
+      import { PropManager, PROP_CATALOG } from "./modularRoadProps.js";
 
       const PARAMS = {
         camera: { fov: 60 },
@@ -615,6 +617,8 @@
           envIntensity: 0.2,
           exposure: 0.5,
           sunDistance: 600,
+          shadowNormalBias: 1.2,
+          shadowBias: -0.0003,
         },
         physicalSky: {
           turbidity: 2,
@@ -687,6 +691,11 @@
         sun.shadow.camera.far = 1200;
         sun.shadow.camera.left = sun.shadow.camera.bottom = -200;
         sun.shadow.camera.right = sun.shadow.camera.top = 200;
+        // Push samples off the surface so big flat sweeps don't self-shadow
+        // (the diagonal "acne" banding). normalBias does the heavy lifting on
+        // large planes; a tiny depth bias cleans up the rest. Tunable below.
+        sun.shadow.normalBias = PARAMS.light.shadowNormalBias;
+        sun.shadow.bias = PARAMS.light.shadowBias;
         const shadowTarget = new THREE.Object3D();
         scene.add(shadowTarget);
         sun.target = shadowTarget;
@@ -734,6 +743,8 @@
           sun.position.copy(sunDir).multiplyScalar(L.sunDistance);
           sun.color.set(L.dirColor);
           sun.intensity = L.dirIntensity;
+          sun.shadow.normalBias = L.shadowNormalBias;
+          sun.shadow.bias = L.shadowBias;
           hemi.color.set(L.hemiSkyColor);
           hemi.groundColor.set(L.hemiGroundColor);
           hemi.intensity = L.hemiIntensity;
@@ -763,11 +774,13 @@
         // ── ROAD MATERIAL + BUILDER ──
         const roadMat = createRoadMaterial(PARAMS.roadColors);
         const railMat = createGuardrailMaterial();
+        const shellMat = createTunnelMaterial();
         let paletteUi;
         const builder = new ModularRoadBuilder({
           scene,
           material: roadMat,
           railMaterial: railMat,
+          shellMaterial: shellMat,
           isBuildMode: () => state.mode === "build" && state.buildMode,
           onChange: () => paletteUi?.refreshStatus(),
         });
@@ -782,6 +795,7 @@
 
         // ── VEHICLE (test drive) ──
         const vehicle = new Vehicle({ scene });
+        vehicle.setArrowsVisible(true); // force arrows on by default (physics tuning)
 
         // BVH colliders, (re)baked on demand. Track + parkour are static while driving.
         const deckBvh = new RoadBvh(); // road/parkour decks + ground → wheel probes
@@ -791,7 +805,21 @@
         // ── OBSTACLE PARKOUR (recreated from the Lotus VVV lab) ──
         const parkour = buildParkour();
         scene.add(parkour.group);
-        const obstacleParams = { enabled: false };
+        const obstacleParams = { enabled: true };
+        parkour.group.visible = obstacleParams.enabled;
+
+        // ── FREE-PLACEMENT PROPS (gizmo) ──
+        const props = new PropManager({
+          scene,
+          camera,
+          domElement: renderer.domElement,
+          orbit: controls,
+          onChange: () => {
+            refreshCollisionDebug();
+            paletteUi?.refreshStatus?.();
+          },
+        });
+        props.setEnabled(state.mode === "build");
 
         // Collision debug wireframe (rebuilt on every bake).
         const debugGroup = new THREE.Group();
@@ -815,13 +843,22 @@
 
         function bakeCollision() {
           scene.updateMatrixWorld(true);
-          const decks = builder.pieces.map((p) => p.mesh);
+          const decks = builder.pieces
+            .map((p) => p.mesh)
+            .filter((m) => !m.userData.noCollision);
           decks.push(floor);
-          const solids = builder.pieces.map((p) => p.railMesh).filter(Boolean);
+          const solids = [];
+          for (const p of builder.pieces) {
+            if (p.railMesh) solids.push(p.railMesh);
+            if (p.shellMesh) solids.push(p.shellMesh); // tunnel walls/roof block the chassis
+          }
           if (obstacleParams.enabled) {
             decks.push(...parkour.deckMeshes);
             solids.push(...parkour.wallMeshes);
           }
+          const propCol = props.collisionMeshes();
+          decks.push(...propCol.deck);
+          solids.push(...propCol.solids);
           deckBvh.bakeFromMeshes(decks);
           solidsBvh.bakeFromMeshes(solids);
           refreshCollisionDebug();
@@ -865,13 +902,16 @@
             ? "WASD drive &bull; in air: W/S pitch, A/D roll, Q/E spin &bull; Space handbrake &bull; F flip upright &bull; R respawn &bull; Tab orbit cam"
             : "LMB place &bull; MMB orbit &bull; <kbd>1</kbd>–<kbd>0</kbd>/<kbd>c</kbd> pick &bull; R flip &bull; Backspace undo";
           builder.setGhostVisible(!on && state.buildMode);
+          props.setEnabled(!on); // gizmo/selection only outside drive mode
           if (on) {
             // Bake a deck BVH (wheel probes) and a solids BVH (guardrail
             // collision) from the current track. Decks + ground go to the
             // deck tree; guardrails go to the solids tree so the chassis is
             // blocked without the false AABB shoves we had before.
             bakeCollision();
-            const collidables = builder.pieces.map((p) => p.mesh);
+            const collidables = builder.pieces
+              .map((p) => p.mesh)
+              .filter((m) => !m.userData.noCollision);
             collidables.push(floor);
             vehicle.setColliders(collidables, []); // raycaster fallback only
             spawnOnTrack();
@@ -895,6 +935,7 @@
         // ── PLACE ON LMB (build mode only) ──
         renderer.domElement.addEventListener("pointerdown", (e) => {
           if (e.button !== 0 || state.mode !== "build" || !state.buildMode) return;
+          if (props.isUsingGizmo()) return; // grabbing a prop gizmo handle, not placing road
           builder.place();
           paletteUi.refreshStatus();
         });
@@ -1020,6 +1061,7 @@
         buildInspector({
           camera, floorMat, roadMat, builder, vehicle, updateSun, rebuildSkyEnv,
           obstacleParams, parkour, bakeCollision, debugGroup, refreshCollisionDebug,
+          props,
           goToParkour: () => {
             if (state.mode !== "drive") setDriveMode(true);
             vehicle.setSpawn(
@@ -1199,6 +1241,7 @@
       function buildInspector({
         camera, floorMat, roadMat, builder, vehicle, updateSun, rebuildSkyEnv,
         obstacleParams, parkour, bakeCollision, debugGroup, refreshCollisionDebug,
+        props,
         goToParkour, goToTrack,
       }) {
         const body = document.getElementById("inspector-body");
@@ -1232,7 +1275,7 @@
 
         // ── Road profile (the cross-section "depth") ──
         {
-          const sec = _section(body, "Road profile", true);
+          const sec = _section(body, "Road profile", false);
           const reb = () => builder.rebuildAll();
           _slider(sec, roadParams, "width", { label: "Width", min: 4, max: 24, step: 0.25, onChange: reb });
           _slider(sec, roadParams, "thickness", { label: "Thickness", min: 0.1, max: 3, step: 0.05, onChange: reb });
@@ -1243,7 +1286,7 @@
 
         // ── Vehicle (VVV physics — tune the test car) ──
         {
-          const sec = _section(body, "Vehicle (test drive)", false);
+          const sec = _section(body, "Vehicle (test drive)", true);
           _slider(sec, TIRE, "accelForce", { label: "Accel (N)", min: 500, max: 20000, step: 100 });
           _slider(sec, TIRE, "topSpeed", { label: "Top speed", min: 5, max: 80, step: 1 });
           _slider(sec, TIRE, "brakeForce", { label: "Brake (N)", min: 0, max: 30000, step: 100 });
@@ -1279,7 +1322,7 @@
           _toggle(sec, SOLID, "enabled", { label: "Guardrail collision" });
           _slider(sec, SOLID, "radius", { label: "Collide radius", min: 0.2, max: 1.2, step: 0.05 });
           _slider(sec, SOLID, "stiffness", { label: "Collide stiff", min: 50000, max: 600000, step: 5000 });
-          _toggle(sec, { v: false }, "v", { label: "Force arrows", onChange: (on) => vehicle.setArrowsVisible(on) });
+          _toggle(sec, { v: true }, "v", { label: "Force arrows", onChange: (on) => vehicle.setArrowsVisible(on) });
         }
 
         // ── Test obstacles + collision debug ──
@@ -1303,7 +1346,7 @@
 
         // ── Guardrail (W-beam + posts on top of the kerbs) ──
         {
-          const sec = _section(body, "Guardrail", true);
+          const sec = _section(body, "Guardrail", false);
           const reb = () => builder.rebuildAll();
           _toggle(sec, guardrailParams, "enabled", { label: "Enabled", onChange: reb });
           _slider(sec, guardrailParams, "beamHeight", { label: "Beam height", min: 0.05, max: 0.8, step: 0.01, onChange: reb });
@@ -1314,7 +1357,7 @@
 
         // ── Piece geometry (applies to the next placed piece + ghost) ──
         {
-          const sec = _section(body, "Piece geometry", true);
+          const sec = _section(body, "Piece geometry", false);
           const reb = () => builder.refreshGhost();
           _slider(sec, pieceParams, "straightLength", { label: "Straight len", min: 4, max: 80, step: 1, onChange: reb });
           _separator(sec);
@@ -1334,6 +1377,42 @@
           _separator(sec);
           _slider(sec, pieceParams, "twistLength", { label: "Twist len", min: 6, max: 80, step: 1, onChange: reb });
           _slider(sec, pieceParams, "twistTurns", { label: "Twist turns", min: 1, max: 4, step: 1, onChange: reb });
+          _separator(sec);
+          _slider(sec, pieceParams, "tunnelHeight", { label: "Tunnel height", min: 4, max: 14, step: 0.5, onChange: reb });
+          _separator(sec);
+          _slider(sec, pieceParams, "spiralRadius", { label: "Spiral radius", min: 5, max: 60, step: 1, onChange: reb });
+          _slider(sec, pieceParams, "spiralAngle", { label: "Spiral arc", min: 30, max: 720, step: 5, onChange: reb });
+          _slider(sec, pieceParams, "spiralRise", { label: "Spiral rise", min: -30, max: 30, step: 0.5, onChange: reb });
+          _separator(sec);
+          _slider(sec, pieceParams, "gapLength", { label: "Gap length", min: 4, max: 60, step: 1, onChange: reb });
+          _slider(sec, pieceParams, "gapDrop", { label: "Gap drop", min: 0, max: 30, step: 0.5, onChange: reb });
+          _separator(sec);
+          _slider(sec, pieceParams, "landLength", { label: "Landing len", min: 4, max: 50, step: 1, onChange: reb });
+          _slider(sec, pieceParams, "landAngle", { label: "Landing angle", min: 0, max: 70, step: 1, onChange: reb });
+        }
+
+        // ── Props (free placement with gizmo) ──
+        {
+          const sec = _section(body, "Props (gizmo placement)", false);
+          const hint = document.createElement("div");
+          hint.className = "section-note";
+          hint.style.cssText = "font-size:10px;opacity:.7;padding:2px 2px 6px;line-height:1.5";
+          hint.innerHTML =
+            "Add a prop, then drag the gizmo. <kbd>W</kbd> move &bull; <kbd>E</kbd> rotate &bull; <kbd>R</kbd> scale &bull; <kbd>Q</kbd> world/local &bull; right-click select &bull; <kbd>Del</kbd> delete &bull; <kbd>Ctrl+D</kbd> duplicate. Rebake collision after moving.";
+          sec.appendChild(hint);
+          for (const def of PROP_CATALOG) {
+            _button(sec, "+ " + def.label, () => props.add(def.id));
+          }
+          _separator(sec);
+          const gz = { mode: "translate" };
+          _select(sec, gz, "mode", ["translate", "rotate", "scale"], {
+            label: "Gizmo",
+            onChange: (m) => props.setMode(m),
+          });
+          _separator(sec);
+          _button(sec, "Duplicate (Ctrl+D)", () => props.duplicateSelected());
+          _button(sec, "Delete selected (Del)", () => props.deleteSelected());
+          _button(sec, "Clear all props", () => props.clear());
         }
 
         // ── Road colors ──
@@ -1364,6 +1443,9 @@
           _slider(sec, PARAMS.light, "hemiIntensity", { label: "Hemi int", min: 0, max: 3, step: 0.05, onChange: up });
           _slider(sec, PARAMS.light, "envIntensity", { label: "Env int", min: 0, max: 3, step: 0.05, onChange: up });
           _slider(sec, PARAMS.light, "exposure", { label: "Exposure", min: 0, max: 3, step: 0.05, onChange: up });
+          _separator(sec);
+          _slider(sec, PARAMS.light, "shadowNormalBias", { label: "Shadow nbias", min: 0, max: 4, step: 0.05, onChange: up });
+          _slider(sec, PARAMS.light, "shadowBias", { label: "Shadow bias", min: -0.002, max: 0.002, step: 0.0001, onChange: up });
         }
 
         // ── Sky ──
