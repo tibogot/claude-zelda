@@ -804,6 +804,7 @@
         ModularRoadDriftSmoke,
         DEFAULT_DRIFT_SMOKE_SETTINGS,
       } from "./modularRoadDriftSmoke.js";
+      import { PortalManager, DEFAULT_PORTAL_PARAMS } from "./modularRoadPortals.js";
 
       const PARAMS = {
         camera: { fov: 60 },
@@ -851,6 +852,7 @@
         audio: structuredClone(DEFAULT_MIXER),
         vehicleAudio: structuredClone(DEFAULT_VEHICLE_AUDIO_SETTINGS),
         driftSmoke: structuredClone(DEFAULT_DRIFT_SMOKE_SETTINGS),
+        portals: structuredClone(DEFAULT_PORTAL_PARAMS),
       };
 
       function sunDirectionFromAngles(azDeg, elDeg, target = new THREE.Vector3()) {
@@ -1053,7 +1055,14 @@
         syncParkourMovers();
 
         // ── FREE-PLACEMENT PROPS (gizmo) ──
-        const props = new PropManager({
+        let props;
+        let portals;
+        function deselectOtherGizmos(except) {
+          if (except !== "props") props?.deselect();
+          if (except !== "portals") portals?.deselect();
+          if (except !== "builder") builder.deselectPlacement?.();
+        }
+        props = new PropManager({
           scene,
           camera,
           domElement: renderer.domElement,
@@ -1062,8 +1071,19 @@
             refreshCollisionDebug();
             paletteUi?.refreshStatus?.();
           },
+          onSelect: () => deselectOtherGizmos("props"),
+        });
+        portals = new PortalManager({
+          scene,
+          camera,
+          domElement: renderer.domElement,
+          orbit: controls,
+          params: PARAMS.portals,
+          onChange: () => paletteUi?.refreshStatus?.(),
+          onActivate: () => deselectOtherGizmos("portals"),
         });
         props.setEnabled(state.mode === "build");
+        portals.setBuildEnabled(state.mode === "build");
 
         // Collision debug wireframe (rebuilt on every bake).
         const debugGroup = new THREE.Group();
@@ -1162,7 +1182,8 @@
             ? "WASD drive &bull; in air: W/S pitch, A/D roll, Q/E spin &bull; Space handbrake &bull; F flip upright &bull; R respawn &bull; Tab orbit cam"
             : "LMB place &bull; N new chain + gizmo &bull; W move Shift+E rotate &bull; 1–0 pick &bull; R flip &bull; Backspace undo";
           builder.setGhostVisible(!on && state.buildMode);
-          props.setEnabled(!on); // gizmo/selection only outside drive mode
+          props.setEnabled(!on);
+          portals.setBuildEnabled(!on);
           if (on) {
             bakeCollision();
             if (obstacleParams.enabled) {
@@ -1201,7 +1222,7 @@
         // ── PLACE ON LMB (build mode only) ──
         renderer.domElement.addEventListener("pointerdown", (e) => {
           if (e.button !== 0 || state.mode !== "build" || !state.buildMode) return;
-          if (props.isUsingGizmo() || builder.isUsingPlacementGizmo()) return;
+          if (props.isUsingGizmo() || portals.isUsingGizmo() || builder.isUsingPlacementGizmo()) return;
           builder.place();
           paletteUi.refreshStatus();
         });
@@ -1354,7 +1375,7 @@
         buildInspector({
           camera, floorMat, roadMat, builder, vehicle, updateSun, rebuildSkyEnv,
           obstacleParams, parkour, bakeCollision, debugGroup, refreshCollisionDebug,
-          props, rebuildVehicleAudio,
+          props, portals, rebuildVehicleAudio,
           goToParkour: () => {
             if (state.mode !== "drive") setDriveMode(true);
             vehicle.setSpawn(
@@ -1383,12 +1404,14 @@
             vehicle.update(dt, readControls());
             tireMarks.update(vehicle);
             driftSmoke.updateFromVehicle(vehicle, camera, dt, keys);
+            portals.updateDrive(dt, vehicle);
             updateChaseCamera(dt);
             driveHud.innerHTML = `${vehicle.speedKmh.toFixed(0)} km/h · ${vehicle.groundedCount}/4 grip`;
           } else {
             controls.update();
           }
           audioSystem.update(dt);
+          portals.updateVisuals(dt);
           renderer.render(scene, camera);
         });
         window.addEventListener("resize", () => {
@@ -1541,7 +1564,7 @@
       function buildInspector({
         camera, floorMat, roadMat, builder, vehicle, updateSun, rebuildSkyEnv,
         obstacleParams, parkour, bakeCollision, debugGroup, refreshCollisionDebug,
-        props, rebuildVehicleAudio,
+        props, portals, rebuildVehicleAudio,
         goToParkour, goToTrack,
       }) {
         const body = document.getElementById("inspector-body");
@@ -1753,6 +1776,27 @@
           _button(sec, "Duplicate (Ctrl+D)", () => props.duplicateSelected());
           _button(sec, "Delete selected (Del)", () => props.deleteSelected());
           _button(sec, "Clear all props", () => props.clear());
+        }
+
+        // ── Teleport portals (paired doors) ──
+        {
+          const sec = _section(body, "Teleport portals", false);
+          const hint = document.createElement("div");
+          hint.className = "section-note";
+          hint.style.cssText = "font-size:10px;opacity:.7;padding:2px 2px 6px;line-height:1.5";
+          hint.innerHTML =
+            "Add two doors to link a pair (cyan ↔ purple). <kbd>W</kbd> move &bull; <kbd>E</kbd> rotate &bull; right-click select &bull; <kbd>Del</kbd> delete pair. Drive through at speed in test drive.";
+          sec.appendChild(hint);
+          const pp = PARAMS.portals;
+          _toggle(sec, pp, "enabled", { label: "Enabled" });
+          _button(sec, "+ Portal door", () => portals.addDoor());
+          _separator(sec);
+          _slider(sec, pp, "exitOffset", { label: "Exit offset (m)", min: 1, max: 6, step: 0.1 });
+          _slider(sec, pp, "cooldownTime", { label: "Cooldown (s)", min: 0.5, max: 5, step: 0.1 });
+          _slider(sec, pp, "minEntrySpeed", { label: "Min speed (m/s)", min: 0, max: 12, step: 0.5 });
+          _separator(sec);
+          _button(sec, "Delete selected pair (Del)", () => portals.deleteSelected());
+          _button(sec, "Clear all portals", () => portals.clear());
         }
 
         // ── Road colors ──

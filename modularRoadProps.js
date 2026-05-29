@@ -140,13 +140,15 @@ export class PropManager {
    * @param {HTMLElement} o.domElement
    * @param {import("three/addons/controls/OrbitControls.js").OrbitControls} o.orbit
    * @param {() => void} [o.onChange] fired when props are added/removed/moved (collision is now stale)
+   * @param {() => void} [o.onSelect] fired when a prop is selected (deselect other gizmos)
    */
-  constructor({ scene, camera, domElement, orbit, onChange = null }) {
+  constructor({ scene, camera, domElement, orbit, onChange = null, onSelect = null }) {
     this.scene = scene;
     this.camera = camera;
     this.domElement = domElement;
     this.orbit = orbit;
     this.onChange = onChange;
+    this.onSelect = onSelect;
     this.enabled = false;
 
     /** @type {{id:string, def:object, root:THREE.Object3D, collision:string}[]} */
@@ -210,6 +212,7 @@ export class PropManager {
 
   /** Spawn a prop near the orbit target (or origin) and select it. */
   add(typeId) {
+    this.onSelect?.();
     const def = PROP_BY_ID.get(typeId);
     if (!def) return null;
     const root = def.make();
@@ -286,6 +289,7 @@ export class PropManager {
   /* ----- internals ----- */
 
   _select(inst) {
+    this.onSelect?.();
     this.selected = inst;
     this.gizmo.attach(inst.root);
     this.gizmo.enabled = true;

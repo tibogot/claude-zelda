@@ -733,6 +733,33 @@ export class Vehicle {
     this.body.pos.y += 0.6;
   }
 
+  /**
+   * Teleport chassis — optional speed preservation along new forward.
+   * @param {THREE.Vector3} worldPos
+   * @param {THREE.Quaternion} worldQuat
+   * @param {{ preserveSpeed?: boolean, dampVertical?: boolean }} [opts]
+   */
+  teleportTo(worldPos, worldQuat, opts = {}) {
+    const body = this.body;
+    let speed = 0;
+    if (opts.preserveSpeed) {
+      this._wheelFwdWorld.set(body.vel.x, 0, body.vel.z);
+      speed = this._wheelFwdWorld.length();
+    }
+    body.pos.copy(worldPos);
+    body.quat.copy(worldQuat);
+    body.angVel.set(0, 0, 0);
+    if (opts.preserveSpeed && speed > 0.05) {
+      this._wheelFwdWorld.set(0, 0, 1).applyQuaternion(worldQuat);
+      this._wheelFwdWorld.y = 0;
+      if (this._wheelFwdWorld.lengthSq() > 1e-8) {
+        this._wheelFwdWorld.normalize().multiplyScalar(speed);
+        body.vel.copy(this._wheelFwdWorld);
+      }
+    }
+    if (opts.dampVertical) body.vel.y *= 0.25;
+  }
+
   setEnabled(on) {
     this.enabled = on;
     this.group.visible = on;
