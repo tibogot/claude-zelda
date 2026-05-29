@@ -131,6 +131,26 @@ export const WHEEL = {
   rimWidth: 0.26,
 };
 
+/** Forward-facing headlights (cheap, no shadows). Two SpotLights parented to the
+ *  chassis mesh so they follow position + orientation for free. Mount/aim offsets
+ *  are chassis-local meters: +Z front, +Y up, +X right. */
+export const HEADLIGHTS = {
+  enabled: false,
+  color: "#fff2d6",
+  intensity: 1200, // candela-ish (decay 2) — tune against night exposure
+  distance: 90,
+  angle: 0.6, // cone half-angle (rad)
+  penumbra: 0.5,
+  decay: 2,
+  // mount on the chassis (local m)
+  side: 0.6,
+  height: 0.05,
+  forward: 1.75,
+  // aim point relative to the mount (local m)
+  aimForward: 16,
+  aimDrop: 3.2,
+};
+
 export const WALL = {
   probeRange: 0.9,
   stiffness: 300000,
@@ -540,6 +560,7 @@ export class Vehicle {
     this.chassisMesh.castShadow = true;
     this.chassisMesh.receiveShadow = true;
     this.group.add(this.chassisMesh);
+    this._buildHeadlights();
 
     const tireGeo = new THREE.CylinderGeometry(WHEEL.radius, WHEEL.radius, WHEEL.thickness, 28);
     tireGeo.rotateZ(Math.PI / 2);
@@ -578,6 +599,48 @@ export class Vehicle {
       return { up, side, fwd };
     });
     this.wheelSpin = [0, 0, 0, 0];
+  }
+
+  _buildHeadlights() {
+    this.headlights = [];
+    this.headlightTargets = [];
+    const H = HEADLIGHTS;
+    for (const s of [-1, 1]) {
+      const light = new THREE.SpotLight(H.color, H.intensity, H.distance, H.angle, H.penumbra, H.decay);
+      light.castShadow = false;
+      light.position.set(s * H.side, H.height, H.forward);
+      const target = new THREE.Object3D();
+      target.position.set(s * H.side, H.height - H.aimDrop, H.forward + H.aimForward);
+      this.chassisMesh.add(light);
+      this.chassisMesh.add(target);
+      light.target = target;
+      light.visible = H.enabled;
+      this.headlights.push(light);
+      this.headlightTargets.push(target);
+    }
+  }
+
+  setHeadlights(on) {
+    HEADLIGHTS.enabled = !!on;
+    for (const l of this.headlights) l.visible = HEADLIGHTS.enabled;
+  }
+
+  /** Re-sync the headlight rig after editing HEADLIGHTS params live. */
+  applyHeadlightParams() {
+    const H = HEADLIGHTS;
+    for (let i = 0; i < this.headlights.length; i++) {
+      const s = i === 0 ? -1 : 1;
+      const l = this.headlights[i];
+      l.color.set(H.color);
+      l.intensity = H.intensity;
+      l.distance = H.distance;
+      l.angle = H.angle;
+      l.penumbra = H.penumbra;
+      l.decay = H.decay;
+      l.visible = H.enabled;
+      l.position.set(s * H.side, H.height, H.forward);
+      this.headlightTargets[i].position.set(s * H.side, H.height - H.aimDrop, H.forward + H.aimForward);
+    }
   }
 
   _initScratch() {

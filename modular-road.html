@@ -781,6 +781,7 @@
       import * as THREE from "three";
       import { OrbitControls } from "three/addons/controls/OrbitControls.js";
       import { SkyMesh } from "three/addons/objects/SkyMesh.js";
+      import { CSMShadowNode } from "three/addons/csm/CSMShadowNode.js";
       import { createTileMaterial } from "./tileMaterial.js";
       import {
         createRoadMaterial,
@@ -791,7 +792,7 @@
       } from "./modularRoadMaterial.js";
       import { ModularRoadBuilder, buildRoadPaletteUI } from "./modularRoadBuilder.js";
       import { roadParams, pieceParams, guardrailParams } from "./modularRoadKit.js";
-      import { Vehicle, TIRE, CHASSIS, SOLID, DECK, AERO, DRIVETRAIN } from "./modularRoadVehicle.js";
+      import { Vehicle, TIRE, CHASSIS, SOLID, DECK, AERO, DRIVETRAIN, HEADLIGHTS } from "./modularRoadVehicle.js";
       import { RoadBvh } from "./modularRoadBvh.js";
       import { buildParkour } from "./modularRoadParkour.js";
       import { PropManager, PROP_CATALOG } from "./modularRoadProps.js";
@@ -844,8 +845,16 @@
           envIntensity: 0.2,
           exposure: 0.5,
           sunDistance: 600,
-          shadowNormalBias: 1.2,
-          shadowBias: -0.0003,
+          shadowNormalBias: 0.02,
+          shadowBias: -0.0005,
+        },
+        csm: {
+          enabled: true,
+          cascades: 2,
+          maxFar: 300,
+          lightMargin: 100,
+          mapSize: 2048,
+          updateEveryFrame: true,
         },
         physicalSky: {
           turbidity: 2,
@@ -917,20 +926,50 @@
         scene.add(hemi);
         const sun = new THREE.DirectionalLight(0xffffff, 1);
         sun.castShadow = true;
-        sun.shadow.mapSize.set(2048, 2048);
+        sun.shadow.mapSize.set(PARAMS.csm.mapSize, PARAMS.csm.mapSize);
         sun.shadow.camera.near = 1;
-        sun.shadow.camera.far = 1200;
-        sun.shadow.camera.left = sun.shadow.camera.bottom = -200;
-        sun.shadow.camera.right = sun.shadow.camera.top = 200;
-        // Push samples off the surface so big flat sweeps don't self-shadow
-        // (the diagonal "acne" banding). normalBias does the heavy lifting on
-        // large planes; a tiny depth bias cleans up the rest. Tunable below.
+        sun.shadow.camera.far = 300;
+        sun.shadow.camera.left = sun.shadow.camera.bottom = -300;
+        sun.shadow.camera.right = sun.shadow.camera.top = 300;
         sun.shadow.normalBias = PARAMS.light.shadowNormalBias;
         sun.shadow.bias = PARAMS.light.shadowBias;
         const shadowTarget = new THREE.Object3D();
         scene.add(shadowTarget);
         sun.target = shadowTarget;
         scene.add(sun);
+
+        // ── CASCADED SHADOW MAPS (match v2/editor — CSMShadowNode, WebGPU TSL) ──
+        // Cascades follow the camera so the car keeps a crisp grounded shadow no
+        // matter how far it drives, instead of a single origin-pinned frustum.
+        let csm = null;
+        function setCsmEnabled(on) {
+          if (!sun.shadow) return;
+          sun.shadow.shadowNode = on && csm ? csm : null;
+        }
+        try {
+          if (renderer.shadowMap) {
+            csm = new CSMShadowNode(sun, {
+              cascades: PARAMS.csm.cascades,
+              maxFar: PARAMS.csm.maxFar,
+              mode: "practical",
+              lightMargin: PARAMS.csm.lightMargin,
+            });
+            if (csm.lights.length > 2) csm.lights[2].shadow.mapSize.set(1024, 1024);
+            if (PARAMS.csm.enabled) sun.shadow.shadowNode = csm;
+          }
+        } catch (err) {
+          console.warn("[modular-road] CSMShadowNode init failed; using plain directional shadow.", err);
+          csm = null;
+        }
+        function rebuildCsm() {
+          if (!csm) return;
+          csm.cascades = PARAMS.csm.cascades;
+          csm.maxFar = PARAMS.csm.maxFar;
+          csm.lightMargin = PARAMS.csm.lightMargin;
+          sun.shadow.mapSize.set(PARAMS.csm.mapSize, PARAMS.csm.mapSize);
+          if (csm.lights.length > 2) csm.lights[2].shadow.mapSize.set(1024, 1024);
+          if (csm.mainFrustum) csm.updateFrustums();
+        }
 
         // ── SKY + IBL ──
         const sky = new SkyMesh();
@@ -1043,6 +1082,36 @@
         // ── VEHICLE (test drive) ──
         const vehicle = new Vehicle({ scene });
         vehicle.setArrowsVisible(true); // force arrows on by default (physics tuning)
+        vehicle.applyHeadlightParams();
+
+        // ── DAY / NIGHT PRESETS ──
+        // Snap the shared light + sky params between a day and a night look, then
+        // drive the existing updateSun()/rebuildSkyEnv() so the change ports 1:1
+        // to v2 (same light + sky rig). SkyMesh can't render a true starfield, so
+        // "night" is a dim, cool, low-sun look that the headlights carry.
+        const TIME_PRESETS = {
+          day: {
+            light: { sunAzimuth: 135, sunElevation: 43, dirColor: "#fff5e0", dirIntensity: 2.2, hemiSkyColor: "#c8e0ff", hemiGroundColor: "#88aa55", hemiIntensity: 0.4, envIntensity: 0.2, exposure: 0.5 },
+            sky: { turbidity: 2, rayleigh: 1.5, cloudCoverage: 0.4, cloudDensity: 0.4 },
+            headlights: false,
+          },
+          night: {
+            light: { sunAzimuth: 135, sunElevation: 7, dirColor: "#aebfe6", dirIntensity: 0.35, hemiSkyColor: "#222f4d", hemiGroundColor: "#0e1118", hemiIntensity: 0.16, envIntensity: 0.08, exposure: 0.62 },
+            sky: { turbidity: 9, rayleigh: 0.7, cloudCoverage: 0.55, cloudDensity: 0.6 },
+            headlights: true,
+          },
+        };
+        const timeOfDay = { mode: "day" };
+        function applyTimePreset(mode) {
+          const preset = TIME_PRESETS[mode] ?? TIME_PRESETS.day;
+          timeOfDay.mode = mode;
+          Object.assign(PARAMS.light, preset.light);
+          Object.assign(PARAMS.physicalSky, preset.sky);
+          vehicle.setHeadlights(preset.headlights);
+          updateSun();
+          rebuildSkyEnv();
+          refreshInspectorWidgets();
+        }
         const tireMarks = new ModularRoadTireMarks(scene);
         const driftSmoke = new ModularRoadDriftSmoke(scene, PARAMS.driftSmoke);
 
@@ -1433,7 +1502,8 @@
         buildInspector({
           camera, floorMat, roadMat, builder, vehicle, updateSun, rebuildSkyEnv,
           obstacleParams, parkour, bakeCollision, debugGroup, refreshCollisionDebug,
-          props, portals, rebuildVehicleAudio,
+          props, portals, rebuildVehicleAudio, timeOfDay, applyTimePreset,
+          setCsmEnabled, rebuildCsm,
           goToParkour: () => {
             if (state.mode !== "drive") setDriveMode(true);
             vehicle.setSpawn(
@@ -1470,6 +1540,9 @@
           }
           audioSystem.update(dt);
           portals.updateVisuals(dt);
+          // CSM cascades are camera-relative — refresh after the camera moved.
+          // Guard on mainFrustum: it's only set once CSM has run its first render.
+          if (csm?.mainFrustum && PARAMS.csm.enabled && PARAMS.csm.updateEveryFrame) csm.updateFrustums();
           renderer.render(scene, camera);
         });
         window.addEventListener("resize", () => {
@@ -1480,6 +1553,12 @@
       }
 
       /* === Inspector widget helpers (mirror v2/editor.html) === */
+      // Widgets register a refresher so presets (e.g. day/night) that mutate the
+      // bound params can push the new values back into the DOM in one call.
+      const _widgetRefreshers = [];
+      function refreshInspectorWidgets() {
+        for (const fn of _widgetRefreshers) fn();
+      }
       const _checkSvg =
         '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12"></polyline></svg>';
       const _arrowSvg =
@@ -1546,6 +1625,11 @@
         num.addEventListener("keydown", (e) => {
           if (e.key === "Enter") num.blur();
         });
+        _widgetRefreshers.push(() => {
+          const v = obj[key];
+          sl.value = String(v);
+          num.value = _fmt(v, step);
+        });
         parent.appendChild(row);
         return row;
       }
@@ -1561,6 +1645,10 @@
           hex.textContent = inp.value;
           onChange?.(inp.value);
         });
+        _widgetRefreshers.push(() => {
+          inp.value = obj[key];
+          hex.textContent = obj[key];
+        });
         parent.appendChild(row);
         return row;
       }
@@ -1575,6 +1663,7 @@
           btn.classList.toggle("checked", obj[key]);
           onChange?.(obj[key]);
         });
+        _widgetRefreshers.push(() => btn.classList.toggle("checked", !!obj[key]));
         parent.appendChild(row);
         return row;
       }
@@ -1605,6 +1694,10 @@
           });
           group.appendChild(b);
         });
+        _widgetRefreshers.push(() => {
+          const btns = group.querySelectorAll("button");
+          choices.forEach((c, i) => btns[i].classList.toggle("palette-btn-primary", obj[key] === c));
+        });
         row.appendChild(lab);
         row.appendChild(group);
         parent.appendChild(row);
@@ -1622,7 +1715,8 @@
       function buildInspector({
         camera, floorMat, roadMat, builder, vehicle, updateSun, rebuildSkyEnv,
         obstacleParams, parkour, bakeCollision, debugGroup, refreshCollisionDebug,
-        props, portals, rebuildVehicleAudio,
+        props, portals, rebuildVehicleAudio, timeOfDay, applyTimePreset,
+        setCsmEnabled, rebuildCsm,
         goToParkour, goToTrack,
       }) {
         const body = document.getElementById("inspector-body");
@@ -1878,6 +1972,8 @@
             updateSun();
             rebuildSkyEnv();
           };
+          _select(sec, timeOfDay, "mode", ["day", "night"], { label: "Time", onChange: (m) => applyTimePreset(m) });
+          _separator(sec);
           _slider(sec, PARAMS.light, "sunAzimuth", { label: "Sun azim", min: 0, max: 360, step: 1, onChange: upEnv });
           _slider(sec, PARAMS.light, "sunElevation", { label: "Sun elev", min: -10, max: 90, step: 1, onChange: upEnv });
           _color(sec, PARAMS.light, "dirColor", { label: "Sun color", onChange: up });
@@ -1885,9 +1981,37 @@
           _slider(sec, PARAMS.light, "hemiIntensity", { label: "Hemi int", min: 0, max: 3, step: 0.05, onChange: up });
           _slider(sec, PARAMS.light, "envIntensity", { label: "Env int", min: 0, max: 3, step: 0.05, onChange: up });
           _slider(sec, PARAMS.light, "exposure", { label: "Exposure", min: 0, max: 3, step: 0.05, onChange: up });
+        }
+
+        // ── Shadows (CSM) — mirrors v2/editor ──
+        {
+          const sec = _section(body, "Shadows (CSM)", false);
+          _toggle(sec, PARAMS.csm, "enabled", { label: "Enabled", onChange: (on) => setCsmEnabled(on) });
+          _toggle(sec, PARAMS.csm, "updateEveryFrame", { label: "Every frame" });
+          _slider(sec, PARAMS.light, "shadowBias", { label: "Bias", min: -0.01, max: 0.001, step: 0.0001, onChange: () => updateSun() });
+          _slider(sec, PARAMS.light, "shadowNormalBias", { label: "Normal bias", min: 0, max: 0.2, step: 0.001, onChange: () => updateSun() });
+          _slider(sec, PARAMS.csm, "cascades", { label: "Cascades", min: 1, max: 4, step: 1, onChange: () => rebuildCsm() });
+          _slider(sec, PARAMS.csm, "maxFar", { label: "Max far", min: 30, max: 600, step: 10, onChange: () => rebuildCsm() });
+          _slider(sec, PARAMS.csm, "lightMargin", { label: "Light margin", min: 0, max: 400, step: 10, onChange: () => rebuildCsm() });
+          _slider(sec, PARAMS.csm, "mapSize", { label: "Map size", min: 512, max: 4096, step: 512, onChange: () => rebuildCsm() });
+        }
+
+        // ── Headlights (car-mounted spotlights, no shadows) ──
+        {
+          const sec = _section(body, "Headlights", false);
+          const reb = () => vehicle.applyHeadlightParams();
+          _toggle(sec, HEADLIGHTS, "enabled", { label: "On", onChange: (on) => vehicle.setHeadlights(on) });
+          _color(sec, HEADLIGHTS, "color", { label: "Color", onChange: reb });
+          _slider(sec, HEADLIGHTS, "intensity", { label: "Intensity", min: 0, max: 6000, step: 50, onChange: reb });
+          _slider(sec, HEADLIGHTS, "distance", { label: "Range (m)", min: 10, max: 200, step: 5, onChange: reb });
+          _slider(sec, HEADLIGHTS, "angle", { label: "Cone angle", min: 0.1, max: 1.2, step: 0.01, onChange: reb });
+          _slider(sec, HEADLIGHTS, "penumbra", { label: "Softness", min: 0, max: 1, step: 0.02, onChange: reb });
           _separator(sec);
-          _slider(sec, PARAMS.light, "shadowNormalBias", { label: "Shadow nbias", min: 0, max: 4, step: 0.05, onChange: up });
-          _slider(sec, PARAMS.light, "shadowBias", { label: "Shadow bias", min: -0.002, max: 0.002, step: 0.0001, onChange: up });
+          _slider(sec, HEADLIGHTS, "forward", { label: "Mount fwd", min: 0, max: 2.5, step: 0.05, onChange: reb });
+          _slider(sec, HEADLIGHTS, "side", { label: "Mount side", min: 0, max: 1.2, step: 0.02, onChange: reb });
+          _slider(sec, HEADLIGHTS, "height", { label: "Mount up", min: -0.4, max: 0.6, step: 0.02, onChange: reb });
+          _slider(sec, HEADLIGHTS, "aimForward", { label: "Aim dist", min: 2, max: 40, step: 1, onChange: reb });
+          _slider(sec, HEADLIGHTS, "aimDrop", { label: "Aim drop", min: 0, max: 8, step: 0.1, onChange: reb });
         }
 
         // ── Sky ──
