@@ -19,6 +19,11 @@ export const CHASSIS = {
   height: 0.6,
   length: 3.6,
   mass: 1400,
+  /** CoM offset from the collision-box center (+X right, +Y up, +Z front). */
+  comX: 0,
+  comY: 0,
+  comZ: 0,
+  /** Visual-only mesh lift along chassis-up (physics unchanged). */
   visualLift: 0,
 };
 
@@ -144,6 +149,13 @@ export const SOLID = {
   clampPenFrac: 0.5,
 };
 
+/** Cached each rebuild — offset from box center to CoM in chassis-local space. */
+const _COM_OFFSET = new THREE.Vector3();
+
+function _syncComOffset() {
+  _COM_OFFSET.set(CHASSIS.comX, CHASSIS.comY, CHASSIS.comZ);
+}
+
 /* ----------------------------------------------------------------------- */
 /* Rigid body — 6-DOF, force/torque accumulators                            */
 /* ----------------------------------------------------------------------- */
@@ -171,10 +183,10 @@ class RigidBody {
     this._worldInvI = new THREE.Matrix3();
   }
 
-  _setInertia(mass, { width: w, height: h, length: l }) {
-    const Ixx = (mass / 12) * (h * h + l * l);
-    const Iyy = (mass / 12) * (w * w + l * l);
-    const Izz = (mass / 12) * (w * w + h * h);
+  _setInertia(mass, { width: w, height: h, length: l, comX = 0, comY = 0, comZ = 0 }) {
+    const Ixx = (mass / 12) * (h * h + l * l) + mass * (comY * comY + comZ * comZ);
+    const Iyy = (mass / 12) * (w * w + l * l) + mass * (comX * comX + comZ * comZ);
+    const Izz = (mass / 12) * (w * w + h * h) + mass * (comX * comX + comY * comY);
     this.localInvInertia.set(1 / Ixx, 0, 0, 0, 1 / Iyy, 0, 0, 0, 1 / Izz);
   }
 
@@ -342,7 +354,11 @@ class Tire {
   }
 
   apply(body, dt, steerAngle, throttle, handbrake, castGround, castSphereSweep, driveScale = 1) {
-    this.worldPos.copy(this.localPos).applyQuaternion(body.quat).add(body.pos);
+    this.worldPos
+      .copy(this.localPos)
+      .sub(_COM_OFFSET)
+      .applyQuaternion(body.quat)
+      .add(body.pos);
     this._up.set(0, 1, 0).applyQuaternion(body.quat);
     this._fwd.set(0, 0, 1).applyQuaternion(body.quat);
     this._right.set(1, 0, 0).applyQuaternion(body.quat);
@@ -619,6 +635,14 @@ export class Vehicle {
     this._xAxis = new THREE.Vector3(1, 0, 0);
     this._zAxis = new THREE.Vector3(0, 0, 1);
     this._arrowDir = new THREE.Vector3();
+    this._geomCenter = new THREE.Vector3();
+    _syncComOffset();
+  }
+
+  /** Map a chassis-box-local point to world space (body.pos = CoM). */
+  _geomToWorld(geomLocal, out) {
+    const body = this.body;
+    return out.copy(geomLocal).sub(_COM_OFFSET).applyQuaternion(body.quat).add(body.pos);
   }
 
   _refreshLocalFrames() {
@@ -653,8 +677,9 @@ export class Vehicle {
     sb[25].set(0, -hh, 0); // bottom
   }
 
-  /** Re-derive inertia + local frames + visual box after mass/size edits. */
+  /** Re-derive inertia + local frames + visual box after mass/size/CoM edits. */
   rebuildBody() {
+    _syncComOffset();
     this.body.mass = CHASSIS.mass;
     this.body.invMass = 1 / CHASSIS.mass;
     this.body._setInertia(CHASSIS.mass, CHASSIS);
@@ -821,7 +846,7 @@ export class Vehicle {
   _applyChassisGroundContact() {
     const body = this.body;
     for (const corner of this.CHASSIS_CORNERS) {
-      this._cWorld.copy(corner).applyQuaternion(body.quat).add(body.pos);
+      this._geomToWorld(corner, this._cWorld);
       if (this._cWorld.y >= 0) continue;
       const pen = -this._cWorld.y;
       body.getVelocityAtPoint(this._cWorld, this._cVel);
@@ -843,7 +868,7 @@ export class Vehicle {
   _applyWallProbes() {
     const body = this.body;
     for (const p of this.PROBE_LOCALS) {
-      this._probeOrigin.copy(p.pos).applyQuaternion(body.quat).add(body.pos);
+      this._geomToWorld(p.pos, this._probeOrigin);
       this._probeDirW.copy(p.dir).applyQuaternion(body.quat);
       this.raycaster.ray.origin.copy(this._probeOrigin);
       this.raycaster.ray.direction.copy(this._probeDirW);
@@ -885,7 +910,7 @@ export class Vehicle {
     const body = this.body;
     const skin = DECK.skin;
     for (const ci of this.BOTTOM_CORNERS) {
-      this._cWorld.copy(this.CHASSIS_CORNERS[ci]).applyQuaternion(body.quat).add(body.pos);
+      this._geomToWorld(this.CHASSIS_CORNERS[ci], this._cWorld);
       const res = this.groundBvh.closestPointWithNormal(
         this._cWorld.x, this._cWorld.y, this._cWorld.z, DECK.searchRadius, this._deckN,
       );
@@ -910,7 +935,7 @@ export class Vehicle {
     const body = this.body;
     const r = SOLID.radius;
     for (const sp of this.SOLID_BOX_SAMPLES) {
-      this._sphC.copy(sp).applyQuaternion(body.quat).add(body.pos);
+      this._geomToWorld(sp, this._sphC);
       const res = this.solidsBvh.closestPointWithNormal(
         this._sphC.x, this._sphC.y, this._sphC.z, r, this._sphN,
       );
@@ -951,7 +976,8 @@ export class Vehicle {
 
   _syncVisuals(dt) {
     const body = this.body;
-    this.chassisMesh.position.copy(body.pos);
+    this._geomCenter.copy(_COM_OFFSET).applyQuaternion(body.quat).add(body.pos);
+    this.chassisMesh.position.copy(this._geomCenter);
     if (CHASSIS.visualLift !== 0) {
       this._wheelUp.set(0, 1, 0).applyQuaternion(body.quat);
       this.chassisMesh.position.addScaledVector(this._wheelUp, CHASSIS.visualLift);
