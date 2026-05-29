@@ -119,6 +119,16 @@ export function createTunnelMaterial(opts = {}) {
   });
 }
 
+/** Vertex-colored material for start/finish/checkpoint decor meshes. */
+export function createDecorMaterial() {
+  return new THREE.MeshStandardMaterial({
+    vertexColors: true,
+    roughness: 0.62,
+    metalness: 0.04,
+    side: THREE.DoubleSide,
+  });
+}
+
 /** Apply hex colors / numeric uniforms from a plain params object. */
 export function syncRoadUniforms(mat, p) {
   const u = mat._roadUniforms;

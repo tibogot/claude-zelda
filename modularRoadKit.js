@@ -56,7 +56,9 @@ export const pieceParams = {
   jumpAngle: 28, // takeoff angle at the exit (deg)
   // Vertical loop (teardrop):
   loopRadius: 10, // loop radius (m)
-  loopAdvance: 14, // forward drift so the entry/exit legs clear the road width (m)
+  loopAdvance: 28, // forward separation entry→exit at bottom (m)
+  // Game line pieces (start / checkpoint / finish):
+  gameLineLength: 16,
   // Twist / barrel roll (straight centreline that rolls):
   twistLength: 26,
   twistTurns: 1, // full 360° rolls over the length
@@ -544,24 +546,33 @@ function jumpPoints(pp) {
 }
 
 /**
- * Drivable vertical loop (teardrop) in the Y/Z plane. A naive circle with little
- * forward drift overlaps itself once the road is wider than the drift — the two
- * passes tangle. Here the forward advance is *bottom-biased* (slope ∝ 1+cos φ),
- * so the entry/exit legs splay apart by `adv` at the ground for clearance while
- * the top stays compact (it already has vertical separation). `adv` is floored
- * to a bit more than the road width so the legs never collide.
+ * Vertical loop with separated entry/exit legs. A flat circle in the Y/Z plane
+ * always crosses itself once the road has width. Here the ascending side is
+ * offset in +X and the descending side in −X (via 1−cos φ), while Z advances
+ * monotonically so entry (0,0,0) and exit (0,0,−exitZ) stay parallel and clear.
  */
 function loopPoints(pp) {
-  const R = Math.max(4, pp.loopRadius);
-  const adv = Math.max(roadParams.width * 1.15, pp.loopAdvance);
-  const n = Math.max(32, Math.ceil((2 * Math.PI * R) / roadParams.segLen));
+  const R = Math.max(6, pp.loopRadius);
+  const W = roadParams.width;
+  const exitZ = Math.max(W * 2.5, pp.loopAdvance, R * 1.1);
+  const spread = Math.max(W * 1.05, R * 0.42);
+  const n = Math.max(48, Math.ceil((2 * Math.PI * R) / roadParams.segLen));
   const pts = [];
   for (let i = 0; i <= n; i++) {
-    const phi = 2 * Math.PI * (i / n);
-    const y = R - R * Math.cos(phi);
-    const z = -R * Math.sin(phi) - (adv * (phi + Math.sin(phi))) / (2 * Math.PI);
-    pts.push(new V3(0, y, z));
+    const phi = (2 * Math.PI * i) / n;
+    const y = R * (1 - Math.cos(phi));
+    const z = (-exitZ * phi) / (2 * Math.PI);
+    const x = spread * Math.sin(phi);
+    pts.push(new V3(x, y, z));
   }
+  return pts;
+}
+
+function gameLinePoints(pp) {
+  const L = Math.max(4, pp.gameLineLength ?? 16);
+  const n = Math.max(2, Math.ceil(L / roadParams.segLen));
+  const pts = [];
+  for (let i = 0; i <= n; i++) pts.push(new V3(0, 0, -L * (i / n)));
   return pts;
 }
 
@@ -715,6 +726,33 @@ export const PIECE_CATALOG = [
     points: jumpPoints,
   },
   {
+    id: "start",
+    label: "Start",
+    hint: "Start line + arch",
+    swatch: "#2ecc71",
+    key: "s",
+    points: gameLinePoints,
+    game: "start",
+  },
+  {
+    id: "checkpoint",
+    label: "Checkpoint",
+    hint: "Arch + direction arrows",
+    swatch: "#3498db",
+    key: "p",
+    points: gameLinePoints,
+    game: "checkpoint",
+  },
+  {
+    id: "finish",
+    label: "Finish",
+    hint: "Checkered line + arch (both ends)",
+    swatch: "#e74c3c",
+    key: "f",
+    points: gameLinePoints,
+    game: "finish",
+  },
+  {
     id: "loop",
     label: "Loop",
     hint: "Vertical 360°",
@@ -770,6 +808,191 @@ export const PIECE_CATALOG = [
 export const PIECE_BY_ID = new Map(PIECE_CATALOG.map((p) => [p.id, p]));
 
 /* ----------------------------------------------------------------------- */
+/* Game-piece decor (checkered lines, arches, arrows)                       */
+/* ----------------------------------------------------------------------- */
+
+const _DECO_BLACK = new THREE.Color(0x111111);
+const _DECO_WHITE = new THREE.Color(0xf4f4f4);
+const _DECO_GREY = new THREE.Color(0xd8d8d8);
+const _DECO_YELLOW = new THREE.Color(0xffcc00);
+
+function _deckPt(fr, rx, rz, lift = 0.04) {
+  return fr.pos
+    .clone()
+    .addScaledVector(fr.right, rx)
+    .addScaledVector(fr.tangent, rz)
+    .addScaledVector(fr.up, lift);
+}
+
+function _geoPart() {
+  return { positions: [], normals: [], colors: [], indices: [] };
+}
+
+function _pushTri(part, a, b, c, n, ca, cb, cc) {
+  const base = part.positions.length / 3;
+  for (const [p, col] of [
+    [a, ca],
+    [b, cb],
+    [c, cc],
+  ]) {
+    part.positions.push(p.x, p.y, p.z);
+    part.normals.push(n.x, n.y, n.z);
+    part.colors.push(col.r, col.g, col.b);
+  }
+  part.indices.push(base, base + 1, base + 2);
+}
+
+function _pushQuad(part, a, b, c, d, n, ca, cb, cc, cd) {
+  const base = part.positions.length / 3;
+  for (const [p, col] of [
+    [a, ca],
+    [b, cb],
+    [c, cc],
+    [d, cd],
+  ]) {
+    part.positions.push(p.x, p.y, p.z);
+    part.normals.push(n.x, n.y, n.z);
+    part.colors.push(col.r, col.g, col.b);
+  }
+  part.indices.push(base, base + 1, base + 2, base, base + 2, base + 3);
+}
+
+function _partToGeo(part) {
+  const g = new THREE.BufferGeometry();
+  g.setAttribute("position", new THREE.Float32BufferAttribute(part.positions, 3));
+  g.setAttribute("normal", new THREE.Float32BufferAttribute(part.normals, 3));
+  g.setAttribute("color", new THREE.Float32BufferAttribute(part.colors, 3));
+  g.setIndex(part.indices);
+  return g;
+}
+
+function _checkerPart(fr, hw, depth, cols, rows) {
+  const part = _geoPart();
+  const n = fr.up.clone().normalize();
+  const cellW = (hw * 2) / cols;
+  const cellD = depth / rows;
+  for (let row = 0; row < rows; row++) {
+    for (let col = 0; col < cols; col++) {
+      const c = (row + col) % 2 === 0 ? _DECO_BLACK : _DECO_WHITE;
+      const x0 = -hw + col * cellW;
+      const x1 = x0 + cellW;
+      const z0 = -row * cellD;
+      const z1 = z0 - cellD;
+      _pushQuad(
+        part,
+        _deckPt(fr, x0, z0),
+        _deckPt(fr, x1, z0),
+        _deckPt(fr, x1, z1),
+        _deckPt(fr, x0, z1),
+        n,
+        c,
+        c,
+        c,
+        c,
+      );
+    }
+  }
+  return part;
+}
+
+function _archPart(fr, hw, height) {
+  const part = _geoPart();
+  const up = fr.up.clone().normalize();
+  const right = fr.right.clone().normalize();
+  const tan = fr.tangent.clone().normalize();
+  const origin = fr.pos.clone();
+  const postH = height * 0.82;
+  const beamR = 0.18;
+  const segs = 14;
+
+  const postW = 0.22;
+  for (const side of [-1, 1]) {
+    const cx = right.clone().multiplyScalar(side * hw);
+    const bl = origin.clone().add(cx).addScaledVector(tan, -postW * 0.5);
+    const br = origin.clone().add(cx).addScaledVector(tan, postW * 0.5);
+    const tl = bl.clone().addScaledVector(up, postH);
+    const tr = br.clone().addScaledVector(up, postH);
+    _pushQuad(part, bl, br, tr, tl, right.clone().multiplyScalar(side), _DECO_WHITE, _DECO_WHITE, _DECO_WHITE, _DECO_WHITE);
+  }
+
+  for (let i = 0; i < segs; i++) {
+    const t0 = (Math.PI * i) / segs;
+    const t1 = (Math.PI * (i + 1)) / segs;
+    const c0 = Math.cos(t0);
+    const s0 = Math.sin(t0);
+    const c1 = Math.cos(t1);
+    const s1 = Math.sin(t1);
+    const p0 = origin.clone().addScaledVector(right, -hw * c0).addScaledVector(up, postH + height * 0.18 * s0);
+    const p1 = origin.clone().addScaledVector(right, -hw * c1).addScaledVector(up, postH + height * 0.18 * s1);
+    const p2 = p1.clone().addScaledVector(up, beamR);
+    const p3 = p0.clone().addScaledVector(up, beamR);
+    const mid = p0.clone().add(p1).multiplyScalar(0.5).sub(origin).normalize();
+    _pushQuad(part, p0, p1, p2, p3, mid, _DECO_GREY, _DECO_GREY, _DECO_GREY, _DECO_GREY);
+  }
+  return part;
+}
+
+function _chevronPart(fr, hw, length, width) {
+  const part = _geoPart();
+  const n = fr.up.clone().normalize();
+  const tip = _deckPt(fr, 0, -length);
+  const l = _deckPt(fr, -width, 0);
+  const r = _deckPt(fr, width, 0);
+  _pushTri(part, tip, l, r, n, _DECO_YELLOW, _DECO_YELLOW, _DECO_YELLOW);
+  return part;
+}
+
+function _bannerPart(fr, hw, height, textColor) {
+  const part = _geoPart();
+  const up = fr.up.clone().normalize();
+  const right = fr.right.clone().normalize();
+  const tan = fr.tangent.clone().normalize();
+  const origin = fr.pos.clone();
+  const y0 = height * 0.55;
+  const y1 = height * 0.78;
+  const bl = origin.clone().addScaledVector(right, -hw * 0.55).addScaledVector(up, y0).addScaledVector(tan, 0.35);
+  const br = origin.clone().addScaledVector(right, hw * 0.55).addScaledVector(up, y0).addScaledVector(tan, 0.35);
+  const tl = origin.clone().addScaledVector(right, -hw * 0.55).addScaledVector(up, y1).addScaledVector(tan, 0.35);
+  const tr = origin.clone().addScaledVector(right, hw * 0.55).addScaledVector(up, y1).addScaledVector(tan, 0.35);
+  _pushQuad(part, bl, br, tr, tl, tan.clone().negate(), textColor, textColor, textColor, textColor);
+  return part;
+}
+
+/** Visual-only geometry for start / checkpoint / finish pieces. */
+export function buildGameDecorGeometry(frames, profileData, gameType) {
+  const hw = profileData.hw;
+  const parts = [];
+  const f0 = frames[0];
+  const fN = frames[frames.length - 1];
+
+  if (gameType === "start") {
+    parts.push(_checkerPart(f0, hw, 3.2, 8, 2));
+    parts.push(_archPart(f0, hw, 6.5));
+    parts.push(_bannerPart(f0, hw, 6.5, _DECO_WHITE));
+  } else if (gameType === "finish") {
+    parts.push(_checkerPart(f0, hw, 3.2, 8, 2));
+    parts.push(_archPart(f0, hw, 6.5));
+    parts.push(_checkerPart(fN, hw, 3.2, 8, 2));
+    parts.push(_archPart(fN, hw, 6.5));
+    parts.push(_bannerPart(fN, hw, 6.5, _DECO_BLACK));
+  } else if (gameType === "checkpoint") {
+    const mid = frames[Math.floor(frames.length / 2)];
+    parts.push(_archPart(mid, hw, 6));
+    parts.push(_bannerPart(mid, hw, 6, _DECO_YELLOW));
+    const step = Math.max(2, Math.floor(frames.length / 5));
+    for (let i = step; i < frames.length - step * 0.5; i += step) {
+      parts.push(_chevronPart(frames[i], hw * 0.55, 2.8, hw * 0.42));
+    }
+  }
+
+  if (!parts.length) return null;
+  const geos = parts.map(_partToGeo);
+  const merged = mergeGeometries(geos, false);
+  for (const g of geos) g.dispose();
+  return merged;
+}
+
+/* ----------------------------------------------------------------------- */
 /* Sockets + placement math                                                 */
 /* ----------------------------------------------------------------------- */
 
@@ -816,6 +1039,7 @@ export function buildPiece(pieceId, currentConnector, pp = pieceParams, rp = roa
   const geometry = buildSweepGeometry(frames, profileData);
   const railGeometry = def.noMesh ? null : buildGuardrailGeometry(frames, profileData, gp, rp);
   const shellGeometry = def.shell ? buildTunnelGeometry(frames, profileData, pp) : null;
+  const decorGeometry = def.game ? buildGameDecorGeometry(frames, profileData, def.game) : null;
 
   const f0 = frames[0];
   const fN = frames[frames.length - 1];
@@ -827,5 +1051,5 @@ export function buildPiece(pieceId, currentConnector, pp = pieceParams, rp = roa
   const world = currentConnector.clone().multiply(entryLocal.clone().invert());
   const connectorOut = world.clone().multiply(exitLocal);
 
-  return { def, geometry, railGeometry, shellGeometry, world, connectorOut };
+  return { def, geometry, railGeometry, shellGeometry, decorGeometry, world, connectorOut };
 }
