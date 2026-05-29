@@ -1,6 +1,7 @@
 import * as THREE from "three";
 import { TransformControls } from "three/addons/controls/TransformControls.js";
 import { computeFrames, buildProfile, buildTunnelGeometry } from "./modularRoadKit.js";
+import { kickerRampGeometry, jumpRampGeometry } from "./modularRoadParkour.js";
 
 /**
  * Free-placement props for the modular road. Unlike auto-chained track pieces,
@@ -90,6 +91,26 @@ export const PROP_CATALOG = [
     label: "Slope ramp",
     collision: "both",
     make: () => new THREE.Mesh(rampGeometry(18, 6, 14), mat(0xe8912d, { roughness: 0.8 })),
+  },
+  {
+    id: "kickerramp",
+    label: "Convex kicker",
+    collision: "both",
+    make: () =>
+      new THREE.Mesh(
+        kickerRampGeometry(14, 20, 7, 32),
+        mat(0xc07840, { roughness: 0.82 }),
+      ),
+  },
+  {
+    id: "jumpkicker",
+    label: "Jump ramp",
+    collision: "both",
+    make: () =>
+      new THREE.Mesh(
+        jumpRampGeometry(14, 22, 8, 32),
+        mat(0x886838, { roughness: 0.82 }),
+      ),
   },
   {
     id: "tube",
@@ -284,6 +305,42 @@ export class PropManager {
       });
     }
     return { deck, solids };
+  }
+
+  /** @returns {{type:string, position:number[], quaternion:number[], scale:number[]}[]} */
+  exportInstances() {
+    return this.instances.map((inst) => ({
+      type: inst.id,
+      position: inst.root.position.toArray(),
+      quaternion: inst.root.quaternion.toArray(),
+      scale: inst.root.scale.toArray(),
+    }));
+  }
+
+  /** @param {{type:string, position:number[], quaternion:number[], scale:number[]}[]} list */
+  importInstances(list) {
+    this.deselect();
+    for (const inst of this.instances) this._disposeInstance(inst);
+    this.instances = [];
+    if (!Array.isArray(list)) return;
+    for (const item of list) {
+      const def = PROP_BY_ID.get(item.type);
+      if (!def || !Array.isArray(item.position)) continue;
+      const root = def.make();
+      root.userData.isProp = true;
+      root.position.fromArray(item.position);
+      if (Array.isArray(item.quaternion) && item.quaternion.length === 4) {
+        root.quaternion.fromArray(item.quaternion);
+      }
+      if (Array.isArray(item.scale) && item.scale.length === 3) {
+        root.scale.fromArray(item.scale);
+      }
+      this.group.add(root);
+      const inst = { id: item.type, def, root, collision: def.collision };
+      root.userData.propInstance = inst;
+      this.instances.push(inst);
+    }
+    this.onChange?.();
   }
 
   /* ----- internals ----- */

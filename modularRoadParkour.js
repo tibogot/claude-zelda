@@ -138,6 +138,58 @@ function curveRampGeometry(w, radius, angleDeg, rise, curveDir = 1, segments = 3
   return geo;
 }
 
+/** Solid extruded kicker: flat entry z=0, profile supplied by heightAt(t) where t∈[0,1]. */
+function solidKickerExtrusion(w, length, rise, segments, heightAt) {
+  const hw = w / 2;
+  const n = Math.max(8, segments);
+  const L = Math.max(4, length);
+  const H = Math.max(0.5, rise);
+  const pos = [];
+  const quad = (a, b, c, d) => pos.push(...a, ...b, ...c, ...a, ...c, ...d);
+
+  const topL = [];
+  const topR = [];
+  const botL = [];
+  const botR = [];
+
+  for (let i = 0; i <= n; i++) {
+    const t = i / n;
+    const z = -L * t;
+    const y = heightAt(t, H);
+    topL.push([-hw, y, z]);
+    topR.push([hw, y, z]);
+    botL.push([-hw, 0, z]);
+    botR.push([hw, 0, z]);
+  }
+
+  for (let i = 0; i < n; i++) quad(topL[i], topR[i], topR[i + 1], topL[i + 1]);
+  for (let i = 0; i < n; i++) quad(botL[i], botL[i + 1], botR[i + 1], botR[i]);
+  for (let i = 0; i < n; i++) quad(botL[i], topL[i], topL[i + 1], botL[i + 1]);
+  for (let i = 0; i < n; i++) quad(botR[i], botR[i + 1], topR[i + 1], topR[i]);
+  quad(botL[n], topL[n], topR[n], botR[n]);
+
+  const geo = new THREE.BufferGeometry();
+  geo.setAttribute("position", new THREE.Float32BufferAttribute(pos, 3));
+  geo.computeVertexNormals();
+  geo.computeBoundingSphere();
+  return geo;
+}
+
+/**
+ * Convex kicker — surface bulges above the straight chord (y = rise×sin(t×π/2)).
+ */
+export function kickerRampGeometry(w, length, rise, segments = 32) {
+  return solidKickerExtrusion(w, length, rise, segments, (t, H) => H * Math.sin((Math.PI / 2) * t));
+}
+
+/**
+ * Concave jump ramp — scooped transition below the chord (y = rise×(1−cos(t×π/2))).
+ * Flat entry, steep lip; typical stunt jump profile.
+ */
+export function jumpRampGeometry(w, length, rise, segments = 32) {
+  return solidKickerExtrusion(w, length, rise, segments, (t, H) => H * (1 - Math.cos((Math.PI / 2) * t)));
+}
+
 /* ----------------------------------------------------------------------- */
 /* Dynamic movers — rebaked each frame, push the chassis via surface velocity */
 /* ----------------------------------------------------------------------- */
@@ -285,6 +337,52 @@ export function buildParkour({ offset = new THREE.Vector3(100, 0, 0) } = {}) {
     return m;
   }
 
+  function addKickerRamp({
+    x,
+    z,
+    w = 14,
+    length = 22,
+    rise = 8,
+    yawDeg = 0,
+    segments = 36,
+    color = 0x9a7848,
+  }) {
+    const yaw = THREE.MathUtils.degToRad(yawDeg);
+    const m = new THREE.Mesh(kickerRampGeometry(w, length, rise, segments), _matRamp(color));
+    m.rotation.order = "YXZ";
+    m.rotation.y = yaw;
+    m.position.set(x, 0, z);
+    m.castShadow = true;
+    m.receiveShadow = true;
+    group.add(m);
+    deckMeshes.push(m);
+    wallMeshes.push(m);
+    return m;
+  }
+
+  function addJumpRamp({
+    x,
+    z,
+    w = 14,
+    length = 22,
+    rise = 8,
+    yawDeg = 0,
+    segments = 36,
+    color = 0x886838,
+  }) {
+    const yaw = THREE.MathUtils.degToRad(yawDeg);
+    const m = new THREE.Mesh(jumpRampGeometry(w, length, rise, segments), _matRamp(color));
+    m.rotation.order = "YXZ";
+    m.rotation.y = yaw;
+    m.position.set(x, 0, z);
+    m.castShadow = true;
+    m.receiveShadow = true;
+    group.add(m);
+    deckMeshes.push(m);
+    wallMeshes.push(m);
+    return m;
+  }
+
   function addStep({ x, z, w, h, l, color = 0x5e7a48 }) {
     const m = new THREE.Mesh(new THREE.BoxGeometry(w, h, l), _matRamp(color));
     m.position.set(x, h / 2, z);
@@ -357,6 +455,26 @@ export function buildParkour({ offset = new THREE.Vector3(100, 0, 0) } = {}) {
     curveDir: 1,
     segments: 40,
     color: 0x6a5840,
+  });
+
+  // ── KICKERS — convex bulge vs concave jump (centre-right) ──
+  addKickerRamp({
+    x: 28,
+    z: 42,
+    w: 12,
+    length: 20,
+    rise: 7,
+    segments: 36,
+    color: 0xb88850,
+  });
+  addJumpRamp({
+    x: 12,
+    z: 42,
+    w: 14,
+    length: 22,
+    rise: 8,
+    segments: 36,
+    color: 0x886838,
   });
 
   // ── MEGA KICKER + LANDING (centre lane, clear of slope ends) ──

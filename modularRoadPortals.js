@@ -335,6 +335,75 @@ export class PortalManager {
     vehicle.teleportTo(_exitPos, _exitQuat, { preserveSpeed: true, dampVertical: true });
   }
 
+  _serializeDoorTransform(root) {
+    return {
+      position: root.position.toArray(),
+      quaternion: root.quaternion.toArray(),
+      scale: root.scale.toArray(),
+    };
+  }
+
+  _applyDoorTransform(root, t) {
+    if (Array.isArray(t.position)) root.position.fromArray(t.position);
+    if (Array.isArray(t.quaternion)) root.quaternion.fromArray(t.quaternion);
+    if (Array.isArray(t.scale)) root.scale.fromArray(t.scale);
+  }
+
+  /** @returns {{ pairs: object[], pending: object|null, nextId: number }} */
+  exportLayout() {
+    return {
+      pairs: this.pairs.map((pair) => ({
+        id: pair.id,
+        enabled: pair.enabled,
+        a: this._serializeDoorTransform(pair.a.root),
+        b: this._serializeDoorTransform(pair.b.root),
+      })),
+      pending: this._pending ? this._serializeDoorTransform(this._pending.root) : null,
+      nextId: this._nextId,
+    };
+  }
+
+  /** @param {{ pairs?: object[], pending?: object|null, nextId?: number }} data */
+  importLayout(data) {
+    this.clear();
+    if (!data) return;
+    let maxId = 0;
+
+    const spawnDoor = (side, transform) => {
+      const color = side === "b" ? this.params.colorB : this.params.colorA;
+      const { root, surfaceMat } = buildPortalMesh(this.params, color, side);
+      root.userData.isPortal = true;
+      if (transform) this._applyDoorTransform(root, transform);
+      const door = { root, surfaceMat, side, pairId: null };
+      root.userData.portalDoor = door;
+      this.group.add(root);
+      return door;
+    };
+
+    for (const row of data.pairs || []) {
+      const id = row.id ?? ++maxId;
+      maxId = Math.max(maxId, id);
+      const doorA = spawnDoor("a", row.a);
+      const doorB = spawnDoor("b", row.b);
+      doorA.pairId = id;
+      doorB.pairId = id;
+      this.pairs.push({
+        id,
+        a: doorA,
+        b: doorB,
+        enabled: row.enabled !== false,
+        cooldown: 0,
+      });
+    }
+
+    if (data.pending) {
+      this._pending = spawnDoor("a", data.pending);
+    }
+
+    this._nextId = Math.max(data.nextId ?? 1, maxId + 1);
+    this.onChange?.();
+  }
+
   /* ----- selection / gizmo ----- */
 
   _select(door) {

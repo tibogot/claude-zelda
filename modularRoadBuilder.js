@@ -403,7 +403,70 @@ export class ModularRoadBuilder {
     this._notify();
   }
 
-  /** @returns {{id:string, pp:object}[]} serializable layout */
+  /** @returns {{id:string, pp:object, edges:boolean, connectorIn:number[]}[]} */
+  exportTrackPieces() {
+    return this.pieces.map((p) => ({
+      id: p.id,
+      pp: { ...p.pp },
+      edges: p.edges ?? true,
+      connectorIn: p.connectorIn.toArray(),
+    }));
+  }
+
+  /**
+   * Replace the chain from saved pieces (supports disconnected chains via stored connectors).
+   * @param {{id:string, pp:object, edges?:boolean, connectorIn:number[]}[]} entries
+   */
+  importTrackPieces(entries) {
+    this.clear();
+    if (!Array.isArray(entries)) return;
+    for (const e of entries) {
+      if (!PIECE_BY_ID.has(e.id) || !Array.isArray(e.connectorIn) || e.connectorIn.length !== 16) continue;
+      const connectorIn = new THREE.Matrix4().fromArray(e.connectorIn);
+      const edges = e.edges ?? true;
+      const pp = { ...e.pp };
+      const built = buildPiece(e.id, connectorIn, pp, roadParams, guardrailParams, edges);
+      const mesh = this._makeMesh(built.geometry, this.material, built.world);
+      mesh.userData.pieceId = e.id;
+      if (built.def.noMesh) {
+        mesh.visible = false;
+        mesh.userData.noCollision = true;
+      }
+      const railMesh =
+        built.railGeometry && this.railMaterial
+          ? this._makeMesh(built.railGeometry, this.railMaterial, built.world)
+          : null;
+      const shellMesh =
+        built.shellGeometry && this.shellMaterial
+          ? this._makeMesh(built.shellGeometry, this.shellMaterial, built.world)
+          : null;
+      const decorMesh =
+        built.decorGeometry && this.decorMaterial
+          ? this._makeMesh(built.decorGeometry, this.decorMaterial, built.world)
+          : null;
+      if (decorMesh) decorMesh.castShadow = false;
+
+      this.pieces.push({
+        id: e.id,
+        pp,
+        edges,
+        mesh,
+        railMesh,
+        shellMesh,
+        decorMesh,
+        connectorIn,
+        connectorOut: built.connectorOut.clone(),
+      });
+    }
+    const last = this.pieces[this.pieces.length - 1];
+    this.currentConnector = last ? last.connectorOut.clone() : initialConnector();
+    this.freePlaceMode = false;
+    this._hidePlacementGizmo();
+    this.refreshGhost();
+    this._notify();
+  }
+
+  /** @returns {{id:string, pp:object}[]} serializable layout (legacy — no connectors) */
   exportLayout() {
     return this.pieces.map((p) => ({ id: p.id, pp: { ...p.pp } }));
   }
@@ -716,5 +779,5 @@ export function buildRoadPaletteUI(builder, opts = {}) {
     }
   });
 
-  return { refreshStatus, renderPieces };
+  return { refreshStatus, renderPieces, syncEdgesBtn };
 }

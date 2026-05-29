@@ -751,6 +751,8 @@
             <button id="road-new-chain" class="palette-btn palette-btn-wide" type="button">New chain (N)</button>
             <button id="road-flip" class="palette-btn" type="button">Flip L/R (R)</button>
             <button id="road-undo" class="palette-btn" type="button">Undo</button>
+            <button id="road-save" class="palette-btn" type="button">Save track</button>
+            <button id="road-load" class="palette-btn" type="button">Load track</button>
             <button id="road-rebake" class="palette-btn" type="button">Rebake collision</button>
             <button id="road-demo" class="palette-btn" type="button">Demo</button>
             <button id="road-clear" class="palette-btn" type="button">Clear</button>
@@ -805,6 +807,12 @@
         DEFAULT_DRIFT_SMOKE_SETTINGS,
       } from "./modularRoadDriftSmoke.js";
       import { PortalManager, DEFAULT_PORTAL_PARAMS } from "./modularRoadPortals.js";
+      import {
+        exportTrack,
+        importTrack,
+        downloadTrackJson,
+        createTrackFileInput,
+      } from "./modularRoadTrackIO.js";
 
       const PARAMS = {
         camera: { fov: 60 },
@@ -1217,6 +1225,56 @@
           const tris = deckBvh.triCount + solidsBvh.triCount;
           rebakeBtn.textContent = `Rebaked (${tris.toLocaleString()} tris)`;
           setTimeout(() => (rebakeBtn.textContent = "Rebake collision"), 1400);
+        });
+
+        // ── TRACK SAVE / LOAD ──
+        const trackFileInput = createTrackFileInput(async (data) => {
+          if (state.mode === "drive") setDriveMode(false);
+          deselectOtherGizmos(null);
+          const result = importTrack(data, {
+            builder,
+            props,
+            portals,
+            obstacleParams,
+            roadParams,
+            guardrailParams,
+            pieceParams,
+            portalParams: PARAMS.portals,
+          });
+          if (!result.ok) {
+            alert(result.error || "Track load failed.");
+            return;
+          }
+          parkour.group.visible = obstacleParams.enabled;
+          syncParkourMovers();
+          builder.rebuildAll();
+          paletteUi?.syncEdgesBtn?.();
+          paletteUi?.refreshStatus?.();
+          bakeCollision();
+          const statusEl = document.getElementById("road-status");
+          if (statusEl) {
+            statusEl.textContent = `Loaded ${result.pieceCount} pieces · ${props.instances.length} props · ${portals.pairs.length} portal pairs`;
+          }
+        });
+        document.getElementById("road-save")?.addEventListener("click", () => {
+          const track = exportTrack({
+            builder,
+            props,
+            portals,
+            obstacleParams,
+            roadParams,
+            guardrailParams,
+            pieceParams,
+            portalParams: PARAMS.portals,
+          });
+          downloadTrackJson(track);
+          const statusEl = document.getElementById("road-status");
+          if (statusEl) {
+            statusEl.textContent = `Saved ${track.pieces.length} pieces · ${track.props.length} props`;
+          }
+        });
+        document.getElementById("road-load")?.addEventListener("click", () => {
+          trackFileInput.click();
         });
 
         // ── PLACE ON LMB (build mode only) ──
@@ -1694,7 +1752,7 @@
             label: "Obstacle parkour",
             onChange: (on) => {
               parkour.group.visible = on;
-              syncParkourMovers();
+              vehicle.setDynamicMovers(on ? parkour.movers : []);
               bakeCollision();
             },
           });
