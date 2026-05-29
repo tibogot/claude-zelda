@@ -41,9 +41,17 @@ export const TIRE = {
   damper: 6500,
   bottomOutThresh: 0.7,
   bottomOutMult: 8,
+  // Per-axle friction multipliers (× frictionCoeff). Lower the rear for
+  // oversteer, lower the front for understeer. Handbrake swaps the rear out.
   gripFront: 1.0,
   gripRear: 1.0,
-  gripHandbrake: 0.08,
+  gripHandbrake: 0.35,
+  // Lateral slip model: force builds linearly with slip then saturates at the
+  // friction circle. `tireStiffness` is the slope (≈ 1/peak-slip-angle); higher
+  // = sharper, more grip before sliding. `lowSpeedRef` keeps slip well-defined
+  // near standstill so the car doesn't jitter when parked.
+  tireStiffness: 7.0,
+  lowSpeedRef: 2.5,
   accelForce: 4000,
   topSpeed: 30,
   powerCurveExp: 2.0,
@@ -53,9 +61,51 @@ export const TIRE = {
   engineBrake: 800,
   maxSteerAngle: 0.55,
   steerSmooth: 8.0,
-  frictionCoeff: 5.0,
+  // Speed-sensitive steering: the usable steer angle shrinks as speed rises so
+  // the car isn't twitchy / spin-happy at the top end. At/above `steerSpeedRef`
+  // (m/s) the angle is reduced by `steerSpeedReduce` (fraction).
+  steerSpeedRef: 26,
+  steerSpeedReduce: 0.55,
+  frictionCoeff: 1.5,
   maxAngVel: 9.0,
-  stabilizerStrength: 8000,
+  // Anti-roll / orientation. When grounded the chassis aligns its up-axis to the
+  // averaged ground normal (so it leans into banks and follows loops instead of
+  // fighting toward world-up); `stabilizerDamp` damps the roll/pitch rate.
+  stabilizerStrength: 9000,
+  stabilizerDamp: 2600,
+  // Airborne control: gentle tumble damping + player torque (W/S pitch, A/D roll).
+  airAngularDamp: 1400,
+  airControl: 5000,
+};
+
+/** Drivetrain. `layout` picks which axle(s) get engine torque; for AWD,
+ *  `powerBias` is the rear power fraction (0 = all front … 1 = all rear, 0.5 =
+ *  even). Braking always acts on all four wheels regardless of layout. Total
+ *  drive force is preserved across layouts, so RWD just concentrates it on the
+ *  rear (more power-oversteer) rather than halving acceleration. */
+export const DRIVETRAIN = {
+  layout: "AWD", // 'FWD' | 'RWD' | 'AWD'
+  powerBias: 0.5,
+};
+
+/** Aerodynamics. `drag` bounds top speed and tames downhill runaway (quadratic,
+ *  opposing velocity). `downforce` presses the car onto whatever surface it's on
+ *  (along -chassis-up) and scales with speed² — light by default, but it adds
+ *  load-sensitive grip in fast corners and margin through loops. */
+export const AERO = {
+  drag: 0.45,
+  downforce: 3.0,
+};
+
+/** Chassis shell vs the deck BVH — stops the body clipping into elevated track
+ *  (ramps, loops, hard landings). Bottom corners get pushed out along the deck
+ *  normal once they sink within `skin` of the surface. */
+export const DECK = {
+  enabled: true,
+  skin: 0.05,
+  searchRadius: 0.8,
+  stiffness: 220000,
+  damper: 9000,
 };
 
 export const WHEEL = {
@@ -175,11 +225,13 @@ class Tire {
     this.localPos = localPos.clone();
     this.canSteer = steer;
     this.canDrive = drive;
+    this.isFront = localPos.z > 0;
 
     this.grounded = false;
     this.compression = 0;
     this.hitDistance = TIRE.rayLength;
     this.hitPoint = new THREE.Vector3();
+    this.hitNormal = new THREE.Vector3(0, 1, 0);
     this.worldPos = new THREE.Vector3();
     this.lastSuspension = new THREE.Vector3();
     this.lastSteering = new THREE.Vector3();
@@ -197,9 +249,10 @@ class Tire {
     this._down = new THREE.Vector3();
     this._rayO = new THREE.Vector3();
     this._bestP = new THREE.Vector3();
+    this._bestN = new THREE.Vector3(0, 1, 0);
   }
 
-  apply(body, dt, steerAngle, throttle, handbrake, castGround) {
+  apply(body, dt, steerAngle, throttle, handbrake, castGround, driveScale = 1) {
     this.worldPos.copy(this.localPos).applyQuaternion(body.quat).add(body.pos);
     this._up.set(0, 1, 0).applyQuaternion(body.quat);
     this._fwd.set(0, 0, 1).applyQuaternion(body.quat);
@@ -227,6 +280,8 @@ class Tire {
       if (hit && hit.distance < bestDist) {
         bestDist = hit.distance;
         bestPoint = this._bestP.copy(hit.point);
+        if (hit.face && hit.face.normal) this._bestN.copy(hit.face.normal);
+        else this._bestN.set(0, 1, 0);
       }
     };
 
@@ -254,6 +309,10 @@ class Tire {
 
     this.grounded = true;
     this.hitPoint.copy(bestPoint);
+    this.hitNormal.copy(this._bestN);
+    if (this.hitNormal.dot(this._up) < 0) this.hitNormal.negate();
+    if (this.hitNormal.lengthSq() < 1e-8) this.hitNormal.copy(this._up);
+    this.hitNormal.normalize();
     const distFromHub = bestDist - pad;
     this.hitDistance = distFromHub;
     this.compression = TIRE.restLength - distFromHub;
@@ -271,49 +330,71 @@ class Tire {
     body.addForceAtPoint(this._F, this.worldPos);
     this.lastSuspension.copy(this._F);
 
-    // 2) Lateral grip (cancel sideways velocity, clamped by friction circle).
-    const sideVel = this._tireVel.dot(this._wheelRight);
-    const grip = this.canSteer ? TIRE.gripFront : handbrake ? TIRE.gripHandbrake : TIRE.gripRear;
-    const desiredVelChange = -sideVel * grip;
-    const tireMass = body.mass / 4;
-    let steerMag = tireMass * (desiredVelChange / dt);
-    const maxLat = TIRE.frictionCoeff * suspMag;
-    if (steerMag > maxLat) steerMag = maxLat;
-    else if (steerMag < -maxLat) steerMag = -maxLat;
-    this._F.copy(this._wheelRight).multiplyScalar(steerMag);
+    // Friction circle radius — load-sensitive: `suspMag` is the dynamic normal
+    // load, so weight transfer (outer wheels compress more) feeds straight into
+    // available grip. Per-axle μ multiplier sets the handling balance.
+    const axleGrip = this.canSteer
+      ? TIRE.gripFront
+      : handbrake
+      ? TIRE.gripHandbrake
+      : TIRE.gripRear;
+    const Fmax = TIRE.frictionCoeff * axleGrip * suspMag;
+
+    // 2) Lateral grip — slip-based brush model. Force rises linearly with the
+    // lateral slip ratio (≈ tan slip angle) up to the friction limit, then the
+    // tire SLIDES (force saturates) instead of perfectly cancelling velocity.
+    const vLat = this._tireVel.dot(this._wheelRight);
+    const vLong = this._tireVel.dot(this._wheelFwd);
+    const vRef = Math.max(Math.abs(vLong), TIRE.lowSpeedRef);
+    let latNorm = -(vLat / vRef) * TIRE.tireStiffness;
+    if (latNorm > 1) latNorm = 1;
+    else if (latNorm < -1) latNorm = -1;
+    let Fy = latNorm * Fmax;
+
+    // 3) Longitudinal. Braking acts on every wheel; engine torque (accel /
+    // reverse / engine-brake) is scaled by this wheel's drivetrain share, so
+    // FWD/RWD/AWD just changes *where* the drive force is applied.
+    let Fx = 0;
+    const carSpeed = body.vel.dot(this._fwd);
+    const thr = TIRE.brakeReverseThreshold;
+    if (throttle > 0) {
+      if (carSpeed < -thr) {
+        Fx = TIRE.brakeForce;
+      } else {
+        const normSpeed = Math.min(1, Math.abs(carSpeed) / TIRE.topSpeed);
+        Fx = driveScale * TIRE.accelForce * Math.max(0, 1 - Math.pow(normSpeed, TIRE.powerCurveExp));
+      }
+    } else if (throttle < 0) {
+      if (carSpeed > thr) {
+        Fx = -TIRE.brakeForce;
+      } else {
+        const normSpeed = Math.min(1, Math.abs(carSpeed) / TIRE.topSpeed);
+        Fx = -driveScale * TIRE.reverseAccel * Math.max(0, 1 - Math.pow(normSpeed, TIRE.powerCurveExp));
+      }
+    } else if (driveScale > 0) {
+      const fwdVel = this._tireVel.dot(this._wheelFwd);
+      Fx = -Math.sign(fwdVel) * Math.min(Math.abs(fwdVel) * 200, TIRE.engineBrake);
+    }
+    if (Fx > Fmax) Fx = Fmax;
+    else if (Fx < -Fmax) Fx = -Fmax;
+
+    // 4) Combined-slip friction circle — lateral and longitudinal share one
+    // budget. Hard braking eats cornering grip (trail-braking / lockup feel);
+    // power-on at a low-grip rear axle eats lateral grip (power oversteer).
+    const demand = Math.hypot(Fx, Fy);
+    if (demand > Fmax && demand > 1e-6) {
+      const s = Fmax / demand;
+      Fx *= s;
+      Fy *= s;
+    }
+
+    this._F.copy(this._wheelRight).multiplyScalar(Fy);
     body.addForceAtPoint(this._F, this.worldPos);
     this.lastSteering.copy(this._F);
 
-    // 3) Longitudinal — accel / brake / reverse / engine brake.
-    if (this.canDrive) {
-      let accelMag = 0;
-      const carSpeed = body.vel.dot(this._fwd);
-      const thr = TIRE.brakeReverseThreshold;
-      if (throttle > 0) {
-        if (carSpeed < -thr) {
-          accelMag = TIRE.brakeForce;
-        } else {
-          const normSpeed = Math.min(1, Math.abs(carSpeed) / TIRE.topSpeed);
-          accelMag = TIRE.accelForce * Math.max(0, 1 - Math.pow(normSpeed, TIRE.powerCurveExp));
-        }
-      } else if (throttle < 0) {
-        if (carSpeed > thr) {
-          accelMag = -TIRE.brakeForce;
-        } else {
-          const normSpeed = Math.min(1, Math.abs(carSpeed) / TIRE.topSpeed);
-          accelMag = -TIRE.reverseAccel * Math.max(0, 1 - Math.pow(normSpeed, TIRE.powerCurveExp));
-        }
-      } else {
-        const fwdVel = this._tireVel.dot(this._wheelFwd);
-        accelMag = -Math.sign(fwdVel) * Math.min(Math.abs(fwdVel) * 200, TIRE.engineBrake);
-      }
-      const maxLong = TIRE.frictionCoeff * suspMag;
-      if (accelMag > maxLong) accelMag = maxLong;
-      if (accelMag < -maxLong) accelMag = -maxLong;
-      this._F.copy(this._wheelFwd).multiplyScalar(accelMag);
-      body.addForceAtPoint(this._F, this.worldPos);
-      this.lastAccel.copy(this._F);
-    }
+    this._F.copy(this._wheelFwd).multiplyScalar(Fx);
+    body.addForceAtPoint(this._F, this.worldPos);
+    this.lastAccel.copy(this._F);
   }
 }
 
@@ -440,6 +521,15 @@ export class Vehicle {
     this._cVelHoriz = new THREE.Vector3();
     this._stabUp = new THREE.Vector3();
     this._stabTorque = new THREE.Vector3();
+    this._stabN = new THREE.Vector3();
+    this._stabCross = new THREE.Vector3();
+    this._stabWTilt = new THREE.Vector3();
+    this._airRight = new THREE.Vector3();
+    this._airFwd = new THREE.Vector3();
+    this._deckN = new THREE.Vector3();
+    this.BOTTOM_CORNERS = [0, 1, 4, 5];
+    this._aeroF = new THREE.Vector3();
+    this._aeroUp = new THREE.Vector3();
     this._probeOrigin = new THREE.Vector3();
     this._probeDirW = new THREE.Vector3();
     this._probeVel = new THREE.Vector3();
@@ -513,6 +603,17 @@ export class Vehicle {
     this.body.angVel.set(0, 0, 0);
   }
 
+  /** Recover in place: keep position + heading, zero the roll/pitch and spin,
+   *  drop vertical speed, and lift slightly so the wheels clear the surface. */
+  flipUpright() {
+    const q = this.body.quat;
+    const yaw = Math.atan2(2 * (q.w * q.y + q.z * q.x), 1 - 2 * (q.y * q.y + q.x * q.x));
+    this.body.quat.setFromAxisAngle(this._yAxis, yaw);
+    this.body.angVel.set(0, 0, 0);
+    this.body.vel.y = 0;
+    this.body.pos.y += 0.6;
+  }
+
   setEnabled(on) {
     this.enabled = on;
     this.group.visible = on;
@@ -536,18 +637,42 @@ export class Vehicle {
     this._syncVisuals(dt);
   }
 
+  /** Steer angle after speed-sensitive reduction (shared by physics + visuals). */
+  _steerAngle() {
+    const speed = this.body.vel.length();
+    let t = speed / Math.max(0.1, TIRE.steerSpeedRef);
+    if (t > 1) t = 1;
+    const factor = 1 - TIRE.steerSpeedReduce * t;
+    return this.input.steer * TIRE.maxSteerAngle * factor;
+  }
+
+  /** Rear power fraction from the drivetrain layout (FWD=0, RWD=1, AWD=bias). */
+  _driveBias() {
+    if (DRIVETRAIN.layout === "FWD") return 0;
+    if (DRIVETRAIN.layout === "RWD") return 1;
+    return Math.min(1, Math.max(0, DRIVETRAIN.powerBias));
+  }
+
   _physicsStep(dt) {
     const subDt = dt / this.SUBSTEPS;
-    const steerAngle = this.input.steer * TIRE.maxSteerAngle;
+    const steerAngle = this._steerAngle();
     const body = this.body;
+    // Per-axle drive scale: total drive is preserved (front+rear share = 2 wheels
+    // × 2 axles' worth), so each axle's two wheels carry their power fraction.
+    const bias = this._driveBias();
+    const fScale = 2 * (1 - bias);
+    const rScale = 2 * bias;
     for (let s = 0; s < this.SUBSTEPS; s++) {
       this._gravityF.set(0, -GRAVITY * body.mass, 0);
       body.addForce(this._gravityF);
+      this._applyAero();
       for (const tire of this.tires) {
-        tire.apply(body, subDt, steerAngle, this.input.throttle, this.input.handbrake, this._castGround);
+        const driveScale = tire.isFront ? fScale : rScale;
+        tire.apply(body, subDt, steerAngle, this.input.throttle, this.input.handbrake, this._castGround, driveScale);
       }
       if (this.walls.length) this._applyWallProbes();
       if (SOLID.enabled && this.solidsBvh && this.solidsBvh.baked) this._resolveSolids();
+      if (DECK.enabled && this.groundBvh && this.groundBvh.baked) this._applyDeckContact();
       this._applyChassisGroundContact();
       this._applyStabilizer();
       body.integrate(subDt);
@@ -557,16 +682,39 @@ export class Vehicle {
   }
 
   _applyStabilizer() {
-    if (TIRE.stabilizerStrength <= 0) return;
+    const body = this.body;
     let grounded = 0;
-    for (const t of this.tires) if (t.grounded) grounded++;
-    if (grounded === 0) return;
-    this._stabUp.set(0, 1, 0).applyQuaternion(this.body.quat);
-    const cosT = this._stabUp.y;
-    if (cosT < 0.3) return;
-    const k = TIRE.stabilizerStrength * (1 - cosT);
-    this._stabTorque.set(-this._stabUp.z * k, 0, this._stabUp.x * k);
-    this.body.torqueAccum.add(this._stabTorque);
+    this._stabN.set(0, 0, 0);
+    for (const t of this.tires) {
+      if (t.grounded) {
+        grounded++;
+        this._stabN.add(t.hitNormal);
+      }
+    }
+    this._stabUp.set(0, 1, 0).applyQuaternion(body.quat);
+
+    if (grounded > 0) {
+      if (TIRE.stabilizerStrength <= 0 || this._stabN.lengthSq() < 1e-8) return;
+      // Align chassis-up to the averaged ground normal (banks/loops follow the
+      // surface), with damping on the roll/pitch rate but not on yaw (steering).
+      this._stabN.normalize();
+      this._stabCross.crossVectors(this._stabUp, this._stabN);
+      this._stabTorque.copy(this._stabCross).multiplyScalar(TIRE.stabilizerStrength);
+      const wYaw = body.angVel.dot(this._stabUp);
+      this._stabWTilt.copy(body.angVel).addScaledVector(this._stabUp, -wYaw);
+      this._stabTorque.addScaledVector(this._stabWTilt, -TIRE.stabilizerDamp);
+      body.torqueAccum.add(this._stabTorque);
+    } else {
+      // Airborne: gentle tumble damping + player air control.
+      this._stabTorque.copy(body.angVel).multiplyScalar(-TIRE.airAngularDamp);
+      if (TIRE.airControl > 0) {
+        this._airRight.set(1, 0, 0).applyQuaternion(body.quat);
+        this._airFwd.set(0, 0, 1).applyQuaternion(body.quat);
+        this._stabTorque.addScaledVector(this._airRight, -this.input.throttle * TIRE.airControl);
+        this._stabTorque.addScaledVector(this._airFwd, this.input.steer * TIRE.airControl);
+      }
+      body.torqueAccum.add(this._stabTorque);
+    }
   }
 
   _applyChassisGroundContact() {
@@ -614,6 +762,46 @@ export class Vehicle {
         const vInto = body.vel.dot(this._probeDirW);
         if (vInto > 0) body.vel.addScaledVector(this._probeDirW, -vInto);
       }
+    }
+  }
+
+  _applyAero() {
+    const v = this.body.vel;
+    const sp = v.length();
+    if (sp < 1e-3) return;
+    if (AERO.drag > 0) {
+      this._aeroF.copy(v).multiplyScalar(-AERO.drag * sp); // -drag·sp·v  (∝ sp²)
+      this.body.addForce(this._aeroF);
+    }
+    if (AERO.downforce > 0) {
+      this._aeroUp.set(0, 1, 0).applyQuaternion(this.body.quat);
+      this._aeroF.copy(this._aeroUp).multiplyScalar(-AERO.downforce * sp * sp);
+      this.body.addForce(this._aeroF); // along -chassis-up → presses onto track
+    }
+  }
+
+  _applyDeckContact() {
+    const body = this.body;
+    const skin = DECK.skin;
+    for (const ci of this.BOTTOM_CORNERS) {
+      this._cWorld.copy(this.CHASSIS_CORNERS[ci]).applyQuaternion(body.quat).add(body.pos);
+      const res = this.groundBvh.closestPointWithNormal(
+        this._cWorld.x, this._cWorld.y, this._cWorld.z, DECK.searchRadius, this._deckN,
+      );
+      if (!res) continue;
+      // Signed distance from surface to corner along the (outward) normal.
+      const sd =
+        (this._cWorld.x - res.x) * this._deckN.x +
+        (this._cWorld.y - res.y) * this._deckN.y +
+        (this._cWorld.z - res.z) * this._deckN.z;
+      if (sd >= skin) continue; // corner safely above the deck → wheels handle it
+      const pen = skin - sd;
+      body.getVelocityAtPoint(this._cWorld, this._cVel);
+      const inward = -this._cVel.dot(this._deckN);
+      const dampMag = Math.max(0, inward) * DECK.damper;
+      const forceMag = pen * DECK.stiffness + dampMag;
+      this._cF.copy(this._deckN).multiplyScalar(forceMag);
+      body.addForceAtPoint(this._cF, this._cWorld);
     }
   }
 
@@ -672,7 +860,7 @@ export class Vehicle {
     }
     this.chassisMesh.quaternion.copy(body.quat);
 
-    const steerAngle = this.input.steer * TIRE.maxSteerAngle;
+    const steerAngle = this._steerAngle();
     for (let i = 0; i < this.tires.length; i++) {
       const t = this.tires[i];
       const cfg = WHEEL_LOCAL[i];

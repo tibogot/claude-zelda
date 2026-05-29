@@ -54,9 +54,9 @@ export const pieceParams = {
   // Jump / launch ramp:
   jumpLength: 18, // arc length of the ramp (m)
   jumpAngle: 28, // takeoff angle at the exit (deg)
-  // Vertical loop:
-  loopRadius: 9, // loop radius (m)
-  loopAdvance: 7, // forward drift over the loop so the exit clears the entry (m)
+  // Vertical loop (teardrop):
+  loopRadius: 10, // loop radius (m)
+  loopAdvance: 14, // forward drift so the entry/exit legs clear the road width (m)
   // Twist / barrel roll (straight centreline that rolls):
   twistLength: 26,
   twistTurns: 1, // full 360° rolls over the length
@@ -389,11 +389,67 @@ function slopePoints(pp) {
   return pts;
 }
 
-/** Lean eased to 0 at both ends so the banked curve still connects level. */
+/**
+ * Constant lean across the whole piece. Holding the bank (rather than easing to
+ * 0 at the ends) means consecutive banked curves keep a single continuous lean
+ * with no flatten/crease at the seam. Use the Bank-in / Bank-out transitions to
+ * ramp to and from a flat (level) piece.
+ */
 function bankRoll(t, pp) {
   const dir = pp.curveDir >= 0 ? 1 : -1;
+  return dir * THREE.MathUtils.degToRad(pp.bankAngle);
+}
+
+/** Straight that ramps the lean 0 → bankAngle (flat → banked entry). */
+function bankInRoll(t, pp) {
+  const dir = pp.curveDir >= 0 ? 1 : -1;
   const a = THREE.MathUtils.degToRad(pp.bankAngle);
-  return dir * a * Math.sin(Math.PI * t);
+  return dir * a * (t * t * (3 - 2 * t));
+}
+
+/** Straight that ramps the lean bankAngle → 0 (banked → flat exit). */
+function bankOutRoll(t, pp) {
+  const dir = pp.curveDir >= 0 ? 1 : -1;
+  const a = THREE.MathUtils.degToRad(pp.bankAngle);
+  return dir * a * (1 - t * t * (3 - 2 * t));
+}
+
+/** Chicane: turn `curveAngle` one way then back the other, ending parallel. */
+function sCurvePoints(pp) {
+  const R = Math.max(2, pp.curveRadius);
+  const A = THREE.MathUtils.degToRad(THREE.MathUtils.clamp(pp.curveAngle, 1, 120));
+  const dir = pp.curveDir >= 0 ? 1 : -1;
+  const half = Math.max(2, Math.ceil((R * A) / roadParams.segLen));
+  const ds = (R * A) / half;
+  const dth = A / half;
+  const pts = [new V3(0, 0, 0)];
+  const pos = new V3(0, 0, 0);
+  let yaw = 0;
+  const run = (sign) => {
+    for (let i = 0; i < half; i++) {
+      yaw += sign * dir * dth;
+      pos.x += -Math.sin(yaw) * ds;
+      pos.z += -Math.cos(yaw) * ds;
+      pts.push(pos.clone());
+    }
+  };
+  run(+1); // turn out by A
+  run(-1); // turn back by A → heading returns to -Z, laterally offset
+  return pts;
+}
+
+/** Smooth crest/dip: rises to slopeRise at the middle, flat (level) at both ends. */
+function crestPoints(pp) {
+  const L = Math.max(2, pp.slopeLength);
+  const H = pp.slopeRise;
+  const n = Math.max(4, Math.ceil(L / roadParams.segLen));
+  const pts = [];
+  for (let i = 0; i <= n; i++) {
+    const tt = i / n;
+    const s = Math.sin(Math.PI * tt);
+    pts.push(new V3(0, H * s * s, -L * tt)); // sin² → horizontal tangents at ends
+  }
+  return pts;
 }
 
 /** Launch ramp: pitches up from horizontal to jumpAngle at the exit. */
@@ -413,16 +469,24 @@ function jumpPoints(pp) {
   return pts;
 }
 
-/** Vertical loop in the Y/Z plane, drifting forward so the exit clears entry. */
+/**
+ * Drivable vertical loop (teardrop) in the Y/Z plane. A naive circle with little
+ * forward drift overlaps itself once the road is wider than the drift — the two
+ * passes tangle. Here the forward advance is *bottom-biased* (slope ∝ 1+cos φ),
+ * so the entry/exit legs splay apart by `adv` at the ground for clearance while
+ * the top stays compact (it already has vertical separation). `adv` is floored
+ * to a bit more than the road width so the legs never collide.
+ */
 function loopPoints(pp) {
-  const R = Math.max(3, pp.loopRadius);
-  const adv = Math.max(0, pp.loopAdvance);
-  const n = Math.max(24, Math.ceil((2 * Math.PI * R) / roadParams.segLen));
+  const R = Math.max(4, pp.loopRadius);
+  const adv = Math.max(roadParams.width * 1.15, pp.loopAdvance);
+  const n = Math.max(32, Math.ceil((2 * Math.PI * R) / roadParams.segLen));
   const pts = [];
   for (let i = 0; i <= n; i++) {
-    const f = i / n;
-    const phi = 2 * Math.PI * f;
-    pts.push(new V3(0, R - R * Math.cos(phi), -R * Math.sin(phi) - adv * f));
+    const phi = 2 * Math.PI * (i / n);
+    const y = R - R * Math.cos(phi);
+    const z = -R * Math.sin(phi) - (adv * (phi + Math.sin(phi))) / (2 * Math.PI);
+    pts.push(new V3(0, y, z));
   }
   return pts;
 }
@@ -469,11 +533,45 @@ export const PIECE_CATALOG = [
   {
     id: "banked",
     label: "Banked curve",
-    hint: "Arc with lean (R flips)",
+    hint: "Constant lean — chain freely",
     swatch: "#9b59b6",
     key: "4",
     points: curvePoints,
     roll: bankRoll,
+  },
+  {
+    id: "bankin",
+    label: "Bank in",
+    hint: "Flat → banked (straight)",
+    swatch: "#7d5fb0",
+    key: "8",
+    points: straightPoints,
+    roll: bankInRoll,
+  },
+  {
+    id: "bankout",
+    label: "Bank out",
+    hint: "Banked → flat (straight)",
+    swatch: "#6b4fa0",
+    key: "9",
+    points: straightPoints,
+    roll: bankOutRoll,
+  },
+  {
+    id: "scurve",
+    label: "S-curve",
+    hint: "Chicane (R flips lead)",
+    swatch: "#16a085",
+    key: "0",
+    points: sCurvePoints,
+  },
+  {
+    id: "crest",
+    label: "Crest / dip",
+    hint: "Hill (slope rise = height)",
+    swatch: "#d35400",
+    key: "c",
+    points: crestPoints,
   },
   {
     id: "jump",

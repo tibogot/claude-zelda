@@ -532,7 +532,7 @@
     <div id="lab-title">Modular Road Lab</div>
     <div id="info">
       <span id="backend">loading…</span> &bull; <span id="cammode">BUILD</span>
-      &bull; <span id="mode-hint">LMB place &bull; MMB orbit &bull; <kbd>1</kbd>–<kbd>7</kbd> pick &bull; R flip &bull; Backspace undo</span>
+      &bull; <span id="mode-hint">LMB place &bull; MMB orbit &bull; <kbd>1</kbd>–<kbd>0</kbd>/<kbd>c</kbd> pick &bull; R flip &bull; Backspace undo</span>
     </div>
     <div id="drive-hud" style="position:fixed;top:14px;right:330px;z-index:15;display:none;font:13px/1.5 var(--font-mono);background:rgba(0,0,0,0.6);border:1px solid rgba(120,255,180,0.35);border-radius:8px;padding:8px 12px;pointer-events:none;color:#c8d8e8;"></div>
     <div id="palette">
@@ -581,7 +581,7 @@
       } from "./modularRoadMaterial.js";
       import { ModularRoadBuilder, buildRoadPaletteUI } from "./modularRoadBuilder.js";
       import { roadParams, pieceParams, guardrailParams } from "./modularRoadKit.js";
-      import { Vehicle, TIRE, CHASSIS, SOLID } from "./modularRoadVehicle.js";
+      import { Vehicle, TIRE, CHASSIS, SOLID, DECK, AERO, DRIVETRAIN } from "./modularRoadVehicle.js";
       import { RoadBvh } from "./modularRoadBvh.js";
       import { buildParkour } from "./modularRoadParkour.js";
 
@@ -862,8 +862,8 @@
           driveHud.style.display = on ? "" : "none";
           camModeEl.textContent = on ? "DRIVE" : state.buildMode ? "BUILD" : "ORBIT";
           modeHint.innerHTML = on
-            ? "WASD drive &bull; Space handbrake &bull; R respawn &bull; Tab orbit cam"
-            : "LMB place &bull; MMB orbit &bull; <kbd>1</kbd>–<kbd>7</kbd> pick &bull; R flip &bull; Backspace undo";
+            ? "WASD drive &bull; in air: W/S pitch, A/D roll &bull; Space handbrake &bull; F flip upright &bull; R respawn &bull; Tab orbit cam"
+            : "LMB place &bull; MMB orbit &bull; <kbd>1</kbd>–<kbd>0</kbd>/<kbd>c</kbd> pick &bull; R flip &bull; Backspace undo";
           builder.setGhostVisible(!on && state.buildMode);
           if (on) {
             // Bake a deck BVH (wheel probes) and a solids BVH (guardrail
@@ -910,6 +910,7 @@
           }
           if (state.mode === "drive") {
             if (e.code === "KeyR") vehicle.respawn();
+            if (e.code === "KeyF") vehicle.flipUpright();
             if (e.code === "Tab") {
               e.preventDefault();
               state.orbitInDrive = !state.orbitInDrive;
@@ -1102,6 +1103,33 @@
         div.className = "section-separator";
         parent.appendChild(div);
       }
+      function _select(parent, obj, key, choices, opts = {}) {
+        const { label, onChange } = opts;
+        const row = document.createElement("div");
+        row.className = "prop-row";
+        const lab = document.createElement("span");
+        lab.className = "prop-label";
+        lab.textContent = label;
+        const group = document.createElement("div");
+        group.style.cssText = "display:flex;gap:4px;flex:1";
+        choices.forEach((c) => {
+          const b = document.createElement("button");
+          b.type = "button";
+          b.textContent = c;
+          b.className = "palette-btn" + (obj[key] === c ? " palette-btn-primary" : "");
+          b.style.cssText = "flex:1;padding:4px 0;font-size:10px";
+          b.addEventListener("click", () => {
+            obj[key] = c;
+            group.querySelectorAll("button").forEach((x) => x.classList.toggle("palette-btn-primary", x === b));
+            onChange?.(c);
+          });
+          group.appendChild(b);
+        });
+        row.appendChild(lab);
+        row.appendChild(group);
+        parent.appendChild(row);
+        return row;
+      }
       function _button(parent, label, onClick) {
         const row = document.createElement("div");
         row.className = "prop-row";
@@ -1163,15 +1191,32 @@
           _slider(sec, TIRE, "topSpeed", { label: "Top speed", min: 5, max: 80, step: 1 });
           _slider(sec, TIRE, "brakeForce", { label: "Brake (N)", min: 0, max: 30000, step: 100 });
           _slider(sec, TIRE, "maxSteerAngle", { label: "Steer max", min: 0.1, max: 1.2, step: 0.01 });
+          _slider(sec, TIRE, "steerSpeedReduce", { label: "Steer hi-spd cut", min: 0, max: 0.9, step: 0.05 });
+          _slider(sec, TIRE, "steerSpeedRef", { label: "Steer cut @ (m/s)", min: 8, max: 60, step: 1 });
           _separator(sec);
-          _slider(sec, TIRE, "gripFront", { label: "Grip front", min: 0, max: 1, step: 0.01 });
-          _slider(sec, TIRE, "gripRear", { label: "Grip rear", min: 0, max: 1, step: 0.01 });
+          _slider(sec, TIRE, "frictionCoeff", { label: "Friction μ", min: 0.5, max: 3, step: 0.05 });
+          _slider(sec, TIRE, "tireStiffness", { label: "Tire stiffness", min: 2, max: 16, step: 0.5 });
+          _slider(sec, TIRE, "gripFront", { label: "Grip front", min: 0, max: 1.2, step: 0.01 });
+          _slider(sec, TIRE, "gripRear", { label: "Grip rear", min: 0, max: 1.2, step: 0.01 });
+          _slider(sec, TIRE, "gripHandbrake", { label: "Grip handbrake", min: 0, max: 1, step: 0.01 });
+          _separator(sec);
+          _select(sec, DRIVETRAIN, "layout", ["FWD", "AWD", "RWD"], { label: "Drivetrain" });
+          _slider(sec, DRIVETRAIN, "powerBias", { label: "Power bias →R", min: 0, max: 1, step: 0.05 });
+          _separator(sec);
           _slider(sec, TIRE, "springStrength", { label: "Spring k", min: 5000, max: 150000, step: 500 });
           _slider(sec, TIRE, "damper", { label: "Damper", min: 0, max: 20000, step: 50 });
-          _slider(sec, TIRE, "stabilizerStrength", { label: "Anti-roll", min: 0, max: 30000, step: 200 });
+          _separator(sec);
+          _slider(sec, TIRE, "stabilizerStrength", { label: "Surface align", min: 0, max: 30000, step: 200 });
+          _slider(sec, TIRE, "stabilizerDamp", { label: "Align damp", min: 0, max: 8000, step: 100 });
+          _slider(sec, TIRE, "airControl", { label: "Air control", min: 0, max: 15000, step: 250 });
+          _slider(sec, TIRE, "airAngularDamp", { label: "Air spin damp", min: 0, max: 5000, step: 100 });
+          _separator(sec);
+          _slider(sec, AERO, "drag", { label: "Aero drag", min: 0, max: 3, step: 0.05 });
+          _slider(sec, AERO, "downforce", { label: "Downforce", min: 0, max: 12, step: 0.25 });
           _separator(sec);
           _slider(sec, CHASSIS, "mass", { label: "Mass (kg)", min: 400, max: 4000, step: 50, onChange: () => vehicle.rebuildBody() });
           _separator(sec);
+          _toggle(sec, DECK, "enabled", { label: "Chassis-vs-deck" });
           _toggle(sec, SOLID, "enabled", { label: "Guardrail collision" });
           _slider(sec, SOLID, "radius", { label: "Collide radius", min: 0.2, max: 1.2, step: 0.05 });
           _slider(sec, SOLID, "stiffness", { label: "Collide stiff", min: 50000, max: 600000, step: 5000 });
@@ -1225,8 +1270,8 @@
           _slider(sec, pieceParams, "jumpLength", { label: "Jump len", min: 4, max: 60, step: 1, onChange: reb });
           _slider(sec, pieceParams, "jumpAngle", { label: "Jump angle", min: 0, max: 75, step: 1, onChange: reb });
           _separator(sec);
-          _slider(sec, pieceParams, "loopRadius", { label: "Loop radius", min: 3, max: 30, step: 0.5, onChange: reb });
-          _slider(sec, pieceParams, "loopAdvance", { label: "Loop advance", min: 0, max: 30, step: 0.5, onChange: reb });
+          _slider(sec, pieceParams, "loopRadius", { label: "Loop radius", min: 4, max: 30, step: 0.5, onChange: reb });
+          _slider(sec, pieceParams, "loopAdvance", { label: "Loop advance", min: 0, max: 45, step: 0.5, onChange: reb });
           _separator(sec);
           _slider(sec, pieceParams, "twistLength", { label: "Twist len", min: 6, max: 80, step: 1, onChange: reb });
           _slider(sec, pieceParams, "twistTurns", { label: "Twist turns", min: 1, max: 4, step: 1, onChange: reb });

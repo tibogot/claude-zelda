@@ -112,6 +112,31 @@ export class RoadBvh {
     };
   }
 
+  /** Nearest surface point + face normal (oriented toward the query point). */
+  closestPointWithNormal(px, py, pz, maxDist, outNormal) {
+    const res = this.closestPointToPoint(px, py, pz, maxDist);
+    if (!res) return null;
+    const fi = _closestTarget.faceIndex;
+    const index = this.geometry.getIndex();
+    const pos = this.geometry.getAttribute("position");
+    if (fi < 0 || !index || !pos) {
+      outNormal.set(0, 1, 0);
+      return res;
+    }
+    const ia = index.getX(fi * 3);
+    const ib = index.getX(fi * 3 + 1);
+    const ic = index.getX(fi * 3 + 2);
+    _triA.fromBufferAttribute(pos, ia);
+    _triB.fromBufferAttribute(pos, ib).sub(_triA);
+    _triC.fromBufferAttribute(pos, ic).sub(_triA);
+    outNormal.crossVectors(_triB, _triC).normalize();
+    // Orient toward the query point so it points "out of" the surface.
+    if ((px - res.x) * outNormal.x + (py - res.y) * outNormal.y + (pz - res.z) * outNormal.z < 0) {
+      outNormal.negate();
+    }
+    return res;
+  }
+
   /** Swept-sphere cast — anti-tunnel helper for fast movement. */
   spherecast(ox, oy, oz, radius, dx, dy, dz, maxDist) {
     if (!this.baked) return null;
