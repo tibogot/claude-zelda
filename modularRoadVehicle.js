@@ -323,9 +323,14 @@ class Tire {
     let bestDist = Infinity;
     let bestPoint = null;
 
-    const consider = (hit) => {
-      if (!hit || hit.distance >= bestDist) return;
-      bestDist = hit.distance;
+    // `dist` lets a caller pass a distance already normalized back to the hub
+    // (ring rays / sphere sweep start BELOW the hub, so their raw hit distance
+    // under-reports the true hub-to-ground gap). Falls back to hit.distance.
+    const consider = (hit, dist) => {
+      if (!hit) return;
+      const d = dist !== undefined ? dist : hit.distance;
+      if (d >= bestDist) return;
+      bestDist = d;
       if (hit.point?.isVector3) this._bestP.copy(hit.point);
       else if (hit.point) this._bestP.set(hit.point.x, hit.point.y, hit.point.z);
       bestPoint = this._bestP;
@@ -350,7 +355,10 @@ class Tire {
         this._rayO.copy(this.worldPos).addScaledVector(this._up, pad);
         this._rayO.addScaledVector(this._wheelFwd, ca * ringR);
         this._rayO.addScaledVector(this._down, sa * ringR);
-        consider(castGround(this._rayO, this._down, far));
+        // This ray starts sa*ringR below the hub plane; add it back so the
+        // distance is measured from the hub, not the lowered ring origin.
+        const hit = castGround(this._rayO, this._down, far);
+        if (hit) consider(hit, hit.distance + sa * ringR);
       }
     } else {
       sample(null, 0);
@@ -378,11 +386,10 @@ class Tire {
         far,
       );
       if (sh) {
-        consider({
-          distance: sh.distance,
-          point: sh.point,
-          normal: sh.normal,
-        });
+        // The sphere (radius sr) contacts ground sr below its center, so the
+        // true hub-to-ground gap is sh.distance + sr (sh.distance is how far
+        // the center travelled from the hub-raised origin).
+        consider({ distance: sh.distance, point: sh.point, normal: sh.normal }, sh.distance + sr);
       }
     }
 
