@@ -39,26 +39,6 @@ function rampGeometry(w, l, angleRad) {
   return geo;
 }
 
-/** Banked deck: low edge at y=0, x=-w/2; rises toward +X. */
-function bankGeometry(w, l, bankRad) {
-  const H = w * Math.sin(bankRad);
-  const hw = w / 2;
-  const hl = l / 2;
-  const pos = [];
-  const quad = (a, b, c, d) => pos.push(...a, ...b, ...c, ...a, ...c, ...d);
-  const tri = (a, b, c) => pos.push(...a, ...b, ...c);
-  quad([-hw, 0, -hl], [-hw, 0, hl], [hw, H, hl], [hw, H, -hl]);
-  quad([-hw, 0, -hl], [hw, 0, -hl], [hw, 0, hl], [-hw, 0, hl]);
-  quad([hw, 0, -hl], [hw, H, -hl], [hw, H, hl], [hw, 0, hl]);
-  tri([-hw, 0, -hl], [-hw, 0, hl], [hw, H, hl]);
-  tri([-hw, 0, -hl], [hw, H, hl], [hw, H, -hl]);
-  const geo = new THREE.BufferGeometry();
-  geo.setAttribute("position", new THREE.Float32BufferAttribute(pos, 3));
-  geo.computeVertexNormals();
-  geo.computeBoundingSphere();
-  return geo;
-}
-
 /**
  * Curved drive ramp: starts at local (0,0,0) heading −Z, turns by `angleDeg`
  * (curveDir ±1), rises to `rise` with smoothstep. Low edge at y = 0.
@@ -289,8 +269,6 @@ export function buildParkour({ offset = new THREE.Vector3(100, 0, 0) } = {}) {
 
   const _matRamp = (color) =>
     new THREE.MeshStandardMaterial({ color, roughness: 0.85, side: THREE.DoubleSide });
-  const _matWall = (color) =>
-    new THREE.MeshStandardMaterial({ color, roughness: 0.7, side: THREE.DoubleSide });
   const _matMover = (color) =>
     new THREE.MeshStandardMaterial({ color, roughness: 0.55, metalness: 0.35, side: THREE.DoubleSide });
 
@@ -300,113 +278,6 @@ export function buildParkour({ offset = new THREE.Vector3(100, 0, 0) } = {}) {
     const m = new THREE.Mesh(rampGeometry(w, l, angle), _matRamp(color));
     m.rotation.order = "YXZ";
     m.rotation.y = yaw;
-    m.position.set(x, 0, z);
-    m.castShadow = true;
-    m.receiveShadow = true;
-    group.add(m);
-    deckMeshes.push(m);
-    wallMeshes.push(m);
-    return m;
-  }
-
-  function addCurveRamp({
-    x,
-    z,
-    w = 12,
-    radius = 16,
-    angleDeg = 75,
-    rise = 5,
-    curveDir = 1,
-    yawDeg = 0,
-    segments = 32,
-    color = 0x7a6248,
-  }) {
-    const yaw = THREE.MathUtils.degToRad(yawDeg);
-    const m = new THREE.Mesh(
-      curveRampGeometry(w, radius, angleDeg, rise, curveDir, segments),
-      _matRamp(color),
-    );
-    m.rotation.order = "YXZ";
-    m.rotation.y = yaw;
-    m.position.set(x, 0, z);
-    m.castShadow = true;
-    m.receiveShadow = true;
-    group.add(m);
-    deckMeshes.push(m);
-    wallMeshes.push(m);
-    return m;
-  }
-
-  function addKickerRamp({
-    x,
-    z,
-    w = 14,
-    length = 22,
-    rise = 8,
-    yawDeg = 0,
-    segments = 36,
-    color = 0x9a7848,
-  }) {
-    const yaw = THREE.MathUtils.degToRad(yawDeg);
-    const m = new THREE.Mesh(kickerRampGeometry(w, length, rise, segments), _matRamp(color));
-    m.rotation.order = "YXZ";
-    m.rotation.y = yaw;
-    m.position.set(x, 0, z);
-    m.castShadow = true;
-    m.receiveShadow = true;
-    group.add(m);
-    deckMeshes.push(m);
-    wallMeshes.push(m);
-    return m;
-  }
-
-  function addJumpRamp({
-    x,
-    z,
-    w = 14,
-    length = 22,
-    rise = 8,
-    yawDeg = 0,
-    segments = 36,
-    color = 0x886838,
-  }) {
-    const yaw = THREE.MathUtils.degToRad(yawDeg);
-    const m = new THREE.Mesh(jumpRampGeometry(w, length, rise, segments), _matRamp(color));
-    m.rotation.order = "YXZ";
-    m.rotation.y = yaw;
-    m.position.set(x, 0, z);
-    m.castShadow = true;
-    m.receiveShadow = true;
-    group.add(m);
-    deckMeshes.push(m);
-    wallMeshes.push(m);
-    return m;
-  }
-
-  function addStep({ x, z, w, h, l, color = 0x5e7a48 }) {
-    const m = new THREE.Mesh(new THREE.BoxGeometry(w, h, l), _matRamp(color));
-    m.position.set(x, h / 2, z);
-    m.castShadow = true;
-    m.receiveShadow = true;
-    group.add(m);
-    deckMeshes.push(m);
-    wallMeshes.push(m);
-    return m;
-  }
-
-  function addWall({ x, z, w, h, l, color = 0x803a3a }) {
-    const m = new THREE.Mesh(new THREE.BoxGeometry(w, h, l), _matWall(color));
-    m.position.set(x, h / 2, z);
-    m.castShadow = true;
-    m.receiveShadow = true;
-    group.add(m);
-    wallMeshes.push(m);
-    return m;
-  }
-
-  function addBank({ x, z, w, l, bankDeg, color = 0x3a5060 }) {
-    const bank = THREE.MathUtils.degToRad(bankDeg);
-    const m = new THREE.Mesh(bankGeometry(w, l, bank), _matRamp(color));
     m.position.set(x, 0, z);
     m.castShadow = true;
     m.receiveShadow = true;
@@ -433,76 +304,7 @@ export function buildParkour({ offset = new THREE.Vector3(100, 0, 0) } = {}) {
     addRamp({ x: -42 + i * 21, z: 48, w: 12, l: 22, angleDeg: slopeAngles[i], color });
   }
 
-  // ── CURVED RAMPS — left wing (arc climb + turn) ──
-  addCurveRamp({
-    x: -58,
-    z: 34,
-    w: 10,
-    radius: 12,
-    angleDeg: 72,
-    rise: 4.5,
-    curveDir: 1,
-    segments: 28,
-    color: 0x8a7050,
-  });
-  addCurveRamp({
-    x: -58,
-    z: -10,
-    w: 16,
-    radius: 26,
-    angleDeg: 92,
-    rise: 9,
-    curveDir: 1,
-    segments: 40,
-    color: 0x6a5840,
-  });
-
-  // ── KICKERS — convex bulge vs concave jump (centre-right) ──
-  addKickerRamp({
-    x: 28,
-    z: 42,
-    w: 12,
-    length: 20,
-    rise: 7,
-    segments: 36,
-    color: 0xb88850,
-  });
-  addJumpRamp({
-    x: 12,
-    z: 42,
-    w: 14,
-    length: 22,
-    rise: 8,
-    segments: 36,
-    color: 0x886838,
-  });
-
-  // ── MEGA KICKER + LANDING (centre lane, clear of slope ends) ──
-  addRamp({ x: 0, z: 14, w: 16, l: 14, angleDeg: 38, color: 0xd97a3a });
-  addStep({ x: 0, z: -4, w: 18, h: 1.2, l: 14, color: 0x8a6840 });
-
-  // ── GAP JUMP — left wing only ──
-  addStep({ x: -36, z: 4, w: 14, h: 1.5, l: 12, color: 0x6a8090 });
-  addStep({ x: -36, z: -22, w: 14, h: 1.5, l: 14, color: 0x5a7080 });
-
-  // ── STEP PYRAMID — right wing ──
-  addStep({ x: 36, z: 22, w: 16, h: 0.9, l: 10, color: 0x4a6038 });
-  addStep({ x: 36, z: 10, w: 16, h: 1.8, l: 10, color: 0x3a5028 });
-  addStep({ x: 36, z: -2, w: 16, h: 2.8, l: 10, color: 0x2a4020 });
-
-  // ── WHOOPS — right wing, below pyramid ──
-  for (let i = 0; i < 10; i++) {
-    addStep({ x: 36, z: -16 - i * 2.6, w: 14, h: 0.38, l: 1.1, color: 0x6e8050 });
-  }
-
-  // ── BANKED TURN (centre, well past whoops) ──
-  addBank({ x: 0, z: -52, w: 20, l: 28, bankDeg: 32, color: 0x3a5060 });
-
-  // ── HALF-PIPE — far left, offset from bank ──
-  addRamp({ x: -52, z: -54, w: 10, l: 18, angleDeg: 52, yawDeg: 90, color: 0x5a4868 });
-  addWall({ x: -60, z: -54, w: 0.8, h: 6, l: 20, color: 0x704868 });
-
-  // ── PENDULUM — centre lane, between bank and wall alley ──
+  // ── PENDULUM — centre lane ──
   const pendPivot = new THREE.Object3D();
   pendPivot.position.set(0, 15, -66);
   group.add(pendPivot);
@@ -520,11 +322,6 @@ export function buildParkour({ offset = new THREE.Vector3(100, 0, 0) } = {}) {
     speed: 0.75,
     amplitude: 0.72,
   });
-
-  // ── WALL ALLEY — end of centre run ──
-  addWall({ x: -12, z: -82, w: 0.8, h: 4, l: 22, color: 0x803a3a });
-  addWall({ x: 12, z: -82, w: 0.8, h: 4, l: 22, color: 0x803a3a });
-  addWall({ x: 0, z: -94, w: 25, h: 4, l: 0.8, color: 0xc04444 });
 
   // ── DYNAMIC ZONE (x ≈ +58, spaced along Z) ──
   const hammerPivot = new THREE.Object3D();
@@ -579,20 +376,12 @@ export function buildParkour({ offset = new THREE.Vector3(100, 0, 0) } = {}) {
   addMover({ mesh: column, pivot: colPivot, mode: "spin-y", speed: 0.55 });
 
   // ── ELEVATOR — far right wing (x ≈ +72) ──
-  // Approach + bridge decks at y=1 m (top). Platform travel tuned so deck top
-  // also hits 1.0 m at the bottom of the stroke (centre y = 0.55, h = 0.9).
+  // Platform travel tuned so deck top hits 1.0 m at the bottom of the stroke.
   const elevDeckTop = 1.0;
   const elevHalf = 0.45;
   const elevLowCenter = elevDeckTop - elevHalf;
   const elevTravel = 5.0;
   const elevOriginY = elevLowCenter + elevTravel;
-
-  addStep({ x: 72, z: 32, w: 12, h: elevDeckTop, l: 12, color: 0x607080 });
-  addStep({ x: 72, z: 22, w: 12, h: elevDeckTop, l: 10, color: 0x687888 });
-  addStep({ x: 72, z: 14, w: 12, h: elevDeckTop, l: 8, color: 0x687888 });
-  addWall({ x: 68.2, z: 10, w: 0.7, h: 16, l: 16, color: 0x506070 });
-  addWall({ x: 75.8, z: 10, w: 0.7, h: 16, l: 16, color: 0x506070 });
-  addStep({ x: 72, z: -6, w: 11, h: 10, l: 10, color: 0x5a7080 });
 
   const elevPlatform = new THREE.Mesh(new THREE.BoxGeometry(10, 0.9, 12), _matRamp(0x8098a8));
   elevPlatform.name = "Elevator";
@@ -622,6 +411,8 @@ export function buildParkour({ offset = new THREE.Vector3(100, 0, 0) } = {}) {
   function update(dt) {
     for (const m of movers) m.update(dt);
   }
+
+  update(0);
 
   return { group, deckMeshes, wallMeshes, movers, deckMovers, spawn, update };
 }
