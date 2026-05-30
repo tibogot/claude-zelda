@@ -10,9 +10,13 @@
  *   - Three-stop turquoise depth ramp (shore → mid → deep) from seabed sample.
  *     Islands are simply terrain that rises above `waterY`.
  *   - Dual-layer mx_noise_float gradient normals (fine surface detail)
- *   - Optional Gerstner wave displacement (vertex) with an analytic per-pixel
- *     wave normal (fragment). Displacement is faded out by camera distance, so
- *     far LOD rings stay flat — no cracks across LOD boundaries.
+ *   - Dual-cascade Tessendorf FFT displacement (swell JONSWAP + ripple Phillips)
+ *     with gradient-matched normals; Jacobian break mask × Voronoi/FBM foam detail
+ *   - Optional Gerstner swell overlay (vertex) with analytic per-pixel normal.
+ *     Displacement is faded out by camera distance, so far LOD rings stay flat.
+ *   - Image-based environment reflections (PMREM sky) with wave-perturbed normals
+ *   - Shore wave damping from terrain heightmap (waves fade in shallow surf / on land)
+ *   - Subsurface scattering approximation on backlit wave crests
  *   - Optional sun-glint specular highlight off the wave normal
  *   - Perturbed, bounded Fresnel — grazing angles tint toward `deepColor`
  *   - Animated coastal foam band at the shoreline
@@ -39,10 +43,10 @@ import * as THREE from "three";
 import { MeshBasicNodeMaterial } from "three";
 import {
   Fn, uniform, float, vec2, vec3, vec4,
-  mix, smoothstep, sin, cos, sqrt, dot, length, round,
+  mix, smoothstep, sin, cos, sqrt, dot, length, round, fract, floor,
   min, max, exp, abs, pow, saturate, clamp,
   normalize, texture, attribute, positionWorld, positionLocal, modelWorldMatrix,
-  cameraPosition, mx_noise_float,
+  cameraPosition, mx_noise_float, pmremTexture, Loop,
 } from "three/tsl";
 
 const TWO_PI = 6.2831853;
@@ -51,6 +55,70 @@ const GRAVITY = 9.8;
 const N_WAVES = 6;
 /** Deterministic per-wave direction offsets in [-1,1] (scaled by windSpread). */
 const WAVE_DIR_OFFSET = [0.0, 0.65, -0.5, 0.28, -0.82, 0.45];
+
+// ─── Voronoi + FBM foam noise (domain-warped Worley) ─────────────────────────
+const foamHash22 = Fn(([p]) => {
+  const px = dot(p, vec2(127.1, 311.7));
+  const py = dot(p, vec2(269.5, 183.3));
+  return fract(sin(vec2(px, py)).mul(43758.5453));
+});
+
+const foamHash21 = Fn(([p]) =>
+  fract(sin(dot(p, vec2(12.9898, 78.233))).mul(43758.5453)),
+);
+
+const foamValueNoise2D = Fn(([pIm]) => {
+  const p = pIm.toVar();
+  const i = floor(p);
+  const f = fract(p);
+  const u = f.mul(f).mul(float(3.0).sub(f.mul(2.0)));
+  const a = foamHash21(i);
+  const b = foamHash21(i.add(vec2(1.0, 0.0)));
+  const c = foamHash21(i.add(vec2(0.0, 1.0)));
+  const d = foamHash21(i.add(vec2(1.0, 1.0)));
+  return mix(mix(a, b, u.x), mix(c, d, u.x), u.y);
+});
+
+/** Voronoi F1 — 3×3 search unrolled in JS to avoid WGSL loop scoping artifacts. */
+const foamVoronoiF1 = Fn(([pIm]) => {
+  const ip = floor(pIm).toVar();
+  const fp = fract(pIm).toVar();
+  const md = float(10.0).toVar();
+  for (const [nx, ny] of [[-1, -1], [0, -1], [1, -1], [-1, 0], [0, 0], [1, 0], [-1, 1], [0, 1], [1, 1]]) {
+    const cellOffset = vec2(float(nx), float(ny));
+    const rnd = foamHash22(ip.add(cellOffset));
+    md.assign(min(md, length(cellOffset.add(rnd).sub(fp))));
+  }
+  return md;
+});
+
+const foamWorleyFbm = Fn(([pIm]) => {
+  const p = pIm.toVar();
+  const value = float(0.0).toVar();
+  const amp = float(0.5).toVar();
+  const totalAmp = float(0.0).toVar();
+  Loop(5, () => {
+    value.addAssign(foamVoronoiF1(p).mul(amp));
+    totalAmp.addAssign(amp);
+    p.assign(p.mul(2.0));
+    amp.assign(amp.mul(0.5));
+  });
+  return value.div(totalAmp);
+});
+
+const foamValueFbm = Fn(([pIm]) => {
+  const p = pIm.toVar();
+  const value = float(0.0).toVar();
+  const amp = float(1.0).toVar();
+  const totalAmp = float(0.0).toVar();
+  Loop(5, () => {
+    value.addAssign(amp.mul(foamValueNoise2D(p)));
+    totalAmp.addAssign(amp);
+    p.assign(p.mul(2.3));
+    amp.assign(amp.mul(0.4));
+  });
+  return value.div(totalAmp);
+});
 
 // ─── Defaults ────────────────────────────────────────────────────────────────
 export const OCEAN_DEFAULTS = {
@@ -73,18 +141,75 @@ export const OCEAN_DEFAULTS = {
   /** Depth used for fragments outside the heightmap bounds. Prevents grey horizon. */
   openOceanDepth:     60.0,
 
+  // ── Shore wave damping (heightmap-driven) ───────────────────────────────────
+  shoreDampEnabled:   true,
+  /** Water depth (m) where swell begins returning. */
+  shoreDampStart:     1.2,
+  /** Water depth (m) where swell reaches full strength. */
+  shoreDampEnd:       16.0,
+  /** Soft land/wet boundary around sea level (m). */
+  shoreLandMargin:    0.45,
+  /** Vertical wave fraction kept in the surf zone (horizontal damps faster). */
+  shoreVertKeep:      0.38,
+  /** Extra coastal foam multiplier in the surf zone. */
+  shoreSurfFoamBoost: 1.55,
+  /** Width (m) of the boosted surf-foam zone from the shoreline. */
+  shoreSurfWidth:     4.5,
+  /** Environment reflection strength in shallow surf (0 = none). */
+  shoreReflDamp:      0.42,
+  /** Open-ocean whitecaps fade out in shallow water. */
+  shoreWhitecapDamp:  true,
+
   // Surface normals (fine noise detail)
   surfNoiseScale1:    0.06,
   surfNoiseScale2:    0.13,
   surfNoiseSpeed1:    0.22,
   surfNoiseSpeed2:   -0.16,
   procNoiseSpeed:     1.0,
-  surfNormalStrength: 0.28,
+  surfNormalStrength: 0.14,
 
-  // ── Gerstner waves (vertex displacement + analytic normal) ──────────────────
+  // ── FFT ocean (primary displacement) ───────────────────────────────────────
+  fftEnabled:         true,
+  fftSwellAmp:        1.15,
+  fftRippleAmp:       0.55,
+  fftChoppiness:      1.28,
+  fftNormalStrength:  1.05,
+  /** Wind speed (m/s) — drives JONSWAP spectrum rebuild. */
+  windSpeed:          14.0,
+  jonswapGamma:       3.3,
+  windSpreadPow:      8,
+  fftSeed:            1337,
+
+  // ── Whitecap foam (Jacobian break mask × Voronoi/FBM detail) ───────────────
+  whitecapEnabled:    true,
+  whitecapIntensity:  0.88,
+  /** Jacobian below this → foam (lower = more foam). */
+  whitecapThreshold:  0.58,
+  whitecapSoftness:   0.24,
+  /** World-space Worley scale (larger = bigger foam patches). */
+  whitecapNoiseScale: 0.38,
+  whitecapNoiseSpeed: 0.16,
+  /** FBM domain-warp strength / scale for organic foam edges. */
+  whitecapWarpStrength: 0.55,
+  whitecapWarpScale:    0.2,
+  whitecapContrast:     1.55,
+  whitecapBrightness:   1.12,
+  /** Worley shaping after contrast (cell visibility). */
+  whitecapProcThreshold: 0.36,
+  whitecapProcSoftness:  0.2,
+
+  // ── Subsurface scattering (crest transmission) ─────────────────────────────
+  sssEnabled:         true,
+  sssIntensity:       0.42,
+  sssColor:           "#48d8b8",
+
+  // ── Gerstner overlay (vertex displacement + analytic normal) ─────────────────
+  /** When false, Gerstner overlay is muted so OFF = calm flat sea vs FFT ON. */
   waveEnabled:        true,
-  /** Base amplitude (world units) of the largest wave. */
-  waveAmp:            0.55,
+  /** Blend 0..1 for optional analytical swells on top of FFT (only when FFT is on). */
+  gerstnerBlend:      0.15,
+  /** Base amplitude (world units) of the largest Gerstner wave. */
+  waveAmp:            0.85,
   /** Base wavelength (world units) of the largest wave. */
   waveLength:         42.0,
   /** Choppiness 0..1 — horizontal pinch at wave crests. */
@@ -104,7 +229,7 @@ export const OCEAN_DEFAULTS = {
   /** Camera distance where wave displacement begins fading out. */
   dispFadeStart:      90.0,
   /** Camera distance where wave displacement reaches zero (rings beyond stay flat). */
-  dispFadeEnd:        260.0,
+  dispFadeEnd:        480.0,
 
   // ── Sun glint (specular off the wave normal) ────────────────────────────────
   glintColor:         "#fff2d8",
@@ -114,9 +239,18 @@ export const OCEAN_DEFAULTS = {
   // Fresnel (bounded — no sky bleed)
   fresnelExp:         4.2,
   /** Highlight contribution. Keep modest (< 0.5) to avoid pale horizons. */
-  fresnelSky:         0.35,
+  fresnelSky:         0.12,
   /** Hard cap on the Fresnel weight before it's used as a colour mix. */
   fresnelMax:         0.72,
+
+  // ── Environment reflections (PMREM sky) ────────────────────────────────────
+  envReflectEnabled:  true,
+  /** Strength of sky/environment reflection (uses baked scene.environment). */
+  envReflectIntensity: 1.05,
+  /** PMREM roughness on calm patches (looking down at water). */
+  envRoughnessCalm:   0.03,
+  /** PMREM roughness on steep / choppy patches and grazing views. */
+  envRoughnessRipple: 0.28,
 
   // Alpha
   opacity:            1.0,
@@ -132,8 +266,10 @@ export const OCEAN_DEFAULTS = {
   /** 0 = solid band, 1 = fully noise-modulated. */
   foamNoiseAmt:       0.78,
   /** Primary noise scale in world-unit^-1 (chunky waves). */
-  foamNoiseScale:     0.22,
-  foamNoiseSpeed:     0.18,
+  foamNoiseScale:     0.28,
+  foamNoiseSpeed:     0.2,
+  foamWarpStrength:   0.5,
+  foamWarpScale:      0.24,
   /** Fine detail noise. */
   foamFineScale:      0.9,
   foamFineAmt:        0.34,
@@ -154,9 +290,11 @@ const DEG2RAD = Math.PI / 180;
  * @param {object} deps
  * @param {THREE.Texture} deps.heightTex — heightmap DataTexture (R = seabed world Y)
  * @param {number}        deps.terrainSize — world size of the terrain (e.g. 1600)
- * @returns {{ material, uniforms, syncParams, update }}
+ * @param {object|null}   deps.fft — from createOceanFFTSimulation()
+ * @param {THREE.Texture|null} deps.envMap — PMREM / equirect environment (scene.environment)
+ * @returns {{ material, uniforms, syncParams, update, setEnvMap }}
  */
-export function createOceanShader({ heightTex, terrainSize }) {
+export function createOceanShader({ heightTex, terrainSize, fft = null, envMap = null }) {
   const u = {};
 
   // Time + water Y (driven from host)
@@ -175,6 +313,17 @@ export function createOceanShader({ heightTex, terrainSize }) {
   u.depthRampMidDeep  = uniform(OCEAN_DEFAULTS.depthRampMidDeep);
   u.openOceanDepth    = uniform(OCEAN_DEFAULTS.openOceanDepth);
 
+  // Shore damping
+  u.shoreDampEnabled   = uniform(OCEAN_DEFAULTS.shoreDampEnabled ? 1 : 0);
+  u.shoreDampStart     = uniform(OCEAN_DEFAULTS.shoreDampStart);
+  u.shoreDampEnd       = uniform(OCEAN_DEFAULTS.shoreDampEnd);
+  u.shoreLandMargin    = uniform(OCEAN_DEFAULTS.shoreLandMargin);
+  u.shoreVertKeep      = uniform(OCEAN_DEFAULTS.shoreVertKeep);
+  u.shoreSurfFoamBoost = uniform(OCEAN_DEFAULTS.shoreSurfFoamBoost);
+  u.shoreSurfWidth     = uniform(OCEAN_DEFAULTS.shoreSurfWidth);
+  u.shoreReflDamp      = uniform(OCEAN_DEFAULTS.shoreReflDamp);
+  u.shoreWhitecapDamp  = uniform(OCEAN_DEFAULTS.shoreWhitecapDamp ? 1 : 0);
+
   // Normals (noise)
   u.surfNoiseScale1    = uniform(OCEAN_DEFAULTS.surfNoiseScale1);
   u.surfNoiseScale2    = uniform(OCEAN_DEFAULTS.surfNoiseScale2);
@@ -182,6 +331,32 @@ export function createOceanShader({ heightTex, terrainSize }) {
   u.surfNoiseSpeed2    = uniform(OCEAN_DEFAULTS.surfNoiseSpeed2);
   u.procNoiseSpeed     = uniform(OCEAN_DEFAULTS.procNoiseSpeed);
   u.surfNormalStrength = uniform(OCEAN_DEFAULTS.surfNormalStrength);
+
+  // FFT ocean
+  u.fftEnabled        = uniform(OCEAN_DEFAULTS.fftEnabled ? 1 : 0);
+  u.fftSwellAmp       = uniform(OCEAN_DEFAULTS.fftSwellAmp);
+  u.fftRippleAmp      = uniform(OCEAN_DEFAULTS.fftRippleAmp);
+  u.fftNormalStrength = uniform(OCEAN_DEFAULTS.fftNormalStrength);
+  u.fftSwellTile      = uniform(fft ? fft.swell.tileSize : 512);
+  u.fftRippleTile     = uniform(fft ? fft.ripple.tileSize : 48);
+
+  // Whitecaps + SSS
+  u.whitecapEnabled   = uniform(OCEAN_DEFAULTS.whitecapEnabled ? 1 : 0);
+  u.whitecapIntensity = uniform(OCEAN_DEFAULTS.whitecapIntensity);
+  u.whitecapThreshold = uniform(OCEAN_DEFAULTS.whitecapThreshold);
+  u.whitecapSoftness  = uniform(OCEAN_DEFAULTS.whitecapSoftness);
+  u.whitecapNoiseScale     = uniform(OCEAN_DEFAULTS.whitecapNoiseScale);
+  u.whitecapNoiseSpeed     = uniform(OCEAN_DEFAULTS.whitecapNoiseSpeed);
+  u.whitecapWarpStrength   = uniform(OCEAN_DEFAULTS.whitecapWarpStrength);
+  u.whitecapWarpScale      = uniform(OCEAN_DEFAULTS.whitecapWarpScale);
+  u.whitecapContrast       = uniform(OCEAN_DEFAULTS.whitecapContrast);
+  u.whitecapBrightness     = uniform(OCEAN_DEFAULTS.whitecapBrightness);
+  u.whitecapProcThreshold  = uniform(OCEAN_DEFAULTS.whitecapProcThreshold);
+  u.whitecapProcSoftness   = uniform(OCEAN_DEFAULTS.whitecapProcSoftness);
+  u.sssEnabled        = uniform(OCEAN_DEFAULTS.sssEnabled ? 1 : 0);
+  u.sssIntensity      = uniform(OCEAN_DEFAULTS.sssIntensity);
+  u.sssColor          = uniform(new THREE.Color(OCEAN_DEFAULTS.sssColor));
+  u.gerstnerBlend     = uniform(OCEAN_DEFAULTS.gerstnerBlend);
 
   // Gerstner waves
   u.waveEnabled        = uniform(OCEAN_DEFAULTS.waveEnabled ? 1 : 0);
@@ -208,6 +383,20 @@ export function createOceanShader({ heightTex, terrainSize }) {
   u.fresnelSky = uniform(OCEAN_DEFAULTS.fresnelSky);
   u.fresnelMax = uniform(OCEAN_DEFAULTS.fresnelMax);
 
+  // Environment reflections
+  u.envReflectEnabled   = uniform(OCEAN_DEFAULTS.envReflectEnabled ? 1 : 0);
+  u.envReflectIntensity = uniform(OCEAN_DEFAULTS.envReflectIntensity);
+  u.envRoughnessCalm    = uniform(OCEAN_DEFAULTS.envRoughnessCalm);
+  u.envRoughnessRipple  = uniform(OCEAN_DEFAULTS.envRoughnessRipple);
+
+  const placeholderEnv = new THREE.DataTexture(
+    new Uint8Array([186, 210, 228, 255]), 1, 1, THREE.RGBAFormat,
+  );
+  placeholderEnv.mapping = THREE.EquirectangularReflectionMapping;
+  placeholderEnv.needsUpdate = true;
+  let envSourceTexture = envMap || placeholderEnv;
+  const envPmrem = pmremTexture(envSourceTexture);
+
   // Alpha
   u.opacity = uniform(OCEAN_DEFAULTS.opacity);
 
@@ -220,6 +409,8 @@ export function createOceanShader({ heightTex, terrainSize }) {
   u.foamNoiseAmt       = uniform(OCEAN_DEFAULTS.foamNoiseAmt);
   u.foamNoiseScale     = uniform(OCEAN_DEFAULTS.foamNoiseScale);
   u.foamNoiseSpeed     = uniform(OCEAN_DEFAULTS.foamNoiseSpeed);
+  u.foamWarpStrength   = uniform(OCEAN_DEFAULTS.foamWarpStrength);
+  u.foamWarpScale      = uniform(OCEAN_DEFAULTS.foamWarpScale);
   u.foamFineScale      = uniform(OCEAN_DEFAULTS.foamFineScale);
   u.foamFineAmt        = uniform(OCEAN_DEFAULTS.foamFineAmt);
   u.foamFineSpeed      = uniform(OCEAN_DEFAULTS.foamFineSpeed);
@@ -286,7 +477,105 @@ export function createOceanShader({ heightTex, terrainSize }) {
     const dist = length(xz.sub(cameraPosition.xz));
     return saturate(
       float(1).sub(smoothstep(u.dispFadeStart, u.dispFadeEnd, dist)),
-    ).mul(u.waveEnabled);
+    );
+  }
+
+  /** Heightmap UV + terrain Y at world XZ. */
+  function terrainSampleAt(xz) {
+    const hUV = vec2(
+      xz.x.div(uTerrainSize).add(0.5),
+      xz.y.div(uTerrainSize).add(0.5),
+    );
+    const uvClamped = vec2(
+      clamp(hUV.x, float(0.001), float(0.999)),
+      clamp(hUV.y, float(0.001), float(0.999)),
+    );
+    const terrainY = texture(heightTex, uvClamped).r;
+    return { terrainY, depthSigned: u.waterY.sub(terrainY) };
+  }
+
+  /** 0 on dry land, ramps to 1 in deep water (signed depth = waterY − terrainY). */
+  function shoreWaveMask(depthSigned) {
+    const wet = smoothstep(
+      u.shoreLandMargin.negate(),
+      u.shoreLandMargin,
+      depthSigned,
+    );
+    const deep = smoothstep(u.shoreDampStart, u.shoreDampEnd, depthSigned);
+    return wet.mul(deep).mul(u.shoreDampEnabled);
+  }
+
+  /** Damp horizontal displacement more than vertical near shore. */
+  function applyShoreToDisp(disp, mask) {
+    const xzMask = mask.mul(mask);
+    const yMask = mix(u.shoreVertKeep, float(1), mask);
+    return vec3(disp.x.mul(xzMask), disp.y.mul(yMask), disp.z.mul(xzMask));
+  }
+
+  /** Tileable FFT displacement sample (dx, height, dz). */
+  function fftDispAt(xz, ampScale) {
+    if (!fft) return vec3(0);
+    const uvS = fract(xz.div(u.fftSwellTile));
+    const uvR = fract(xz.div(u.fftRippleTile));
+    const dS = texture(fft.swell.dispTex, uvS).xyz.mul(u.fftSwellAmp);
+    const dR = texture(fft.ripple.dispTex, uvR).xyz.mul(u.fftRippleAmp);
+    return dS.add(dR).mul(ampScale).mul(u.fftEnabled);
+  }
+
+  /** FFT height-field gradient → normal tilt (x/z). */
+  function fftSlopeAt(xz, ampScale) {
+    if (!fft) return vec2(0);
+    const uvS = fract(xz.div(u.fftSwellTile));
+    const uvR = fract(xz.div(u.fftRippleTile));
+    const gS = texture(fft.swell.gradTex, uvS).xy.mul(u.fftSwellAmp);
+    const gR = texture(fft.ripple.gradTex, uvR).xy.mul(u.fftRippleAmp);
+    return gS.add(gR).mul(u.fftNormalStrength).mul(ampScale).mul(u.fftEnabled);
+  }
+
+  /** Jacobian whitecap factor from FFT displacement textures. */
+  function worleyFoamPattern(
+    xz, scale, speed, warpStr, warpScale, contrast, threshold, softness, brightness,
+  ) {
+    const scroll = vec2(
+      u.time.mul(speed),
+      u.time.mul(speed.mul(0.71)),
+    );
+    const baseUV = xz.mul(scale).add(scroll).toVar();
+    const warpUV = baseUV.mul(warpScale);
+    const w1 = foamValueFbm(warpUV);
+    const w2 = foamValueFbm(warpUV.add(vec2(4.0, 4.0)));
+    baseUV.addAssign(vec2(w1.sub(0.5), w2.sub(0.5)).mul(warpStr));
+    let n = foamWorleyFbm(baseUV);
+    n = pow(saturate(n), contrast);
+    n = smoothstep(threshold, threshold.add(softness), n);
+    return saturate(n.mul(brightness));
+  }
+
+  function fftWhitecapAt(xz, ampScale) {
+    if (!fft) return float(0);
+    const uvS = fract(xz.div(u.fftSwellTile));
+    const uvR = fract(xz.div(u.fftRippleTile));
+    const jS = texture(fft.swell.dispTex, uvS).w;
+    const jR = texture(fft.ripple.dispTex, uvR).w;
+    const jMin = min(jS, jR);
+    const lo = u.whitecapThreshold.sub(u.whitecapSoftness);
+    const breaking = float(1).sub(smoothstep(lo, u.whitecapThreshold, jMin));
+    const detail = worleyFoamPattern(
+      xz,
+      u.whitecapNoiseScale,
+      u.whitecapNoiseSpeed,
+      u.whitecapWarpStrength,
+      u.whitecapWarpScale,
+      u.whitecapContrast,
+      u.whitecapProcThreshold,
+      u.whitecapProcSoftness,
+      u.whitecapBrightness,
+    );
+    return breaking.mul(detail)
+      .mul(u.whitecapIntensity)
+      .mul(u.whitecapEnabled)
+      .mul(u.fftEnabled)
+      .mul(ampScale);
   }
 
   // ── Vertex stage: CDLOD morph + Gerstner displacement ────────────────────
@@ -309,8 +598,22 @@ export function createOceanShader({ heightTex, terrainSize }) {
 
     const worldBase = modelWorldMatrix.mul(vec4(positionLocal, float(1))).xz;
     const worldXZ = worldBase.add(morphedXZ.sub(localXZ));
-    const disp = gerstnerDisp(worldXZ, ampScaleAt(worldXZ));
-    return vec3(morphedXZ.x, float(0), morphedXZ.y).add(disp);
+    const ampScale = ampScaleAt(worldXZ);
+    const { depthSigned } = terrainSampleAt(worldXZ);
+    const shoreMask = shoreWaveMask(depthSigned);
+
+    const fftDisp = applyShoreToDisp(
+      fftDispAt(worldXZ, ampScale),
+      shoreMask,
+    );
+    const gerstner = applyShoreToDisp(
+      gerstnerDisp(
+        worldXZ,
+        ampScale.mul(u.waveEnabled).mul(u.gerstnerBlend).mul(u.fftEnabled),
+      ),
+      shoreMask,
+    );
+    return vec3(morphedXZ.x, float(0), morphedXZ.y).add(fftDisp).add(gerstner);
   });
 
   // ── Fragment shader ────────────────────────────────────────────────────────
@@ -338,6 +641,10 @@ export function createOceanShader({ heightTex, terrainSize }) {
     const dShoreRaw = u.waterY.sub(terrainY);            // signed, used for foam band
     const dShore    = mix(u.openOceanDepth, dShoreRaw, inside);
     const depth     = max(dShore, float(0));
+    const shoreMask = shoreWaveMask(dShoreRaw).mul(inside);
+    const shallowT  = float(1).sub(
+      smoothstep(float(0), u.shoreSurfWidth, max(dShoreRaw, float(0))),
+    );
 
     // ── Three-stop depth ramp (shore → mid → deep) ──────────────────────────
     const tDepth = float(1)
@@ -369,35 +676,80 @@ export function createOceanShader({ heightTex, terrainSize }) {
     const s20  = mx_noise_float(uvN2);
     const s2x  = mx_noise_float(uvN2.add(vec2(eps.mul(1.15), 0)));
     const s2z  = mx_noise_float(uvN2.add(vec2(0, eps.mul(1.15))));
-    const dnx  = s1x.sub(s10).add(s2x.sub(s20).mul(0.62)).mul(u.surfNormalStrength);
-    const dnz  = s1z.sub(s10).add(s2z.sub(s20).mul(0.62)).mul(u.surfNormalStrength);
+    const dnx  = s1x.sub(s10).add(s2x.sub(s20).mul(0.62))
+      .mul(u.surfNormalStrength)
+      .mul(mix(float(0.25), float(1), u.fftEnabled))
+      .mul(shoreMask);
+    const dnz  = s1z.sub(s10).add(s2z.sub(s20).mul(0.62))
+      .mul(u.surfNormalStrength)
+      .mul(mix(float(0.25), float(1), u.fftEnabled))
+      .mul(shoreMask);
 
-    // ── Gerstner wave slope (matches the vertex displacement field) ─────────
-    const ampScaleF = ampScaleAt(wXZ);
-    const gSlope = gerstnerSlope(wXZ, ampScaleF);
+    // ── FFT + Gerstner wave slopes ───────────────────────────────────────────
+    const ampScaleF = ampScaleAt(wXZ).mul(shoreMask);
+    const fftSlope = fftSlopeAt(wXZ, ampScaleF);
+    const gSlope = gerstnerSlope(
+      wXZ,
+      ampScaleAt(wXZ)
+        .mul(u.waveEnabled)
+        .mul(u.gerstnerBlend)
+        .mul(u.fftEnabled)
+        .mul(shoreMask),
+    );
     const worldN = normalize(vec3(
-      dnx.negate().add(gSlope.x),
+      dnx.negate().add(fftSlope.x.negate()).add(gSlope.x),
       float(1),
-      dnz.negate().add(gSlope.y),
+      dnz.negate().add(fftSlope.y.negate()).add(gSlope.y),
     ));
 
-    // ── Fresnel (bounded, grazing-tinted toward deep colour) ────────────────
+    // ── Fresnel + environment reflection (PMREM sky) ─────────────────────────
     const viewDir = normalize(cameraPosition.sub(positionWorld));
     const NdotV   = max(dot(worldN, viewDir), float(0.001));
     const fresnelRaw = pow(float(1).sub(saturate(NdotV)), u.fresnelExp);
     const fresnel    = min(fresnelRaw, u.fresnelMax);
-    // Near-normal view keeps highlightColor; grazing view pulls it toward deepColor.
     const grazing = saturate(float(1).sub(NdotV));
     const hlCol   = mix(u.highlightColor, u.deepColor, pow(grazing, float(1.2)));
-    const lit     = absorption.add(hlCol.mul(fresnel).mul(u.fresnelSky));
+    const skyTint = hlCol.mul(fresnel).mul(u.fresnelSky);
+
+    const reflectDir = viewDir.negate().reflect(worldN).normalize();
+    const slopeMag = length(vec2(fftSlope.x, fftSlope.y));
+    const envRough = mix(
+      u.envRoughnessCalm,
+      u.envRoughnessRipple,
+      saturate(grazing.mul(0.45).add(slopeMag.mul(0.35))),
+    );
+    const reflectMixed = pow(envRough, float(4)).mix(reflectDir, worldN).normalize();
+    const envRadiance = envPmrem.context({
+      getUV: () => reflectMixed,
+      getTextureLevel: () => envRough,
+    });
+    const envRefl = envRadiance
+      .mul(fresnel)
+      .mul(u.envReflectIntensity)
+      .mul(u.envReflectEnabled)
+      .mul(mix(float(1), u.shoreReflDamp, shallowT));
+
+    const lit = absorption.add(skyTint).add(envRefl);
 
     // ── Sun glint (Blinn specular off the wave normal) ──────────────────────
     const halfV = normalize(viewDir.add(u.sunDir));
     const spec  = pow(max(dot(worldN, halfV), float(0)), u.glintPower)
       .mul(u.glintIntensity);
-    const surfaceColor = lit.add(u.glintColor.mul(spec));
+    const withGlint = lit.add(u.glintColor.mul(spec));
 
-    // ── Coastal foam band (2-octave value noise, breathing shoreline) ───────
+    // ── Subsurface scattering (backlit crest transmission) ───────────────────
+    const sunDotN = dot(worldN, u.sunDir);
+    const crestLit = saturate(sunDotN.negate());
+    const viewToSun = saturate(dot(viewDir, u.sunDir.negate()));
+    const sss = crestLit.mul(viewToSun).mul(u.sssIntensity).mul(u.sssEnabled);
+    const withSss = withGlint.add(u.sssColor.mul(sss));
+
+    // ── Jacobian whitecap foam (open ocean) ──────────────────────────────────
+    const whitecap = fftWhitecapAt(wXZ, ampScaleAt(wXZ))
+      .mul(mix(float(1), shoreMask, u.shoreWhitecapDamp));
+    const withWhitecap = mix(withSss, u.foamColor, whitecap);
+
+    // ── Coastal foam band (Worley/FBM detail on shoreline mask) ─────────────
     const breath = sin(u.time.mul(u.foamBreatheHz).mul(float(TWO_PI)))
       .mul(u.foamBreatheAmp);
     const dShoreBand = dShoreRaw.add(breath);
@@ -409,26 +761,30 @@ export function createOceanShader({ heightTex, terrainSize }) {
       u.time.mul(u.foamNoiseSpeed),
       u.time.mul(u.foamNoiseSpeed.mul(0.73)),
     );
-    const uvMainF = wXZ.mul(u.foamNoiseScale).add(scrollF);
-    const uvFineF = wXZ.mul(u.foamFineScale).add(
-      vec2(u.time.mul(u.foamFineSpeed), u.time.mul(u.foamFineSpeed.mul(0.61))),
+    const shoreProc = worleyFoamPattern(
+      wXZ.add(scrollF.mul(0.15)),
+      u.foamNoiseScale,
+      u.foamNoiseSpeed,
+      u.foamWarpStrength,
+      u.foamWarpScale,
+      u.foamContrast,
+      u.foamCutoff,
+      u.foamTransitionWidth,
+      float(1),
     );
-    const n0 = mx_noise_float(uvMainF).mul(0.5).add(0.5);
-    const n1 = mx_noise_float(uvFineF).mul(0.5).add(0.5);
-    const nMix     = saturate(n0.add(n1.sub(0.5).mul(u.foamFineAmt)));
-    const nShaped  = pow(max(nMix, float(0.0001)), u.foamContrast);
-    const noiseBlend = mix(float(1), nShaped, u.foamNoiseAmt);
+    const noiseBlend = mix(float(1), shoreProc, u.foamNoiseAmt);
     const unified  = saturate(bandShaped.mul(noiseBlend));
 
-    const tw = max(u.foamTransitionWidth, float(0.02));
-    const lo = max(u.foamCutoff.sub(tw), float(0));
-    const hi = min(u.foamCutoff.add(tw), float(1));
-    const foamMask = saturate(smoothstep(lo, hi, unified).mul(u.foamIntensity))
+    const foamMask = saturate(
+      unified
+        .mul(u.foamIntensity)
+        .mul(mix(float(1), u.shoreSurfFoamBoost, shallowT)),
+    )
       .mul(u.foamEnabled)
-      .mul(inside); // no foam outside terrain bounds — open ocean has no shore
+      .mul(inside);
 
     // ── Composite ───────────────────────────────────────────────────────────
-    const finalColor = mix(surfaceColor, u.foamColor, foamMask).saturate();
+    const finalColor = mix(withWhitecap, u.foamColor, foamMask).saturate();
     return vec4(finalColor, u.opacity);
   });
 
@@ -458,12 +814,44 @@ export function createOceanShader({ heightTex, terrainSize }) {
     if (p.depthRampMidDeep   != null) u.depthRampMidDeep.value   = p.depthRampMidDeep;
     if (p.openOceanDepth     != null) u.openOceanDepth.value     = p.openOceanDepth;
 
+    if (p.shoreDampEnabled   != null) u.shoreDampEnabled.value   = p.shoreDampEnabled ? 1 : 0;
+    if (p.shoreDampStart     != null) u.shoreDampStart.value     = p.shoreDampStart;
+    if (p.shoreDampEnd       != null) u.shoreDampEnd.value       = p.shoreDampEnd;
+    if (p.shoreLandMargin    != null) u.shoreLandMargin.value    = p.shoreLandMargin;
+    if (p.shoreVertKeep      != null) u.shoreVertKeep.value      = p.shoreVertKeep;
+    if (p.shoreSurfFoamBoost != null) u.shoreSurfFoamBoost.value = p.shoreSurfFoamBoost;
+    if (p.shoreSurfWidth     != null) u.shoreSurfWidth.value     = p.shoreSurfWidth;
+    if (p.shoreReflDamp      != null) u.shoreReflDamp.value      = p.shoreReflDamp;
+    if (p.shoreWhitecapDamp  != null) u.shoreWhitecapDamp.value  = p.shoreWhitecapDamp ? 1 : 0;
+
     if (p.surfNoiseScale1    != null) u.surfNoiseScale1.value    = p.surfNoiseScale1;
     if (p.surfNoiseScale2    != null) u.surfNoiseScale2.value    = p.surfNoiseScale2;
     if (p.surfNoiseSpeed1    != null) u.surfNoiseSpeed1.value    = p.surfNoiseSpeed1;
     if (p.surfNoiseSpeed2    != null) u.surfNoiseSpeed2.value    = p.surfNoiseSpeed2;
     if (p.procNoiseSpeed     != null) u.procNoiseSpeed.value     = p.procNoiseSpeed;
     if (p.surfNormalStrength != null) u.surfNormalStrength.value = p.surfNormalStrength;
+
+    if (p.fftEnabled        != null) u.fftEnabled.value        = p.fftEnabled ? 1 : 0;
+    if (p.fftSwellAmp       != null) u.fftSwellAmp.value       = p.fftSwellAmp;
+    if (p.fftRippleAmp      != null) u.fftRippleAmp.value      = p.fftRippleAmp;
+    if (p.fftNormalStrength != null) u.fftNormalStrength.value = p.fftNormalStrength;
+    if (p.gerstnerBlend     != null) u.gerstnerBlend.value     = p.gerstnerBlend;
+
+    if (p.whitecapEnabled   != null) u.whitecapEnabled.value   = p.whitecapEnabled ? 1 : 0;
+    if (p.whitecapIntensity != null) u.whitecapIntensity.value = p.whitecapIntensity;
+    if (p.whitecapThreshold != null) u.whitecapThreshold.value = p.whitecapThreshold;
+    if (p.whitecapSoftness  != null) u.whitecapSoftness.value  = p.whitecapSoftness;
+    if (p.whitecapNoiseScale     != null) u.whitecapNoiseScale.value     = p.whitecapNoiseScale;
+    if (p.whitecapNoiseSpeed     != null) u.whitecapNoiseSpeed.value     = p.whitecapNoiseSpeed;
+    if (p.whitecapWarpStrength   != null) u.whitecapWarpStrength.value   = p.whitecapWarpStrength;
+    if (p.whitecapWarpScale      != null) u.whitecapWarpScale.value      = p.whitecapWarpScale;
+    if (p.whitecapContrast       != null) u.whitecapContrast.value       = p.whitecapContrast;
+    if (p.whitecapBrightness     != null) u.whitecapBrightness.value     = p.whitecapBrightness;
+    if (p.whitecapProcThreshold  != null) u.whitecapProcThreshold.value  = p.whitecapProcThreshold;
+    if (p.whitecapProcSoftness   != null) u.whitecapProcSoftness.value   = p.whitecapProcSoftness;
+    if (p.sssEnabled        != null) u.sssEnabled.value        = p.sssEnabled ? 1 : 0;
+    if (p.sssIntensity      != null) u.sssIntensity.value      = p.sssIntensity;
+    if (p.sssColor          != null) c(p.sssColor, u.sssColor.value);
 
     if (p.waveEnabled        != null) u.waveEnabled.value        = p.waveEnabled ? 1 : 0;
     if (p.waveAmp            != null) u.waveAmp.value            = p.waveAmp;
@@ -487,6 +875,11 @@ export function createOceanShader({ heightTex, terrainSize }) {
     if (p.fresnelSky != null) u.fresnelSky.value = p.fresnelSky;
     if (p.fresnelMax != null) u.fresnelMax.value = p.fresnelMax;
 
+    if (p.envReflectEnabled   != null) u.envReflectEnabled.value   = p.envReflectEnabled ? 1 : 0;
+    if (p.envReflectIntensity != null) u.envReflectIntensity.value = p.envReflectIntensity;
+    if (p.envRoughnessCalm    != null) u.envRoughnessCalm.value    = p.envRoughnessCalm;
+    if (p.envRoughnessRipple  != null) u.envRoughnessRipple.value  = p.envRoughnessRipple;
+
     if (p.opacity != null) u.opacity.value = p.opacity;
 
     if (p.foamEnabled         != null) u.foamEnabled.value         = p.foamEnabled ? 1 : 0;
@@ -497,6 +890,8 @@ export function createOceanShader({ heightTex, terrainSize }) {
     if (p.foamNoiseAmt        != null) u.foamNoiseAmt.value        = p.foamNoiseAmt;
     if (p.foamNoiseScale      != null) u.foamNoiseScale.value      = p.foamNoiseScale;
     if (p.foamNoiseSpeed      != null) u.foamNoiseSpeed.value      = p.foamNoiseSpeed;
+    if (p.foamWarpStrength    != null) u.foamWarpStrength.value    = p.foamWarpStrength;
+    if (p.foamWarpScale       != null) u.foamWarpScale.value       = p.foamWarpScale;
     if (p.foamFineScale       != null) u.foamFineScale.value       = p.foamFineScale;
     if (p.foamFineAmt         != null) u.foamFineAmt.value         = p.foamFineAmt;
     if (p.foamFineSpeed       != null) u.foamFineSpeed.value       = p.foamFineSpeed;
@@ -512,13 +907,22 @@ export function createOceanShader({ heightTex, terrainSize }) {
    * @param {number}       dt       delta seconds (unused but kept for API parity)
    * @param {number}       elapsed  total elapsed seconds
    * @param {THREE.Mesh[]} meshes   ocean mesh(es) — waterY is read from meshes[0].position.y
+   * @param {object|null}  fftSim   optional FFT simulation (syncParams + update handled externally)
    */
-  function update(dt, elapsed, meshes) {
+  function update(dt, elapsed, meshes, fftSim) {
     u.time.value = elapsed;
     if (meshes && meshes.length > 0) {
       u.waterY.value = meshes[0].position.y;
     }
+    if (fftSim) fftSim.update(elapsed);
   }
 
-  return { material, uniforms: u, syncParams, update };
+  /** Update the sky PMREM after rebaking scene.environment. */
+  function setEnvMap(tex) {
+    if (!tex) return;
+    envSourceTexture = tex;
+    envPmrem.value = tex;
+  }
+
+  return { material, uniforms: u, syncParams, update, setEnvMap, fft };
 }

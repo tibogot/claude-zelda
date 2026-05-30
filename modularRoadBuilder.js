@@ -53,14 +53,25 @@ export class ModularRoadBuilder {
     this.onChange = onChange;
 
     this.activePieceId = PIECE_CATALOG[0].id;
-    /** @type {{id:string, pp:object, mesh:THREE.Mesh, railMesh:THREE.Mesh|null, shellMesh:THREE.Mesh|null, decorMesh:THREE.Mesh|null, connectorIn:THREE.Matrix4, connectorOut:THREE.Matrix4}[]} */
+    /** @type {{id:string, chainId:number, pp:object, mesh:THREE.Mesh, railMesh:THREE.Mesh|null, shellMesh:THREE.Mesh|null, decorMesh:THREE.Mesh|null, connectorIn:THREE.Matrix4, connectorOut:THREE.Matrix4}[]} */
     this.pieces = [];
+
+    /**
+     * First-class chains. Each chain owns an `anchor` connector (its start) that
+     * the placement gizmo edits; pieces in a chain are rebuilt sequentially from
+     * that anchor, so moving the anchor rigidly moves/rotates the whole chain.
+     * New pieces append to `activeChainId`; N starts a new chain, [ / ] cycle.
+     * @type {{id:number, anchor:THREE.Matrix4}[]}
+     */
+    this.chains = [{ id: 0, anchor: initialConnector() }];
+    this.chainSeq = 1;
+    this.activeChainId = 0;
     this.currentConnector = initialConnector();
 
-    /** When true, ghost follows pointer / orbit target instead of chain end. */
-    this.freePlaceMode = false;
+    /** Anchor gizmo state (pos + yaw) for the active chain. */
+    this.freePlaceMode = true;
     this.freeYaw = 0;
-    this._freePos = new THREE.Vector3(0, 0.5, 0);
+    this._freePos = new THREE.Vector3(0, 0, 0);
 
     this.root = new THREE.Group();
     this.root.name = "ModularRoad";
@@ -126,16 +137,83 @@ export class ModularRoadBuilder {
     this._notify();
   }
 
-  /** Start a disconnected chain — ghost follows the placement gizmo. */
+  /** Start a new disconnected chain at `atPos` and make it active. */
   beginNewChain(atPos = null, yaw = null) {
     this.freePlaceMode = true;
-    if (yaw != null) this.freeYaw = yaw;
+    this.freeYaw = yaw != null ? yaw : 0;
     if (atPos) this._freePos.copy(atPos);
     else if (this.orbit?.target) this._freePos.copy(this.orbit.target);
-    this._applyFreeConnector();
+    const id = this.chainSeq++;
+    const anchor = this._anchorFromFree();
+    this.chains.push({ id, anchor });
+    this.activeChainId = id;
+    this.currentConnector = anchor.clone();
     this._showPlacementGizmo();
     this.refreshGhost();
     this._notify();
+  }
+
+  _activeChain() {
+    return this.chains.find((c) => c.id === this.activeChainId) ?? null;
+  }
+
+  /** Pieces of one chain, in placement order. */
+  _chainPieces(chainId) {
+    return this.pieces.filter((p) => p.chainId === chainId);
+  }
+
+  _lastPieceOfChain(chainId) {
+    const ps = this._chainPieces(chainId);
+    return ps.length ? ps[ps.length - 1] : null;
+  }
+
+  /** Recompute the open connector for the active chain (end, or its anchor). */
+  _syncCurrentConnector() {
+    const last = this._lastPieceOfChain(this.activeChainId);
+    const chain = this._activeChain();
+    this.currentConnector = last
+      ? last.connectorOut.clone()
+      : chain
+        ? chain.anchor.clone()
+        : initialConnector();
+  }
+
+  /** Switch the active (append) chain and move the gizmo + ghost to it. */
+  selectChain(chainId) {
+    const chain = this.chains.find((c) => c.id === chainId);
+    if (!chain) return;
+    this.activeChainId = chainId;
+    this.freePlaceMode = true;
+    // Seed the gizmo from the chain's anchor (pos + yaw).
+    this._freePos.setFromMatrixPosition(chain.anchor);
+    const e = new THREE.Euler().setFromRotationMatrix(chain.anchor, "YXZ");
+    this.freeYaw = e.y;
+    this._syncCurrentConnector();
+    this._showPlacementGizmo();
+    this.refreshGhost();
+    this._notify();
+  }
+
+  /** Cycle the active chain (dir -1 = previous, +1 = next). */
+  cycleChain(dir = -1) {
+    if (this.chains.length < 2) return;
+    const i = this.chains.findIndex((c) => c.id === this.activeChainId);
+    const n = this.chains.length;
+    const next = this.chains[(i + (dir < 0 ? -1 : 1) + n) % n];
+    this.selectChain(next.id);
+  }
+
+  get activeChainIndex() {
+    return this.chains.findIndex((c) => c.id === this.activeChainId);
+  }
+
+  get chainCount() {
+    return this.chains.length;
+  }
+
+  /** Hide the active-chain gizmo (used when another gizmo takes over). */
+  deselectPlacement() {
+    this._hidePlacementGizmo();
   }
 
   setPlacementGizmoMode(mode) {
@@ -175,8 +253,15 @@ export class ModularRoadBuilder {
     this._freePos.copy(this.placementPivot.position);
     this.freeYaw = this.placementPivot.rotation.y;
     this.placementPivot.rotation.set(0, this.freeYaw, 0);
-    this._applyFreeConnector();
-    this.refreshGhost();
+    // Push the new anchor onto the active chain, then re-chain it rigidly.
+    const chain = this._activeChain();
+    if (chain) {
+      chain.anchor = this._anchorFromFree();
+      this.rebuildAll();
+    } else {
+      this._syncCurrentConnector();
+      this.refreshGhost();
+    }
   }
 
   setFreePlacement(pos, yaw) {
@@ -184,22 +269,25 @@ export class ModularRoadBuilder {
     if (yaw !== undefined) this.freeYaw = yaw;
     this.placementPivot.position.copy(this._freePos);
     this.placementPivot.rotation.set(0, this.freeYaw, 0);
-    this._applyFreeConnector();
-    this.refreshGhost();
+    const chain = this._activeChain();
+    if (chain) chain.anchor = this._anchorFromFree();
+    this.rebuildAll();
   }
 
   rotateFreeYaw(delta) {
     if (!this.freePlaceMode) return;
     this.freeYaw += delta;
     this.placementPivot.rotation.set(0, this.freeYaw, 0);
-    this._applyFreeConnector();
-    this.refreshGhost();
+    const chain = this._activeChain();
+    if (chain) chain.anchor = this._anchorFromFree();
+    this.rebuildAll();
   }
 
-  _applyFreeConnector() {
+  /** Build a connector matrix from the gizmo's pos + yaw. */
+  _anchorFromFree() {
     const q = new THREE.Quaternion().setFromAxisAngle(new THREE.Vector3(0, 1, 0), this.freeYaw);
     const travel = new THREE.Vector3(0, 0, -1).applyQuaternion(q);
-    socketMatrix(this._freePos, travel, new THREE.Vector3(0, 1, 0), this.currentConnector);
+    return socketMatrix(this._freePos, travel, new THREE.Vector3(0, 1, 0));
   }
 
   /** Rebuild the translucent ghost at the current open connector. */
@@ -269,6 +357,7 @@ export class ModularRoadBuilder {
 
     this.pieces.push({
       id: this.activePieceId,
+      chainId: this.activeChainId,
       pp: this._snapshotParams(),
       edges,
       mesh,
@@ -279,8 +368,8 @@ export class ModularRoadBuilder {
       connectorOut: built.connectorOut.clone(),
     });
     this.currentConnector = built.connectorOut.clone();
-    this.freePlaceMode = false;
-    this._hidePlacementGizmo();
+    // Keep the anchor gizmo on the active chain so the whole chain stays movable.
+    this._showPlacementGizmo();
     this.refreshGhost();
     this._notify();
     return mesh;
@@ -304,12 +393,16 @@ export class ModularRoadBuilder {
   }
 
   undo() {
-    const last = this.pieces.pop();
+    // Remove the last piece of the active chain (fall back to global last).
+    let last = this._lastPieceOfChain(this.activeChainId);
+    if (!last) last = this.pieces[this.pieces.length - 1];
     if (!last) return false;
+    this.activeChainId = last.chainId;
+    const idx = this.pieces.indexOf(last);
+    this.pieces.splice(idx, 1);
     this._removePiece(last);
-    this.currentConnector = this.pieces.length
-      ? this.pieces[this.pieces.length - 1].connectorOut.clone()
-      : initialConnector();
+    this._syncCurrentConnector();
+    this._showPlacementGizmo();
     this.refreshGhost();
     this._notify();
     return true;
@@ -318,104 +411,95 @@ export class ModularRoadBuilder {
   clear() {
     for (const p of this.pieces) this._removePiece(p);
     this.pieces = [];
-    this.freePlaceMode = false;
-    this._hidePlacementGizmo();
+    this.chains = [{ id: 0, anchor: initialConnector() }];
+    this.chainSeq = 1;
+    this.activeChainId = 0;
+    this.freePlaceMode = true;
+    this._freePos.set(0, 0, 0);
+    this.freeYaw = 0;
     this.currentConnector = initialConnector();
+    this._hidePlacementGizmo();
     this.refreshGhost();
     this._notify();
   }
 
   /**
-   * Rebuild every placed piece from its stored entry connector + params.
-   * Supports multiple disconnected chains.
+   * Rebuild every chain from its anchor: pieces are re-chained sequentially
+   * (each piece's entry = the previous piece's exit), so moving a chain anchor
+   * or editing a piece flows correctly down the rest of that chain.
    */
   rebuildAll() {
-    for (const p of this.pieces) {
-      const edges = p.edges ?? true;
-      const built = buildPiece(p.id, p.connectorIn, p.pp, roadParams, guardrailParams, edges);
-      p.mesh.geometry.dispose();
-      p.mesh.geometry = built.geometry;
-      p.mesh.matrix.copy(built.world);
+    for (const chain of this.chains) {
+      let conn = chain.anchor.clone();
+      for (const p of this.pieces) {
+        if (p.chainId !== chain.id) continue;
+        p.connectorIn = conn.clone();
+        const edges = p.edges ?? true;
+        const built = buildPiece(p.id, conn, p.pp, roadParams, guardrailParams, edges);
+        this._applyBuilt(p, built);
+        p.connectorOut = built.connectorOut.clone();
+        conn = built.connectorOut.clone();
+      }
+    }
+    this._syncCurrentConnector();
+    this.refreshGhost();
+    this._notify();
+  }
 
-      if (built.railGeometry && this.railMaterial) {
-        if (p.railMesh) {
-          p.railMesh.geometry.dispose();
-          p.railMesh.geometry = built.railGeometry;
-          p.railMesh.matrix.copy(built.world);
-        } else {
-          p.railMesh = this._makeMesh(built.railGeometry, this.railMaterial, built.world);
-        }
-      } else if (p.railMesh) {
-        this.root.remove(p.railMesh);
+  /** Update a placed piece's meshes from a freshly built result. */
+  _applyBuilt(p, built) {
+    p.mesh.geometry.dispose();
+    p.mesh.geometry = built.geometry;
+    p.mesh.matrix.copy(built.world);
+
+    if (built.railGeometry && this.railMaterial) {
+      if (p.railMesh) {
         p.railMesh.geometry.dispose();
-        p.railMesh = null;
+        p.railMesh.geometry = built.railGeometry;
+        p.railMesh.matrix.copy(built.world);
+      } else {
+        p.railMesh = this._makeMesh(built.railGeometry, this.railMaterial, built.world);
       }
+    } else if (p.railMesh) {
+      this.root.remove(p.railMesh);
+      p.railMesh.geometry.dispose();
+      p.railMesh = null;
+    }
 
-      if (built.shellGeometry && this.shellMaterial) {
-        if (p.shellMesh) {
-          p.shellMesh.geometry.dispose();
-          p.shellMesh.geometry = built.shellGeometry;
-          p.shellMesh.matrix.copy(built.world);
-        } else {
-          p.shellMesh = this._makeMesh(built.shellGeometry, this.shellMaterial, built.world);
-        }
-      } else if (p.shellMesh) {
-        this.root.remove(p.shellMesh);
+    if (built.shellGeometry && this.shellMaterial) {
+      if (p.shellMesh) {
         p.shellMesh.geometry.dispose();
-        p.shellMesh = null;
+        p.shellMesh.geometry = built.shellGeometry;
+        p.shellMesh.matrix.copy(built.world);
+      } else {
+        p.shellMesh = this._makeMesh(built.shellGeometry, this.shellMaterial, built.world);
       }
+    } else if (p.shellMesh) {
+      this.root.remove(p.shellMesh);
+      p.shellMesh.geometry.dispose();
+      p.shellMesh = null;
+    }
 
-      if (built.decorGeometry && this.decorMaterial) {
-        if (p.decorMesh) {
-          p.decorMesh.geometry.dispose();
-          p.decorMesh.geometry = built.decorGeometry;
-          p.decorMesh.matrix.copy(built.world);
-        } else {
-          p.decorMesh = this._makeMesh(built.decorGeometry, this.decorMaterial, built.world);
-          p.decorMesh.castShadow = false;
-        }
-      } else if (p.decorMesh) {
-        this.root.remove(p.decorMesh);
+    if (built.decorGeometry && this.decorMaterial) {
+      if (p.decorMesh) {
         p.decorMesh.geometry.dispose();
-        p.decorMesh = null;
+        p.decorMesh.geometry = built.decorGeometry;
+        p.decorMesh.matrix.copy(built.world);
+      } else {
+        p.decorMesh = this._makeMesh(built.decorGeometry, this.decorMaterial, built.world);
+        p.decorMesh.castShadow = false;
       }
-
-      p.connectorOut = built.connectorOut.clone();
+    } else if (p.decorMesh) {
+      this.root.remove(p.decorMesh);
+      p.decorMesh.geometry.dispose();
+      p.decorMesh = null;
     }
-    const last = this.pieces[this.pieces.length - 1];
-    this.currentConnector = last ? last.connectorOut.clone() : initialConnector();
-    this.refreshGhost();
-    this._notify();
-  }
-
-  /** Load a few pieces so the page isn't empty on first open. */
-  loadDemo() {
-    this.clear();
-    const demo = ["straight", "curve", "slope", "straight", "curve"];
-    const savedDir = pieceParams.curveDir;
-    for (const id of demo) {
-      this.activePieceId = id;
-      this.place();
-    }
-    pieceParams.curveDir = savedDir;
-    this.activePieceId = PIECE_CATALOG[0].id;
-    this.refreshGhost();
-    this._notify();
-  }
-
-  /** @returns {{id:string, pp:object, edges:boolean, connectorIn:number[]}[]} */
-  exportTrackPieces() {
-    return this.pieces.map((p) => ({
-      id: p.id,
-      pp: { ...p.pp },
-      edges: p.edges ?? true,
-      connectorIn: p.connectorIn.toArray(),
-    }));
   }
 
   /**
-   * Replace the chain from saved pieces (supports disconnected chains via stored connectors).
-   * @param {{id:string, pp:object, edges?:boolean, connectorIn:number[]}[]} entries
+   * Replace all chains from saved pieces (supports disconnected chains via
+   * stored chainId + connectors).
+   * @param {{id:string, chainId?:number, pp:object, edges?:boolean, connectorIn:number[]}[]} entries
    */
   importTrackPieces(entries) {
     this.clear();
@@ -448,6 +532,7 @@ export class ModularRoadBuilder {
 
       this.pieces.push({
         id: e.id,
+        chainId: e.chainId ?? 0,
         pp,
         edges,
         mesh,
@@ -458,12 +543,48 @@ export class ModularRoadBuilder {
         connectorOut: built.connectorOut.clone(),
       });
     }
-    const last = this.pieces[this.pieces.length - 1];
-    this.currentConnector = last ? last.connectorOut.clone() : initialConnector();
-    this.freePlaceMode = false;
+    // Reconstruct chains from the loaded pieces (anchor = first piece's entry).
+    const seen = new Map();
+    for (const p of this.pieces) {
+      if (!seen.has(p.chainId)) seen.set(p.chainId, { id: p.chainId, anchor: p.connectorIn.clone() });
+    }
+    this.chains = seen.size ? [...seen.values()] : [{ id: 0, anchor: initialConnector() }];
+    this.chainSeq = Math.max(-1, ...this.chains.map((c) => c.id)) + 1;
+    this.activeChainId = this.chains[this.chains.length - 1].id;
+    this.freePlaceMode = true;
+    const a = this.chains[this.chains.length - 1].anchor;
+    this._freePos.setFromMatrixPosition(a);
+    this.freeYaw = new THREE.Euler().setFromRotationMatrix(a, "YXZ").y;
+    this._syncCurrentConnector();
     this._hidePlacementGizmo();
     this.refreshGhost();
     this._notify();
+  }
+
+  /** Load a few pieces so the page isn't empty on first open. */
+  loadDemo() {
+    this.clear();
+    const demo = ["straight", "curve", "slope", "straight", "curve"];
+    const savedDir = pieceParams.curveDir;
+    for (const id of demo) {
+      this.activePieceId = id;
+      this.place();
+    }
+    pieceParams.curveDir = savedDir;
+    this.activePieceId = PIECE_CATALOG[0].id;
+    this.refreshGhost();
+    this._notify();
+  }
+
+  /** @returns {{id:string, chainId:number, pp:object, edges:boolean, connectorIn:number[]}[]} */
+  exportTrackPieces() {
+    return this.pieces.map((p) => ({
+      id: p.id,
+      chainId: p.chainId ?? 0,
+      pp: { ...p.pp },
+      edges: p.edges ?? true,
+      connectorIn: p.connectorIn.toArray(),
+    }));
   }
 
   /** @returns {{id:string, pp:object}[]} serializable layout (legacy — no connectors) */
@@ -672,9 +793,11 @@ export function buildRoadPaletteUI(builder, opts = {}) {
       const label = def?.label ?? builder.activePieceId;
       const dir = pieceParams.curveDir >= 0 ? "R" : "L";
       const curveIds = new Set(["curve", "banked", "scurve", "spiral"]);
+      const chainInfo =
+        builder.chainCount > 1 ? ` · chain ${builder.activeChainIndex + 1}/${builder.chainCount}` : "";
       statusEl.textContent = `${builder.count} placed · ${label}${
         curveIds.has(builder.activePieceId) ? " (" + dir + ")" : ""
-      }${builder.freePlaceMode ? " · gizmo: W move · Shift+E rotate · Q/E yaw" : ""}`;
+      }${chainInfo} · anchor gizmo drags whole chain`;
     }
     for (const [key, btn] of pieceTiles) {
       const isProp = key.endsWith(":prop");

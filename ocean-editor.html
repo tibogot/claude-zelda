@@ -15,6 +15,22 @@
         background: rgba(8, 22, 30, 0.55); padding: 6px 9px; border-radius: 6px;
         pointer-events: none; white-space: pre;
       }
+      #boat-ui {
+        position: fixed; bottom: 8px; right: 8px; z-index: 25;
+        max-width: 320px; color: #d8ece8; font-size: 12px; line-height: 1.55;
+        background: rgba(8, 22, 30, 0.72); border: 1px solid rgba(120, 200, 180, 0.25);
+        border-radius: 8px; padding: 10px 12px; pointer-events: none;
+      }
+      #boat-ui strong { color: #9ee8d8; font-size: 13px; }
+      #boat-ui kbd {
+        background: rgba(255, 255, 255, 0.1); padding: 1px 5px;
+        border-radius: 4px; font: 11px ui-monospace, monospace;
+      }
+      #boat-ui .cam-badge {
+        display: inline-block; margin-top: 6px; padding: 2px 8px;
+        border-radius: 4px; font: 11px ui-monospace, monospace;
+        background: rgba(80, 160, 140, 0.35); border: 1px solid rgba(120, 220, 190, 0.35);
+      }
     </style>
     <script type="importmap">
       {
@@ -31,6 +47,14 @@
   </head>
   <body>
     <div id="hud"></div>
+    <div id="boat-ui" hidden>
+      <strong>Boat controls</strong><br />
+      <kbd>W</kbd>/<kbd>S</kbd> or <kbd>↑</kbd>/<kbd>↓</kbd> throttle ·
+      <kbd>A</kbd>/<kbd>D</kbd> or <kbd>←</kbd>/<kbd>→</kbd> steer<br />
+      <kbd>Shift</kbd> boost · <kbd>Space</kbd> brake · <kbd>R</kbd> respawn<br />
+      <kbd>Tab</kbd> or <kbd>C</kbd> toggle chase / orbit camera<br />
+      <span class="cam-badge" id="boat-cam-badge">chase cam</span>
+    </div>
     <script type="module">
       import * as THREE from "three/webgpu";
       import { OrbitControls } from "three/addons/controls/OrbitControls.js";
@@ -38,6 +62,8 @@
       import { Pane } from "tweakpane";
       import Stats from "stats-gl";
       import { createOceanShader, OCEAN_DEFAULTS } from "./ocean-shader.js";
+      import { createOceanFFTSimulation, OCEAN_FFT_DEFAULTS, sampleOceanSurface } from "./ocean-fft.js";
+      import { OceanBoatPhysics, DEFAULT_BOAT_HULL } from "./ocean-buoyancy.js";
 
       // ─────────────────────────────────────────────────────────────────────
       //  Map presets — the three world sizes the v2 map supports.
@@ -99,6 +125,20 @@
         }
         return sum / norm;
       }
+      function ridgedFbm(wx, wz, perm, octaves) {
+        let sum = 0, amp = 1, freq = 1, norm = 0;
+        for (let o = 0; o < octaves; o++) {
+          let n = 1 - Math.abs(perlin2(wx * freq, wz * freq, perm));
+          n *= n;
+          sum += amp * n;
+          norm += amp; amp *= 0.5; freq *= 2;
+        }
+        return sum / norm;
+      }
+      function smoothstepJs(e0, e1, x) {
+        const t = THREE.MathUtils.clamp((x - e0) / (e1 - e0), 0, 1);
+        return t * t * (3 - 2 * t);
+      }
       function sampleHeightBilinear(data, RES, tu, tv) {
         const u = THREE.MathUtils.clamp(tu, 0, 1);
         const v = THREE.MathUtils.clamp(tv, 0, 1);
@@ -119,46 +159,87 @@
         ).normalize();
       }
 
-      // ─── Island heightmap (seabed below seaY, islands poke above) ──────────
+      // ─── Heightmap: ocean seabed below seaY=0, continental land with hills ──
       function buildIslandHeightData(o, RES, terrainSize) {
         const half = terrainSize * 0.5;
         const perm = buildPermutation(o.seed);
         const permMacro = buildPermutation(o.seed + 97);
         const permWarp = buildPermutation(o.seed + 241);
+        const permRidge = buildPermutation(o.seed + 503);
         const rnd = mulberry32((o.seed + 13) >>> 0);
         const islands = [];
         for (let n = 0; n < o.islandCount; n++) {
           islands.push({
-            cx: (rnd() * 2 - 1) * half * 0.62,
-            cz: (rnd() * 2 - 1) * half * 0.62,
-            r: half * o.islandRadiusFrac * (0.55 + rnd() * 0.9),
-            h: o.islandHeight * (0.6 + rnd() * 0.8),
+            cx: (rnd() * 2 - 1) * half * 0.58,
+            cz: (rnd() * 2 - 1) * half * 0.58,
+            r: half * o.islandRadiusFrac * (0.7 + rnd() * 0.85),
+            h: o.islandHeight * (0.75 + rnd() * 0.65),
           });
         }
         const data = new Float32Array(RES * RES);
+        const lo = o.landThreshold - o.landSoftness;
+        const hi = o.landThreshold + o.landSoftness;
         for (let j = 0; j < RES; j++) {
           for (let i = 0; i < RES; i++) {
             const x = (i / (RES - 1)) * terrainSize - half;
             const z = (j / (RES - 1)) * terrainSize - half;
             const nx = x / terrainSize, nz = z / terrainSize;
-            let y =
-              -o.seabedDepth +
-              fbmPerlin(nx * o.seabedFreq, nz * o.seabedFreq, permMacro, 4) *
-                o.seabedRough;
+
+            const seabed = -o.seabedDepth +
+              fbmPerlin(nx * o.seabedFreq, nz * o.seabedFreq, permMacro, 4) * o.seabedRough;
+
+            // Large-scale land/ocean mask (connected coastlines, not tiny dots).
+            let landMask = fbmPerlin(
+              nx * o.continentFreq + 0.17,
+              nz * o.continentFreq - 0.09,
+              permMacro, 6,
+            );
+            landMask += fbmPerlin(
+              nx * o.coastFreq * 0.35 + 2.1,
+              nz * o.coastFreq * 0.35 - 1.3,
+              permWarp, 3,
+            ) * 0.14;
+            landMask = smoothstepJs(lo, hi, landMask * 0.5 + 0.5);
+
             for (const isl of islands) {
               const wob = fbmPerlin(
-                nx * o.coastFreq + isl.cx * 0.01,
-                nz * o.coastFreq + isl.cz * 0.01,
+                nx * o.coastFreq + isl.cx * 0.008,
+                nz * o.coastFreq + isl.cz * 0.008,
                 permWarp, 3,
               );
-              const rr = Math.max(isl.r * (1 + 0.35 * wob), 1);
+              const rr = Math.max(isl.r * (1 + 0.28 * wob), 1);
+              const d = Math.hypot(x - isl.cx, z - isl.cz);
+              const t = Math.max(0, 1 - d / rr);
+              const blob = Math.pow(t * t * (3 - 2 * t), o.islandSharp * 0.85);
+              landMask = Math.max(landMask, blob * 0.92);
+            }
+
+            const inland = Math.pow(landMask, 0.72);
+            const hills = fbmPerlin(nx * o.detailFreq * 0.32, nz * o.detailFreq * 0.32, perm, 5);
+            const ridges = ridgedFbm(nx * o.ridgeFreq, nz * o.ridgeFreq, permRidge, 4);
+            let landY =
+              inland * o.hillAmp * (hills * 0.55 + 0.45) +
+              inland * inland * o.mountainHeight * ridges * o.ridgeStrength;
+
+            for (const isl of islands) {
+              const wob = fbmPerlin(
+                nx * o.coastFreq + isl.cx * 0.008,
+                nz * o.coastFreq + isl.cz * 0.008,
+                permWarp, 3,
+              );
+              const rr = Math.max(isl.r * (1 + 0.28 * wob), 1);
               const d = Math.hypot(x - isl.cx, z - isl.cz);
               const t = Math.max(0, 1 - d / rr);
               const shape = Math.pow(t * t * (3 - 2 * t), o.islandSharp);
-              y += isl.h * shape;
+              landY = Math.max(landY, isl.h * shape);
             }
-            y += fbmPerlin(nx * o.detailFreq, nz * o.detailFreq, perm, 5) *
-              o.detailAmp;
+
+            landY += fbmPerlin(nx * o.detailFreq, nz * o.detailFreq, perm, 5) *
+              o.detailAmp * landMask;
+
+            // Coast: seabed offshore, rising terrain on land. Sea level stays at Y=0.
+            const coastBlend = smoothstepJs(0, 0.22, landMask);
+            const y = seabed * (1 - coastBlend) + Math.max(seabed, landY) * coastBlend;
             data[j * RES + i] = y;
           }
         }
@@ -318,39 +399,48 @@
         const camera = new THREE.PerspectiveCamera(
           50, window.innerWidth / window.innerHeight, 0.1, 30000,
         );
-        camera.position.set(0, 90, 260);
+        camera.position.set(-420, 140, 380);
         const controls = new OrbitControls(camera, renderer.domElement);
         controls.enableDamping = true;
-        controls.target.set(0, 0, 0);
+        controls.target.set(-80, 42, 40);
         controls.maxPolarAngle = Math.PI * 0.495;
         controls.maxDistance = 12000;
         controls.update();
 
         const clock = new THREE.Timer();
         const hud = document.getElementById("hud");
+        const boatUi = document.getElementById("boat-ui");
+        const boatCamBadge = document.getElementById("boat-cam-badge");
 
         // ── Params ───────────────────────────────────────────────────────────
+        const SEA_LEVEL = 0;
         const params = {
-          // map
+          // map — ocean is fixed at Y=0; terrain rises above / seabed below.
           preset: "Medium (1600)",
-          seaY: 0,
-          terrainSeg: 240,
-          // islands
+          terrainSeg: 280,
+          // land / coast
           seed: 1337,
-          islandCount: 6,
-          islandHeight: 26,
-          islandRadiusFrac: 0.18,
-          islandSharp: 1.4,
-          seabedDepth: 32,
-          seabedRough: 10,
+          continentFreq: 1.65,
+          landThreshold: 0.48,
+          landSoftness: 0.11,
+          hillAmp: 32,
+          mountainHeight: 98,
+          ridgeFreq: 2.35,
+          ridgeStrength: 0.74,
+          islandCount: 2,
+          islandHeight: 52,
+          islandRadiusFrac: 0.26,
+          islandSharp: 1.15,
+          seabedDepth: 38,
+          seabedRough: 12,
           seabedFreq: 3.0,
           coastFreq: 5.0,
           detailFreq: 14.0,
-          detailAmp: 3.0,
+          detailAmp: 5.0,
           // LOD
           levels: 7,
           gridM: 64,
-          baseCell: 2.0,
+          baseCell: 1.0,
           horizonScale: 6.0,
           wireframe: false,
           lodColor: false,
@@ -367,6 +457,16 @@
           skyMieG: 0.8,
           fogDensity: 0.0,
           terrainRoughness: 0.92,
+          // boat (VVV-style buoyancy, no Rapier)
+          boatEnabled: false,
+          boatFollowCam: false,
+          boatCamDistance: 18,
+          boatCamHeight: 6.5,
+          boatCamLookY: 1.4,
+          boatCamLerp: 5.5,
+          boatThrust: 14000,
+          boatTopSpeed: 14,
+          boatMass: DEFAULT_BOAT_HULL.mass,
         };
         // OCEAN_DEFAULTS exposes windAngleDeg / windSpreadDeg as the wind keys.
 
@@ -402,11 +502,167 @@
           s.add(sky.clone());
           scene.environment = pmrem.fromScene(s, 0.04).texture;
           if (prev && prev.dispose) prev.dispose();
+          if (ocean) ocean.setEnvMap(scene.environment);
         }
 
         // ── Mutable world state (rebuilt on preset / island / LOD changes) ────
         let terrainSize, RES, heightData, heightTex, terrainMesh, terrainMat;
-        let ocean = null, clip = null;
+        let ocean = null, clip = null, fftSim = null;
+        let boatPhysics = null, boatRoot = null;
+
+        function sampleTerrainY(x, z) {
+          const half = terrainSize * 0.5;
+          const tu = (x + half) / terrainSize;
+          const tv = (z + half) / terrainSize;
+          if (tu < 0 || tu > 1 || tv < 0 || tv > 1) return -9999;
+          return sampleHeightBilinear(heightData, RES, tu, tv);
+        }
+
+        function shoreMaskAt(x, z) {
+          if (!params.shoreDampEnabled) return 1;
+          const depth = SEA_LEVEL - sampleTerrainY(x, z);
+          const wet = smoothstepJs(-params.shoreLandMargin, params.shoreLandMargin, depth);
+          const deep = smoothstepJs(params.shoreDampStart, params.shoreDampEnd, depth);
+          return wet * deep;
+        }
+
+        function oceanSurfaceQuery(x, z) {
+          return sampleOceanSurface(fftSim, x, z, {
+            seaY: SEA_LEVEL,
+            fftEnabled: params.fftEnabled,
+            swellAmp: params.fftSwellAmp,
+            rippleAmp: params.fftRippleAmp,
+            normalStrength: params.fftNormalStrength,
+            shoreMask: shoreMaskAt(x, z),
+            shoreVertKeep: params.shoreVertKeep,
+          });
+        }
+
+        function findBoatSpawn() {
+          const minDepth = params.shoreDampEnd + 3;
+          for (let r = 0; r < terrainSize * 0.45; r += 35) {
+            for (let a = 0; a < 12; a++) {
+              const x = Math.cos((a / 12) * Math.PI * 2) * r;
+              const z = Math.sin((a / 12) * Math.PI * 2) * r;
+              if (SEA_LEVEL - sampleTerrainY(x, z) >= minDepth) {
+                return { x, z, yaw: Math.atan2(x, z) + Math.PI };
+              }
+            }
+          }
+          return { x: 120, z: -80, yaw: 0.4 };
+        }
+
+        function buildBoatMesh() {
+          const g = new THREE.Group();
+          const hull = new THREE.Mesh(
+            new THREE.BoxGeometry(DEFAULT_BOAT_HULL.length, DEFAULT_BOAT_HULL.height * 0.35, DEFAULT_BOAT_HULL.width),
+            new THREE.MeshStandardMaterial({ color: 0x5c4033, roughness: 0.82, metalness: 0.05 }),
+          );
+          hull.position.y = DEFAULT_BOAT_HULL.height * 0.08 + DEFAULT_BOAT_HULL.visualLift;
+          g.add(hull);
+          const cabin = new THREE.Mesh(
+            new THREE.BoxGeometry(1.6, 0.55, 1.4),
+            new THREE.MeshStandardMaterial({ color: 0xd8dce8, roughness: 0.75, metalness: 0.1 }),
+          );
+          cabin.position.set(-0.4, 0.55 + DEFAULT_BOAT_HULL.visualLift, 0);
+          g.add(cabin);
+          const mast = new THREE.Mesh(
+            new THREE.CylinderGeometry(0.04, 0.06, 2.8, 8),
+            new THREE.MeshStandardMaterial({ color: 0x8b7355, roughness: 0.9 }),
+          );
+          mast.position.set(0.8, 1.5 + DEFAULT_BOAT_HULL.visualLift, 0);
+          g.add(mast);
+          return g;
+        }
+
+        function syncBoatCameraMode() {
+          controls.enabled = !params.boatFollowCam;
+          if (boatCamBadge) {
+            boatCamBadge.textContent = params.boatFollowCam ? "chase cam" : "orbit cam";
+          }
+          if (params.boatFollowCam && boatPhysics) {
+            snapChaseCamera(1);
+          }
+        }
+
+        function toggleBoatCamera() {
+          params.boatFollowCam = !params.boatFollowCam;
+          syncBoatCameraMode();
+          pane.refresh();
+        }
+
+        /** Yaw-only heading from body quaternion (stable chase cam). */
+        function boatYawFromQuat(q) {
+          const siny = 2 * (q.w * q.y + q.z * q.x);
+          const cosy = 1 - 2 * (q.y * q.y + q.x * q.x);
+          return Math.atan2(siny, cosy);
+        }
+
+        const _camOffset = new THREE.Vector3();
+        const _camDesired = new THREE.Vector3();
+        const _camLookAt = new THREE.Vector3();
+        const _yawQuat = new THREE.Quaternion();
+
+        function snapChaseCamera(alpha = 1) {
+          if (!boatPhysics) return;
+          const yaw = boatYawFromQuat(boatPhysics.body.quat);
+          _yawQuat.setFromAxisAngle(new THREE.Vector3(0, 1, 0), yaw);
+          _camOffset.set(0, params.boatCamHeight, -params.boatCamDistance).applyQuaternion(_yawQuat);
+          _camDesired.copy(boatPhysics.body.pos).add(_camOffset);
+          _camLookAt.copy(boatPhysics.body.pos).setY(boatPhysics.body.pos.y + params.boatCamLookY);
+          if (alpha >= 1) {
+            camera.position.copy(_camDesired);
+            controls.target.copy(_camLookAt);
+          } else {
+            camera.position.lerp(_camDesired, alpha);
+            controls.target.lerp(_camLookAt, alpha);
+          }
+          camera.lookAt(_camLookAt);
+        }
+
+        function updateBoatCamera(dt) {
+          if (!boatPhysics || !params.boatFollowCam) return;
+          const yaw = boatYawFromQuat(boatPhysics.body.quat);
+          _yawQuat.setFromAxisAngle(new THREE.Vector3(0, 1, 0), yaw);
+          _camOffset.set(0, params.boatCamHeight, -params.boatCamDistance).applyQuaternion(_yawQuat);
+          _camDesired.copy(boatPhysics.body.pos).add(_camOffset);
+          _camLookAt.copy(boatPhysics.body.pos).setY(boatPhysics.body.pos.y + params.boatCamLookY);
+          const k = 1 - Math.exp(-params.boatCamLerp * dt);
+          camera.position.lerp(_camDesired, k);
+          controls.target.lerp(_camLookAt, k);
+          camera.lookAt(_camLookAt);
+        }
+
+        function spawnBoat() {
+          if (!params.boatEnabled) return;
+          boatUi.hidden = false;
+          if (!boatPhysics) {
+            boatPhysics = new OceanBoatPhysics({
+              hull: { mass: params.boatMass },
+              buoyT: { thrustForce: params.boatThrust, topSpeed: params.boatTopSpeed },
+            });
+          } else {
+            boatPhysics.hull.mass = params.boatMass;
+            boatPhysics.body.rebuildInertia({ mass: params.boatMass, size: boatPhysics.hull });
+            boatPhysics.buoyT.thrustForce = params.boatThrust;
+            boatPhysics.buoyT.topSpeed = params.boatTopSpeed;
+          }
+          if (!boatRoot) {
+            boatRoot = buildBoatMesh();
+            scene.add(boatRoot);
+          }
+          const sp = findBoatSpawn();
+          const surf = oceanSurfaceQuery(sp.x, sp.z);
+          boatPhysics.reset(sp.x, surf.y + 0.6, sp.z, sp.yaw);
+          boatPhysics.syncMesh(boatRoot);
+          syncBoatCameraMode();
+        }
+
+        function syncOceanParams() {
+          if (!ocean) return;
+          ocean.syncParams(params);
+          if (fftSim) fftSim.syncParams(params);
+        }
 
         function disposeOcean() {
           if (!clip) return;
@@ -470,17 +726,32 @@
           }
           rebuildTerrainMesh();
 
-          // Ocean shader is bound to terrainSize, so recreate it on world change.
-          ocean = createOceanShader({ heightTex, terrainSize });
-          ocean.syncParams(params);
+          if (!fftSim) {
+            fftSim = createOceanFFTSimulation({
+              seed: params.seed,
+              windAngleDeg: params.windAngleDeg,
+              ...OCEAN_FFT_DEFAULTS,
+            });
+          }
+
+          // Ocean shader is bound to terrainSize + FFT textures, so recreate on world change.
+          ocean = createOceanShader({
+            heightTex, terrainSize, fft: fftSim, envMap: scene.environment,
+          });
+          syncOceanParams();
           applySky();
           buildClip();
 
           controls.maxDistance = Math.max(2000, terrainSize * 4);
+          if (params.boatEnabled) spawnBoat();
+          else {
+            boatUi.hidden = true;
+            controls.enabled = true;
+          }
         }
 
-        rebuildWorld();
         bakeSkyEnv();
+        rebuildWorld();
 
         // ── Tweakpane ─────────────────────────────────────────────────────────
         const pane = new Pane({ title: "Ocean Lab" });
@@ -488,23 +759,30 @@
         const fMap = pane.addFolder({ title: "Map" });
         fMap.addBinding(params, "preset", { options: Object.fromEntries(Object.keys(MAP_PRESETS).map((k) => [k, k])) })
           .on("change", () => rebuildWorld());
-        fMap.addBinding(params, "seaY", { min: -40, max: 40, step: 0.5 });
+        fMap.addBinding({ seaLevel: "Y = 0 (fixed)" }, "seaLevel", { readonly: true });
         fMap.addBinding(params, "terrainSeg", { min: 64, max: 512, step: 8 })
           .on("change", rebuildTerrainMesh);
 
-        const fIsl = pane.addFolder({ title: "Islands", expanded: false });
-        const reIsland = () => { rebuildHeightData(); refreshHeightTex(); rebuildTerrainMesh(); };
-        fIsl.addBinding(params, "seed", { min: 1, max: 99999, step: 1 }).on("change", reIsland);
-        fIsl.addBinding(params, "islandCount", { min: 0, max: 24, step: 1 }).on("change", reIsland);
-        fIsl.addBinding(params, "islandHeight", { min: 2, max: 120, step: 1 }).on("change", reIsland);
-        fIsl.addBinding(params, "islandRadiusFrac", { min: 0.04, max: 0.5, step: 0.01 }).on("change", reIsland);
-        fIsl.addBinding(params, "islandSharp", { min: 0.4, max: 4, step: 0.05 }).on("change", reIsland);
-        fIsl.addBinding(params, "seabedDepth", { min: 4, max: 120, step: 1 }).on("change", reIsland);
-        fIsl.addBinding(params, "seabedRough", { min: 0, max: 40, step: 0.5 }).on("change", reIsland);
-        fIsl.addBinding(params, "seabedFreq", { min: 0.5, max: 12, step: 0.1 }).on("change", reIsland);
-        fIsl.addBinding(params, "coastFreq", { min: 0.5, max: 16, step: 0.1 }).on("change", reIsland);
-        fIsl.addBinding(params, "detailFreq", { min: 2, max: 40, step: 0.5 }).on("change", reIsland);
-        fIsl.addBinding(params, "detailAmp", { min: 0, max: 12, step: 0.1 }).on("change", reIsland);
+        const fLand = pane.addFolder({ title: "Land / Coast", expanded: true });
+        const reLand = () => { rebuildHeightData(); refreshHeightTex(); rebuildTerrainMesh(); };
+        fLand.addBinding(params, "seed", { min: 1, max: 99999, step: 1 }).on("change", reLand);
+        fLand.addBinding(params, "continentFreq", { min: 0.6, max: 4, step: 0.05, label: "continent freq" }).on("change", reLand);
+        fLand.addBinding(params, "landThreshold", { min: 0.2, max: 0.75, step: 0.01, label: "land amount" }).on("change", reLand);
+        fLand.addBinding(params, "landSoftness", { min: 0.02, max: 0.25, step: 0.01, label: "coast softness" }).on("change", reLand);
+        fLand.addBinding(params, "hillAmp", { min: 4, max: 80, step: 1, label: "hills" }).on("change", reLand);
+        fLand.addBinding(params, "mountainHeight", { min: 20, max: 200, step: 1, label: "peaks" }).on("change", reLand);
+        fLand.addBinding(params, "ridgeFreq", { min: 0.8, max: 6, step: 0.05 }).on("change", reLand);
+        fLand.addBinding(params, "ridgeStrength", { min: 0, max: 1.5, step: 0.02, label: "ridge mix" }).on("change", reLand);
+        fLand.addBinding(params, "islandCount", { min: 0, max: 8, step: 1, label: "extra land blobs" }).on("change", reLand);
+        fLand.addBinding(params, "islandHeight", { min: 8, max: 160, step: 1, label: "blob height" }).on("change", reLand);
+        fLand.addBinding(params, "islandRadiusFrac", { min: 0.08, max: 0.45, step: 0.01, label: "blob size" }).on("change", reLand);
+        fLand.addBinding(params, "islandSharp", { min: 0.4, max: 4, step: 0.05 }).on("change", reLand);
+        fLand.addBinding(params, "seabedDepth", { min: 4, max: 120, step: 1 }).on("change", reLand);
+        fLand.addBinding(params, "seabedRough", { min: 0, max: 40, step: 0.5 }).on("change", reLand);
+        fLand.addBinding(params, "seabedFreq", { min: 0.5, max: 12, step: 0.1 }).on("change", reLand);
+        fLand.addBinding(params, "coastFreq", { min: 0.5, max: 16, step: 0.1 }).on("change", reLand);
+        fLand.addBinding(params, "detailFreq", { min: 2, max: 40, step: 0.5 }).on("change", reLand);
+        fLand.addBinding(params, "detailAmp", { min: 0, max: 16, step: 0.1 }).on("change", reLand);
 
         const fLod = pane.addFolder({ title: "LOD / Perf" });
         fLod.addBinding(params, "levels", { min: 2, max: 10, step: 1 }).on("change", buildClip);
@@ -514,9 +792,52 @@
         fLod.addBinding(params, "wireframe").on("change", applyDebugMode);
         fLod.addBinding(params, "lodColor", { label: "LOD colours" }).on("change", applyDebugMode);
 
-        const sync = () => ocean.syncParams(params);
-        const fWave = pane.addFolder({ title: "Waves (Gerstner)" });
+        const sync = () => syncOceanParams();
+
+        const fShore = pane.addFolder({ title: "Shore / Surf", expanded: true });
+        fShore.addBinding(params, "shoreDampEnabled", { label: "wave damp" }).on("change", sync);
+        fShore.addBinding(params, "shoreDampStart", { min: 0, max: 8, step: 0.1, label: "damp start (m)" }).on("change", sync);
+        fShore.addBinding(params, "shoreDampEnd", { min: 2, max: 40, step: 0.5, label: "full waves (m)" }).on("change", sync);
+        fShore.addBinding(params, "shoreLandMargin", { min: 0.1, max: 2, step: 0.05, label: "waterline soft (m)" }).on("change", sync);
+        fShore.addBinding(params, "shoreVertKeep", { min: 0, max: 1, step: 0.02, label: "vertical keep" }).on("change", sync);
+        fShore.addBinding(params, "shoreSurfFoamBoost", { min: 1, max: 3, step: 0.05, label: "surf foam ×" }).on("change", sync);
+        fShore.addBinding(params, "shoreSurfWidth", { min: 1, max: 12, step: 0.25, label: "surf zone (m)" }).on("change", sync);
+        fShore.addBinding(params, "shoreReflDamp", { min: 0, max: 1, step: 0.02, label: "shallow refl" }).on("change", sync);
+        fShore.addBinding(params, "shoreWhitecapDamp", { label: "damp whitecaps" }).on("change", sync);
+
+        const fFFT = pane.addFolder({ title: "FFT Ocean (JONSWAP)" });
+        fFFT.addBinding(params, "fftEnabled").on("change", sync);
+        fFFT.addBinding(params, "windSpeed", { min: 4, max: 32, step: 0.5 }).on("change", sync);
+        fFFT.addBinding(params, "jonswapGamma", { min: 1, max: 7, step: 0.1 }).on("change", sync);
+        fFFT.addBinding(params, "windSpreadPow", { min: 2, max: 16, step: 1 }).on("change", sync);
+        fFFT.addBinding(params, "fftSwellAmp", { min: 0, max: 2.5, step: 0.05 }).on("change", sync);
+        fFFT.addBinding(params, "fftRippleAmp", { min: 0, max: 1.5, step: 0.05 }).on("change", sync);
+        fFFT.addBinding(params, "fftChoppiness", { min: 0.2, max: 2.5, step: 0.05 }).on("change", sync);
+        fFFT.addBinding(params, "fftNormalStrength", { min: 0, max: 2.5, step: 0.05 }).on("change", sync);
+        fFFT.addBinding(params, "fftSeed", { min: 1, max: 99999, step: 1 }).on("change", sync);
+
+        const fWhite = pane.addFolder({ title: "Whitecaps (Worley)", expanded: false });
+        fWhite.addBinding(params, "whitecapEnabled").on("change", sync);
+        fWhite.addBinding(params, "whitecapIntensity", { min: 0, max: 2, step: 0.05, label: "intensity" }).on("change", sync);
+        fWhite.addBinding(params, "whitecapThreshold", { min: 0.1, max: 1.2, step: 0.02, label: "break threshold" }).on("change", sync);
+        fWhite.addBinding(params, "whitecapSoftness", { min: 0.02, max: 0.6, step: 0.02, label: "break soft" }).on("change", sync);
+        fWhite.addBinding(params, "whitecapNoiseScale", { min: 0.05, max: 1.2, step: 0.01, label: "cell scale" }).on("change", sync);
+        fWhite.addBinding(params, "whitecapNoiseSpeed", { min: 0, max: 0.5, step: 0.01, label: "drift speed" }).on("change", sync);
+        fWhite.addBinding(params, "whitecapWarpStrength", { min: 0, max: 1.5, step: 0.02, label: "warp" }).on("change", sync);
+        fWhite.addBinding(params, "whitecapWarpScale", { min: 0.05, max: 0.8, step: 0.01, label: "warp scale" }).on("change", sync);
+        fWhite.addBinding(params, "whitecapContrast", { min: 0.4, max: 3, step: 0.05, label: "contrast" }).on("change", sync);
+        fWhite.addBinding(params, "whitecapProcThreshold", { min: 0, max: 0.8, step: 0.02, label: "cell threshold" }).on("change", sync);
+        fWhite.addBinding(params, "whitecapProcSoftness", { min: 0.02, max: 0.5, step: 0.02, label: "cell soft" }).on("change", sync);
+        fWhite.addBinding(params, "whitecapBrightness", { min: 0.5, max: 2, step: 0.05, label: "brightness" }).on("change", sync);
+
+        const fSSS = pane.addFolder({ title: "Subsurface (SSS)", expanded: false });
+        fSSS.addBinding(params, "sssEnabled").on("change", sync);
+        fSSS.addBinding(params, "sssIntensity", { min: 0, max: 1.5, step: 0.02 }).on("change", sync);
+        fSSS.addBinding(params, "sssColor").on("change", sync);
+
+        const fWave = pane.addFolder({ title: "Gerstner overlay" });
         fWave.addBinding(params, "waveEnabled").on("change", sync);
+        fWave.addBinding(params, "gerstnerBlend", { min: 0, max: 1, step: 0.02 }).on("change", sync);
         fWave.addBinding(params, "waveAmp", { min: 0, max: 4, step: 0.01 }).on("change", sync);
         fWave.addBinding(params, "waveLength", { min: 4, max: 200, step: 1 }).on("change", sync);
         fWave.addBinding(params, "waveSteep", { min: 0, max: 1, step: 0.01 }).on("change", sync);
@@ -546,9 +867,6 @@
         fSurf.addBinding(params, "surfNoiseSpeed1", { min: -1, max: 1, step: 0.01 }).on("change", sync);
         fSurf.addBinding(params, "surfNoiseSpeed2", { min: -1, max: 1, step: 0.01 }).on("change", sync);
         fSurf.addBinding(params, "surfNormalStrength", { min: 0, max: 1.5, step: 0.01 }).on("change", sync);
-        fSurf.addBinding(params, "fresnelExp", { min: 0.5, max: 10, step: 0.1 }).on("change", sync);
-        fSurf.addBinding(params, "fresnelSky", { min: 0, max: 1, step: 0.01 }).on("change", sync);
-        fSurf.addBinding(params, "fresnelMax", { min: 0, max: 1, step: 0.01 }).on("change", sync);
 
         const fGlint = pane.addFolder({ title: "Sun glint", expanded: false });
         fGlint.addBinding(params, "glintColor").on("change", sync);
@@ -562,7 +880,13 @@
         fFoam.addBinding(params, "foamIntensity", { min: 0, max: 4, step: 0.05 }).on("change", sync);
         fFoam.addBinding(params, "foamSharpness", { min: 0.2, max: 4, step: 0.05 }).on("change", sync);
         fFoam.addBinding(params, "foamNoiseAmt", { min: 0, max: 1, step: 0.01 }).on("change", sync);
-        fFoam.addBinding(params, "foamNoiseScale", { min: 0.02, max: 1, step: 0.01 }).on("change", sync);
+        fFoam.addBinding(params, "foamNoiseScale", { min: 0.02, max: 1, step: 0.01, label: "cell scale" }).on("change", sync);
+        fFoam.addBinding(params, "foamNoiseSpeed", { min: 0, max: 0.5, step: 0.01, label: "drift speed" }).on("change", sync);
+        fFoam.addBinding(params, "foamWarpStrength", { min: 0, max: 1.5, step: 0.02, label: "warp" }).on("change", sync);
+        fFoam.addBinding(params, "foamWarpScale", { min: 0.05, max: 0.8, step: 0.01, label: "warp scale" }).on("change", sync);
+        fFoam.addBinding(params, "foamContrast", { min: 0.4, max: 3, step: 0.05 }).on("change", sync);
+        fFoam.addBinding(params, "foamCutoff", { min: 0, max: 0.8, step: 0.02, label: "cell threshold" }).on("change", sync);
+        fFoam.addBinding(params, "foamTransitionWidth", { min: 0.02, max: 0.5, step: 0.02, label: "cell soft" }).on("change", sync);
         fFoam.addBinding(params, "foamBreatheAmp", { min: 0, max: 4, step: 0.05 }).on("change", sync);
         fFoam.addBinding(params, "foamBreatheHz", { min: 0, max: 2, step: 0.01 }).on("change", sync);
 
@@ -570,9 +894,18 @@
         fSky.addBinding(params, "exposure", { min: 0.1, max: 2, step: 0.01 }).on("change", applySky);
         fSky.addBinding(params, "sunAzimuth", { min: 0, max: 360, step: 1 }).on("change", applySky);
         fSky.addBinding(params, "sunElevation", { min: 1, max: 90, step: 1 }).on("change", applySky);
-        fSky.addBinding(params, "envIntensity", { min: 0, max: 2, step: 0.05 }).on("change", applySky);
+        fSky.addBinding(params, "envIntensity", { min: 0, max: 2, step: 0.05, label: "terrain env" }).on("change", applySky);
         fSky.addBinding(params, "fogDensity", { min: 0, max: 0.01, step: 0.0001 }).on("change", applySky);
         fSky.addButton({ title: "Bake sky env" }).on("click", () => { applySky(); bakeSkyEnv(); });
+
+        const fRefl = pane.addFolder({ title: "Reflections (sky PMREM)" });
+        fRefl.addBinding(params, "envReflectEnabled").on("change", sync);
+        fRefl.addBinding(params, "envReflectIntensity", { min: 0, max: 2.5, step: 0.05, label: "intensity" }).on("change", sync);
+        fRefl.addBinding(params, "envRoughnessCalm", { min: 0, max: 0.5, step: 0.01, label: "roughness calm" }).on("change", sync);
+        fRefl.addBinding(params, "envRoughnessRipple", { min: 0, max: 0.8, step: 0.01, label: "roughness choppy" }).on("change", sync);
+        fRefl.addBinding(params, "fresnelExp", { min: 0.5, max: 10, step: 0.1, label: "fresnel power" }).on("change", sync);
+        fRefl.addBinding(params, "fresnelMax", { min: 0.2, max: 1, step: 0.02, label: "fresnel max" }).on("change", sync);
+        fRefl.addBinding(params, "fresnelSky", { min: 0, max: 0.6, step: 0.02, label: "sky tint (fallback)" }).on("change", sync);
 
         pane.addButton({ title: "Export params JSON" }).on("click", () => {
           const blob = new Blob([JSON.stringify(params, null, 2)], { type: "application/json" });
@@ -582,6 +915,61 @@
           a.click();
           setTimeout(() => URL.revokeObjectURL(a.href), 100);
         });
+
+        const fBoat = pane.addFolder({ title: "Boat (VVV buoyancy)", expanded: true });
+        fBoat.addBinding(params, "boatEnabled", { label: "enabled" }).on("change", () => {
+          if (params.boatEnabled) spawnBoat();
+          else {
+            boatUi.hidden = true;
+            controls.enabled = true;
+            if (boatRoot) boatRoot.visible = false;
+          }
+        });
+        fBoat.addBinding(params, "boatFollowCam", { label: "chase camera" })
+          .on("change", syncBoatCameraMode);
+        fBoat.addBinding(params, "boatCamDistance", { min: 6, max: 40, step: 0.5, label: "cam distance" });
+        fBoat.addBinding(params, "boatCamHeight", { min: 2, max: 20, step: 0.5, label: "cam height" });
+        fBoat.addBinding(params, "boatCamLookY", { min: 0.2, max: 4, step: 0.1, label: "look height" });
+        fBoat.addBinding(params, "boatCamLerp", { min: 1, max: 14, step: 0.5, label: "cam smooth" });
+        fBoat.addBinding(params, "boatMass", { min: 200, max: 4000, step: 50 }).on("change", () => {
+          if (boatPhysics) {
+            boatPhysics.hull.mass = params.boatMass;
+            boatPhysics.body.rebuildInertia({ mass: params.boatMass, size: boatPhysics.hull });
+          }
+        });
+        fBoat.addBinding(params, "boatThrust", { min: 2000, max: 40000, step: 500 }).on("change", () => {
+          if (boatPhysics) boatPhysics.buoyT.thrustForce = params.boatThrust;
+        });
+        fBoat.addBinding(params, "boatTopSpeed", { min: 4, max: 30, step: 0.5 }).on("change", () => {
+          if (boatPhysics) boatPhysics.buoyT.topSpeed = params.boatTopSpeed;
+        });
+        fBoat.addButton({ title: "Respawn boat" }).on("click", spawnBoat);
+
+        const keys = {};
+        window.addEventListener("keydown", (e) => {
+          keys[e.code] = true;
+          if (e.code === "KeyR" && boatPhysics) spawnBoat();
+          if (e.code === "KeyC" || e.code === "Tab") {
+            if (e.code === "Tab") e.preventDefault();
+            if (params.boatEnabled) toggleBoatCamera();
+          }
+        });
+        window.addEventListener("keyup", (e) => {
+          keys[e.code] = false;
+        });
+
+        function readBoatInput() {
+          const left = (keys.KeyA || keys.ArrowLeft) ? 1 : 0;
+          const right = (keys.KeyD || keys.ArrowRight) ? 1 : 0;
+          const fwd = (keys.KeyW || keys.ArrowUp) ? 1 : 0;
+          const back = (keys.KeyS || keys.ArrowDown) ? 1 : 0;
+          return {
+            throttle: fwd - back,
+            steer: left - right,
+            boost: !!(keys.ShiftLeft || keys.ShiftRight),
+            handbrake: !!keys.Space,
+          };
+        }
 
         // ── Resize ─────────────────────────────────────────────────────────────
         window.addEventListener("resize", () => {
@@ -593,28 +981,64 @@
         // ── Loop ─────────────────────────────────────────────────────────────
         renderer.setAnimationLoop(() => {
           clock.update();
+          const dt = Math.min(clock.getDelta(), 0.05);
           const elapsed = clock.getElapsed();
-          controls.update();
 
           // Recenter the clipmap on the camera, snapped to the finest 2-cell
           // grid so the rigid group never swims relative to the wave field.
           const step = clip.snapStep;
+          const clipX = (params.boatFollowCam && boatPhysics)
+            ? boatPhysics.body.pos.x
+            : camera.position.x;
+          const clipZ = (params.boatFollowCam && boatPhysics)
+            ? boatPhysics.body.pos.z
+            : camera.position.z;
           clip.group.position.set(
-            Math.round(camera.position.x / step) * step,
-            params.seaY,
-            Math.round(camera.position.z / step) * step,
+            Math.round(clipX / step) * step,
+            SEA_LEVEL,
+            Math.round(clipZ / step) * step,
           );
-          ocean.uniforms.waterY.value = params.seaY;
-          ocean.update(0, elapsed, null);
+          ocean.uniforms.waterY.value = SEA_LEVEL;
+          ocean.update(dt, elapsed, null, fftSim);
+
+          if (params.boatEnabled && boatPhysics && boatRoot) {
+            boatRoot.visible = true;
+            const input = readBoatInput();
+            boatPhysics.update(dt, {
+              surfaceQuery: oceanSurfaceQuery,
+              landQuery: sampleTerrainY,
+              seaY: SEA_LEVEL,
+              throttle: input.throttle,
+              steer: input.steer,
+              boost: input.boost,
+              handbrake: input.handbrake,
+            });
+            boatPhysics.syncMesh(boatRoot);
+            updateBoatCamera(dt);
+          }
+
+          if (controls.enabled) {
+            if (boatPhysics) {
+              controls.target.lerp(
+                _camLookAt.copy(boatPhysics.body.pos).setY(boatPhysics.body.pos.y + params.boatCamLookY),
+                1 - Math.exp(-8 * dt),
+              );
+            }
+            controls.update();
+          }
 
           renderer.render(scene, camera);
           stats.update();
 
+          const boatLine = (params.boatEnabled && boatPhysics)
+            ? `\nboat ${boatPhysics.body.vel.length().toFixed(1)} m/s  ·  ${params.boatFollowCam ? "chase" : "orbit"} cam`
+            : "";
           hud.textContent =
-            `map ${terrainSize}  ·  ocean tris ${(clip.triCount / 1000).toFixed(1)}k  ·  ` +
+            `map ${terrainSize}  ·  sea Y=0  ·  ocean tris ${(clip.triCount / 1000).toFixed(1)}k  ·  ` +
             `lvls ${params.levels}  grid ${params.gridM}  cell ${params.baseCell}\n` +
             `finest ${clip.finestExtent}u  ·  cam ${camera.position.x.toFixed(0)},` +
-            `${camera.position.y.toFixed(0)},${camera.position.z.toFixed(0)}`;
+            `${camera.position.y.toFixed(0)},${camera.position.z.toFixed(0)}` +
+            boatLine;
         });
       }
 
