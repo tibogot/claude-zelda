@@ -1,7 +1,7 @@
 import * as THREE from "three";
 import { TransformControls } from "three/addons/controls/TransformControls.js";
 import { computeFrames, buildProfile, buildTunnelGeometry } from "./modularRoadKit.js";
-import { kickerRampGeometry, jumpRampGeometry } from "./modularRoadParkour.js";
+import { kickerRampGeometry, jumpRampGeometry, buildSlopeLabGroup } from "./modularRoadParkour.js";
 
 /**
  * Free-placement props for the modular road. Unlike auto-chained track pieces,
@@ -105,6 +105,12 @@ export const PROP_CATALOG = [
     label: "Slope ramp",
     collision: "both",
     make: () => new THREE.Mesh(rampGeometry(18, 6, 14), mat(0xe8912d, { roughness: 0.8 })),
+  },
+  {
+    id: "slopelab",
+    label: "Slope lab",
+    collision: "both",
+    make: () => buildSlopeLabGroup(),
   },
   {
     id: "glowbox",

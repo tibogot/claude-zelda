@@ -13,7 +13,7 @@ import { RoadBvh } from "./modularRoadBvh.js";
 /* ----------------------------------------------------------------------- */
 
 /** Drive ramp: low edge at y=0, z=0 (local); rises toward -Z. */
-function rampGeometry(w, l, angleRad) {
+export function rampGeometry(w, l, angleRad) {
   const H = l * Math.sin(angleRad);
   const hw = w / 2;
   const zN = 0;
@@ -37,6 +37,36 @@ function rampGeometry(w, l, angleRad) {
   geo.computeVertexNormals();
   geo.computeBoundingSphere();
   return geo;
+}
+
+/** Five side-by-side test ramps (15°–55°), centred on XZ with feet on y=0. */
+export function buildSlopeLabGroup() {
+  const group = new THREE.Group();
+  group.name = "SlopeLab";
+  const slopeAngles = [15, 25, 35, 45, 55];
+  const w = 12;
+  const l = 22;
+  const z = 48;
+  for (let i = 0; i < slopeAngles.length; i++) {
+    const tint = 0.52 - i * 0.055;
+    const color = new THREE.Color().setHSL(0.085, 0.42, tint).getHex();
+    const m = new THREE.Mesh(
+      rampGeometry(w, l, THREE.MathUtils.degToRad(slopeAngles[i])),
+      new THREE.MeshStandardMaterial({ color, roughness: 0.85, side: THREE.DoubleSide }),
+    );
+    m.position.set(-42 + i * 21, 0, z);
+    m.castShadow = true;
+    m.receiveShadow = true;
+    group.add(m);
+  }
+  const box = new THREE.Box3().setFromObject(group);
+  const cx = (box.min.x + box.max.x) * 0.5;
+  const cz = (box.min.z + box.max.z) * 0.5;
+  for (const child of group.children) {
+    child.position.x -= cx;
+    child.position.z -= cz;
+  }
+  return group;
 }
 
 /**
@@ -267,25 +297,8 @@ export function buildParkour({ offset = new THREE.Vector3(100, 0, 0) } = {}) {
   const wallMeshes = [];
   const movers = [];
 
-  const _matRamp = (color) =>
-    new THREE.MeshStandardMaterial({ color, roughness: 0.85, side: THREE.DoubleSide });
   const _matMover = (color) =>
     new THREE.MeshStandardMaterial({ color, roughness: 0.55, metalness: 0.35, side: THREE.DoubleSide });
-
-  function addRamp({ x, z, w = 14, l = 22, angleDeg = 25, yawDeg = 0, color = 0x6a5436 }) {
-    const angle = THREE.MathUtils.degToRad(angleDeg);
-    const yaw = THREE.MathUtils.degToRad(yawDeg);
-    const m = new THREE.Mesh(rampGeometry(w, l, angle), _matRamp(color));
-    m.rotation.order = "YXZ";
-    m.rotation.y = yaw;
-    m.position.set(x, 0, z);
-    m.castShadow = true;
-    m.receiveShadow = true;
-    group.add(m);
-    deckMeshes.push(m);
-    wallMeshes.push(m);
-    return m;
-  }
 
   function addMover(cfg) {
     const mover = new ParkourMover(cfg);
@@ -293,16 +306,7 @@ export function buildParkour({ offset = new THREE.Vector3(100, 0, 0) } = {}) {
     return mover;
   }
 
-  // Layout: spawn at z=+62, drive toward −Z. Lanes — centre x≈0, left wing x≈−36,
-  // right wing x≈+36, dynamic x≈+58, elevator x≈+72. Generous gaps between zones.
-
-  // ── SLOPE LAB (z ≈ 48, ramps end ≈ z 24) ──
-  const slopeAngles = [15, 25, 35, 45, 55];
-  for (let i = 0; i < slopeAngles.length; i++) {
-    const tint = 0.52 - i * 0.055;
-    const color = new THREE.Color().setHSL(0.085, 0.42, tint).getHex();
-    addRamp({ x: -42 + i * 21, z: 48, w: 12, l: 22, angleDeg: slopeAngles[i], color });
-  }
+  // Layout: spawn at z=+62, drive toward −Z. Dynamic zone x≈+58, elevator x≈+72.
 
   // ── PENDULUM — centre lane ──
   const pendPivot = new THREE.Object3D();
@@ -383,7 +387,10 @@ export function buildParkour({ offset = new THREE.Vector3(100, 0, 0) } = {}) {
   const elevTravel = 5.0;
   const elevOriginY = elevLowCenter + elevTravel;
 
-  const elevPlatform = new THREE.Mesh(new THREE.BoxGeometry(10, 0.9, 12), _matRamp(0x8098a8));
+  const elevPlatform = new THREE.Mesh(
+    new THREE.BoxGeometry(10, 0.9, 12),
+    new THREE.MeshStandardMaterial({ color: 0x8098a8, roughness: 0.85, side: THREE.DoubleSide }),
+  );
   elevPlatform.name = "Elevator";
   const elevLeft = new THREE.Mesh(new THREE.BoxGeometry(0.5, 2.2, 12), _matMover(0x607888));
   elevLeft.position.set(-5.25, 1.1, 0);

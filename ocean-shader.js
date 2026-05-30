@@ -517,8 +517,8 @@ export function createOceanShader({ heightTex, terrainSize, fft = null, envMap =
     if (!fft) return vec3(0);
     const uvS = fract(xz.div(u.fftSwellTile));
     const uvR = fract(xz.div(u.fftRippleTile));
-    const dS = texture(fft.swell.dispTex, uvS).xyz.mul(u.fftSwellAmp);
-    const dR = texture(fft.ripple.dispTex, uvR).xyz.mul(u.fftRippleAmp);
+    const dS = fft.swell.dispNode(uvS).xyz.mul(u.fftSwellAmp);
+    const dR = fft.ripple.dispNode(uvR).xyz.mul(u.fftRippleAmp);
     return dS.add(dR).mul(ampScale).mul(u.fftEnabled);
   }
 
@@ -527,8 +527,8 @@ export function createOceanShader({ heightTex, terrainSize, fft = null, envMap =
     if (!fft) return vec2(0);
     const uvS = fract(xz.div(u.fftSwellTile));
     const uvR = fract(xz.div(u.fftRippleTile));
-    const gS = texture(fft.swell.gradTex, uvS).xy.mul(u.fftSwellAmp);
-    const gR = texture(fft.ripple.gradTex, uvR).xy.mul(u.fftRippleAmp);
+    const gS = fft.swell.gradNode(uvS).xy.mul(u.fftSwellAmp);
+    const gR = fft.ripple.gradNode(uvR).xy.mul(u.fftRippleAmp);
     return gS.add(gR).mul(u.fftNormalStrength).mul(ampScale).mul(u.fftEnabled);
   }
 
@@ -555,8 +555,8 @@ export function createOceanShader({ heightTex, terrainSize, fft = null, envMap =
     if (!fft) return float(0);
     const uvS = fract(xz.div(u.fftSwellTile));
     const uvR = fract(xz.div(u.fftRippleTile));
-    const jS = texture(fft.swell.dispTex, uvS).w;
-    const jR = texture(fft.ripple.dispTex, uvR).w;
+    const jS = fft.swell.dispNode(uvS).w;
+    const jR = fft.ripple.dispNode(uvR).w;
     const jMin = min(jS, jR);
     const lo = u.whitecapThreshold.sub(u.whitecapSoftness);
     const breaking = float(1).sub(smoothstep(lo, u.whitecapThreshold, jMin));

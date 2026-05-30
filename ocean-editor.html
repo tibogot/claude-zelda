@@ -63,6 +63,7 @@
       import Stats from "stats-gl";
       import { createOceanShader, OCEAN_DEFAULTS } from "./ocean-shader.js";
       import { createOceanFFTSimulation, OCEAN_FFT_DEFAULTS, sampleOceanSurface } from "./ocean-fft.js";
+      import { createOceanFFTGPUSimulation, OCEAN_FFT_GPU_DEFAULTS } from "./ocean-fft-gpu.js";
       import { OceanBoatPhysics, DEFAULT_BOAT_HULL } from "./ocean-buoyancy.js";
 
       // ─────────────────────────────────────────────────────────────────────
@@ -446,6 +447,8 @@
           lodColor: false,
           // waves + look (spread from OCEAN_DEFAULTS, overridable)
           ...structuredClone(OCEAN_DEFAULTS),
+          /** GPU FFT compute rate (Hz) — decoupled from render fps. */
+          fftUpdateHz: 30,
           // sky / light
           exposure: 0.95,
           sunAzimuth: 38,
@@ -507,8 +510,21 @@
 
         // ── Mutable world state (rebuilt on preset / island / LOD changes) ────
         let terrainSize, RES, heightData, heightTex, terrainMesh, terrainMat;
-        let ocean = null, clip = null, fftSim = null;
+        let ocean = null, clip = null, fftGpu = null, fftSim = null;
         let boatPhysics = null, boatRoot = null;
+
+        // CPU FFT mirror — created lazily, only used to sample the surface for
+        // boat buoyancy. The visual ocean is driven by the GPU sim (fftGpu).
+        function ensureCpuFft() {
+          if (fftSim) return fftSim;
+          fftSim = createOceanFFTSimulation({
+            seed: params.seed,
+            windAngleDeg: params.windAngleDeg,
+            ...OCEAN_FFT_DEFAULTS,
+          });
+          fftSim.syncParams(params);
+          return fftSim;
+        }
 
         function sampleTerrainY(x, z) {
           const half = terrainSize * 0.5;
@@ -635,6 +651,7 @@
 
         function spawnBoat() {
           if (!params.boatEnabled) return;
+          ensureCpuFft();
           boatUi.hidden = false;
           if (!boatPhysics) {
             boatPhysics = new OceanBoatPhysics({
@@ -661,6 +678,7 @@
         function syncOceanParams() {
           if (!ocean) return;
           ocean.syncParams(params);
+          if (fftGpu) fftGpu.syncParams(params);
           if (fftSim) fftSim.syncParams(params);
         }
 
@@ -726,17 +744,20 @@
           }
           rebuildTerrainMesh();
 
-          if (!fftSim) {
-            fftSim = createOceanFFTSimulation({
+          if (!fftGpu) {
+            fftGpu = createOceanFFTGPUSimulation({
+              renderer,
               seed: params.seed,
               windAngleDeg: params.windAngleDeg,
-              ...OCEAN_FFT_DEFAULTS,
+              ...OCEAN_FFT_GPU_DEFAULTS,
             });
+            fftGpu.update(0); // bake frame 0 so the surface isn't flat before the first tick
           }
+          if (params.boatEnabled) ensureCpuFft();
 
-          // Ocean shader is bound to terrainSize + FFT textures, so recreate on world change.
+          // Ocean shader is bound to terrainSize + FFT buffers, so recreate on world change.
           ocean = createOceanShader({
-            heightTex, terrainSize, fft: fftSim, envMap: scene.environment,
+            heightTex, terrainSize, fft: fftGpu, envMap: scene.environment,
           });
           syncOceanParams();
           applySky();
@@ -815,6 +836,7 @@
         fFFT.addBinding(params, "fftChoppiness", { min: 0.2, max: 2.5, step: 0.05 }).on("change", sync);
         fFFT.addBinding(params, "fftNormalStrength", { min: 0, max: 2.5, step: 0.05 }).on("change", sync);
         fFFT.addBinding(params, "fftSeed", { min: 1, max: 99999, step: 1 }).on("change", sync);
+        fFFT.addBinding(params, "fftUpdateHz", { min: 5, max: 60, step: 5, label: "sim rate (hz)" });
 
         const fWhite = pane.addFolder({ title: "Whitecaps (Worley)", expanded: false });
         fWhite.addBinding(params, "whitecapEnabled").on("change", sync);
@@ -979,6 +1001,7 @@
         });
 
         // ── Loop ─────────────────────────────────────────────────────────────
+        let fftAccum = 0; // drives the throttled GPU FFT compute
         renderer.setAnimationLoop(() => {
           clock.update();
           const dt = Math.min(clock.getDelta(), 0.05);
@@ -999,10 +1022,21 @@
             Math.round(clipZ / step) * step,
           );
           ocean.uniforms.waterY.value = SEA_LEVEL;
-          ocean.update(dt, elapsed, null, fftSim);
+          ocean.update(dt, elapsed, null);
+          // GPU compute: time-evolve + IFFT the cascades, throttled to sim rate
+          // (waves don't need 60 Hz; decouples the ~100 dispatches from render fps).
+          if (params.fftEnabled) {
+            fftAccum += dt;
+            const interval = 1 / Math.max(1, params.fftUpdateHz);
+            if (fftAccum >= interval) {
+              fftAccum = Math.min(fftAccum - interval, interval); // clamp, no spiral
+              fftGpu.update(elapsed);
+            }
+          }
 
           if (params.boatEnabled && boatPhysics && boatRoot) {
             boatRoot.visible = true;
+            if (fftSim) fftSim.update(elapsed); // CPU mirror for buoyancy sampling
             const input = readBoatInput();
             boatPhysics.update(dt, {
               surfaceQuery: oceanSurfaceQuery,
