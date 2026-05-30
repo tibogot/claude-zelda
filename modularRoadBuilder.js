@@ -130,6 +130,21 @@ export class ModularRoadBuilder {
     this._notify();
   }
 
+  /**
+   * Select a curated kit preset: apply its frozen params onto the shared
+   * pieceParams, then make its base piece active. The generator is unchanged —
+   * a preset is just a named param snapshot, so placing it builds identical
+   * local geometry every time (instancing-friendly).
+   * @param {{base:string, params:object}} preset
+   */
+  setActivePreset(preset) {
+    if (!preset || !PIECE_BY_ID.has(preset.base)) return;
+    Object.assign(pieceParams, preset.params);
+    this.activePieceId = preset.base;
+    this.refreshGhost();
+    this._notify();
+  }
+
   /** Flip curve direction (only meaningful for the curve piece). */
   flip() {
     pieceParams.curveDir = pieceParams.curveDir >= 0 ? -1 : 1;
@@ -620,6 +635,7 @@ const PIECE_TO_CATEGORY = {
   crest: "slopes",
   spiral: "slopes",
   banked: "banked",
+  banktilt: "banked",
   bankin: "banked",
   bankout: "banked",
   twist: "tilted",
@@ -694,6 +710,215 @@ function piecePreviewSvg(pieceId) {
 }
 
 /**
+ * Curated "kit" presets — premade pieces (TrackMania-style) layered over the
+ * parametric generator. Each preset is a named snapshot of pieceParams on a base
+ * piece (the generator stays the authoring tool). Identical presets place the
+ * same local geometry, so they're instancing-friendly later. Categories listed
+ * here render presets instead of raw parametric pieces; categories absent here
+ * fall back to the raw PIECE_CATALOG (converted step by step).
+ * @type {Record<string, {id:string,label:string,base:string,params:object,preview:string}[]>}
+ */
+export const CATEGORY_PRESETS = {
+  banked: [
+    {
+      id: "bank_up_right",
+      label: "Up Right",
+      base: "bankin",
+      params: { straightLength: 18, bankAngle: 22, curveDir: 1 },
+      preview: `<svg viewBox="0 0 80 80"><rect x="10" y="40" width="26" height="10" rx="1" ${_RB}/><rect x="38" y="32" width="32" height="10" rx="1" transform="rotate(-16 54 37)" ${_RB}/></svg>`,
+    },
+    {
+      id: "bank_up_left",
+      label: "Up Left",
+      base: "bankin",
+      params: { straightLength: 18, bankAngle: 22, curveDir: -1 },
+      preview: `<svg viewBox="0 0 80 80"><rect x="10" y="40" width="26" height="10" rx="1" ${_RB}/><rect x="38" y="32" width="32" height="10" rx="1" transform="rotate(16 54 37)" ${_RB}/></svg>`,
+    },
+    {
+      id: "bank_down_right",
+      label: "Down Right",
+      base: "bankout",
+      params: { straightLength: 18, bankAngle: 22, curveDir: 1 },
+      preview: `<svg viewBox="0 0 80 80"><rect x="10" y="32" width="32" height="10" rx="1" transform="rotate(-16 26 37)" ${_RB}/><rect x="44" y="40" width="26" height="10" rx="1" ${_RB}/></svg>`,
+    },
+    {
+      id: "bank_down_left",
+      label: "Down Left",
+      base: "bankout",
+      params: { straightLength: 18, bankAngle: 22, curveDir: -1 },
+      preview: `<svg viewBox="0 0 80 80"><rect x="10" y="32" width="32" height="10" rx="1" transform="rotate(16 26 37)" ${_RB}/><rect x="44" y="40" width="26" height="10" rx="1" ${_RB}/></svg>`,
+    },
+    {
+      id: "bank_straight_right",
+      label: "Straight Right",
+      base: "banktilt",
+      params: { straightLength: 22, bankAngle: 22, curveDir: 1 },
+      preview: `<svg viewBox="0 0 80 80"><rect x="10" y="34" width="60" height="12" rx="2" transform="rotate(-16 40 40)" ${_RB}/></svg>`,
+    },
+    {
+      id: "bank_straight_left",
+      label: "Straight Left",
+      base: "banktilt",
+      params: { straightLength: 22, bankAngle: 22, curveDir: -1 },
+      preview: `<svg viewBox="0 0 80 80"><rect x="10" y="34" width="60" height="12" rx="2" transform="rotate(16 40 40)" ${_RB}/></svg>`,
+    },
+    {
+      id: "bank_road_tilted",
+      label: "Road Tilted",
+      base: "banktilt",
+      params: { straightLength: 22, bankAngle: 35, curveDir: 1 },
+      preview: `<svg viewBox="0 0 80 80"><rect x="10" y="34" width="60" height="12" rx="2" transform="rotate(-26 40 40)" ${_RB}/></svg>`,
+    },
+    {
+      id: "bank_short_turn",
+      label: "Short Turn",
+      base: "banked",
+      params: { curveRadius: 18, curveAngle: 60, bankAngle: 22, curveDir: 1 },
+      preview: `<svg viewBox="0 0 80 80"><path d="M22 68 L22 40 Q22 22 44 22 L66 22" ${_RS}/></svg>`,
+    },
+    {
+      id: "bank_long_turn",
+      label: "Long Turn",
+      base: "banked",
+      params: { curveRadius: 30, curveAngle: 90, bankAngle: 22, curveDir: 1 },
+      preview: `<svg viewBox="0 0 80 80"><path d="M18 70 L18 40 Q18 18 40 18 L70 18" ${_RS}/></svg>`,
+    },
+  ],
+  straight: [
+    {
+      id: "straight_short",
+      label: "Short",
+      base: "straight",
+      params: { straightLength: 14 },
+      preview: `<svg viewBox="0 0 80 80"><rect x="26" y="32" width="28" height="16" rx="2" ${_RB}/><line x1="30" y1="40" x2="50" y2="40" ${_RS}/></svg>`,
+    },
+    {
+      id: "straight_long",
+      label: "Long",
+      base: "straight",
+      params: { straightLength: 32 },
+      preview: `<svg viewBox="0 0 80 80"><rect x="8" y="32" width="64" height="16" rx="2" ${_RB}/><line x1="12" y1="40" x2="68" y2="40" ${_RS}/></svg>`,
+    },
+    {
+      id: "straight_tunnel",
+      label: "Tunnel",
+      base: "tunnel",
+      params: { straightLength: 22, tunnelHeight: 7 },
+      preview: `<svg viewBox="0 0 80 80"><rect x="8" y="34" width="64" height="14" rx="2" ${_RB}/><path d="M8 34 Q40 8 72 34" fill="none" stroke="#6a7580" stroke-width="3"/></svg>`,
+    },
+  ],
+  ramps: [
+    {
+      id: "ramp_10",
+      label: "Ramp 10",
+      base: "jump",
+      params: { jumpLength: 12, jumpAngle: 18 },
+      preview: `<svg viewBox="0 0 80 80"><line x1="8" y1="62" x2="72" y2="62" stroke="#c0392b" stroke-width="1.5"/><path d="M14 62 Q46 62 64 40" ${_RS}/></svg>`,
+    },
+    {
+      id: "ramp_20",
+      label: "Ramp 20",
+      base: "jump",
+      params: { jumpLength: 18, jumpAngle: 24 },
+      preview: `<svg viewBox="0 0 80 80"><line x1="8" y1="62" x2="72" y2="62" stroke="#c0392b" stroke-width="1.5"/><path d="M12 62 Q44 62 66 32" ${_RS}/></svg>`,
+    },
+    {
+      id: "ramp_40",
+      label: "Ramp 40",
+      base: "jump",
+      params: { jumpLength: 26, jumpAngle: 30 },
+      preview: `<svg viewBox="0 0 80 80"><line x1="8" y1="64" x2="72" y2="64" stroke="#c0392b" stroke-width="1.5"/><path d="M12 64 Q42 64 66 24" ${_RS}/></svg>`,
+    },
+    {
+      id: "ramp_100",
+      label: "Ramp 100",
+      base: "jump",
+      params: { jumpLength: 44, jumpAngle: 36 },
+      preview: `<svg viewBox="0 0 80 80"><line x1="8" y1="66" x2="72" y2="66" stroke="#c0392b" stroke-width="1.5"/><path d="M10 66 Q40 66 68 16" ${_RS}/></svg>`,
+    },
+    {
+      id: "land_10",
+      label: "Land 10",
+      base: "landing",
+      params: { landLength: 12, landAngle: 18 },
+      preview: `<svg viewBox="0 0 80 80"><line x1="8" y1="62" x2="72" y2="62" stroke="#c0392b" stroke-width="1.5"/><path d="M16 40 Q34 62 66 62" ${_RS}/></svg>`,
+    },
+    {
+      id: "land_20",
+      label: "Land 20",
+      base: "landing",
+      params: { landLength: 18, landAngle: 24 },
+      preview: `<svg viewBox="0 0 80 80"><line x1="8" y1="62" x2="72" y2="62" stroke="#c0392b" stroke-width="1.5"/><path d="M14 32 Q36 62 68 62" ${_RS}/></svg>`,
+    },
+    {
+      id: "land_40",
+      label: "Land 40",
+      base: "landing",
+      params: { landLength: 26, landAngle: 30 },
+      preview: `<svg viewBox="0 0 80 80"><line x1="8" y1="64" x2="72" y2="64" stroke="#c0392b" stroke-width="1.5"/><path d="M14 24 Q38 64 68 64" ${_RS}/></svg>`,
+    },
+    {
+      id: "land_100",
+      label: "Land 100",
+      base: "landing",
+      params: { landLength: 44, landAngle: 36 },
+      preview: `<svg viewBox="0 0 80 80"><line x1="8" y1="66" x2="72" y2="66" stroke="#c0392b" stroke-width="1.5"/><path d="M12 16 Q40 66 70 66" ${_RS}/></svg>`,
+    },
+  ],
+  turns: [
+    {
+      id: "turn_smooth_small",
+      label: "Smooth Small",
+      base: "curve",
+      params: { curveRadius: 24, curveAngle: 45, curveDir: 1 },
+      preview: `<svg viewBox="0 0 80 80"><path d="M20 70 L20 46 Q20 30 40 26 L62 22" ${_RS}/></svg>`,
+    },
+    {
+      id: "turn_smooth_long",
+      label: "Smooth Long",
+      base: "curve",
+      params: { curveRadius: 24, curveAngle: 90, curveDir: 1 },
+      preview: `<svg viewBox="0 0 80 80"><path d="M20 70 L20 40 Q20 20 40 20 L70 20" ${_RS}/></svg>`,
+    },
+    {
+      id: "turn_smooth_longer",
+      label: "Smooth Longer",
+      base: "curve",
+      params: { curveRadius: 30, curveAngle: 135, curveDir: 1 },
+      preview: `<svg viewBox="0 0 80 80"><path d="M22 70 L22 38 Q22 16 44 16 Q62 16 64 36" ${_RS}/></svg>`,
+    },
+    {
+      id: "turn_smooth_longest",
+      label: "Smooth Longest",
+      base: "curve",
+      params: { curveRadius: 34, curveAngle: 180, curveDir: 1 },
+      preview: `<svg viewBox="0 0 80 80"><path d="M20 70 L20 40 Q20 14 42 14 Q64 14 64 40 L64 70" ${_RS}/></svg>`,
+    },
+    {
+      id: "turn_sharp_small",
+      label: "Sharp Small",
+      base: "curve",
+      params: { curveRadius: 12, curveAngle: 90, curveDir: 1 },
+      preview: `<svg viewBox="0 0 80 80"><path d="M22 70 L22 36 Q22 22 36 22 L70 22" stroke="#e8eaed" stroke-width="3" fill="none" stroke-linecap="round"/></svg>`,
+    },
+    {
+      id: "turn_s_left",
+      label: "S Left",
+      base: "scurve",
+      params: { curveRadius: 20, curveAngle: 38, curveDir: -1 },
+      preview: `<svg viewBox="0 0 80 80"><path d="M58 70 L58 50 Q58 34 40 34 Q22 34 22 18 L22 10" ${_RS}/></svg>`,
+    },
+    {
+      id: "turn_s_right",
+      label: "S Right",
+      base: "scurve",
+      params: { curveRadius: 20, curveAngle: 38, curveDir: 1 },
+      preview: `<svg viewBox="0 0 80 80"><path d="M22 70 L22 50 Q22 34 40 34 Q58 34 58 18 L58 10" ${_RS}/></svg>`,
+    },
+  ],
+};
+
+/**
  * Wire the left palette + toolbar DOM to a builder instance.
  * @param {ModularRoadBuilder} builder
  * @param {{ propCatalog?: object[], onAddProp?: (id:string)=>void, onEdgesChange?: ()=>void }} [opts]
@@ -715,10 +940,21 @@ export function buildRoadPaletteUI(builder, opts = {}) {
 
   let activeCategory = "straight";
   let activePropId = null;
+  let activePresetId = null;
 
   function piecesInCategory(catId) {
     if (catId === "obstacles") {
       return propCatalog.map((p) => ({ id: p.id, label: p.label, isProp: true, hint: "" }));
+    }
+    // Curated kit: if this category has presets, show those instead of raw pieces.
+    if (CATEGORY_PRESETS[catId]) {
+      return CATEGORY_PRESETS[catId].map((pr) => ({
+        id: pr.id,
+        label: pr.label,
+        isPreset: true,
+        preset: pr,
+        preview: pr.preview,
+      }));
     }
     return PIECE_CATALOG.filter((p) => PIECE_TO_CATEGORY[p.id] === catId);
   }
@@ -749,10 +985,11 @@ export function buildRoadPaletteUI(builder, opts = {}) {
         btn.disabled = true;
       }
       if (item.isProp) btn.dataset.isProp = "1";
+      if (item.isPreset) btn.dataset.isPreset = "1";
 
       const preview = document.createElement("div");
       preview.className = "piece-tile-preview";
-      preview.innerHTML = piecePreviewSvg(item.id);
+      preview.innerHTML = item.isPreset ? item.preview : piecePreviewSvg(item.id);
 
       const name = document.createElement("span");
       name.className = "piece-tile-name";
@@ -776,21 +1013,36 @@ export function buildRoadPaletteUI(builder, opts = {}) {
           refreshStatus();
           return;
         }
+        if (item.isPreset) {
+          activePropId = null;
+          activePresetId = item.id;
+          builder.setActivePreset(item.preset);
+          refreshStatus();
+          return;
+        }
         activePropId = null;
+        activePresetId = null;
         builder.setActivePiece(item.id);
         refreshStatus();
       });
 
       grid.appendChild(btn);
-      pieceTiles.set(item.id + (item.isProp ? ":prop" : ""), btn);
+      const suffix = item.isProp ? ":prop" : item.isPreset ? ":preset" : "";
+      pieceTiles.set(item.id + suffix, btn);
     }
     refreshStatus();
   }
 
   function refreshStatus() {
     if (statusEl) {
-      const def = PIECE_BY_ID.get(builder.activePieceId);
-      const label = def?.label ?? builder.activePieceId;
+      let label;
+      if (activePresetId) {
+        const all = Object.values(CATEGORY_PRESETS).flat();
+        label = all.find((p) => p.id === activePresetId)?.label ?? activePresetId;
+      } else {
+        const def = PIECE_BY_ID.get(builder.activePieceId);
+        label = def?.label ?? builder.activePieceId;
+      }
       const dir = pieceParams.curveDir >= 0 ? "R" : "L";
       const curveIds = new Set(["curve", "banked", "scurve", "spiral"]);
       const chainInfo =
@@ -800,9 +1052,14 @@ export function buildRoadPaletteUI(builder, opts = {}) {
       }${chainInfo} · anchor gizmo drags whole chain`;
     }
     for (const [key, btn] of pieceTiles) {
-      const isProp = key.endsWith(":prop");
-      const id = isProp ? key.slice(0, -5) : key;
-      const active = isProp ? activePropId === id : !activePropId && id === builder.activePieceId;
+      let active;
+      if (key.endsWith(":prop")) {
+        active = activePropId === key.slice(0, -5);
+      } else if (key.endsWith(":preset")) {
+        active = activePresetId === key.slice(0, -7);
+      } else {
+        active = !activePropId && !activePresetId && key === builder.activePieceId;
+      }
       btn.classList.toggle("active", active);
     }
     for (const [id, btn] of catBtns) {
@@ -870,6 +1127,7 @@ export function buildRoadPaletteUI(builder, opts = {}) {
     const byKey = PIECE_CATALOG.find((p) => p.key === e.key);
     if (byKey) {
       activePropId = null;
+      activePresetId = null;
       activeCategory = PIECE_TO_CATEGORY[byKey.id] ?? activeCategory;
       renderPieces();
       builder.setActivePiece(byKey.id);

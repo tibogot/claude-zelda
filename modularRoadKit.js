@@ -698,6 +698,14 @@ export const PIECE_CATALOG = [
     roll: bankRoll,
   },
   {
+    id: "banktilt",
+    label: "Banked straight",
+    hint: "Constant lean (straight) — chain freely",
+    swatch: "#8e6fc0",
+    points: straightPoints,
+    roll: bankRoll,
+  },
+  {
     id: "bankin",
     label: "Bank in",
     hint: "Flat → banked (straight)",
