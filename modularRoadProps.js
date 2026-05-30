@@ -5,14 +5,14 @@ import { kickerRampGeometry, jumpRampGeometry } from "./modularRoadParkour.js";
 
 /**
  * Free-placement props for the modular road. Unlike auto-chained track pieces,
- * props are standalone objects (box, ramp, open cylinder, ring gate, air tunnel)
+ * props are standalone objects (box, wall, ramp, open cylinder, ring gate, air tunnel)
  * positioned by hand with a shared TransformControls gizmo — the same pattern as
  * the v2 editor props mode (W/E/R = move/rotate/scale, right-click select).
  *
  * Each prop carries a `collision` role so the page can bake it into the right
  * BVH:
  *   - "deck"  → drive surface (wheel raycasts): ramps, the floor of a tube
- *   - "solid" → chassis wall collision: air-tunnel walls/roof
+ *   - "solid" → chassis wall collision only (no wheel ground): wall panels, air-tunnel shell
  *   - "both"  → drive on top AND blocked at the sides: boxes
  *   - "none"  → pure decoration you pass through: ring gates
  */
@@ -87,6 +87,16 @@ export const PROP_CATALOG = [
     make: () => {
       const m = new THREE.Mesh(new THREE.BoxGeometry(8, 4, 8), mat(0x8a9099, { roughness: 0.85 }));
       m.geometry.translate(0, 2, 0); // sit on the ground
+      return m;
+    },
+  },
+  {
+    id: "wall",
+    label: "Wall",
+    collision: "solid",
+    make: () => {
+      const m = new THREE.Mesh(new THREE.BoxGeometry(0.8, 4, 22), mat(0x804040, { roughness: 0.75 }));
+      m.geometry.translate(0, 2, 0); // rest on the ground
       return m;
     },
   },
