@@ -602,11 +602,6 @@ export class ModularRoadBuilder {
     }));
   }
 
-  /** @returns {{id:string, pp:object}[]} serializable layout (legacy — no connectors) */
-  exportLayout() {
-    return this.pieces.map((p) => ({ id: p.id, pp: { ...p.pp } }));
-  }
-
   dispose() {
     this.clear();
     this._hidePlacementGizmo();
@@ -660,8 +655,6 @@ export const PALETTE_CATEGORIES = [
 /** Shared road stroke for preview SVGs. */
 const _RS = 'stroke="#e8eaed" stroke-width="2.2" fill="none" stroke-linecap="round" stroke-linejoin="round"';
 const _RB = 'fill="#2a2e36" stroke="#c0392b" stroke-width="1.8"';
-const _RK = 'fill="#555" stroke="#888" stroke-width="1"';
-
 function categoryIconSvg(id) {
   const icons = {
     straight: `<svg viewBox="0 0 48 48"><rect x="6" y="20" width="36" height="10" rx="1" ${_RB}/><line x1="8" y1="25" x2="40" y2="25" ${_RS}/></svg>`,
@@ -697,9 +690,6 @@ function piecePreviewSvg(pieceId) {
     start: `<svg viewBox="0 0 80 80"><rect x="10" y="34" width="60" height="12" rx="2" ${_RB}/><rect x="14" y="20" width="8" height="24" fill="#fff"/><rect x="14" y="20" width="16" height="8" fill="#fff"/><rect x="12" y="38" width="8" height="4" fill="#111"/><rect x="20" y="38" width="8" height="4" fill="#fff"/></svg>`,
     checkpoint: `<svg viewBox="0 0 80 80"><rect x="10" y="34" width="60" height="12" rx="2" ${_RB}/><line x1="28" y1="18" x2="28" y2="34" stroke="#fff" stroke-width="3"/><polygon points="28,12 22,20 34,20" fill="#fff"/><line x1="52" y1="18" x2="52" y2="34" stroke="#fff" stroke-width="3"/><polygon points="52,12 46,20 58,20" fill="#fff"/><polygon points="40,42 34,48 46,48" fill="#ffcc00"/></svg>`,
     finish: `<svg viewBox="0 0 80 80"><rect x="10" y="34" width="60" height="12" rx="2" ${_RB}/><rect x="36" y="16" width="8" height="28" fill="#fff"/><polygon points="36,12 32,20 40,20" fill="#fff"/><rect x="12" y="38" width="8" height="4" fill="#111"/><rect x="20" y="38" width="8" height="4" fill="#fff"/><rect x="52" y="38" width="8" height="4" fill="#111"/><rect x="60" y="38" width="8" height="4" fill="#fff"/></svg>`,
-    _start: `<svg viewBox="0 0 80 80"><rect x="10" y="34" width="60" height="12" rx="2" ${_RB}/><rect x="14" y="20" width="8" height="24" fill="#fff"/><rect x="14" y="20" width="16" height="8" fill="#fff"/></svg>`,
-    _checkpoint: `<svg viewBox="0 0 80 80"><rect x="10" y="34" width="60" height="12" rx="2" ${_RB}/><line x1="28" y1="18" x2="28" y2="34" stroke="#fff" stroke-width="3"/><polygon points="28,12 22,20 34,20" fill="#fff"/><line x1="52" y1="18" x2="52" y2="34" stroke="#fff" stroke-width="3"/><polygon points="52,12 46,20 58,20" fill="#fff"/></svg>`,
-    _finish: `<svg viewBox="0 0 80 80"><rect x="10" y="34" width="60" height="12" rx="2" ${_RB}/><rect x="36" y="16" width="8" height="28" fill="#fff"/><polygon points="36,12 32,20 40,20" fill="#fff"/></svg>`,
     box: `<svg viewBox="0 0 80 80"><rect x="22" y="28" width="36" height="28" rx="2" fill="#6a7580" stroke="#999" stroke-width="1.5"/></svg>`,
     ramp: `<svg viewBox="0 0 80 80"><polygon points="12,60 68,60 68,24" fill="#e8912d" stroke="#c0392b" stroke-width="1.5"/></svg>`,
     tube: `<svg viewBox="0 0 80 80"><ellipse cx="40" cy="40" rx="28" ry="14" fill="none" stroke="#3a7bd5" stroke-width="3"/></svg>`,
@@ -924,7 +914,7 @@ export const CATEGORY_PRESETS = {
  * @param {{ propCatalog?: object[], onAddProp?: (id:string)=>void, onEdgesChange?: ()=>void }} [opts]
  */
 export function buildRoadPaletteUI(builder, opts = {}) {
-  const { propCatalog = [], onAddProp = null, onEdgesChange = null } = opts;
+  const { propCatalog = [], thumbnails = null, onAddProp = null, onEdgesChange = null } = opts;
   const catList = document.getElementById("category-list");
   const grid = document.getElementById("piece-grid");
   const titleEl = document.getElementById("category-title");
@@ -989,7 +979,16 @@ export function buildRoadPaletteUI(builder, opts = {}) {
 
       const preview = document.createElement("div");
       preview.className = "piece-tile-preview";
-      preview.innerHTML = item.isPreset ? item.preview : piecePreviewSvg(item.id);
+      const thumb = thumbnails?.get(item.id);
+      if (thumb) {
+        const img = document.createElement("img");
+        img.src = thumb;
+        img.alt = item.label;
+        img.draggable = false;
+        preview.appendChild(img);
+      } else {
+        preview.innerHTML = item.isPreset ? item.preview : piecePreviewSvg(item.id);
+      }
 
       const name = document.createElement("span");
       name.className = "piece-tile-name";
