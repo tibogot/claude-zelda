@@ -908,6 +908,15 @@ export const CATEGORY_PRESETS = {
   ],
 };
 
+/** Thumbnail map key for the first tile shown in a palette category. */
+export function categoryThumbnailKey(catId, propCatalog = []) {
+  if (catId === "obstacles") return propCatalog[0]?.id ?? null;
+  const presets = CATEGORY_PRESETS[catId];
+  if (presets?.length) return presets[0].id;
+  const piece = PIECE_CATALOG.find((p) => PIECE_TO_CATEGORY[p.id] === catId);
+  return piece?.id ?? null;
+}
+
 /**
  * Wire the left palette + toolbar DOM to a builder instance.
  * @param {ModularRoadBuilder} builder
@@ -931,6 +940,13 @@ export function buildRoadPaletteUI(builder, opts = {}) {
   let activeCategory = "straight";
   let activePropId = null;
   let activePresetId = null;
+
+  function categoryIconMarkup(catId) {
+    const key = categoryThumbnailKey(catId, propCatalog);
+    const thumb = key ? thumbnails?.get(key) : null;
+    if (thumb) return `<img src="${thumb}" alt="" draggable="false">`;
+    return categoryIconSvg(catId);
+  }
 
   function piecesInCategory(catId) {
     if (catId === "obstacles") {
@@ -1074,7 +1090,7 @@ export function buildRoadPaletteUI(builder, opts = {}) {
       btn.className = "cat-btn";
       btn.dataset.categoryId = cat.id;
       btn.innerHTML = `
-        <span class="cat-btn-icon">${categoryIconSvg(cat.id)}</span>
+        <span class="cat-btn-icon">${categoryIconMarkup(cat.id)}</span>
         <span class="cat-btn-label">${cat.label}</span>
       `;
       btn.addEventListener("click", () => {

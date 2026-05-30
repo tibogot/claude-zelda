@@ -17,7 +17,7 @@ import {
  * @param {object} o
  * @param {THREE.WebGPURenderer} o.renderer
  * @param {{road:THREE.Material, rail?:THREE.Material, shell?:THREE.Material, decor?:THREE.Material}} o.materials
- * @param {{key:string, pieceId:string, params?:object}[]} o.items
+ * @param {{key:string, pieceId?:string, params?:object, make?:()=>THREE.Object3D}[]} o.items
  * @param {THREE.Texture} [o.environment] optional IBL (the main scene's PMREM) for correct lighting
  * @param {number} [o.size=128]
  * @returns {Promise<Map<string,string>>}
@@ -59,36 +59,43 @@ export async function bakeRoadThumbnails({ renderer, materials, items, environme
   const clearGroup = () => {
     while (group.children.length) {
       const c = group.children.pop();
-      c.geometry?.dispose?.();
+      c.traverse?.((o) => {
+        if (o.isMesh) o.geometry?.dispose?.();
+      });
     }
   };
 
   try {
     for (const item of items) {
-      const pp = { ...pieceParams, ...(item.params || {}) };
-      let built;
-      try {
-        built = buildPiece(
-          item.pieceId,
-          initialConnector(),
-          pp,
-          roadParams,
-          guardrailParams,
-          guardrailParams.enabled,
-        );
-      } catch {
-        continue;
+      clearGroup();
+
+      if (item.make) {
+        group.add(item.make());
+      } else {
+        const pp = { ...pieceParams, ...(item.params || {}) };
+        let built;
+        try {
+          built = buildPiece(
+            item.pieceId,
+            initialConnector(),
+            pp,
+            roadParams,
+            guardrailParams,
+            guardrailParams.enabled,
+          );
+        } catch {
+          continue;
+        }
+        const addMesh = (geo, mat) => {
+          if (!geo || !mat) return;
+          group.add(new THREE.Mesh(geo, mat));
+        };
+        if (!built.def.noMesh) addMesh(built.geometry, materials.road);
+        addMesh(built.railGeometry, materials.rail);
+        addMesh(built.shellGeometry, materials.shell);
+        addMesh(built.decorGeometry, materials.decor);
       }
 
-      clearGroup();
-      const addMesh = (geo, mat) => {
-        if (!geo || !mat) return;
-        group.add(new THREE.Mesh(geo, mat));
-      };
-      if (!built.def.noMesh) addMesh(built.geometry, materials.road);
-      addMesh(built.railGeometry, materials.rail);
-      addMesh(built.shellGeometry, materials.shell);
-      addMesh(built.decorGeometry, materials.decor);
       if (!group.children.length) continue;
 
       // Frame by bounding sphere so every piece (long straight, wide curve,
@@ -120,19 +127,15 @@ export async function bakeRoadThumbnails({ renderer, materials, items, environme
   return out;
 }
 
-/** RGBA byte buffer → PNG data-URL via a 2D canvas (flip Y for GL origin). */
+/** RGBA byte buffer → PNG data-URL via a 2D canvas. WebGPU readRenderTargetPixelsAsync
+ *  returns top-first rows (same as canvas ImageData); do not flip Y (that was for WebGL). */
 function pixelsToDataURL(buf, size) {
   const canvas = document.createElement("canvas");
   canvas.width = size;
   canvas.height = size;
   const ctx = canvas.getContext("2d");
   const img = ctx.createImageData(size, size);
-  const row = size * 4;
-  for (let y = 0; y < size; y++) {
-    const src = (size - 1 - y) * row;
-    const dst = y * row;
-    img.data.set(buf.subarray(src, src + row), dst);
-  }
+  img.data.set(buf.subarray(0, size * size * 4));
   ctx.putImageData(img, 0, 0);
   return canvas.toDataURL("image/png");
 }
