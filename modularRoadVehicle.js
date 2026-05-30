@@ -142,6 +142,7 @@ export const HEADLIGHTS = {
   angle: 0.6, // cone half-angle (rad)
   penumbra: 0.5,
   decay: 2,
+  lampEmissive: 3.0, // emissive lamp face brightness (>1 so it blooms)
   // mount on the chassis (local m)
   side: 0.6,
   height: 0.05,
@@ -149,6 +150,21 @@ export const HEADLIGHTS = {
   // aim point relative to the mount (local m)
   aimForward: 16,
   aimDrop: 3.2,
+};
+
+/** Rear taillights — emissive meshes only (no real lights, bloom-friendly). They
+ *  glow dimly while the headlights are on (night) and flare bright under braking
+ *  or handbrake. Mount offsets are chassis-local meters (rear face is -Z). */
+export const TAILLIGHTS = {
+  enabled: true,
+  color: "#ff2020",
+  runningIntensity: 0.6, // dim glow when headlights are on
+  brakeIntensity: 4.0, // bright flare on brake / handbrake
+  width: 0.35,
+  height: 0.16,
+  side: 0.62, // ±X
+  up: 0.12, // +Y
+  back: 1.78, // distance behind centre (placed at -Z)
 };
 
 export const WALL = {
@@ -561,6 +577,7 @@ export class Vehicle {
     this.chassisMesh.receiveShadow = true;
     this.group.add(this.chassisMesh);
     this._buildHeadlights();
+    this._buildTaillights();
 
     const tireGeo = new THREE.CylinderGeometry(WHEEL.radius, WHEEL.radius, WHEEL.thickness, 28);
     tireGeo.rotateZ(Math.PI / 2);
@@ -604,7 +621,9 @@ export class Vehicle {
   _buildHeadlights() {
     this.headlights = [];
     this.headlightTargets = [];
+    this.headlamps = []; // emissive lamp faces (bloom source)
     const H = HEADLIGHTS;
+    this._lampGeo = this._lampGeo ?? new THREE.BoxGeometry(1, 1, 1);
     for (const s of [-1, 1]) {
       const light = new THREE.SpotLight(H.color, H.intensity, H.distance, H.angle, H.penumbra, H.decay);
       light.castShadow = false;
@@ -617,12 +636,31 @@ export class Vehicle {
       light.visible = H.enabled;
       this.headlights.push(light);
       this.headlightTargets.push(target);
+
+      const lamp = new THREE.Mesh(
+        this._lampGeo,
+        new THREE.MeshStandardMaterial({
+          color: H.color,
+          emissive: H.color,
+          emissiveIntensity: H.lampEmissive,
+          roughness: 0.4,
+          metalness: 0,
+        }),
+      );
+      lamp.castShadow = false;
+      lamp.receiveShadow = false;
+      lamp.position.set(s * H.side, H.height, H.forward + 0.02);
+      lamp.scale.set(0.22, 0.12, 0.05);
+      lamp.visible = H.enabled;
+      this.chassisMesh.add(lamp);
+      this.headlamps.push(lamp);
     }
   }
 
   setHeadlights(on) {
     HEADLIGHTS.enabled = !!on;
     for (const l of this.headlights) l.visible = HEADLIGHTS.enabled;
+    for (const m of this.headlamps) m.visible = HEADLIGHTS.enabled;
   }
 
   /** Re-sync the headlight rig after editing HEADLIGHTS params live. */
@@ -641,9 +679,72 @@ export class Vehicle {
       l.position.set(s * H.side, H.height, H.forward);
       this.headlightTargets[i].position.set(s * H.side, H.height - H.aimDrop, H.forward + H.aimForward);
     }
+    for (let i = 0; i < this.headlamps.length; i++) {
+      const s = i === 0 ? -1 : 1;
+      const m = this.headlamps[i];
+      m.material.color.set(H.color);
+      m.material.emissive.set(H.color);
+      m.material.emissiveIntensity = H.lampEmissive;
+      m.position.set(s * H.side, H.height, H.forward + 0.02);
+      m.visible = H.enabled;
+    }
+  }
+
+  _buildTaillights() {
+    this.taillights = [];
+    const T = TAILLIGHTS;
+    const geo = new THREE.BoxGeometry(1, 1, 1); // unit box, scaled per params
+    for (const s of [-1, 1]) {
+      const mat = new THREE.MeshStandardMaterial({
+        color: T.color,
+        emissive: T.color,
+        emissiveIntensity: T.runningIntensity,
+        roughness: 0.4,
+        metalness: 0,
+      });
+      const m = new THREE.Mesh(geo, mat);
+      m.castShadow = false;
+      m.receiveShadow = false;
+      m.position.set(s * T.side, T.up, -T.back);
+      m.scale.set(T.width, T.height, 0.06);
+      m.visible = false;
+      this.chassisMesh.add(m);
+      this.taillights.push(m);
+    }
+  }
+
+  /** Re-sync taillight color / size / mount after editing TAILLIGHTS params. */
+  applyTaillightParams() {
+    const T = TAILLIGHTS;
+    for (let i = 0; i < this.taillights.length; i++) {
+      const s = i === 0 ? -1 : 1;
+      const m = this.taillights[i];
+      m.material.color.set(T.color);
+      m.material.emissive.set(T.color);
+      m.position.set(s * T.side, T.up, -T.back);
+      m.scale.set(T.width, T.height, 0.06);
+    }
+  }
+
+  /** Per-frame: dim running glow when headlights are on, bright on brake. */
+  _updateTaillights() {
+    if (!this.taillights.length) return;
+    const T = TAILLIGHTS;
+    this._tlFwd.set(0, 0, 1).applyQuaternion(this.body.quat);
+    const vFwd = this.body.vel.dot(this._tlFwd);
+    const braking = this.input.handbrake || (this.input.throttle < 0 && vFwd > 0.5);
+    let intensity = 0;
+    if (braking) intensity = T.brakeIntensity;
+    else if (HEADLIGHTS.enabled) intensity = T.runningIntensity;
+    const on = T.enabled && intensity > 0;
+    for (const m of this.taillights) {
+      m.visible = on;
+      m.material.emissiveIntensity = intensity;
+    }
   }
 
   _initScratch() {
+    this._tlFwd = new THREE.Vector3();
     this._gravityF = new THREE.Vector3();
     this._hw = CHASSIS.width / 2;
     this._hh = CHASSIS.height / 2;
@@ -1093,6 +1194,7 @@ export class Vehicle {
 
   _syncVisuals(dt) {
     const body = this.body;
+    this._updateTaillights();
     this._geomCenter.copy(_COM_OFFSET).applyQuaternion(body.quat).add(body.pos);
     this.chassisMesh.position.copy(this._geomCenter);
     if (CHASSIS.visualLift !== 0) {

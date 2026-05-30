@@ -1,0 +1,624 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Ocean — LOD Clipmap · WebGPU + TSL</title>
+    <style>
+      * { margin: 0; padding: 0; box-sizing: border-box; }
+      body { background: #14202e; overflow: hidden; font-family: system-ui, sans-serif; }
+      canvas { display: block; width: 100vw; height: 100vh; }
+      .tp-dfwv { max-height: calc(100vh - 16px); overflow-y: auto; z-index: 20; }
+      #hud {
+        position: fixed; bottom: 8px; left: 8px; z-index: 25;
+        color: #bfe6e0; font: 12px/1.4 ui-monospace, monospace;
+        background: rgba(8, 22, 30, 0.55); padding: 6px 9px; border-radius: 6px;
+        pointer-events: none; white-space: pre;
+      }
+    </style>
+    <script type="importmap">
+      {
+        "imports": {
+          "three": "https://cdn.jsdelivr.net/npm/three@0.183.1/build/three.webgpu.js",
+          "three/webgpu": "https://cdn.jsdelivr.net/npm/three@0.183.1/build/three.webgpu.js",
+          "three/tsl": "https://cdn.jsdelivr.net/npm/three@0.183.1/build/three.tsl.js",
+          "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.183.1/examples/jsm/",
+          "tweakpane": "https://cdn.jsdelivr.net/npm/tweakpane@4.0.5/+esm",
+          "stats-gl": "https://cdn.jsdelivr.net/npm/stats-gl/dist/main.js"
+        }
+      }
+    </script>
+  </head>
+  <body>
+    <div id="hud"></div>
+    <script type="module">
+      import * as THREE from "three/webgpu";
+      import { OrbitControls } from "three/addons/controls/OrbitControls.js";
+      import { SkyMesh } from "three/addons/objects/SkyMesh.js";
+      import { Pane } from "tweakpane";
+      import Stats from "stats-gl";
+      import { createOceanShader, OCEAN_DEFAULTS } from "./ocean-shader.js";
+
+      // ─────────────────────────────────────────────────────────────────────
+      //  Map presets — the three world sizes the v2 map supports.
+      // ─────────────────────────────────────────────────────────────────────
+      const MAP_PRESETS = {
+        "Small (600)": { size: 600, res: 256 },
+        "Medium (1600)": { size: 1600, res: 384 },
+        "Large (3200)": { size: 3200, res: 512 },
+      };
+
+      // ─── Noise helpers (Perlin fbm — same as lake-unreal-editor.html) ──────
+      function mulberry32(a) {
+        return function () {
+          let t = (a += 0x6d2b79f5);
+          t = Math.imul(t ^ (t >>> 15), t | 1);
+          t ^= t + Math.imul(t ^ (t >>> 7), t | 61);
+          return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+        };
+      }
+      function buildPermutation(seed) {
+        const rnd = mulberry32(seed >>> 0);
+        const p = new Uint8Array(512);
+        for (let i = 0; i < 256; i++) p[i] = i;
+        for (let i = 255; i > 0; i--) {
+          const j = (rnd() * (i + 1)) | 0;
+          const t = p[i]; p[i] = p[j]; p[j] = t;
+        }
+        for (let i = 0; i < 256; i++) p[256 + i] = p[i];
+        return p;
+      }
+      function fadePerlin(t) { return t * t * t * (t * (t * 6 - 15) + 10); }
+      function lerp1(a, b, t) { return a + t * (b - a); }
+      function grad2(hash, x, y) {
+        const h = hash & 3;
+        const u = h < 2 ? x : y;
+        const v = h < 2 ? y : x;
+        return ((h & 1) === 0 ? u : -u) + ((h & 2) === 0 ? v : -v);
+      }
+      function perlin2(x, y, perm) {
+        const xi = Math.floor(x) & 255;
+        const yi = Math.floor(y) & 255;
+        const xf = x - Math.floor(x);
+        const yf = y - Math.floor(y);
+        const u = fadePerlin(xf);
+        const v = fadePerlin(yf);
+        const aa = perm[xi + perm[yi]];
+        const ab = perm[xi + perm[yi + 1]];
+        const ba = perm[xi + 1 + perm[yi]];
+        const bb = perm[xi + 1 + perm[yi + 1]];
+        const x1 = lerp1(grad2(aa, xf, yf), grad2(ba, xf - 1, yf), u);
+        const x2 = lerp1(grad2(ab, xf, yf - 1), grad2(bb, xf - 1, yf - 1), u);
+        return lerp1(x1, x2, v);
+      }
+      function fbmPerlin(wx, wz, perm, octaves) {
+        let sum = 0, amp = 1, freq = 1, norm = 0;
+        for (let o = 0; o < octaves; o++) {
+          sum += amp * perlin2(wx * freq, wz * freq, perm);
+          norm += amp; amp *= 0.5; freq *= 2;
+        }
+        return sum / norm;
+      }
+      function sampleHeightBilinear(data, RES, tu, tv) {
+        const u = THREE.MathUtils.clamp(tu, 0, 1);
+        const v = THREE.MathUtils.clamp(tv, 0, 1);
+        const fx = u * (RES - 1), fy = v * (RES - 1);
+        const i0 = Math.floor(fx), j0 = Math.floor(fy);
+        const t = fx - i0, w = fy - j0;
+        const i1 = Math.min(i0 + 1, RES - 1), j1 = Math.min(j0 + 1, RES - 1);
+        const h00 = data[j0 * RES + i0], h10 = data[j0 * RES + i1];
+        const h01 = data[j1 * RES + i0], h11 = data[j1 * RES + i1];
+        return lerp1(lerp1(h00, h10, t), lerp1(h01, h11, t), w);
+      }
+      function sunDirectionFromAngles(azimuthDeg, elevationDeg) {
+        const az = (azimuthDeg * Math.PI) / 180;
+        const el = (elevationDeg * Math.PI) / 180;
+        const cosEl = Math.cos(el);
+        return new THREE.Vector3(
+          cosEl * Math.cos(az), Math.sin(el), cosEl * Math.sin(az),
+        ).normalize();
+      }
+
+      // ─── Island heightmap (seabed below seaY, islands poke above) ──────────
+      function buildIslandHeightData(o, RES, terrainSize) {
+        const half = terrainSize * 0.5;
+        const perm = buildPermutation(o.seed);
+        const permMacro = buildPermutation(o.seed + 97);
+        const permWarp = buildPermutation(o.seed + 241);
+        const rnd = mulberry32((o.seed + 13) >>> 0);
+        const islands = [];
+        for (let n = 0; n < o.islandCount; n++) {
+          islands.push({
+            cx: (rnd() * 2 - 1) * half * 0.62,
+            cz: (rnd() * 2 - 1) * half * 0.62,
+            r: half * o.islandRadiusFrac * (0.55 + rnd() * 0.9),
+            h: o.islandHeight * (0.6 + rnd() * 0.8),
+          });
+        }
+        const data = new Float32Array(RES * RES);
+        for (let j = 0; j < RES; j++) {
+          for (let i = 0; i < RES; i++) {
+            const x = (i / (RES - 1)) * terrainSize - half;
+            const z = (j / (RES - 1)) * terrainSize - half;
+            const nx = x / terrainSize, nz = z / terrainSize;
+            let y =
+              -o.seabedDepth +
+              fbmPerlin(nx * o.seabedFreq, nz * o.seabedFreq, permMacro, 4) *
+                o.seabedRough;
+            for (const isl of islands) {
+              const wob = fbmPerlin(
+                nx * o.coastFreq + isl.cx * 0.01,
+                nz * o.coastFreq + isl.cz * 0.01,
+                permWarp, 3,
+              );
+              const rr = Math.max(isl.r * (1 + 0.35 * wob), 1);
+              const d = Math.hypot(x - isl.cx, z - isl.cz);
+              const t = Math.max(0, 1 - d / rr);
+              const shape = Math.pow(t * t * (3 - 2 * t), o.islandSharp);
+              y += isl.h * shape;
+            }
+            y += fbmPerlin(nx * o.detailFreq, nz * o.detailFreq, perm, 5) *
+              o.detailAmp;
+            data[j * RES + i] = y;
+          }
+        }
+        return data;
+      }
+
+      // ─── Terrain mesh (vertex-coloured: seabed → sand → grass → rock) ──────
+      const _cSeabed = new THREE.Color("#15323a");
+      const _cSand = new THREE.Color("#cdbd86");
+      const _cGrass = new THREE.Color("#3f6b2e");
+      const _cRock = new THREE.Color("#6e6a63");
+      const _cSnow = new THREE.Color("#eef2f4");
+      const _tmpA = new THREE.Color(), _tmpB = new THREE.Color();
+      function terrainColorAt(y, out) {
+        if (y < -0.5) {
+          const d = THREE.MathUtils.clamp(-y / 24, 0, 1);
+          return out.copy(_cSand).lerp(_cSeabed, d);
+        }
+        if (y < 2.5) return out.copy(_cSand);
+        if (y < 16) {
+          return out.copy(_cSand).lerp(_cGrass, THREE.MathUtils.clamp((y - 2.5) / 8, 0, 1));
+        }
+        if (y < 40) {
+          return out.copy(_cGrass).lerp(_cRock, THREE.MathUtils.clamp((y - 16) / 24, 0, 1));
+        }
+        return out.copy(_cRock).lerp(_cSnow, THREE.MathUtils.clamp((y - 40) / 30, 0, 1));
+      }
+      function buildTerrainGeo(data, RES, terrainSize, seg) {
+        const half = terrainSize / 2;
+        const N = seg + 1;
+        const positions = new Float32Array(N * N * 3);
+        const colors = new Float32Array(N * N * 3);
+        let p = 0;
+        for (let j = 0; j < N; j++) {
+          const tv = j / seg, z = tv * terrainSize - half;
+          for (let i = 0; i < N; i++) {
+            const tu = i / seg, x = tu * terrainSize - half;
+            const y = sampleHeightBilinear(data, RES, tu, tv);
+            positions[p] = x; positions[p + 1] = y; positions[p + 2] = z;
+            terrainColorAt(y, _tmpA);
+            colors[p] = _tmpA.r; colors[p + 1] = _tmpA.g; colors[p + 2] = _tmpA.b;
+            p += 3;
+          }
+        }
+        const idx = [];
+        for (let j = 0; j < seg; j++) {
+          for (let i = 0; i < seg; i++) {
+            const a = j * N + i, b = a + 1, c = a + N, d = c + 1;
+            idx.push(a, c, b, b, c, d);
+          }
+        }
+        const geo = new THREE.BufferGeometry();
+        geo.setAttribute("position", new THREE.BufferAttribute(positions, 3));
+        geo.setAttribute("color", new THREE.BufferAttribute(colors, 3));
+        geo.setIndex(idx);
+        geo.computeVertexNormals();
+        return geo;
+      }
+
+      // ─── LOD clipmap ocean geometry ────────────────────────────────────────
+      // A square ring grid in the XZ plane (y = 0). `innerHalf` cuts a central
+      // square hole (cells whose centre lies inside it are dropped). Shared by
+      // every LOD level and the horizon skirt.
+      function buildRingGeometryXZ(seg, outerHalf, innerHalf) {
+        const N = seg + 1;
+        const cell = (outerHalf * 2) / seg;
+        const positions = new Float32Array(N * N * 3);
+        const aCell = new Float32Array(N * N);
+        const aOuter = new Float32Array(N * N);
+        let p = 0, q = 0;
+        for (let j = 0; j < N; j++) {
+          const z = -outerHalf + j * cell;
+          for (let i = 0; i < N; i++) {
+            positions[p] = -outerHalf + i * cell;
+            positions[p + 1] = 0;
+            positions[p + 2] = z;
+            aCell[q] = cell;
+            aOuter[q] = outerHalf;
+            p += 3; q += 1;
+          }
+        }
+        const idx = [];
+        for (let j = 0; j < seg; j++) {
+          for (let i = 0; i < seg; i++) {
+            const cx = -outerHalf + (i + 0.5) * cell;
+            const cz = -outerHalf + (j + 0.5) * cell;
+            if (Math.max(Math.abs(cx), Math.abs(cz)) < innerHalf - 1e-3) continue;
+            const a = j * N + i, b = a + 1, c = a + N, d = c + 1;
+            idx.push(a, c, b, b, c, d);
+          }
+        }
+        const geo = new THREE.BufferGeometry();
+        geo.setAttribute("position", new THREE.BufferAttribute(positions, 3));
+        geo.setAttribute("aCell", new THREE.BufferAttribute(aCell, 1));
+        geo.setAttribute("aOuterHalf", new THREE.BufferAttribute(aOuter, 1));
+        geo.setIndex(idx);
+        return geo;
+      }
+
+      const LOD_PALETTE = [
+        0xff5050, 0xffa040, 0xffe640, 0x66ff66, 0x40e6e6, 0x5090ff, 0xb060ff, 0xff60c0,
+      ];
+
+      function buildClipmapOcean({ levels, gridM, baseCell, horizonScale, material }) {
+        const group = new THREE.Group();
+        const meshes = [];
+        const debugMats = [];
+        let triCount = 0;
+        let lastOuterHalf = 0;
+        for (let k = 0; k < levels; k++) {
+          const outerHalf = (gridM * baseCell * Math.pow(2, k)) / 2;
+          const innerHalf = k === 0 ? 0 : outerHalf / 2;
+          const geo = buildRingGeometryXZ(gridM, outerHalf, innerHalf);
+          triCount += geo.getIndex().count / 3;
+          const mesh = new THREE.Mesh(geo, material);
+          mesh.frustumCulled = false;
+          mesh.renderOrder = 1;
+          group.add(mesh);
+          meshes.push(mesh);
+          debugMats.push(
+            new THREE.MeshBasicMaterial({
+              color: LOD_PALETTE[k % LOD_PALETTE.length], wireframe: true,
+            }),
+          );
+          lastOuterHalf = outerHalf;
+        }
+        // Horizon skirt: one big low-res flat ring out to the visible horizon.
+        if (horizonScale > 1.01) {
+          const skirtOuter = lastOuterHalf * horizonScale;
+          const geo = buildRingGeometryXZ(32, skirtOuter, lastOuterHalf);
+          triCount += geo.getIndex().count / 3;
+          const mesh = new THREE.Mesh(geo, material);
+          mesh.frustumCulled = false;
+          mesh.renderOrder = 1;
+          group.add(mesh);
+          meshes.push(mesh);
+          debugMats.push(new THREE.MeshBasicMaterial({ color: 0x303040, wireframe: true }));
+        }
+        return { group, meshes, debugMats, triCount, snapStep: baseCell * 2, finestExtent: gridM * baseCell };
+      }
+
+      // ─────────────────────────────────────────────────────────────────────
+      async function init() {
+        const renderer = new THREE.WebGPURenderer({ antialias: true });
+        renderer.setSize(window.innerWidth, window.innerHeight);
+        renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+        renderer.toneMapping = THREE.ACESFilmicToneMapping;
+        document.body.appendChild(renderer.domElement);
+        await renderer.init();
+
+        const stats = new Stats({ trackGPU: false });
+        stats.init(renderer);
+        stats.dom.style.cssText = "position:fixed;top:0;left:0;z-index:25;cursor:pointer";
+        document.body.appendChild(stats.dom);
+
+        const scene = new THREE.Scene();
+        const camera = new THREE.PerspectiveCamera(
+          50, window.innerWidth / window.innerHeight, 0.1, 30000,
+        );
+        camera.position.set(0, 90, 260);
+        const controls = new OrbitControls(camera, renderer.domElement);
+        controls.enableDamping = true;
+        controls.target.set(0, 0, 0);
+        controls.maxPolarAngle = Math.PI * 0.495;
+        controls.maxDistance = 12000;
+        controls.update();
+
+        const clock = new THREE.Timer();
+        const hud = document.getElementById("hud");
+
+        // ── Params ───────────────────────────────────────────────────────────
+        const params = {
+          // map
+          preset: "Medium (1600)",
+          seaY: 0,
+          terrainSeg: 240,
+          // islands
+          seed: 1337,
+          islandCount: 6,
+          islandHeight: 26,
+          islandRadiusFrac: 0.18,
+          islandSharp: 1.4,
+          seabedDepth: 32,
+          seabedRough: 10,
+          seabedFreq: 3.0,
+          coastFreq: 5.0,
+          detailFreq: 14.0,
+          detailAmp: 3.0,
+          // LOD
+          levels: 7,
+          gridM: 64,
+          baseCell: 2.0,
+          horizonScale: 6.0,
+          wireframe: false,
+          lodColor: false,
+          // waves + look (spread from OCEAN_DEFAULTS, overridable)
+          ...structuredClone(OCEAN_DEFAULTS),
+          // sky / light
+          exposure: 0.95,
+          sunAzimuth: 38,
+          sunElevation: 28,
+          envIntensity: 0.45,
+          skyTurbidity: 3,
+          skyRayleigh: 1.6,
+          skyMie: 0.005,
+          skyMieG: 0.8,
+          fogDensity: 0.0,
+          terrainRoughness: 0.92,
+        };
+        // OCEAN_DEFAULTS exposes windAngleDeg / windSpreadDeg as the wind keys.
+
+        // ── Sky + lights ──────────────────────────────────────────────────────
+        const hemi = new THREE.HemisphereLight(0xbfe0ff, 0x44607a, 0.5);
+        scene.add(hemi);
+        const sunLight = new THREE.DirectionalLight(0xfff3d8, 2.0);
+        scene.add(sunLight, sunLight.target);
+        const sky = new SkyMesh();
+        sky.scale.setScalar(20000);
+        scene.add(sky);
+        const fog = new THREE.FogExp2(0x9fb8c4, 0);
+        scene.fog = fog;
+        const pmrem = new THREE.PMREMGenerator(renderer);
+
+        function applySky() {
+          sky.turbidity.value = params.skyTurbidity;
+          sky.rayleigh.value = params.skyRayleigh;
+          sky.mieCoefficient.value = params.skyMie;
+          sky.mieDirectionalG.value = params.skyMieG;
+          const sunUnit = sunDirectionFromAngles(params.sunAzimuth, params.sunElevation);
+          sky.sunPosition.value.copy(sunUnit);
+          sunLight.position.copy(sunUnit).multiplyScalar(500);
+          sunLight.target.position.set(0, 0, 0);
+          scene.environmentIntensity = params.envIntensity;
+          renderer.toneMappingExposure = params.exposure;
+          fog.density = params.fogDensity;
+          if (ocean) ocean.uniforms.sunDir.value.copy(sunUnit);
+        }
+        function bakeSkyEnv() {
+          const prev = scene.environment;
+          const s = new THREE.Scene();
+          s.add(sky.clone());
+          scene.environment = pmrem.fromScene(s, 0.04).texture;
+          if (prev && prev.dispose) prev.dispose();
+        }
+
+        // ── Mutable world state (rebuilt on preset / island / LOD changes) ────
+        let terrainSize, RES, heightData, heightTex, terrainMesh, terrainMat;
+        let ocean = null, clip = null;
+
+        function disposeOcean() {
+          if (!clip) return;
+          for (const m of clip.meshes) m.geometry.dispose();
+          scene.remove(clip.group);
+          clip = null;
+        }
+        function buildClip() {
+          disposeOcean();
+          clip = buildClipmapOcean({
+            levels: params.levels, gridM: params.gridM, baseCell: params.baseCell,
+            horizonScale: params.horizonScale, material: ocean.material,
+          });
+          applyDebugMode();
+          scene.add(clip.group);
+        }
+        function applyDebugMode() {
+          if (!clip) return;
+          for (let k = 0; k < clip.meshes.length; k++) {
+            const m = clip.meshes[k];
+            if (params.lodColor) m.material = clip.debugMats[k];
+            else { m.material = ocean.material; ocean.material.wireframe = params.wireframe; }
+          }
+        }
+
+        function rebuildHeightData() {
+          heightData = buildIslandHeightData(params, RES, terrainSize);
+        }
+        function rebuildTerrainMesh() {
+          if (terrainMesh) { terrainMesh.geometry.dispose(); scene.remove(terrainMesh); }
+          const geo = buildTerrainGeo(heightData, RES, terrainSize, params.terrainSeg);
+          terrainMesh = new THREE.Mesh(geo, terrainMat);
+          scene.add(terrainMesh);
+        }
+        function refreshHeightTex() {
+          heightTex.image.data = heightData;
+          heightTex.needsUpdate = true;
+        }
+
+        // Full (re)build when the preset / world size changes.
+        function rebuildWorld() {
+          const preset = MAP_PRESETS[params.preset];
+          terrainSize = preset.size;
+          RES = preset.res;
+          rebuildHeightData();
+
+          if (heightTex) heightTex.dispose();
+          heightTex = new THREE.DataTexture(
+            heightData, RES, RES, THREE.RedFormat, THREE.FloatType,
+          );
+          heightTex.magFilter = THREE.LinearFilter;
+          heightTex.minFilter = THREE.LinearFilter;
+          heightTex.wrapS = heightTex.wrapT = THREE.ClampToEdgeWrapping;
+          heightTex.flipY = false;
+          heightTex.needsUpdate = true;
+
+          if (!terrainMat) {
+            terrainMat = new THREE.MeshStandardMaterial({
+              vertexColors: true, roughness: params.terrainRoughness, metalness: 0,
+            });
+          }
+          rebuildTerrainMesh();
+
+          // Ocean shader is bound to terrainSize, so recreate it on world change.
+          ocean = createOceanShader({ heightTex, terrainSize });
+          ocean.syncParams(params);
+          applySky();
+          buildClip();
+
+          controls.maxDistance = Math.max(2000, terrainSize * 4);
+        }
+
+        rebuildWorld();
+        bakeSkyEnv();
+
+        // ── Tweakpane ─────────────────────────────────────────────────────────
+        const pane = new Pane({ title: "Ocean Lab" });
+
+        const fMap = pane.addFolder({ title: "Map" });
+        fMap.addBinding(params, "preset", { options: Object.fromEntries(Object.keys(MAP_PRESETS).map((k) => [k, k])) })
+          .on("change", () => rebuildWorld());
+        fMap.addBinding(params, "seaY", { min: -40, max: 40, step: 0.5 });
+        fMap.addBinding(params, "terrainSeg", { min: 64, max: 512, step: 8 })
+          .on("change", rebuildTerrainMesh);
+
+        const fIsl = pane.addFolder({ title: "Islands", expanded: false });
+        const reIsland = () => { rebuildHeightData(); refreshHeightTex(); rebuildTerrainMesh(); };
+        fIsl.addBinding(params, "seed", { min: 1, max: 99999, step: 1 }).on("change", reIsland);
+        fIsl.addBinding(params, "islandCount", { min: 0, max: 24, step: 1 }).on("change", reIsland);
+        fIsl.addBinding(params, "islandHeight", { min: 2, max: 120, step: 1 }).on("change", reIsland);
+        fIsl.addBinding(params, "islandRadiusFrac", { min: 0.04, max: 0.5, step: 0.01 }).on("change", reIsland);
+        fIsl.addBinding(params, "islandSharp", { min: 0.4, max: 4, step: 0.05 }).on("change", reIsland);
+        fIsl.addBinding(params, "seabedDepth", { min: 4, max: 120, step: 1 }).on("change", reIsland);
+        fIsl.addBinding(params, "seabedRough", { min: 0, max: 40, step: 0.5 }).on("change", reIsland);
+        fIsl.addBinding(params, "seabedFreq", { min: 0.5, max: 12, step: 0.1 }).on("change", reIsland);
+        fIsl.addBinding(params, "coastFreq", { min: 0.5, max: 16, step: 0.1 }).on("change", reIsland);
+        fIsl.addBinding(params, "detailFreq", { min: 2, max: 40, step: 0.5 }).on("change", reIsland);
+        fIsl.addBinding(params, "detailAmp", { min: 0, max: 12, step: 0.1 }).on("change", reIsland);
+
+        const fLod = pane.addFolder({ title: "LOD / Perf" });
+        fLod.addBinding(params, "levels", { min: 2, max: 10, step: 1 }).on("change", buildClip);
+        fLod.addBinding(params, "gridM", { min: 16, max: 128, step: 8 }).on("change", buildClip);
+        fLod.addBinding(params, "baseCell", { min: 0.5, max: 8, step: 0.5 }).on("change", buildClip);
+        fLod.addBinding(params, "horizonScale", { min: 1, max: 20, step: 0.5 }).on("change", buildClip);
+        fLod.addBinding(params, "wireframe").on("change", applyDebugMode);
+        fLod.addBinding(params, "lodColor", { label: "LOD colours" }).on("change", applyDebugMode);
+
+        const sync = () => ocean.syncParams(params);
+        const fWave = pane.addFolder({ title: "Waves (Gerstner)" });
+        fWave.addBinding(params, "waveEnabled").on("change", sync);
+        fWave.addBinding(params, "waveAmp", { min: 0, max: 4, step: 0.01 }).on("change", sync);
+        fWave.addBinding(params, "waveLength", { min: 4, max: 200, step: 1 }).on("change", sync);
+        fWave.addBinding(params, "waveSteep", { min: 0, max: 1, step: 0.01 }).on("change", sync);
+        fWave.addBinding(params, "waveSpeed", { min: 0, max: 3, step: 0.01 }).on("change", sync);
+        fWave.addBinding(params, "windAngleDeg", { min: 0, max: 360, step: 1 }).on("change", sync);
+        fWave.addBinding(params, "windSpreadDeg", { min: 0, max: 120, step: 1 }).on("change", sync);
+        fWave.addBinding(params, "waveAmpFalloff", { min: 0.4, max: 0.98, step: 0.01 }).on("change", sync);
+        fWave.addBinding(params, "waveLenFalloff", { min: 0.4, max: 0.98, step: 0.01 }).on("change", sync);
+        fWave.addBinding(params, "waveNormalStrength", { min: 0, max: 3, step: 0.01 }).on("change", sync);
+        fWave.addBinding(params, "dispFadeStart", { min: 10, max: 1000, step: 5 }).on("change", sync);
+        fWave.addBinding(params, "dispFadeEnd", { min: 20, max: 2000, step: 5 }).on("change", sync);
+
+        const fCol = pane.addFolder({ title: "Colour / Depth", expanded: false });
+        fCol.addBinding(params, "shoreColor").on("change", sync);
+        fCol.addBinding(params, "midColor").on("change", sync);
+        fCol.addBinding(params, "deepColor").on("change", sync);
+        fCol.addBinding(params, "highlightColor").on("change", sync);
+        fCol.addBinding(params, "depthAbsorb", { min: 0.01, max: 1, step: 0.01 }).on("change", sync);
+        fCol.addBinding(params, "depthRampShoreMid", { min: 0, max: 1, step: 0.01 }).on("change", sync);
+        fCol.addBinding(params, "depthRampMidDeep", { min: 0, max: 1, step: 0.01 }).on("change", sync);
+        fCol.addBinding(params, "openOceanDepth", { min: 1, max: 200, step: 1 }).on("change", sync);
+        fCol.addBinding(params, "opacity", { min: 0, max: 1, step: 0.01 }).on("change", sync);
+
+        const fSurf = pane.addFolder({ title: "Surface / Fresnel", expanded: false });
+        fSurf.addBinding(params, "surfNoiseScale1", { min: 0.01, max: 0.5, step: 0.005 }).on("change", sync);
+        fSurf.addBinding(params, "surfNoiseScale2", { min: 0.01, max: 0.5, step: 0.005 }).on("change", sync);
+        fSurf.addBinding(params, "surfNoiseSpeed1", { min: -1, max: 1, step: 0.01 }).on("change", sync);
+        fSurf.addBinding(params, "surfNoiseSpeed2", { min: -1, max: 1, step: 0.01 }).on("change", sync);
+        fSurf.addBinding(params, "surfNormalStrength", { min: 0, max: 1.5, step: 0.01 }).on("change", sync);
+        fSurf.addBinding(params, "fresnelExp", { min: 0.5, max: 10, step: 0.1 }).on("change", sync);
+        fSurf.addBinding(params, "fresnelSky", { min: 0, max: 1, step: 0.01 }).on("change", sync);
+        fSurf.addBinding(params, "fresnelMax", { min: 0, max: 1, step: 0.01 }).on("change", sync);
+
+        const fGlint = pane.addFolder({ title: "Sun glint", expanded: false });
+        fGlint.addBinding(params, "glintColor").on("change", sync);
+        fGlint.addBinding(params, "glintIntensity", { min: 0, max: 3, step: 0.01 }).on("change", sync);
+        fGlint.addBinding(params, "glintPower", { min: 4, max: 600, step: 1 }).on("change", sync);
+
+        const fFoam = pane.addFolder({ title: "Coastal foam", expanded: false });
+        fFoam.addBinding(params, "foamEnabled").on("change", sync);
+        fFoam.addBinding(params, "foamColor").on("change", sync);
+        fFoam.addBinding(params, "foamBandWidth", { min: 0.2, max: 20, step: 0.1 }).on("change", sync);
+        fFoam.addBinding(params, "foamIntensity", { min: 0, max: 4, step: 0.05 }).on("change", sync);
+        fFoam.addBinding(params, "foamSharpness", { min: 0.2, max: 4, step: 0.05 }).on("change", sync);
+        fFoam.addBinding(params, "foamNoiseAmt", { min: 0, max: 1, step: 0.01 }).on("change", sync);
+        fFoam.addBinding(params, "foamNoiseScale", { min: 0.02, max: 1, step: 0.01 }).on("change", sync);
+        fFoam.addBinding(params, "foamBreatheAmp", { min: 0, max: 4, step: 0.05 }).on("change", sync);
+        fFoam.addBinding(params, "foamBreatheHz", { min: 0, max: 2, step: 0.01 }).on("change", sync);
+
+        const fSky = pane.addFolder({ title: "Sky / Light", expanded: false });
+        fSky.addBinding(params, "exposure", { min: 0.1, max: 2, step: 0.01 }).on("change", applySky);
+        fSky.addBinding(params, "sunAzimuth", { min: 0, max: 360, step: 1 }).on("change", applySky);
+        fSky.addBinding(params, "sunElevation", { min: 1, max: 90, step: 1 }).on("change", applySky);
+        fSky.addBinding(params, "envIntensity", { min: 0, max: 2, step: 0.05 }).on("change", applySky);
+        fSky.addBinding(params, "fogDensity", { min: 0, max: 0.01, step: 0.0001 }).on("change", applySky);
+        fSky.addButton({ title: "Bake sky env" }).on("click", () => { applySky(); bakeSkyEnv(); });
+
+        pane.addButton({ title: "Export params JSON" }).on("click", () => {
+          const blob = new Blob([JSON.stringify(params, null, 2)], { type: "application/json" });
+          const a = document.createElement("a");
+          a.download = "ocean-params.json";
+          a.href = URL.createObjectURL(blob);
+          a.click();
+          setTimeout(() => URL.revokeObjectURL(a.href), 100);
+        });
+
+        // ── Resize ─────────────────────────────────────────────────────────────
+        window.addEventListener("resize", () => {
+          camera.aspect = window.innerWidth / window.innerHeight;
+          camera.updateProjectionMatrix();
+          renderer.setSize(window.innerWidth, window.innerHeight);
+        });
+
+        // ── Loop ─────────────────────────────────────────────────────────────
+        renderer.setAnimationLoop(() => {
+          clock.update();
+          const elapsed = clock.getElapsed();
+          controls.update();
+
+          // Recenter the clipmap on the camera, snapped to the finest 2-cell
+          // grid so the rigid group never swims relative to the wave field.
+          const step = clip.snapStep;
+          clip.group.position.set(
+            Math.round(camera.position.x / step) * step,
+            params.seaY,
+            Math.round(camera.position.z / step) * step,
+          );
+          ocean.uniforms.waterY.value = params.seaY;
+          ocean.update(0, elapsed, null);
+
+          renderer.render(scene, camera);
+          stats.update();
+
+          hud.textContent =
+            `map ${terrainSize}  ·  ocean tris ${(clip.triCount / 1000).toFixed(1)}k  ·  ` +
+            `lvls ${params.levels}  grid ${params.gridM}  cell ${params.baseCell}\n` +
+            `finest ${clip.finestExtent}u  ·  cam ${camera.position.x.toFixed(0)},` +
+            `${camera.position.y.toFixed(0)},${camera.position.z.toFixed(0)}`;
+        });
+      }
+
+      init();
+    </script>
+  </body>
+</html>

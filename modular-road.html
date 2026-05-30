@@ -731,6 +731,7 @@
       &bull; <span id="mode-hint">LMB place &bull; MMB orbit &bull; <kbd>1</kbd>–<kbd>0</kbd>/<kbd>c</kbd> pick &bull; R flip &bull; Backspace undo</span>
     </div>
     <div id="drive-hud" style="position:fixed;top:14px;right:330px;z-index:15;display:none;font:13px/1.5 var(--font-mono);background:rgba(0,0,0,0.6);border:1px solid rgba(120,255,180,0.35);border-radius:8px;padding:8px 12px;pointer-events:none;color:#c8d8e8;"></div>
+    <div id="pause-badge" style="position:fixed;top:50px;left:50%;transform:translateX(-50%);z-index:16;display:none;font:600 12px/1 var(--font-mono);letter-spacing:0.22em;text-transform:uppercase;color:#a8d4ff;background:rgba(12,18,30,0.82);border:1px solid rgba(120,180,255,0.4);border-radius:20px;padding:8px 16px;pointer-events:none;">⏸ Paused &bull; <span style="color:#7fa8d8">N step &bull; LMB orbit</span></div>
     <div id="palette">
       <div id="palette-rail">
         <button id="edges-toggle" class="on" type="button">Edges<br />On/Off</button>
@@ -779,9 +780,11 @@
 
     <script type="module">
       import * as THREE from "three";
+      import { uniform, fog, mix, clamp, exponentialHeightFogFactor, densityFogFactor, pass, renderOutput } from "three/tsl";
       import { OrbitControls } from "three/addons/controls/OrbitControls.js";
       import { SkyMesh } from "three/addons/objects/SkyMesh.js";
       import { CSMShadowNode } from "three/addons/csm/CSMShadowNode.js";
+      import { bloom } from "three/addons/tsl/display/BloomNode.js";
       import { createTileMaterial } from "./tileMaterial.js";
       import {
         createRoadMaterial,
@@ -792,10 +795,10 @@
       } from "./modularRoadMaterial.js";
       import { ModularRoadBuilder, buildRoadPaletteUI } from "./modularRoadBuilder.js";
       import { roadParams, pieceParams, guardrailParams } from "./modularRoadKit.js";
-      import { Vehicle, TIRE, CHASSIS, SOLID, DECK, AERO, DRIVETRAIN, HEADLIGHTS } from "./modularRoadVehicle.js";
+      import { Vehicle, TIRE, CHASSIS, SOLID, DECK, AERO, DRIVETRAIN, HEADLIGHTS, TAILLIGHTS } from "./modularRoadVehicle.js";
       import { RoadBvh } from "./modularRoadBvh.js";
       import { buildParkour } from "./modularRoadParkour.js";
-      import { PropManager, PROP_CATALOG } from "./modularRoadProps.js";
+      import { PropManager, PROP_CATALOG, glowPropParams } from "./modularRoadProps.js";
       import { ModularRoadTireMarks } from "./modularRoadTireMarks.js";
       import {
         createModularRoadAudioSystem,
@@ -856,6 +859,11 @@
           mapSize: 2048,
           updateEveryFrame: true,
         },
+        fog: {
+          height: { enabled: false, color: "#a8c4e0", density: 0.05, height: 30.0 },
+          distance: { enabled: false, color: "#d0e4f0", density: 0.006 },
+        },
+        bloom: { enabled: false, strength: 0.25, threshold: 1.0, radius: 0.4, smoothWidth: 1.0 },
         physicalSky: {
           turbidity: 2,
           rayleigh: 1.5,
@@ -911,7 +919,7 @@
         controls.dampingFactor = 0.05;
         controls.maxPolarAngle = Math.PI * 0.495;
 
-        const state = { mode: "build", buildMode: true, orbitInDrive: false };
+        const state = { mode: "build", buildMode: true, orbitInDrive: false, paused: false, frameStep: false };
         function syncOrbitButtons() {
           const build = state.mode === "build" && state.buildMode;
           controls.mouseButtons = build
@@ -1041,6 +1049,34 @@
         floor.receiveShadow = true;
         scene.add(floor);
 
+        // ── FOG (match v2: exponential height + distance fog, single fogNode) ──
+        // Assign scene.fogNode ONCE — toggling it at runtime recompiles every
+        // material (WebGPU device-lost risk). Uniforms zero the effect when off.
+        const F = PARAMS.fog;
+        const uHFogEnabled = uniform(F.height.enabled ? 1 : 0);
+        const uHFogColor = uniform(new THREE.Color(F.height.color).convertSRGBToLinear());
+        const uHFogDensity = uniform(F.height.density);
+        const uHFogHeight = uniform(F.height.height);
+        const uDFogEnabled = uniform(F.distance.enabled ? 1 : 0);
+        const uDFogColor = uniform(new THREE.Color(F.distance.color).convertSRGBToLinear());
+        const uDFogDensity = uniform(F.distance.density);
+        const _hFactor = exponentialHeightFogFactor(uHFogDensity, uHFogHeight).mul(uHFogEnabled);
+        const _dFactor = densityFogFactor(uDFogDensity).mul(uDFogEnabled);
+        const _fogFactor = clamp(_hFactor.add(_dFactor), 0, 1);
+        const _fogW = _hFactor.add(_dFactor).add(0.0001);
+        const _fogColor = mix(uHFogColor, uDFogColor, _dFactor.div(_fogW));
+        scene.fogNode = fog(_fogColor, _fogFactor);
+        function syncFog() {
+          uHFogEnabled.value = F.height.enabled ? 1 : 0;
+          uHFogColor.value.set(F.height.color).convertSRGBToLinear();
+          uHFogDensity.value = F.height.density;
+          uHFogHeight.value = F.height.height;
+          uDFogEnabled.value = F.distance.enabled ? 1 : 0;
+          uDFogColor.value.set(F.distance.color).convertSRGBToLinear();
+          uDFogDensity.value = F.distance.density;
+        }
+        syncFog();
+
         // ── ROAD MATERIAL + BUILDER ──
         const roadMat = createRoadMaterial(PARAMS.roadColors);
         const railMat = createGuardrailMaterial();
@@ -1083,6 +1119,7 @@
         const vehicle = new Vehicle({ scene });
         vehicle.setArrowsVisible(true); // force arrows on by default (physics tuning)
         vehicle.applyHeadlightParams();
+        vehicle.applyTaillightParams();
 
         // ── DAY / NIGHT PRESETS ──
         // Snap the shared light + sky params between a day and a night look, then
@@ -1228,6 +1265,7 @@
         const driveBtn = document.getElementById("road-drive");
         const driveHud = document.getElementById("drive-hud");
         const modeHint = document.getElementById("mode-hint");
+        const pauseBadge = document.getElementById("pause-badge");
 
         function setBuildMode(on) {
           state.buildMode = on;
@@ -1256,7 +1294,7 @@
           driveHud.style.display = on ? "" : "none";
           camModeEl.textContent = on ? "DRIVE" : state.buildMode ? "BUILD" : "ORBIT";
           modeHint.innerHTML = on
-            ? "WASD drive &bull; in air: W/S pitch, A/D roll, Q/E spin &bull; Space handbrake &bull; F flip upright &bull; R respawn &bull; Tab orbit cam"
+            ? "WASD drive &bull; Space handbrake &bull; F flip &bull; R respawn &bull; P pause (orbit + N step) &bull; Tab orbit cam"
             : "LMB place &bull; N new chain + gizmo &bull; W move Shift+E rotate &bull; 1–0 pick &bull; R flip &bull; Backspace undo";
           builder.setGhostVisible(!on && state.buildMode);
           props.setEnabled(!on);
@@ -1282,10 +1320,28 @@
             driftSmoke.reset();
           }
           state.orbitInDrive = false;
+          state.paused = false;
+          state.frameStep = false;
+          pauseBadge.style.display = "none";
           controls.enabled = !on; // chase cam drives in drive mode
           syncOrbitButtons();
         }
         driveBtn.addEventListener("click", () => setDriveMode(state.mode !== "drive"));
+
+        // Freeze the sim mid-action and free-orbit the car (v2 play-mode pattern).
+        // P toggles; while paused, LMB orbits around the frozen car and N steps one frame.
+        function setPaused(on) {
+          if (state.mode !== "drive") return;
+          state.paused = on;
+          pauseBadge.style.display = on ? "" : "none";
+          if (on) {
+            controls.enabled = true; // orbit around the frozen car
+            controls.target.copy(vehicle.body.pos);
+            for (const k in keys) keys[k] = false; // don't lurch on resume
+          } else {
+            controls.enabled = state.orbitInDrive;
+          }
+        }
 
         // Manual collision rebake — bake the current track/parkour into the BVHs.
         const rebakeBtn = document.getElementById("road-rebake");
@@ -1374,10 +1430,18 @@
               driftSmoke.reset();
             }
             if (e.code === "KeyF") vehicle.flipUpright();
+            if (e.code === "KeyP") {
+              setPaused(!state.paused);
+              return;
+            }
+            if (e.code === "KeyN" && state.paused) {
+              state.frameStep = true;
+              return;
+            }
             if (e.code === "Tab") {
               e.preventDefault();
               state.orbitInDrive = !state.orbitInDrive;
-              controls.enabled = state.orbitInDrive;
+              controls.enabled = state.orbitInDrive || state.paused;
             }
           }
           keys[e.code] = true;
@@ -1498,12 +1562,46 @@
           camera.lookAt(_camLook);
         }
 
+        // ── BLOOM (post-FX) — bloom-only slice of v2's PostFxPipeline ──
+        // Lazy: the pipeline + bloom node are built on first enable, so it
+        // costs nothing until used. Additive bloom on the scene-pass color in
+        // linear HDR, then renderOutput() does tonemap + sRGB (matches v2).
+        let post = null;
+        let bloomPass = null;
+        function buildPost() {
+          if (post) return;
+          const Pipeline = THREE.RenderPipeline ?? THREE.PostProcessing;
+          post = new Pipeline(renderer);
+          post.outputColorTransform = false; // renderOutput handles tonemap+sRGB
+          const scenePass = pass(scene, camera);
+          const scenePassColor = scenePass.getTextureNode("output");
+          bloomPass = bloom(
+            scenePassColor,
+            PARAMS.bloom.strength,
+            PARAMS.bloom.radius,
+            PARAMS.bloom.threshold,
+          );
+          post.outputNode = renderOutput(scenePassColor.add(bloomPass));
+        }
+        function applyBloomParams() {
+          if (!bloomPass) return;
+          bloomPass.strength.value = PARAMS.bloom.strength;
+          bloomPass.threshold.value = PARAMS.bloom.threshold;
+          bloomPass.radius.value = PARAMS.bloom.radius;
+          if (bloomPass.smoothWidth) bloomPass.smoothWidth.value = PARAMS.bloom.smoothWidth;
+        }
+        function setBloomEnabled(on) {
+          PARAMS.bloom.enabled = on;
+          if (on) buildPost();
+          applyBloomParams();
+        }
+
         // ── INSPECTOR ──
         buildInspector({
           camera, floorMat, roadMat, builder, vehicle, updateSun, rebuildSkyEnv,
           obstacleParams, parkour, bakeCollision, debugGroup, refreshCollisionDebug,
           props, portals, rebuildVehicleAudio, timeOfDay, applyTimePreset,
-          setCsmEnabled, rebuildCsm,
+          setCsmEnabled, rebuildCsm, syncFog, setBloomEnabled, applyBloomParams,
           goToParkour: () => {
             if (state.mode !== "drive") setDriveMode(true);
             vehicle.setSpawn(
@@ -1525,15 +1623,28 @@
           const dt = Math.min(now - lastT, 0.05);
           lastT = now;
           if (state.mode === "drive") {
-            if (obstacleParams.enabled) {
-              parkour.update(dt);
-              if (parkour.deckMovers.length) rebakeDeckWithMovers();
+            // Paused → freeze the sim (simDt 0); N requests a single frame step.
+            let simDt = state.paused ? 0 : dt;
+            if (state.paused && state.frameStep) {
+              simDt = 1 / 60;
+              state.frameStep = false;
             }
-            vehicle.update(dt, readControls());
-            tireMarks.update(vehicle);
-            driftSmoke.updateFromVehicle(vehicle, camera, dt, keys);
-            portals.updateDrive(dt, vehicle);
-            updateChaseCamera(dt);
+            if (simDt > 0) {
+              if (obstacleParams.enabled) {
+                parkour.update(simDt);
+                if (parkour.deckMovers.length) rebakeDeckWithMovers();
+              }
+              vehicle.update(simDt, readControls());
+              tireMarks.update(vehicle);
+              driftSmoke.updateFromVehicle(vehicle, camera, simDt, keys);
+              portals.updateDrive(simDt, vehicle);
+            }
+            if (state.paused) {
+              controls.target.copy(vehicle.body.pos); // orbit around the frozen car
+              controls.update();
+            } else {
+              updateChaseCamera(dt);
+            }
             driveHud.innerHTML = `${vehicle.speedKmh.toFixed(0)} km/h · ${vehicle.groundedCount}/4 grip`;
           } else {
             controls.update();
@@ -1543,7 +1654,8 @@
           // CSM cascades are camera-relative — refresh after the camera moved.
           // Guard on mainFrustum: it's only set once CSM has run its first render.
           if (csm?.mainFrustum && PARAMS.csm.enabled && PARAMS.csm.updateEveryFrame) csm.updateFrustums();
-          renderer.render(scene, camera);
+          if (PARAMS.bloom.enabled && post) post.render();
+          else renderer.render(scene, camera);
         });
         window.addEventListener("resize", () => {
           camera.aspect = innerWidth / innerHeight;
@@ -1716,7 +1828,7 @@
         camera, floorMat, roadMat, builder, vehicle, updateSun, rebuildSkyEnv,
         obstacleParams, parkour, bakeCollision, debugGroup, refreshCollisionDebug,
         props, portals, rebuildVehicleAudio, timeOfDay, applyTimePreset,
-        setCsmEnabled, rebuildCsm,
+        setCsmEnabled, rebuildCsm, syncFog, setBloomEnabled, applyBloomParams,
         goToParkour, goToTrack,
       }) {
         const body = document.getElementById("inspector-body");
@@ -1919,6 +2031,9 @@
             _button(sec, "+ " + def.label, () => props.add(def.id));
           }
           _separator(sec);
+          _color(sec, glowPropParams, "color", { label: "Glow color", onChange: () => props.applyGlowParams() });
+          _slider(sec, glowPropParams, "intensity", { label: "Glow strength", min: 0, max: 20, step: 0.5, onChange: () => props.applyGlowParams() });
+          _separator(sec);
           const gz = { mode: "translate" };
           _select(sec, gz, "mode", ["translate", "rotate", "scale"], {
             label: "Gizmo",
@@ -2006,12 +2121,54 @@
           _slider(sec, HEADLIGHTS, "distance", { label: "Range (m)", min: 10, max: 200, step: 5, onChange: reb });
           _slider(sec, HEADLIGHTS, "angle", { label: "Cone angle", min: 0.1, max: 1.2, step: 0.01, onChange: reb });
           _slider(sec, HEADLIGHTS, "penumbra", { label: "Softness", min: 0, max: 1, step: 0.02, onChange: reb });
+          _slider(sec, HEADLIGHTS, "lampEmissive", { label: "Lamp glow", min: 0, max: 8, step: 0.1, onChange: reb });
           _separator(sec);
           _slider(sec, HEADLIGHTS, "forward", { label: "Mount fwd", min: 0, max: 2.5, step: 0.05, onChange: reb });
           _slider(sec, HEADLIGHTS, "side", { label: "Mount side", min: 0, max: 1.2, step: 0.02, onChange: reb });
           _slider(sec, HEADLIGHTS, "height", { label: "Mount up", min: -0.4, max: 0.6, step: 0.02, onChange: reb });
           _slider(sec, HEADLIGHTS, "aimForward", { label: "Aim dist", min: 2, max: 40, step: 1, onChange: reb });
           _slider(sec, HEADLIGHTS, "aimDrop", { label: "Aim drop", min: 0, max: 8, step: 0.1, onChange: reb });
+        }
+
+        // ── Taillights (emissive, glow on brake/handbrake) ──
+        {
+          const sec = _section(body, "Taillights", false);
+          const reb = () => vehicle.applyTaillightParams();
+          _toggle(sec, TAILLIGHTS, "enabled", { label: "Enabled" });
+          _color(sec, TAILLIGHTS, "color", { label: "Color", onChange: reb });
+          _slider(sec, TAILLIGHTS, "runningIntensity", { label: "Running glow", min: 0, max: 4, step: 0.05 });
+          _slider(sec, TAILLIGHTS, "brakeIntensity", { label: "Brake glow", min: 0, max: 12, step: 0.1 });
+          _separator(sec);
+          _slider(sec, TAILLIGHTS, "width", { label: "Width", min: 0.05, max: 1, step: 0.01, onChange: reb });
+          _slider(sec, TAILLIGHTS, "height", { label: "Height", min: 0.05, max: 0.6, step: 0.01, onChange: reb });
+          _slider(sec, TAILLIGHTS, "side", { label: "Mount side", min: 0, max: 1.2, step: 0.02, onChange: reb });
+          _slider(sec, TAILLIGHTS, "up", { label: "Mount up", min: -0.4, max: 0.6, step: 0.02, onChange: reb });
+          _slider(sec, TAILLIGHTS, "back", { label: "Mount back", min: 0, max: 2.5, step: 0.05, onChange: reb });
+        }
+
+        // ── Fog (match v2 — height + distance) ──
+        {
+          const sec = _section(body, "Fog", false);
+          const F = PARAMS.fog;
+          _toggle(sec, F.height, "enabled", { label: "Height fog", onChange: syncFog });
+          _color(sec, F.height, "color", { label: "H color", onChange: syncFog });
+          _slider(sec, F.height, "density", { label: "H density", min: 0, max: 0.3, step: 0.001, onChange: syncFog });
+          _slider(sec, F.height, "height", { label: "H height", min: 0, max: 120, step: 1, onChange: syncFog });
+          _separator(sec);
+          _toggle(sec, F.distance, "enabled", { label: "Distance fog", onChange: syncFog });
+          _color(sec, F.distance, "color", { label: "D color", onChange: syncFog });
+          _slider(sec, F.distance, "density", { label: "D density", min: 0, max: 0.05, step: 0.0005, onChange: syncFog });
+        }
+
+        // ── Bloom (post-FX) ──
+        {
+          const sec = _section(body, "Bloom (post)", false);
+          const B = PARAMS.bloom;
+          _toggle(sec, B, "enabled", { label: "Enabled", onChange: (on) => setBloomEnabled(on) });
+          _slider(sec, B, "strength", { label: "Strength", min: 0, max: 3, step: 0.01, onChange: applyBloomParams });
+          _slider(sec, B, "threshold", { label: "Threshold", min: 0, max: 2, step: 0.01, onChange: applyBloomParams });
+          _slider(sec, B, "radius", { label: "Radius", min: 0, max: 1, step: 0.01, onChange: applyBloomParams });
+          _slider(sec, B, "smoothWidth", { label: "Smooth width", min: 0, max: 1, step: 0.01, onChange: applyBloomParams });
         }
 
         // ── Sky ──

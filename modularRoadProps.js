@@ -63,6 +63,10 @@ function airTunnelGeometry(length = 36, height = 9) {
 /* Prop catalog                                                             */
 /* ----------------------------------------------------------------------- */
 
+/** Shared look for the emissive "Glow box" prop. Edited live via the inspector;
+ *  high emissiveIntensity (>1) so it blooms against any sky (folio-2025 style). */
+export const glowPropParams = { color: "#ff5a1e", intensity: 6 };
+
 function mat(color, opts = {}) {
   return new THREE.MeshStandardMaterial({
     color: new THREE.Color(color),
@@ -91,6 +95,24 @@ export const PROP_CATALOG = [
     label: "Slope ramp",
     collision: "both",
     make: () => new THREE.Mesh(rampGeometry(18, 6, 14), mat(0xe8912d, { roughness: 0.8 })),
+  },
+  {
+    id: "glowbox",
+    label: "Glow box",
+    collision: "both",
+    make: () => {
+      const m = new THREE.Mesh(
+        new THREE.BoxGeometry(6, 12, 3),
+        mat(glowPropParams.color, {
+          roughness: 0.5,
+          emissive: glowPropParams.color,
+          emissiveIntensity: glowPropParams.intensity,
+        }),
+      );
+      m.geometry.translate(0, 6, 0); // rest on the ground
+      m.userData.isGlow = true;
+      return m;
+    },
   },
   {
     id: "kickerramp",
@@ -229,6 +251,20 @@ export class PropManager {
 
   setMode(mode) {
     this.gizmo.setMode(mode);
+  }
+
+  /** Push the shared glow params onto every placed Glow box (live tuning). */
+  applyGlowParams() {
+    for (const inst of this.instances) {
+      if (inst.id !== "glowbox") continue;
+      inst.root.traverse((o) => {
+        if (o.isMesh && o.material) {
+          o.material.color.set(glowPropParams.color);
+          o.material.emissive.set(glowPropParams.color);
+          o.material.emissiveIntensity = glowPropParams.intensity;
+        }
+      });
+    }
   }
 
   /** Spawn a prop near the orbit target (or origin) and select it. */
