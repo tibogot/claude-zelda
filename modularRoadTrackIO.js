@@ -25,7 +25,7 @@ function assignPlainParams(target, source) {
  * @param {import("./modularRoadBuilder.js").ModularRoadBuilder} ctx.builder
  * @param {import("./modularRoadProps.js").PropManager} ctx.props
  * @param {import("./modularRoadPortals.js").PortalManager} ctx.portals
- * @param {{ enabled?: boolean }} [ctx.obstacleParams]
+ * @param {import("./modularRoadMoverProps.js").MoverPropManager} ctx.movers
  * @param {object} ctx.roadParams
  * @param {object} ctx.guardrailParams
  * @param {object} ctx.pieceParams
@@ -34,8 +34,8 @@ function assignPlainParams(target, source) {
 export function exportTrack({
   builder,
   props,
+  movers,
   portals,
-  obstacleParams,
   roadParams,
   guardrailParams,
   pieceParams,
@@ -51,10 +51,8 @@ export function exportTrack({
     portalParams: clonePlainParams(portalParams),
     pieces: builder.exportTrackPieces(),
     props: props.exportInstances(),
+    movers: movers.exportInstances(),
     portals: portals.exportLayout(),
-    settings: {
-      parkourEnabled: obstacleParams?.enabled !== false,
-    },
   };
 }
 
@@ -81,11 +79,8 @@ export function importTrack(data, ctx) {
 
   ctx.builder.importTrackPieces(data.pieces);
   ctx.props.importInstances(data.props);
+  if (ctx.movers) ctx.movers.importInstances(data.movers);
   ctx.portals.importLayout(data.portals);
-
-  if (ctx.obstacleParams && data.settings && "parkourEnabled" in data.settings) {
-    ctx.obstacleParams.enabled = !!data.settings.parkourEnabled;
-  }
 
   return { ok: true, pieceCount: ctx.builder.count };
 }

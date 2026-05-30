@@ -46,7 +46,7 @@ import {
   mix, smoothstep, sin, cos, sqrt, dot, length, round, fract, floor,
   min, max, exp, abs, pow, saturate, clamp,
   normalize, texture, attribute, positionWorld, positionLocal, modelWorldMatrix,
-  cameraPosition, mx_noise_float, pmremTexture, Loop,
+  cameraPosition, mx_noise_float, pmremTexture, Loop, If,
 } from "three/tsl";
 
 const TWO_PI = 6.2831853;
@@ -252,6 +252,20 @@ export const OCEAN_DEFAULTS = {
   /** PMREM roughness on steep / choppy patches and grazing views. */
   envRoughnessRipple: 0.28,
 
+  // ── Horizon atmosphere fade (dissolves the ocean/sky seam at the far edge) ──
+  // The flat ocean plane never reaches the true (infinite) horizon, so a thin
+  // band of bright sky shows below it. Fading the far water toward a horizon
+  // colour hides that seam and adds aerial perspective.
+  horizonFadeEnabled: true,
+  /** true = fade far water to the actual sky (env) along the view ray (best seam
+   *  hide); false = fade to the flat `horizonColor` below. */
+  horizonUseSky:      true,
+  horizonColor:       "#cdddea",
+  /** Camera distance where the fade begins. */
+  horizonFadeStart:   1800.0,
+  /** Camera distance where water is fully the horizon colour. */
+  horizonFadeEnd:     9000.0,
+
   // Alpha
   opacity:            1.0,
 
@@ -396,6 +410,13 @@ export function createOceanShader({ heightTex, terrainSize, fft = null, envMap =
   placeholderEnv.needsUpdate = true;
   let envSourceTexture = envMap || placeholderEnv;
   const envPmrem = pmremTexture(envSourceTexture);
+
+  // Horizon fade
+  u.horizonFadeEnabled = uniform(OCEAN_DEFAULTS.horizonFadeEnabled ? 1 : 0);
+  u.horizonUseSky      = uniform(OCEAN_DEFAULTS.horizonUseSky ? 1 : 0);
+  u.horizonColor       = uniform(new THREE.Color(OCEAN_DEFAULTS.horizonColor));
+  u.horizonFadeStart   = uniform(OCEAN_DEFAULTS.horizonFadeStart);
+  u.horizonFadeEnd     = uniform(OCEAN_DEFAULTS.horizonFadeEnd);
 
   // Alpha
   u.opacity = uniform(OCEAN_DEFAULTS.opacity);
@@ -560,22 +581,24 @@ export function createOceanShader({ heightTex, terrainSize, fft = null, envMap =
     const jMin = min(jS, jR);
     const lo = u.whitecapThreshold.sub(u.whitecapSoftness);
     const breaking = float(1).sub(smoothstep(lo, u.whitecapThreshold, jMin));
-    const detail = worleyFoamPattern(
-      xz,
-      u.whitecapNoiseScale,
-      u.whitecapNoiseSpeed,
-      u.whitecapWarpStrength,
-      u.whitecapWarpScale,
-      u.whitecapContrast,
-      u.whitecapProcThreshold,
-      u.whitecapProcSoftness,
-      u.whitecapBrightness,
-    );
-    return breaking.mul(detail)
-      .mul(u.whitecapIntensity)
-      .mul(u.whitecapEnabled)
-      .mul(u.fftEnabled)
-      .mul(ampScale);
+    // Gate the expensive Worley noise: only breaking crests (and only where
+    // whitecaps are enabled + in wave range) ever need it. Calm/far warps skip it.
+    const gate = breaking.mul(u.whitecapEnabled).mul(u.fftEnabled).mul(ampScale);
+    const detail = float(0).toVar();
+    If(gate.greaterThan(float(0.001)), () => {
+      detail.assign(worleyFoamPattern(
+        xz,
+        u.whitecapNoiseScale,
+        u.whitecapNoiseSpeed,
+        u.whitecapWarpStrength,
+        u.whitecapWarpScale,
+        u.whitecapContrast,
+        u.whitecapProcThreshold,
+        u.whitecapProcSoftness,
+        u.whitecapBrightness,
+      ));
+    });
+    return breaking.mul(detail).mul(u.whitecapIntensity).mul(ampScale);
   }
 
   // ── Vertex stage: CDLOD morph + Gerstner displacement ────────────────────
@@ -761,17 +784,22 @@ export function createOceanShader({ heightTex, terrainSize, fft = null, envMap =
       u.time.mul(u.foamNoiseSpeed),
       u.time.mul(u.foamNoiseSpeed.mul(0.73)),
     );
-    const shoreProc = worleyFoamPattern(
-      wXZ.add(scrollF.mul(0.15)),
-      u.foamNoiseScale,
-      u.foamNoiseSpeed,
-      u.foamWarpStrength,
-      u.foamWarpScale,
-      u.foamContrast,
-      u.foamCutoff,
-      u.foamTransitionWidth,
-      float(1),
-    );
+    // Gate the Worley noise to the shoreline band — open ocean (band ≈ 0) and
+    // out-of-bounds fragments skip it entirely.
+    const shoreProc = float(0).toVar();
+    If(bandShaped.mul(inside).mul(u.foamEnabled).greaterThan(float(0.001)), () => {
+      shoreProc.assign(worleyFoamPattern(
+        wXZ.add(scrollF.mul(0.15)),
+        u.foamNoiseScale,
+        u.foamNoiseSpeed,
+        u.foamWarpStrength,
+        u.foamWarpScale,
+        u.foamContrast,
+        u.foamCutoff,
+        u.foamTransitionWidth,
+        float(1),
+      ));
+    });
     const noiseBlend = mix(float(1), shoreProc, u.foamNoiseAmt);
     const unified  = saturate(bandShaped.mul(noiseBlend));
 
@@ -784,7 +812,24 @@ export function createOceanShader({ heightTex, terrainSize, fft = null, envMap =
       .mul(inside);
 
     // ── Composite ───────────────────────────────────────────────────────────
-    const finalColor = mix(withWhitecap, u.foamColor, foamMask).saturate();
+    const composited = mix(withWhitecap, u.foamColor, foamMask).saturate();
+    // Aerial-perspective fade to hide the ocean/sky seam at the far edge. Fade
+    // target = the actual sky (env) sampled along the view ray, clamped to the
+    // horizon, so the far water matches the sky sliver above the geometry edge.
+    const horizDist = length(wXZ.sub(cameraPosition.xz));
+    const hf = smoothstep(u.horizonFadeStart, u.horizonFadeEnd, horizDist)
+      .mul(u.horizonFadeEnabled);
+    const horizonTarget = u.horizonColor.toVar();
+    If(hf.greaterThan(float(0.001)), () => {
+      const vRay = positionWorld.sub(cameraPosition);
+      const vDir = normalize(vec3(vRay.x, max(vRay.y, float(0.02)), vRay.z));
+      const skyCol = envPmrem.context({
+        getUV: () => vDir,
+        getTextureLevel: () => float(1.0),
+      });
+      horizonTarget.assign(mix(u.horizonColor, skyCol, u.horizonUseSky));
+    });
+    const finalColor = mix(composited, horizonTarget, hf);
     return vec4(finalColor, u.opacity);
   });
 
@@ -879,6 +924,12 @@ export function createOceanShader({ heightTex, terrainSize, fft = null, envMap =
     if (p.envReflectIntensity != null) u.envReflectIntensity.value = p.envReflectIntensity;
     if (p.envRoughnessCalm    != null) u.envRoughnessCalm.value    = p.envRoughnessCalm;
     if (p.envRoughnessRipple  != null) u.envRoughnessRipple.value  = p.envRoughnessRipple;
+
+    if (p.horizonFadeEnabled != null) u.horizonFadeEnabled.value = p.horizonFadeEnabled ? 1 : 0;
+    if (p.horizonUseSky      != null) u.horizonUseSky.value = p.horizonUseSky ? 1 : 0;
+    if (p.horizonColor       != null) c(p.horizonColor, u.horizonColor.value);
+    if (p.horizonFadeStart   != null) u.horizonFadeStart.value = p.horizonFadeStart;
+    if (p.horizonFadeEnd     != null) u.horizonFadeEnd.value = p.horizonFadeEnd;
 
     if (p.opacity != null) u.opacity.value = p.opacity;
 

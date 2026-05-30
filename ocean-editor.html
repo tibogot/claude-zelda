@@ -240,7 +240,14 @@
 
             // Coast: seabed offshore, rising terrain on land. Sea level stays at Y=0.
             const coastBlend = smoothstepJs(0, 0.22, landMask);
-            const y = seabed * (1 - coastBlend) + Math.max(seabed, landY) * coastBlend;
+            let y = seabed * (1 - coastBlend) + Math.max(seabed, landY) * coastBlend;
+            // Edge falloff: sink terrain to seabed near the map border so the
+            // perimeter is always open ocean — no land cut off at the boundary
+            // (which read as a hollow, single-sided shell).
+            const du = Math.min(i, RES - 1 - i) / (RES - 1);
+            const dv = Math.min(j, RES - 1 - j) / (RES - 1);
+            const edgeT = smoothstepJs(0, Math.max(o.edgeFalloff, 1e-4), Math.min(du, dv));
+            y = lerp1(seabed, y, edgeT);
             data[j * RES + i] = y;
           }
         }
@@ -349,8 +356,15 @@
         const meshes = [];
         const debugMats = [];
         let triCount = 0;
+        // Every ring is a proper doubling CDLOD level (gridM segs, cell ×2 each
+        // level) so the vertex morph stitches every boundary. Extra doubling
+        // levels are appended past `levels` until the ocean reaches
+        // horizonScale × extent. (The old coarse skirt was a non-matching grid,
+        // leaving a square T-junction crack that showed sky through the water.)
+        const mainOuter = (gridM * baseCell * Math.pow(2, levels - 1)) / 2;
+        const targetOuter = mainOuter * Math.max(1, horizonScale);
         let lastOuterHalf = 0;
-        for (let k = 0; k < levels; k++) {
+        for (let k = 0; k < levels + 16; k++) {
           const outerHalf = (gridM * baseCell * Math.pow(2, k)) / 2;
           const innerHalf = k === 0 ? 0 : outerHalf / 2;
           const geo = buildRingGeometryXZ(gridM, outerHalf, innerHalf);
@@ -366,20 +380,9 @@
             }),
           );
           lastOuterHalf = outerHalf;
+          if (k >= levels - 1 && outerHalf >= targetOuter) break;
         }
-        // Horizon skirt: one big low-res flat ring out to the visible horizon.
-        if (horizonScale > 1.01) {
-          const skirtOuter = lastOuterHalf * horizonScale;
-          const geo = buildRingGeometryXZ(32, skirtOuter, lastOuterHalf);
-          triCount += geo.getIndex().count / 3;
-          const mesh = new THREE.Mesh(geo, material);
-          mesh.frustumCulled = false;
-          mesh.renderOrder = 1;
-          group.add(mesh);
-          meshes.push(mesh);
-          debugMats.push(new THREE.MeshBasicMaterial({ color: 0x303040, wireframe: true }));
-        }
-        return { group, meshes, debugMats, triCount, snapStep: baseCell * 2, finestExtent: gridM * baseCell };
+        return { group, meshes, debugMats, triCount, snapStep: baseCell * 2, finestExtent: gridM * baseCell, levelCount: meshes.length, reach: lastOuterHalf };
       }
 
       // ─────────────────────────────────────────────────────────────────────
@@ -438,6 +441,8 @@
           coastFreq: 5.0,
           detailFreq: 14.0,
           detailAmp: 5.0,
+          /** Fraction of the map (per side) over which land sinks to seabed at the border. */
+          edgeFalloff: 0.12,
           // LOD
           levels: 7,
           gridM: 64,
@@ -740,6 +745,7 @@
           if (!terrainMat) {
             terrainMat = new THREE.MeshStandardMaterial({
               vertexColors: true, roughness: params.terrainRoughness, metalness: 0,
+              side: THREE.DoubleSide, // no see-through ("hollow") at sloped/cut edges
             });
           }
           rebuildTerrainMesh();
@@ -804,6 +810,7 @@
         fLand.addBinding(params, "coastFreq", { min: 0.5, max: 16, step: 0.1 }).on("change", reLand);
         fLand.addBinding(params, "detailFreq", { min: 2, max: 40, step: 0.5 }).on("change", reLand);
         fLand.addBinding(params, "detailAmp", { min: 0, max: 16, step: 0.1 }).on("change", reLand);
+        fLand.addBinding(params, "edgeFalloff", { min: 0, max: 0.4, step: 0.01, label: "edge → sea" }).on("change", reLand);
 
         const fLod = pane.addFolder({ title: "LOD / Perf" });
         fLod.addBinding(params, "levels", { min: 2, max: 10, step: 1 }).on("change", buildClip);
@@ -918,6 +925,11 @@
         fSky.addBinding(params, "sunElevation", { min: 1, max: 90, step: 1 }).on("change", applySky);
         fSky.addBinding(params, "envIntensity", { min: 0, max: 2, step: 0.05, label: "terrain env" }).on("change", applySky);
         fSky.addBinding(params, "fogDensity", { min: 0, max: 0.01, step: 0.0001 }).on("change", applySky);
+        fSky.addBinding(params, "horizonFadeEnabled", { label: "horizon fade" }).on("change", sync);
+        fSky.addBinding(params, "horizonUseSky", { label: "match sky" }).on("change", sync);
+        fSky.addBinding(params, "horizonColor", { label: "horizon col" }).on("change", sync);
+        fSky.addBinding(params, "horizonFadeStart", { min: 200, max: 8000, step: 50, label: "fade start" }).on("change", sync);
+        fSky.addBinding(params, "horizonFadeEnd", { min: 1000, max: 20000, step: 100, label: "fade end" }).on("change", sync);
         fSky.addButton({ title: "Bake sky env" }).on("click", () => { applySky(); bakeSkyEnv(); });
 
         const fRefl = pane.addFolder({ title: "Reflections (sky PMREM)" });

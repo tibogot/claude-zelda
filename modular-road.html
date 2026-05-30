@@ -816,8 +816,8 @@
       import { bakeRoadThumbnails } from "./modularRoadThumbnails.js";
       import { Vehicle, TIRE, CHASSIS, SOLID, DECK, AERO, DRIVETRAIN, HEADLIGHTS, TAILLIGHTS } from "./modularRoadVehicle.js";
       import { RoadBvh } from "./modularRoadBvh.js";
-      import { buildParkour } from "./modularRoadParkour.js";
       import { PropManager, PROP_CATALOG, glowPropParams } from "./modularRoadProps.js";
+      import { MoverPropManager, MOVER_CATALOG } from "./modularRoadMoverProps.js";
       import { ModularRoadTireMarks } from "./modularRoadTireMarks.js";
       import {
         createModularRoadAudioSystem,
@@ -1122,6 +1122,7 @@
           for (const pr of presets) thumbItems.push({ key: pr.id, pieceId: pr.base, params: pr.params });
         }
         for (const p of PROP_CATALOG) thumbItems.push({ key: p.id, make: p.make });
+        for (const m of MOVER_CATALOG) thumbItems.push({ key: m.id, make: m.make });
         let roadThumbnails = new Map();
         try {
           roadThumbnails = await bakeRoadThumbnails({
@@ -1135,20 +1136,27 @@
           console.warn("[modular-road] thumbnail bake skipped", e);
         }
 
+        let props;
+        let moverProps;
+        let portals;
         paletteUi = buildRoadPaletteUI(builder, {
           propCatalog: PROP_CATALOG,
+          moverCatalog: MOVER_CATALOG,
           thumbnails: roadThumbnails,
           onAddProp: (id) => props.add(id),
+          onAddMover: (id) => moverProps.add(id),
           onEdgesChange: () => bakeCollision(),
         });
 
         function beginFreeChain() {
           props.deselect();
+          moverProps.deselect();
           builder.beginNewChain(controls.target.clone());
           paletteUi?.refreshStatus();
         }
         function cycleChain(dir) {
           props.deselect();
+          moverProps.deselect();
           builder.cycleChain(dir);
           paletteUi?.refreshStatus();
         }
@@ -1160,8 +1168,6 @@
         roadParams.onChange = () => builder.rebuildAll();
         guardrailParams.onChange = () => builder.rebuildAll();
         pieceParams.onChange = () => builder.refreshGhost();
-
-        builder.loadDemo();
 
         // ── VEHICLE (test drive) ──
         const vehicle = new Vehicle({ scene });
@@ -1200,27 +1206,18 @@
         const tireMarks = new ModularRoadTireMarks(scene);
         const driftSmoke = new ModularRoadDriftSmoke(scene, PARAMS.driftSmoke);
 
-        // BVH colliders, (re)baked on demand. Track + parkour are static while driving.
-        const deckBvh = new RoadBvh(); // road/parkour decks + ground → wheel probes
+        // BVH colliders, (re)baked on demand. Track + props/movers are static while driving.
+        const deckBvh = new RoadBvh(); // road decks + ground → wheel probes
         const solidsBvh = new RoadBvh(); // guardrails + walls → chassis collision
         vehicle.setBvh(deckBvh, solidsBvh);
 
-        // ── OBSTACLE PARKOUR (recreated from the Lotus VVV lab) ──
-        const parkour = buildParkour();
-        scene.add(parkour.group);
-        const obstacleParams = { enabled: true };
-        parkour.group.visible = obstacleParams.enabled;
-
-        function syncParkourMovers() {
-          vehicle.setDynamicMovers(obstacleParams.enabled ? parkour.movers : []);
+        function syncDynamicMovers() {
+          vehicle.setDynamicMovers(moverProps.getMovers());
         }
-        syncParkourMovers();
 
-        // ── FREE-PLACEMENT PROPS (gizmo) ──
-        let props;
-        let portals;
         function deselectOtherGizmos(except) {
           if (except !== "props") props?.deselect();
+          if (except !== "movers") moverProps?.deselect();
           if (except !== "portals") portals?.deselect();
           if (except !== "builder") builder.deselectPlacement?.();
         }
@@ -1235,6 +1232,17 @@
           },
           onSelect: () => deselectOtherGizmos("props"),
         });
+        moverProps = new MoverPropManager({
+          scene,
+          camera,
+          domElement: renderer.domElement,
+          orbit: controls,
+          onChange: () => {
+            refreshCollisionDebug();
+            paletteUi?.refreshStatus?.();
+          },
+          onSelect: () => deselectOtherGizmos("movers"),
+        });
         portals = new PortalManager({
           scene,
           camera,
@@ -1245,6 +1253,7 @@
           onActivate: () => deselectOtherGizmos("portals"),
         });
         props.setEnabled(state.mode === "build");
+        moverProps.setEnabled(state.mode === "build");
         portals.setBuildEnabled(state.mode === "build");
 
         // Collision debug wireframe (rebuilt on every bake).
@@ -1278,10 +1287,9 @@
             if (p.railMesh) solids.push(p.railMesh);
             if (p.shellMesh) solids.push(p.shellMesh);
           }
-          if (obstacleParams.enabled) {
-            decks.push(...parkour.deckMeshes);
-            solids.push(...parkour.wallMeshes);
-          }
+          const moverCol = moverProps.collisionMeshes();
+          decks.push(...moverCol.deck);
+          solids.push(...moverCol.solids);
           const propCol = props.collisionMeshes();
           decks.push(...propCol.deck);
           solids.push(...propCol.solids);
@@ -1298,10 +1306,9 @@
             .map((p) => p.mesh)
             .filter((m) => !m.userData.noCollision);
           decks.push(floor);
-          if (obstacleParams.enabled) {
-            decks.push(...parkour.deckMeshes);
-            for (const dm of parkour.deckMovers) decks.push(dm.mesh);
-          }
+          const moverCol = moverProps.collisionMeshes();
+          decks.push(...moverCol.deck);
+          for (const dm of moverProps.getDeckMovers()) decks.push(dm.mesh);
           const propCol = props.collisionMeshes();
           decks.push(...propCol.deck);
           deckBvh.bakeFromMeshes(decks);
@@ -1346,13 +1353,14 @@
             : "LMB place &bull; N new chain + gizmo &bull; W move Shift+E rotate &bull; 1–0 pick &bull; R flip &bull; Backspace undo";
           builder.setGhostVisible(!on && state.buildMode);
           props.setEnabled(!on);
+          moverProps.setEnabled(!on);
           portals.setBuildEnabled(!on);
           if (on) {
             bakeCollision();
-            if (obstacleParams.enabled) {
-              parkour.update(0);
-              if (parkour.deckMovers.length) rebakeDeckWithMovers();
-            }
+            moverProps.rebuildMovers();
+            moverProps.update(0);
+            syncDynamicMovers();
+            if (moverProps.getDeckMovers().length) rebakeDeckWithMovers();
             const collidables = builder.pieces
               .map((p) => p.mesh)
               .filter((m) => !m.userData.noCollision);
@@ -1391,7 +1399,7 @@
           }
         }
 
-        // Manual collision rebake — bake the current track/parkour into the BVHs.
+        // Manual collision rebake — bake the current track layout into the BVHs.
         const rebakeBtn = document.getElementById("road-rebake");
         rebakeBtn?.addEventListener("click", () => {
           bakeCollision();
@@ -1407,8 +1415,8 @@
           const result = importTrack(data, {
             builder,
             props,
+            movers: moverProps,
             portals,
-            obstacleParams,
             roadParams,
             guardrailParams,
             pieceParams,
@@ -1418,23 +1426,22 @@
             alert(result.error || "Track load failed.");
             return;
           }
-          parkour.group.visible = obstacleParams.enabled;
-          syncParkourMovers();
+          syncDynamicMovers();
           builder.rebuildAll();
           paletteUi?.syncEdgesBtn?.();
           paletteUi?.refreshStatus?.();
           bakeCollision();
           const statusEl = document.getElementById("road-status");
           if (statusEl) {
-            statusEl.textContent = `Loaded ${result.pieceCount} pieces · ${props.instances.length} props · ${portals.pairs.length} portal pairs`;
+            statusEl.textContent = `Loaded ${result.pieceCount} pieces · ${props.instances.length} props · ${moverProps.instances.length} movers · ${portals.pairs.length} portal pairs`;
           }
         });
         document.getElementById("road-save")?.addEventListener("click", () => {
           const track = exportTrack({
             builder,
             props,
+            movers: moverProps,
             portals,
-            obstacleParams,
             roadParams,
             guardrailParams,
             pieceParams,
@@ -1443,7 +1450,7 @@
           downloadTrackJson(track);
           const statusEl = document.getElementById("road-status");
           if (statusEl) {
-            statusEl.textContent = `Saved ${track.pieces.length} pieces · ${track.props.length} props`;
+            statusEl.textContent = `Saved ${track.pieces.length} pieces · ${track.props.length} props · ${track.movers.length} movers`;
           }
         });
         document.getElementById("road-load")?.addEventListener("click", () => {
@@ -1453,7 +1460,7 @@
         // ── PLACE ON LMB (build mode only) ──
         renderer.domElement.addEventListener("pointerdown", (e) => {
           if (e.button !== 0 || state.mode !== "build" || !state.buildMode) return;
-          if (props.isUsingGizmo() || portals.isUsingGizmo() || builder.isUsingPlacementGizmo()) return;
+          if (props.isUsingGizmo() || moverProps.isUsingGizmo() || portals.isUsingGizmo() || builder.isUsingPlacementGizmo()) return;
           builder.place();
           paletteUi.refreshStatus();
         });
@@ -1655,17 +1662,9 @@
         // ── INSPECTOR ──
         buildInspector({
           camera, floorMat, roadMat, builder, vehicle, updateSun, rebuildSkyEnv,
-          obstacleParams, parkour, bakeCollision, debugGroup, refreshCollisionDebug,
-          props, portals, rebuildVehicleAudio, timeOfDay, applyTimePreset,
+          bakeCollision, debugGroup, refreshCollisionDebug,
+          props, moverProps, portals, rebuildVehicleAudio, timeOfDay, applyTimePreset,
           setCsmEnabled, rebuildCsm, syncFog, setBloomEnabled, applyBloomParams,
-          goToParkour: () => {
-            if (state.mode !== "drive") setDriveMode(true);
-            vehicle.setSpawn(
-              new THREE.Vector3(parkour.spawn.pos.x, parkour.spawn.pos.y + TIRE.restLength + 0.15, parkour.spawn.pos.z),
-              new THREE.Quaternion().setFromAxisAngle(new THREE.Vector3(0, 1, 0), parkour.spawn.yaw),
-            );
-            vehicle.respawn();
-          },
           goToTrack: () => {
             spawnOnTrack();
             vehicle.respawn();
@@ -1686,10 +1685,8 @@
               state.frameStep = false;
             }
             if (simDt > 0) {
-              if (obstacleParams.enabled) {
-                parkour.update(simDt);
-                if (parkour.deckMovers.length) rebakeDeckWithMovers();
-              }
+              moverProps.update(simDt);
+              if (moverProps.getDeckMovers().length) rebakeDeckWithMovers();
               vehicle.update(simDt, readControls());
               tireMarks.update(vehicle);
               driftSmoke.updateFromVehicle(vehicle, camera, simDt, keys);
@@ -1882,10 +1879,10 @@
 
       function buildInspector({
         camera, floorMat, roadMat, builder, vehicle, updateSun, rebuildSkyEnv,
-        obstacleParams, parkour, bakeCollision, debugGroup, refreshCollisionDebug,
-        props, portals, rebuildVehicleAudio, timeOfDay, applyTimePreset,
+        bakeCollision, debugGroup, refreshCollisionDebug,
+        props, moverProps, portals, rebuildVehicleAudio, timeOfDay, applyTimePreset,
         setCsmEnabled, rebuildCsm, syncFog, setBloomEnabled, applyBloomParams,
-        goToParkour, goToTrack,
+        goToTrack,
       }) {
         const body = document.getElementById("inspector-body");
         document.getElementById("inspector-toggle").addEventListener("click", (e) => {
@@ -2007,18 +2004,9 @@
           _slider(sec, sm, "rise", { label: "Rise", min: 0, max: 3, step: 0.05 });
         }
 
-        // ── Test obstacles + collision debug ──
+        // ── Collision debug ──
         {
-          const sec = _section(body, "Test obstacles & debug", false);
-          _toggle(sec, obstacleParams, "enabled", {
-            label: "Obstacle parkour",
-            onChange: (on) => {
-              parkour.group.visible = on;
-              vehicle.setDynamicMovers(on ? parkour.movers : []);
-              bakeCollision();
-            },
-          });
-          _button(sec, "Go to parkour", () => goToParkour());
+          const sec = _section(body, "Collision debug", false);
           _button(sec, "Go to track start", () => goToTrack());
           _separator(sec);
           _toggle(sec, debugGroup, "visible", {
@@ -2099,6 +2087,30 @@
           _button(sec, "Duplicate (Ctrl+D)", () => props.duplicateSelected());
           _button(sec, "Delete selected (Del)", () => props.deleteSelected());
           _button(sec, "Clear all props", () => props.clear());
+        }
+
+        // ── Moving obstacles (gizmo placement) ──
+        {
+          const sec = _section(body, "Moving obstacles", false);
+          const hint = document.createElement("div");
+          hint.className = "section-note";
+          hint.style.cssText = "font-size:10px;opacity:.7;padding:2px 2px 6px;line-height:1.5";
+          hint.innerHTML =
+            "Add from the Moving palette or below. Same gizmo as props — spin bars, gates, pendulums, elevator. Rebake collision after moving.";
+          sec.appendChild(hint);
+          for (const def of MOVER_CATALOG) {
+            _button(sec, "+ " + def.label, () => moverProps.add(def.id));
+          }
+          _separator(sec);
+          const gz = { mode: "translate" };
+          _select(sec, gz, "mode", ["translate", "rotate", "scale"], {
+            label: "Gizmo",
+            onChange: (m) => moverProps.setMode(m),
+          });
+          _separator(sec);
+          _button(sec, "Duplicate (Ctrl+D)", () => moverProps.duplicateSelected());
+          _button(sec, "Delete selected (Del)", () => moverProps.deleteSelected());
+          _button(sec, "Clear all movers", () => moverProps.clear());
         }
 
         // ── Teleport portals (paired doors) ──

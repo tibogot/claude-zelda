@@ -648,6 +648,7 @@ export const PALETTE_CATEGORIES = [
   { id: "slopes", label: "Slopes" },
   { id: "banked", label: "Banked" },
   { id: "obstacles", label: "Obstacles" },
+  { id: "moving", label: "Moving" },
   { id: "tilted", label: "Tilted" },
   { id: "loop", label: "Loop" },
 ];
@@ -664,6 +665,7 @@ function categoryIconSvg(id) {
     slopes: `<svg viewBox="0 0 48 48"><polygon points="6,36 42,36 42,12" fill="#2a2e36" stroke="#c0392b" stroke-width="1.8"/><line x1="8" y1="34" x2="40" y2="14" ${_RS}/></svg>`,
     banked: `<svg viewBox="0 0 48 48"><path d="M6 30 L42 18" ${_RS}/><rect x="8" y="16" width="32" height="8" rx="1" transform="rotate(-12 24 20)" ${_RB}/></svg>`,
     obstacles: `<svg viewBox="0 0 48 48"><rect x="12" y="14" width="14" height="22" rx="1" fill="#6a7580" stroke="#999" stroke-width="1.5"/><ellipse cx="34" cy="28" rx="8" ry="10" fill="none" stroke="#dce622" stroke-width="2"/></svg>`,
+    moving: `<svg viewBox="0 0 48 48"><rect x="8" y="22" width="32" height="6" rx="1" fill="#e8c040" stroke="#999" stroke-width="1.2"/><path d="M24 8 L24 18 M24 32 L24 42" stroke="#dce622" stroke-width="2" stroke-linecap="round"/><path d="M18 8 L24 14 L30 8" fill="none" stroke="#dce622" stroke-width="2" stroke-linecap="round"/></svg>`,
     tilted: `<svg viewBox="0 0 48 48"><path d="M8 24 Q24 8 40 24 Q24 40 8 24" ${_RS}/><rect x="14" y="20" width="20" height="6" rx="1" transform="rotate(25 24 23)" ${_RB}/></svg>`,
     loop: `<svg viewBox="0 0 48 48"><path d="M10 38 L10 22 Q10 6 24 6 Q38 6 38 22 L38 38" ${_RS}/><ellipse cx="24" cy="22" rx="12" ry="14" fill="none" stroke="#c0392b" stroke-width="1.5" opacity="0.6"/></svg>`,
   };
@@ -909,7 +911,8 @@ export const CATEGORY_PRESETS = {
 };
 
 /** Thumbnail map key for the first tile shown in a palette category. */
-export function categoryThumbnailKey(catId, propCatalog = []) {
+export function categoryThumbnailKey(catId, propCatalog = [], moverCatalog = []) {
+  if (catId === "moving") return moverCatalog[0]?.id ?? null;
   if (catId === "obstacles") return propCatalog[0]?.id ?? null;
   const presets = CATEGORY_PRESETS[catId];
   if (presets?.length) return presets[0].id;
@@ -920,10 +923,17 @@ export function categoryThumbnailKey(catId, propCatalog = []) {
 /**
  * Wire the left palette + toolbar DOM to a builder instance.
  * @param {ModularRoadBuilder} builder
- * @param {{ propCatalog?: object[], onAddProp?: (id:string)=>void, onEdgesChange?: ()=>void }} [opts]
+ * @param {{ propCatalog?: object[], moverCatalog?: object[], onAddProp?: (id:string)=>void, onAddMover?: (id:string)=>void, onEdgesChange?: ()=>void }} [opts]
  */
 export function buildRoadPaletteUI(builder, opts = {}) {
-  const { propCatalog = [], thumbnails = null, onAddProp = null, onEdgesChange = null } = opts;
+  const {
+    propCatalog = [],
+    moverCatalog = [],
+    thumbnails = null,
+    onAddProp = null,
+    onAddMover = null,
+    onEdgesChange = null,
+  } = opts;
   const catList = document.getElementById("category-list");
   const grid = document.getElementById("piece-grid");
   const titleEl = document.getElementById("category-title");
@@ -939,10 +949,11 @@ export function buildRoadPaletteUI(builder, opts = {}) {
 
   let activeCategory = "straight";
   let activePropId = null;
+  let activeMoverId = null;
   let activePresetId = null;
 
   function categoryIconMarkup(catId) {
-    const key = categoryThumbnailKey(catId, propCatalog);
+    const key = categoryThumbnailKey(catId, propCatalog, moverCatalog);
     const thumb = key ? thumbnails?.get(key) : null;
     if (thumb) return `<img src="${thumb}" alt="" draggable="false">`;
     return categoryIconSvg(catId);
@@ -951,6 +962,9 @@ export function buildRoadPaletteUI(builder, opts = {}) {
   function piecesInCategory(catId) {
     if (catId === "obstacles") {
       return propCatalog.map((p) => ({ id: p.id, label: p.label, isProp: true, hint: "" }));
+    }
+    if (catId === "moving") {
+      return moverCatalog.map((m) => ({ id: m.id, label: m.label, isMover: true, hint: "" }));
     }
     // Curated kit: if this category has presets, show those instead of raw pieces.
     if (CATEGORY_PRESETS[catId]) {
@@ -976,6 +990,7 @@ export function buildRoadPaletteUI(builder, opts = {}) {
     grid.innerHTML = "";
     pieceTiles.clear();
     activePropId = null;
+    activeMoverId = null;
 
     const items = piecesInCategory(activeCategory);
     const catLabel = PALETTE_CATEGORIES.find((c) => c.id === activeCategory)?.label ?? activeCategory;
@@ -991,6 +1006,7 @@ export function buildRoadPaletteUI(builder, opts = {}) {
         btn.disabled = true;
       }
       if (item.isProp) btn.dataset.isProp = "1";
+      if (item.isMover) btn.dataset.isMover = "1";
       if (item.isPreset) btn.dataset.isPreset = "1";
 
       const preview = document.createElement("div");
@@ -1023,26 +1039,38 @@ export function buildRoadPaletteUI(builder, opts = {}) {
         if (item.soon) return;
         if (item.isProp && onAddProp) {
           activePropId = item.id;
+          activeMoverId = null;
           builder.setActivePiece(builder.activePieceId);
           onAddProp(item.id);
           refreshStatus();
           return;
         }
+        if (item.isMover && onAddMover) {
+          activeMoverId = item.id;
+          activePropId = null;
+          activePresetId = null;
+          builder.setActivePiece(builder.activePieceId);
+          onAddMover(item.id);
+          refreshStatus();
+          return;
+        }
         if (item.isPreset) {
           activePropId = null;
+          activeMoverId = null;
           activePresetId = item.id;
           builder.setActivePreset(item.preset);
           refreshStatus();
           return;
         }
         activePropId = null;
+        activeMoverId = null;
         activePresetId = null;
         builder.setActivePiece(item.id);
         refreshStatus();
       });
 
       grid.appendChild(btn);
-      const suffix = item.isProp ? ":prop" : item.isPreset ? ":preset" : "";
+      const suffix = item.isProp ? ":prop" : item.isMover ? ":mover" : item.isPreset ? ":preset" : "";
       pieceTiles.set(item.id + suffix, btn);
     }
     refreshStatus();
@@ -1070,10 +1098,12 @@ export function buildRoadPaletteUI(builder, opts = {}) {
       let active;
       if (key.endsWith(":prop")) {
         active = activePropId === key.slice(0, -5);
+      } else if (key.endsWith(":mover")) {
+        active = activeMoverId === key.slice(0, -6);
       } else if (key.endsWith(":preset")) {
         active = activePresetId === key.slice(0, -7);
       } else {
-        active = !activePropId && !activePresetId && key === builder.activePieceId;
+        active = !activePropId && !activeMoverId && !activePresetId && key === builder.activePieceId;
       }
       btn.classList.toggle("active", active);
     }
