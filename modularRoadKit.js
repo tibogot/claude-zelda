@@ -66,9 +66,9 @@ export const pieceParams = {
   loopTighten: 0, // teardrop pinch toward the top (0 = round circle, up to 0.7)
   loopAdvance: 28, // legacy full-loop param (older tracks)
   // Spiral ring / corkscrew (flat run + climbing wrapped arc):
-  loopSpiralRadius: 12, // corkscrew radius (m)
-  loopSpiralTurns: 1, // full revolutions around the travel axis
-  loopSpiralPitch: 40, // forward advance per revolution (m)
+  loopSpiralRadius: 12, // helix radius (m)
+  loopSpiralTurns: 1, // full revolutions about the vertical axis
+  loopSpiralRise: 32, // total height climbed over the helix (m)
   // Game line pieces (start / checkpoint / finish):
   gameLineLength: 16,
   // Twist / barrel roll (straight centreline that rolls):
@@ -689,32 +689,51 @@ function loopFixFrames(frames, pp) {
 }
 
 /**
- * Corkscrew spiral — a true helix wound around the travel (-Z) axis. The road
- * circles in the X/Y plane (radius R) while advancing forward, so the car drives
- * *through* the spiral like a barrel/corkscrew. `loopSpiralTurns` sets how many
- * full revolutions; `loopSpiralPitch` is forward advance per revolution; curveDir
- * picks the winding direction. Starts and ends tangent to -Z so it chains cleanly.
+ * Climbing helix ramp — winds around a VERTICAL axis while climbing, like a
+ * parking-garage ramp or spiral staircase: starts FLAT on the ground heading -Z,
+ * spirals up `loopSpiralTurns` revolutions, and ends FLAT at height `loopSpiralRise`.
+ * The climb uses smoothstep so the vertical tangent is 0 at both ends → entry and
+ * exit are level. curveDir picks the turn direction. Paired with loopSpiralFixFrames
+ * (up = world-up) so the deck stays level across its width (a drivable ramp).
  */
 function loopSpiralPoints(pp) {
-  const R = Math.max(4, pp.loopSpiralRadius ?? pp.loopRadius ?? 12);
+  const R = Math.max(4, pp.loopSpiralRadius ?? 12);
   const dir = pp.curveDir >= 0 ? 1 : -1;
   const turns = Math.max(0.25, pp.loopSpiralTurns ?? 1);
-  const pitch = Math.max(R * 1.2, pp.loopSpiralPitch ?? R * 3); // forward run per turn
-  const totalAngle = 2 * Math.PI * turns;
-  const totalFwd = pitch * turns;
-  const n = Math.max(48, Math.ceil((R * totalAngle) / roadParams.segLen));
+  const rise = pp.loopSpiralRise ?? R * 2.6; // total height gained over the helix
+  const A = 2 * Math.PI * turns; // total turn angle about the vertical axis
+  const center = new V3(dir * R, 0, 0); // turn centre (origin starts on the rim)
+  const radius0 = new V3(-dir * R, 0, 0); // origin - center
+  const smooth = (u) => u * u * (3 - 2 * u); // ease climb in/out → flat ends
+  const n = Math.max(64, Math.ceil((R * A) / roadParams.segLen));
   const pts = [];
   for (let i = 0; i <= n; i++) {
     const u = i / n;
-    const theta = totalAngle * u;
-    // Circle around the -Z axis: x sideways, y up, both starting at 0 so the
-    // entry sits on the deck and the path leaves/returns tangent to -Z.
-    const x = dir * R * Math.sin(theta);
-    const y = R * (1 - Math.cos(theta));
-    const z = -totalFwd * u;
-    pts.push(new V3(x, y, z));
+    const pt = center.clone().add(rotateY(radius0, -dir * A * u)); // horizontal turn
+    pt.y = rise * smooth(u); // climb, flat at both ends
+    pts.push(pt);
   }
   return pts;
+}
+
+/**
+ * Keep the spiral-ramp deck level across its width: up = world up (perpendicular
+ * to the tangent), so the road banks neither inward nor outward — a normal
+ * drivable ramp, not a banked/corkscrew one.
+ */
+function loopSpiralFixFrames(frames) {
+  const worldUp = new V3(0, 1, 0);
+  const up = new V3();
+  const right = new V3();
+  for (const fr of frames) {
+    const T = fr.tangent;
+    up.copy(worldUp).addScaledVector(T, -worldUp.dot(T));
+    if (up.lengthSq() < 1e-9) up.copy(worldUp);
+    up.normalize();
+    right.crossVectors(T, up).normalize();
+    fr.up.copy(up);
+    fr.right.copy(right);
+  }
 }
 
 function gameLinePoints(pp) {
@@ -930,10 +949,11 @@ export const PIECE_CATALOG = [
   {
     id: "loop_spiral",
     label: "Loop spiral",
-    hint: "Flat run + corkscrew ring arc",
+    hint: "Climbing helix ramp — flat → spiral up → flat",
     swatch: "#e67e22",
     key: "",
     points: loopSpiralPoints,
+    fixFrames: loopSpiralFixFrames,
   },
   {
     id: "twist",
