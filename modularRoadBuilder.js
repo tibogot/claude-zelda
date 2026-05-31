@@ -633,7 +633,6 @@ const PIECE_TO_CATEGORY = {
   banktilt: "banked",
   bankin: "banked",
   bankout: "banked",
-  twist: "tilted",
   loop: "loop",
   loop_half: "loop",
   loop_spiral: "loop",
@@ -651,7 +650,6 @@ export const PALETTE_CATEGORIES = [
   { id: "banked", label: "Banked" },
   { id: "obstacles", label: "Obstacles" },
   { id: "moving", label: "Moving" },
-  { id: "tilted", label: "Tilted" },
   { id: "loop", label: "Loop" },
 ];
 
@@ -668,7 +666,6 @@ function categoryIconSvg(id) {
     banked: `<svg viewBox="0 0 48 48"><path d="M6 30 L42 18" ${_RS}/><rect x="8" y="16" width="32" height="8" rx="1" transform="rotate(-12 24 20)" ${_RB}/></svg>`,
     obstacles: `<svg viewBox="0 0 48 48"><rect x="12" y="14" width="14" height="22" rx="1" fill="#6a7580" stroke="#999" stroke-width="1.5"/><ellipse cx="34" cy="28" rx="8" ry="10" fill="none" stroke="#dce622" stroke-width="2"/></svg>`,
     moving: `<svg viewBox="0 0 48 48"><rect x="8" y="22" width="32" height="6" rx="1" fill="#e8c040" stroke="#999" stroke-width="1.2"/><path d="M24 8 L24 18 M24 32 L24 42" stroke="#dce622" stroke-width="2" stroke-linecap="round"/><path d="M18 8 L24 14 L30 8" fill="none" stroke="#dce622" stroke-width="2" stroke-linecap="round"/></svg>`,
-    tilted: `<svg viewBox="0 0 48 48"><path d="M8 24 Q24 8 40 24 Q24 40 8 24" ${_RS}/><rect x="14" y="20" width="20" height="6" rx="1" transform="rotate(25 24 23)" ${_RB}/></svg>`,
     loop: `<svg viewBox="0 0 48 48"><circle cx="24" cy="26" r="14" fill="none" stroke="#c0392b" stroke-width="1.8"/><path d="M10 38 L10 26 Q10 12 24 12 Q38 12 38 26 L38 38" ${_RS}/></svg>`,
   };
   return icons[id] ?? icons.straight;

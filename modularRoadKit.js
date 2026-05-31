@@ -608,28 +608,34 @@ function loopPoints(pp) {
   const R = Math.max(6, pp.loopRadius);
   const dir = pp.curveDir >= 0 ? 1 : -1;
   const gap = pp.loopOffset ?? roadParams.width; // lateral entry→exit gap (m)
-  const pinch = THREE.MathUtils.clamp(pp.loopTighten ?? 0.45, 0, 0.8); // teardrop tightness
-  // Integrate the road's pitch φ from 0 (flat) around a full 360°. The local
-  // radius is WIDE at the bottom (legs flare out + flatten onto the floor) and
-  // TIGHT at the top (φ≈π) → a teardrop "looping", not a plain circle. Because
-  // r(φ) is symmetric about π and pitch starts/ends at 0, both feet end flat
-  // (horizontal tangent) on the floor (y returns to 0). A steady lateral drift
-  // separates entry and exit feet along the red (X) axis by `gap`.
-  const steps = Math.max(96, Math.ceil((2 * Math.PI * R) / roadParams.segLen));
-  const dphi = (2 * Math.PI) / steps;
-  const pos = new V3(0, 0, 0);
-  const pts = [pos.clone()];
-  for (let i = 1; i <= steps; i++) {
-    const phiMid = (i - 0.5) * dphi;
-    const r = R * (1 - pinch * Math.sin(phiMid / 2)); // wide at base, tight on top
-    const ds = r * dphi;
-    pos.y += Math.sin(phiMid) * ds;
-    pos.z += -dir * Math.cos(phiMid) * ds;
-    pos.x += (gap / steps) * dir; // lateral red-axis drift across the whole loop
-    pts.push(pos.clone());
+  const flat = Math.max(0, pp.loopFlat ?? R * 0.6); // flat lead-in / lead-out (m)
+  const segN = Math.max(2, Math.ceil(flat / roadParams.segLen));
+  const ringN = Math.max(96, Math.ceil((2 * Math.PI * R) / roadParams.segLen));
+  const pts = [];
+  // 1) Flat lead-in along -Z on the entry lane (x = -gap/2), so the loop reads as
+  //    a piece sitting ON the road, not a floating ring.
+  for (let i = 0; i < segN; i++) {
+    pts.push(new V3(-gap / 2, 0, -flat * (i / segN)));
   }
-  // Pin the exit foot exactly onto the floor (kill tiny numeric drift in y).
-  pts[pts.length - 1].y = 0;
+  // 2) The vertical ring: a round circle in Y/Z (kept perfectly circular) that
+  //    drifts sideways from the entry lane (-gap/2) to the exit lane (+gap/2), so
+  //    the two feet are split along the red (X) axis but both sit flat on the floor.
+  for (let i = 0; i <= ringN; i++) {
+    const u = i / ringN;
+    const theta = 2 * Math.PI * u; // bottom → up → over → back to bottom
+    const y = R * (1 - Math.cos(theta));
+    const z = -flat - dir * R * Math.sin(theta);
+    // Lateral offset uses a CUBIC in u (not linear): the spread is concentrated at
+    // the two feet while the body of the ring stays near x=0 — so it reads as a
+    // round VERTICAL ring with its feet splayed apart, not a tilted coil/spring.
+    const s = 2 * u - 1; // -1 (entry foot) → 0 (top) → +1 (exit foot)
+    const x = (gap / 2) * s * s * s;
+    pts.push(new V3(x, y, z));
+  }
+  // 3) Flat lead-out continuing along -Z on the exit lane (x = +gap/2).
+  for (let i = 1; i <= segN; i++) {
+    pts.push(new V3(gap / 2, 0, -flat - flat * (i / segN)));
+  }
   return pts;
 }
 
@@ -883,7 +889,7 @@ export const PIECE_CATALOG = [
     label: "Twist / roll",
     hint: "Barrel roll",
     swatch: "#1abc9c",
-    key: "7",
+    key: "",
     points: twistPoints,
     roll: twistRoll,
   },

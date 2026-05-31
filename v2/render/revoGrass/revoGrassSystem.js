@@ -217,9 +217,15 @@ function createSsbo(config, uniforms, { heightTex, windTex, exclusionTex }) {
     const mixTime = sin(time.mul(0.4).add(posNoise.mul(0.1))).mul(0.25);
     const w = clamp(mixRand.add(mixTime), 0.2, 0.8);
     const n = mix(nA, nB, w);
-    const windFactor = n.r
-      .mul(uniforms.uWindStrength)
-      .add(n.g.mul(uniforms.uWindStrength).mul(0.35));
+    // Revo's intensity ramp: strength climbs from uWindStrength (calm) to 1.5
+    // (full gust) by uWindIntensity. Without it, wind has the right shape but
+    // ~4× too little amplitude at intensity = 1.
+    const strength = mix(
+      uniforms.uWindStrength,
+      float(1.5),
+      uniforms.uWindIntensity,
+    );
+    const windFactor = n.r.mul(strength).add(n.g.mul(strength).mul(0.35));
     const target = dir.mul(windFactor);
     const k = mix(0.08, 0.25, abs(n.b));
     const newWind = prevWind.add(target.sub(prevWind).mul(k));
