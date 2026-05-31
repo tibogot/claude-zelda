@@ -914,7 +914,7 @@ export const CATEGORY_PRESETS = {
       id: "looping_full",
       label: "Looping",
       base: "loop",
-      params: { loopRadius: 16, curveDir: 1 },
+      params: { loopRadius: 25, loopOffset: 16, loopFlat: 12, loopSpread: 1, loopLean: 0, loopTighten: 0, curveDir: 1 },
       preview: `<svg viewBox="0 0 80 80"><path d="M14 66 Q14 14 40 14 Q66 14 66 50 Q66 66 50 66" ${_RS}/><line x1="8" y1="66" x2="72" y2="66" stroke="#c0392b" stroke-width="1.2"/></svg>`,
     },
     {
