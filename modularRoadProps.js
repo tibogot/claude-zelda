@@ -5,7 +5,7 @@ import { kickerRampGeometry, jumpRampGeometry, buildSlopeLabGroup } from "./modu
 
 /**
  * Free-placement props for the modular road. Unlike auto-chained track pieces,
- * props are standalone objects (box, wall, ramp, open cylinder, ring gate, air tunnel)
+ * props are standalone objects (box, wall, ramp, cylinders, ring gate, air tunnel)
  * positioned by hand with a shared TransformControls gizmo — the same pattern as
  * the v2 editor props mode (W/E/R = move/rotate/scale, right-click select).
  *
@@ -57,6 +57,31 @@ function airTunnelGeometry(length = 36, height = 9) {
   geo.translate(0, 0, length / 2);
   geo.computeBoundingSphere();
   return geo;
+}
+
+/** Thick-walled pipe: outer shell, inner liner, and annular end caps (still hollow to drive through). */
+function openTubeGroup(outerR = 9, length = 30, wall = 0.65, segments = 40) {
+  const innerR = outerR - wall;
+  const half = length / 2;
+  const tubeMat = mat(0x3a7bd5, { metalness: 0.55, roughness: 0.4, side: THREE.DoubleSide });
+  const innerMat = mat(0x3a7bd5, { metalness: 0.55, roughness: 0.4, side: THREE.BackSide });
+
+  const root = new THREE.Group();
+  root.name = "OpenCylinder";
+
+  root.add(new THREE.Mesh(new THREE.CylinderGeometry(outerR, outerR, length, segments, 1, true), tubeMat));
+  root.add(new THREE.Mesh(new THREE.CylinderGeometry(innerR, innerR, length, segments, 1, true), innerMat));
+
+  for (const y of [half, -half]) {
+    const cap = new THREE.Mesh(new THREE.RingGeometry(innerR, outerR, segments), tubeMat);
+    cap.rotation.x = -Math.PI / 2;
+    cap.position.y = y;
+    root.add(cap);
+  }
+
+  root.rotation.x = Math.PI / 2;
+  root.position.set(0, outerR, 0); // bottom of the pipe rests on the ground
+  return root;
 }
 
 /* ----------------------------------------------------------------------- */
@@ -154,13 +179,21 @@ export const PROP_CATALOG = [
     id: "tube",
     label: "Open cylinder",
     collision: "deck",
+    make: () => openTubeGroup(),
+  },
+  {
+    id: "cylinder_full",
+    label: "Solid cylinder",
+    collision: "both",
     make: () => {
+      const r = 0.55;
+      const len = 8;
       const m = new THREE.Mesh(
-        new THREE.CylinderGeometry(9, 9, 30, 40, 1, true),
-        mat(0x3a7bd5, { metalness: 0.55, roughness: 0.4, side: THREE.DoubleSide }),
+        new THREE.CylinderGeometry(r, r, len, 20),
+        mat(0x707880, { roughness: 0.88 }),
       );
-      m.geometry.rotateX(Math.PI / 2); // axis along Z (drive through it)
-      m.geometry.translate(0, 9, 0); // rest on the ground
+      m.geometry.rotateZ(Math.PI / 2); // axis along X — log lying on the floor
+      m.geometry.translate(0, r, 0);
       return m;
     },
   },

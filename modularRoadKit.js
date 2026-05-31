@@ -55,9 +55,16 @@ export const pieceParams = {
   // Jump / launch ramp:
   jumpLength: 18, // arc length of the ramp (m)
   jumpAngle: 28, // takeoff angle at the exit (deg)
-  // Vertical loop (teardrop):
-  loopRadius: 10, // loop radius (m)
-  loopAdvance: 28, // forward separation entry→exit at bottom (m)
+  // Drivable vertical loop (teardrop + lateral offset so the up/down lanes don't
+  // self-intersect). Half = one side ground→top; place two (mirror 2nd) for 360°.
+  loopRadius: 18, // ring radius at the base (m)
+  loopTighten: 0.34, // teardrop: how much the radius shrinks toward the top (0..0.7)
+  loopOffset: 9, // lateral drift entry→top (m) so a mirrored pair clears itself
+  loopAdvance: 28, // legacy full-loop param (older tracks)
+  // Spiral ring / corkscrew (flat run + climbing wrapped arc):
+  loopSpiralRadius: 12, // corkscrew radius (m)
+  loopSpiralTurns: 1, // full revolutions around the travel axis
+  loopSpiralPitch: 40, // forward advance per revolution (m)
   // Game line pieces (start / checkpoint / finish):
   gameLineLength: 16,
   // Twist / barrel roll (straight centreline that rolls):
@@ -560,23 +567,88 @@ function jumpPoints(pp) {
 }
 
 /**
- * Vertical loop with separated entry/exit legs. A flat circle in the Y/Z plane
- * always crosses itself once the road has width. Here the ascending side is
- * offset in +X and the descending side in −X (via 1−cos φ), while Z advances
- * monotonically so entry (0,0,0) and exit (0,0,−exitZ) stay parallel and clear.
+ * One side of a *drivable* vertical loop: ground → over the top, built by
+ * integrating a pitch angle from horizontal (0) to inverted (π). Two fixes over
+ * a plain semicircle: (1) the radius tightens toward the top (`loopTighten`) so
+ * the silhouette is a teardrop/clothoid, not a perfect ring; (2) the path drifts
+ * laterally (`loopOffset`) so when you place this piece then its mirror (R /
+ * curveDir flip), the climbing and descending lanes sit side-by-side instead of
+ * colliding — a loop a car can actually drive. curveDir picks the lateral side.
  */
+function loopHalfPoints(pp) {
+  const R = Math.max(6, pp.loopRadius);
+  const dir = pp.curveDir >= 0 ? 1 : -1;
+  // Sideways gap each half adds (≈ one road width by default). curveDir flips the
+  // drift side so a mirrored pair offsets laterally → the two feet of the loop sit
+  // side-by-side with a gap, instead of one-behind-the-other. This is what makes
+  // it a real drivable looping.
+  const gap = pp.loopOffset ?? roadParams.width;
+  const steps = Math.max(48, Math.ceil((Math.PI * R) / roadParams.segLen));
+  const pts = [];
+  for (let i = 0; i <= steps; i++) {
+    const u = i / steps;
+    const theta = Math.PI * u; // 0 → π : floor → up → over to the inverted top
+    // Tall vertical ramp in the travel plane (Y up, Z forward): a true semicircle,
+    // entry on the floor (y=0) and exit inverted at the top (y=2R, z back to 0).
+    const y = R * (1 - Math.cos(theta));
+    const z = -R * Math.sin(theta);
+    const x = dir * gap * u; // lateral drift → the sideways loop gap
+    pts.push(new V3(x, y, z));
+  }
+  return pts;
+}
+
+/** Full 360° drivable loop in one piece (teardrop + lateral offset, same model
+ *  as the half so the up/down lanes don't self-intersect). */
 function loopPoints(pp) {
   const R = Math.max(6, pp.loopRadius);
-  const W = roadParams.width;
-  const exitZ = Math.max(W * 2.5, pp.loopAdvance, R * 1.1);
-  const spread = Math.max(W * 1.05, R * 0.42);
-  const n = Math.max(48, Math.ceil((2 * Math.PI * R) / roadParams.segLen));
+  const dir = pp.curveDir >= 0 ? 1 : -1;
+  const tighten = THREE.MathUtils.clamp(pp.loopTighten ?? 0.34, 0, 0.7);
+  const offset = pp.loopOffset ?? 9;
+  const steps = Math.max(64, Math.ceil((2 * Math.PI * R) / roadParams.segLen));
+  const dphi = (2 * Math.PI) / steps;
+  const pos = new V3(0, 0, 0);
+  const pts = [pos.clone()];
+  let phi = 0;
+  for (let i = 1; i <= steps; i++) {
+    const u = i / steps;
+    // Radius tightens to the top (u≈0.5) and re-widens to the exit → teardrop.
+    const r = R * (1 - tighten * Math.sin(Math.PI * u));
+    const ds = r * dphi;
+    const phiMid = phi + dphi * 0.5;
+    pos.y += Math.sin(phiMid) * ds;
+    pos.z += -dir * Math.cos(phiMid) * ds;
+    pos.x += dir * (offset / steps); // total `offset` lateral drift entry→exit
+    phi += dphi;
+    pts.push(pos.clone());
+  }
+  return pts;
+}
+
+/**
+ * Corkscrew spiral — a true helix wound around the travel (-Z) axis. The road
+ * circles in the X/Y plane (radius R) while advancing forward, so the car drives
+ * *through* the spiral like a barrel/corkscrew. `loopSpiralTurns` sets how many
+ * full revolutions; `loopSpiralPitch` is forward advance per revolution; curveDir
+ * picks the winding direction. Starts and ends tangent to -Z so it chains cleanly.
+ */
+function loopSpiralPoints(pp) {
+  const R = Math.max(4, pp.loopSpiralRadius ?? pp.loopRadius ?? 12);
+  const dir = pp.curveDir >= 0 ? 1 : -1;
+  const turns = Math.max(0.25, pp.loopSpiralTurns ?? 1);
+  const pitch = Math.max(R * 1.2, pp.loopSpiralPitch ?? R * 3); // forward run per turn
+  const totalAngle = 2 * Math.PI * turns;
+  const totalFwd = pitch * turns;
+  const n = Math.max(48, Math.ceil((R * totalAngle) / roadParams.segLen));
   const pts = [];
   for (let i = 0; i <= n; i++) {
-    const phi = (2 * Math.PI * i) / n;
-    const y = R * (1 - Math.cos(phi));
-    const z = (-exitZ * phi) / (2 * Math.PI);
-    const x = spread * Math.sin(phi);
+    const u = i / n;
+    const theta = totalAngle * u;
+    // Circle around the -Z axis: x sideways, y up, both starting at 0 so the
+    // entry sits on the deck and the path leaves/returns tangent to -Z.
+    const x = dir * R * Math.sin(theta);
+    const y = R * (1 - Math.cos(theta));
+    const z = -totalFwd * u;
     pts.push(new V3(x, y, z));
   }
   return pts;
@@ -776,11 +848,27 @@ export const PIECE_CATALOG = [
   },
   {
     id: "loop",
-    label: "Loop",
-    hint: "Vertical 360°",
+    label: "Loop (full)",
+    hint: "Full 360° vertical ring",
+    swatch: "#f1c40f",
+    key: "",
+    points: loopPoints,
+  },
+  {
+    id: "loop_half",
+    label: "Loop half",
+    hint: "180° ring arc — place two (mirror 2nd) for a Sonic loop",
     swatch: "#f1c40f",
     key: "6",
-    points: loopPoints,
+    points: loopHalfPoints,
+  },
+  {
+    id: "loop_spiral",
+    label: "Loop spiral",
+    hint: "Flat run + corkscrew ring arc",
+    swatch: "#e67e22",
+    key: "",
+    points: loopSpiralPoints,
   },
   {
     id: "twist",

@@ -635,6 +635,8 @@ const PIECE_TO_CATEGORY = {
   bankout: "banked",
   twist: "tilted",
   loop: "loop",
+  loop_half: "loop",
+  loop_spiral: "loop",
   start: "game",
   checkpoint: "game",
   finish: "game",
@@ -667,7 +669,7 @@ function categoryIconSvg(id) {
     obstacles: `<svg viewBox="0 0 48 48"><rect x="12" y="14" width="14" height="22" rx="1" fill="#6a7580" stroke="#999" stroke-width="1.5"/><ellipse cx="34" cy="28" rx="8" ry="10" fill="none" stroke="#dce622" stroke-width="2"/></svg>`,
     moving: `<svg viewBox="0 0 48 48"><rect x="8" y="22" width="32" height="6" rx="1" fill="#e8c040" stroke="#999" stroke-width="1.2"/><path d="M24 8 L24 18 M24 32 L24 42" stroke="#dce622" stroke-width="2" stroke-linecap="round"/><path d="M18 8 L24 14 L30 8" fill="none" stroke="#dce622" stroke-width="2" stroke-linecap="round"/></svg>`,
     tilted: `<svg viewBox="0 0 48 48"><path d="M8 24 Q24 8 40 24 Q24 40 8 24" ${_RS}/><rect x="14" y="20" width="20" height="6" rx="1" transform="rotate(25 24 23)" ${_RB}/></svg>`,
-    loop: `<svg viewBox="0 0 48 48"><path d="M10 38 L10 22 Q10 6 24 6 Q38 6 38 22 L38 38" ${_RS}/><ellipse cx="24" cy="22" rx="12" ry="14" fill="none" stroke="#c0392b" stroke-width="1.5" opacity="0.6"/></svg>`,
+    loop: `<svg viewBox="0 0 48 48"><circle cx="24" cy="26" r="14" fill="none" stroke="#c0392b" stroke-width="1.8"/><path d="M10 38 L10 26 Q10 12 24 12 Q38 12 38 26 L38 38" ${_RS}/></svg>`,
   };
   return icons[id] ?? icons.straight;
 }
@@ -688,7 +690,9 @@ function piecePreviewSvg(pieceId) {
     gap: `<svg viewBox="0 0 80 80"><rect x="8" y="48" width="24" height="8" rx="1" ${_RB}/><rect x="48" y="56" width="24" height="8" rx="1" ${_RB}/><path d="M32 52 L48 58" stroke="#dce622" stroke-width="1.5" stroke-dasharray="4 3"/></svg>`,
     landing: `<svg viewBox="0 0 80 80"><polygon points="8,36 72,36 72,60" fill="#2a2e36" stroke="#c0392b" stroke-width="1.8"/><line x1="10" y1="38" x2="70" y2="58" ${_RS}/></svg>`,
     twist: `<svg viewBox="0 0 80 80"><path d="M12 40 Q40 12 68 40 Q40 68 12 40" ${_RS}/><rect x="30" y="34" width="20" height="8" rx="1" transform="rotate(30 40 38)" ${_RB}/></svg>`,
-    loop: `<svg viewBox="0 0 80 80"><path d="M16 68 L16 36 Q16 12 40 12 Q64 12 64 36 L64 68" ${_RS}/></svg>`,
+    loop: `<svg viewBox="0 0 80 80"><path d="M40 68 Q16 68 16 40 Q16 12 40 12 Q64 12 64 40 Q64 68 40 68" ${_RS}/></svg>`,
+    loop_half: `<svg viewBox="0 0 80 80"><path d="M40 68 Q16 68 16 40 Q16 12 40 12" ${_RS}/></svg>`,
+    loop_spiral: `<svg viewBox="0 0 80 80"><line x1="12" y1="62" x2="28" y2="62" stroke="#c0392b" stroke-width="1.5"/><path d="M28 62 Q22 48 26 34 Q34 18 48 14 Q58 24 54 38 Q48 52 36 58" ${_RS}/></svg>`,
     start: `<svg viewBox="0 0 80 80"><rect x="10" y="34" width="60" height="12" rx="2" ${_RB}/><rect x="14" y="20" width="8" height="24" fill="#fff"/><rect x="14" y="20" width="16" height="8" fill="#fff"/><rect x="12" y="38" width="8" height="4" fill="#111"/><rect x="20" y="38" width="8" height="4" fill="#fff"/></svg>`,
     checkpoint: `<svg viewBox="0 0 80 80"><rect x="10" y="34" width="60" height="12" rx="2" ${_RB}/><line x1="28" y1="18" x2="28" y2="34" stroke="#fff" stroke-width="3"/><polygon points="28,12 22,20 34,20" fill="#fff"/><line x1="52" y1="18" x2="52" y2="34" stroke="#fff" stroke-width="3"/><polygon points="52,12 46,20 58,20" fill="#fff"/><polygon points="40,42 34,48 46,48" fill="#ffcc00"/></svg>`,
     finish: `<svg viewBox="0 0 80 80"><rect x="10" y="34" width="60" height="12" rx="2" ${_RB}/><rect x="36" y="16" width="8" height="28" fill="#fff"/><polygon points="36,12 32,20 40,20" fill="#fff"/><rect x="12" y="38" width="8" height="4" fill="#111"/><rect x="20" y="38" width="8" height="4" fill="#fff"/><rect x="52" y="38" width="8" height="4" fill="#111"/><rect x="60" y="38" width="8" height="4" fill="#fff"/></svg>`,
@@ -908,6 +912,36 @@ export const CATEGORY_PRESETS = {
       preview: `<svg viewBox="0 0 80 80"><path d="M22 70 L22 50 Q22 34 40 34 Q58 34 58 18 L58 10" ${_RS}/></svg>`,
     },
   ],
+  loop: [
+    {
+      id: "loop_half_right",
+      label: "Ring half (R)",
+      base: "loop_half",
+      params: { loopRadius: 18, curveDir: 1 },
+      preview: `<svg viewBox="0 0 80 80"><path d="M40 68 Q18 68 18 40 Q18 14 40 14" ${_RS}/></svg>`,
+    },
+    {
+      id: "loop_half_left",
+      label: "Ring half (L)",
+      base: "loop_half",
+      params: { loopRadius: 18, curveDir: -1 },
+      preview: `<svg viewBox="0 0 80 80"><path d="M40 68 Q62 68 62 40 Q62 14 40 14" ${_RS}/></svg>`,
+    },
+    {
+      id: "loop_spiral_right",
+      label: "Spiral ring (R)",
+      base: "loop_spiral",
+      params: { loopSpiralRadius: 12, loopSpiralTurns: 1, loopSpiralPitch: 40, curveDir: 1 },
+      preview: `<svg viewBox="0 0 80 80"><line x1="10" y1="62" x2="26" y2="62" stroke="#c0392b" stroke-width="1.5"/><path d="M26 62 Q20 46 24 32 Q32 16 46 12 Q56 22 52 36 Q46 50 34 56" ${_RS}/></svg>`,
+    },
+    {
+      id: "loop_spiral_left",
+      label: "Spiral ring (L)",
+      base: "loop_spiral",
+      params: { loopSpiralRadius: 12, loopSpiralTurns: 1, loopSpiralPitch: 40, curveDir: -1 },
+      preview: `<svg viewBox="0 0 80 80"><line x1="70" y1="62" x2="54" y2="62" stroke="#c0392b" stroke-width="1.5"/><path d="M54 62 Q60 46 56 32 Q48 16 34 12 Q24 22 28 36 Q34 50 46 56" ${_RS}/></svg>`,
+    },
+  ],
 };
 
 /** Thumbnail map key for the first tile shown in a palette category. */
@@ -1087,7 +1121,7 @@ export function buildRoadPaletteUI(builder, opts = {}) {
         label = def?.label ?? builder.activePieceId;
       }
       const dir = pieceParams.curveDir >= 0 ? "R" : "L";
-      const curveIds = new Set(["curve", "banked", "scurve", "spiral"]);
+      const curveIds = new Set(["curve", "banked", "scurve", "spiral", "loop_half", "loop_spiral"]);
       const chainInfo =
         builder.chainCount > 1 ? ` · chain ${builder.activeChainIndex + 1}/${builder.chainCount}` : "";
       statusEl.textContent = `${builder.count} placed · ${label}${
