@@ -61,6 +61,7 @@ export const pieceParams = {
   loopOffset: 16, // sideways gap between the entry foot and exit foot (m, red axis)
   loopFlat: 12, // flat lead-in / lead-out length on the floor (m)
   loopSpread: 1, // how much the foot gap concentrates at the feet (0 = even/coil, 1 = feet only)
+  loopHalf: "full", // "full" = whole loop; "in" = entry→top slice; "out" = top→exit slice
   loopLean: 0, // tilt the ring plane toward/away (-1..1); 0 = perfectly vertical
   loopTighten: 0, // teardrop pinch toward the top (0 = round circle, up to 0.7)
   loopAdvance: 28, // legacy full-loop param (older tracks)
@@ -578,27 +579,15 @@ function jumpPoints(pp) {
  * curveDir flip), the climbing and descending lanes sit side-by-side instead of
  * colliding — a loop a car can actually drive. curveDir picks the lateral side.
  */
+/**
+ * Half of the EXACT same looping as `loopPoints` — just sliced. `loopHalf='in'`
+ * gives the entry-foot→top portion (flat foot on the floor → inverted at top);
+ * `loopHalf='out'` gives top→exit-foot. The shared `loopFixFrames` keeps both
+ * feet flat. Place the 'in' half then its mirror ('out', curveDir flipped) to
+ * build the full looping from two pieces.
+ */
 function loopHalfPoints(pp) {
-  const R = Math.max(6, pp.loopRadius);
-  const dir = pp.curveDir >= 0 ? 1 : -1;
-  // Sideways gap each half adds (≈ one road width by default). curveDir flips the
-  // drift side so a mirrored pair offsets laterally → the two feet of the loop sit
-  // side-by-side with a gap, instead of one-behind-the-other. This is what makes
-  // it a real drivable looping.
-  const gap = pp.loopOffset ?? roadParams.width;
-  const steps = Math.max(48, Math.ceil((Math.PI * R) / roadParams.segLen));
-  const pts = [];
-  for (let i = 0; i <= steps; i++) {
-    const u = i / steps;
-    const theta = Math.PI * u; // 0 → π : floor → up → over to the inverted top
-    // Tall vertical ramp in the travel plane (Y up, Z forward): a true semicircle,
-    // entry on the floor (y=0) and exit inverted at the top (y=2R, z back to 0).
-    const y = R * (1 - Math.cos(theta));
-    const z = -R * Math.sin(theta);
-    const x = dir * gap * u; // lateral drift → the sideways loop gap
-    pts.push(new V3(x, y, z));
-  }
-  return pts;
+  return loopPoints(pp); // loopPoints honours pp.loopHalf to emit only one side
 }
 
 /**
@@ -615,41 +604,52 @@ function loopPoints(pp) {
   const spread = THREE.MathUtils.clamp(pp.loopSpread ?? 1, 0, 1); // gap concentration at feet
   const lean = THREE.MathUtils.clamp(pp.loopLean ?? 0, -1, 1); // ring-plane tilt
   const pinch = THREE.MathUtils.clamp(pp.loopTighten ?? 0, 0, 0.7); // teardrop pinch
+  // half: undefined/'full' = whole loop; 'in' = entry foot → top; 'out' = top → exit foot.
+  const half = pp.loopHalf;
   const segN = Math.max(1, Math.ceil(Math.max(0.001, flat) / roadParams.segLen));
   const ringN = Math.max(96, Math.ceil((2 * Math.PI * R) / roadParams.segLen));
   const pts = [];
 
-  // Sideways offset profile across the ring. CRITICAL: it must have ZERO slope at
-  // both feet (u=0 and u=1) — otherwise the path heads sideways at the foot, which
-  // tilts/banks the road frame and the entry/exit "lean" instead of sitting flat.
-  // Both smoothstep (S1) and smootherstep (S2) flatten to horizontal at the ends,
-  // so the feet stay flat for ANY gap. `spread` just blends how S-shaped it is.
-  const S1 = (u) => u * u * (3 - 2 * u); // zero 1st-deriv at ends
-  const S2 = (u) => u * u * u * (u * (u * 6 - 15) + 10); // zero 1st AND 2nd deriv
+  // Sideways offset across the FULL ring (θ over 0..2π). Zero slope at both feet
+  // so they sit flat. A half just samples its portion of this same curve, so the
+  // halves are literally slices of the full looping.
+  const S1 = (u) => u * u * (3 - 2 * u);
+  const S2 = (u) => u * u * u * (u * (u * 6 - 15) + 10);
   const xAt = (u) => {
-    const s = (1 - spread) * S1(u) + spread * S2(u); // 0 → 1, flat at both ends
-    return -gap / 2 + gap * s; // entry foot -gap/2 → exit foot +gap/2
+    const s = (1 - spread) * S1(u) + spread * S2(u); // u: 0 (entry) → 1 (exit)
+    return -gap / 2 + gap * s;
   };
-
-  // 1) Flat lead-in on the entry lane.
-  for (let i = 0; i < segN; i++) {
-    pts.push(new V3(-gap / 2, 0, -flat * (i / segN)));
-  }
-  // 2) The ring. y/z trace a (optionally teardrop-pinched) vertical circle; x uses
-  //    the spread profile; `lean` tilts the whole ring plane by feeding height into
-  //    forward Z so it can lean toward/away from the camera if wanted.
-  for (let i = 0; i <= ringN; i++) {
-    const u = i / ringN;
+  // Ring point at full-loop parameter u ∈ [0,1].
+  const ringPt = (u) => {
     const theta = 2 * Math.PI * u;
-    const r = R * (1 - pinch * Math.sin(Math.PI * u)); // 1 at feet, pinched on top
+    const r = R * (1 - pinch * Math.sin(Math.PI * u));
     const y = r * (1 - Math.cos(theta));
     const z = -flat - dir * r * Math.sin(theta) + lean * y;
-    pts.push(new V3(xAt(u), y, z));
+    return new V3(xAt(u), y, z);
+  };
+
+  const hN = Math.max(48, Math.ceil((Math.PI * R) / roadParams.segLen));
+  if (half === "in") {
+    // Entry foot → top. Flat lead-in from origin heading -Z (same as the full
+    // loop's start), then the first half of the ring (u: 0 → 0.5). Top left open.
+    const entry = ringPt(0); // foot, on the floor at (-gap/2, 0, -flat)
+    for (let i = 0; i < segN; i++) pts.push(new V3(entry.x, 0, -flat * (i / segN)));
+    for (let i = 0; i <= hN; i++) pts.push(ringPt(0.5 * (i / hN)));
+    return pts;
   }
-  // 3) Flat lead-out on the exit lane.
-  for (let i = 1; i <= segN; i++) {
-    pts.push(new V3(gap / 2, 0, -flat - flat * (i / segN)));
+  if (half === "out") {
+    // Top → exit foot, then flat lead-out continuing -Z (same as the full loop's
+    // end). Entry is the inverted top — meant to snap onto an "in" half's top.
+    const exit = ringPt(1); // foot, on the floor at (+gap/2, 0, -flat)
+    for (let i = 0; i <= hN; i++) pts.push(ringPt(0.5 + 0.5 * (i / hN)));
+    for (let i = 1; i <= segN; i++) pts.push(new V3(exit.x, 0, exit.z - flat * (i / segN)));
+    return pts;
   }
+
+  // Full loop: flat lead-in, the ring, flat lead-out.
+  for (let i = 0; i < segN; i++) pts.push(new V3(-gap / 2, 0, -flat * (i / segN)));
+  for (let i = 0; i <= ringN; i++) pts.push(ringPt(i / ringN));
+  for (let i = 1; i <= segN; i++) pts.push(new V3(gap / 2, 0, -flat - flat * (i / segN)));
   return pts;
 }
 
@@ -664,26 +664,23 @@ function loopPoints(pp) {
 function loopFixFrames(frames, pp) {
   const R = Math.max(6, pp.loopRadius);
   const flat = Math.max(0, pp.loopFlat ?? R * 0.5);
-  const segN = Math.max(1, Math.ceil(Math.max(0.001, flat) / roadParams.segLen));
-  const ringN = Math.max(96, Math.ceil((2 * Math.PI * R) / roadParams.segLen));
-  const ringStart = segN; // first ring frame index
-  const ringEnd = segN + ringN; // last ring frame index (inclusive)
+  // A frame is "on the ring" when it's clearly above the floor; flat foot leads
+  // (y≈0) keep world-up. This works for the full loop AND either half slice
+  // without index bookkeeping. The ring centre sits at y=R, z=-flat, and shares
+  // the frame's own x (the ring is swept sideways rigidly).
   const worldUp = new V3(0, 1, 0);
   const up = new V3();
   const right = new V3();
-  for (let i = 0; i < frames.length; i++) {
-    const fr = frames[i];
+  const onRingY = 0.05 * R; // height above which we treat the frame as ring
+  for (const fr of frames) {
     const T = fr.tangent;
-    if (i < ringStart || i > ringEnd) {
-      // Flat lead-in / lead-out: up = world up, made perpendicular to tangent.
-      up.copy(worldUp).addScaledVector(T, -worldUp.dot(T));
+    if (fr.pos.y <= onRingY) {
+      up.copy(worldUp).addScaledVector(T, -worldUp.dot(T)); // flat foot
     } else {
-      // Ring: up points from the road toward the ring centre (x of centre = the
-      // point's own x because the ring is swept sideways rigidly; y = R; z = -flat).
-      up.set(fr.pos.x, R, -flat).sub(fr.pos);
-      up.addScaledVector(T, -up.dot(T)); // orthogonalise against the tangent
+      up.set(fr.pos.x, R, -flat).sub(fr.pos); // toward ring centre
+      up.addScaledVector(T, -up.dot(T));
     }
-    if (up.lengthSq() < 1e-9) up.copy(worldUp); // safety
+    if (up.lengthSq() < 1e-9) up.copy(worldUp);
     up.normalize();
     right.crossVectors(T, up).normalize();
     fr.up.copy(up);
@@ -924,10 +921,11 @@ export const PIECE_CATALOG = [
   {
     id: "loop_half",
     label: "Loop half",
-    hint: "180° ring arc — place two (mirror 2nd) for a Sonic loop",
+    hint: "Half of the looping — place two (mirror 2nd) for a full loop",
     swatch: "#f1c40f",
     key: "6",
     points: loopHalfPoints,
+    fixFrames: loopFixFrames,
   },
   {
     id: "loop_spiral",
