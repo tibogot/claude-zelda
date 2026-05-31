@@ -598,30 +598,38 @@ function loopHalfPoints(pp) {
   return pts;
 }
 
-/** Full 360° drivable loop in one piece (teardrop + lateral offset, same model
- *  as the half so the up/down lanes don't self-intersect). */
+/**
+ * Full drivable LOOPING in one piece. A complete 360° vertical circle (Y/Z plane)
+ * that also drifts sideways (X) as it goes around, so the entry foot and exit foot
+ * both sit FLAT on the floor (y=0) but separated by `loopOffset` along the red (X)
+ * axis — they don't meet. This lateral gap is what makes it a real looping.
+ */
 function loopPoints(pp) {
   const R = Math.max(6, pp.loopRadius);
   const dir = pp.curveDir >= 0 ? 1 : -1;
-  const tighten = THREE.MathUtils.clamp(pp.loopTighten ?? 0.34, 0, 0.7);
-  const offset = pp.loopOffset ?? 9;
-  const steps = Math.max(64, Math.ceil((2 * Math.PI * R) / roadParams.segLen));
+  const gap = pp.loopOffset ?? roadParams.width; // lateral entry→exit gap (m)
+  const pinch = THREE.MathUtils.clamp(pp.loopTighten ?? 0.45, 0, 0.8); // teardrop tightness
+  // Integrate the road's pitch φ from 0 (flat) around a full 360°. The local
+  // radius is WIDE at the bottom (legs flare out + flatten onto the floor) and
+  // TIGHT at the top (φ≈π) → a teardrop "looping", not a plain circle. Because
+  // r(φ) is symmetric about π and pitch starts/ends at 0, both feet end flat
+  // (horizontal tangent) on the floor (y returns to 0). A steady lateral drift
+  // separates entry and exit feet along the red (X) axis by `gap`.
+  const steps = Math.max(96, Math.ceil((2 * Math.PI * R) / roadParams.segLen));
   const dphi = (2 * Math.PI) / steps;
   const pos = new V3(0, 0, 0);
   const pts = [pos.clone()];
-  let phi = 0;
   for (let i = 1; i <= steps; i++) {
-    const u = i / steps;
-    // Radius tightens to the top (u≈0.5) and re-widens to the exit → teardrop.
-    const r = R * (1 - tighten * Math.sin(Math.PI * u));
+    const phiMid = (i - 0.5) * dphi;
+    const r = R * (1 - pinch * Math.sin(phiMid / 2)); // wide at base, tight on top
     const ds = r * dphi;
-    const phiMid = phi + dphi * 0.5;
     pos.y += Math.sin(phiMid) * ds;
     pos.z += -dir * Math.cos(phiMid) * ds;
-    pos.x += dir * (offset / steps); // total `offset` lateral drift entry→exit
-    phi += dphi;
+    pos.x += (gap / steps) * dir; // lateral red-axis drift across the whole loop
     pts.push(pos.clone());
   }
+  // Pin the exit foot exactly onto the floor (kill tiny numeric drift in y).
+  pts[pts.length - 1].y = 0;
   return pts;
 }
 

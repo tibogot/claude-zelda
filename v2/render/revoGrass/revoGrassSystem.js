@@ -29,8 +29,31 @@ import {
   fract,
   If,
 } from "three/tsl";
-import { createWindTexture } from "../../core/foliage/windTexture.js";
 import { hash42 } from "../../core/foliage/tsl-utils.js";
+
+/**
+ * Revo Realms' packed RGBA noise atlas (MIT — alezen9/revo-realms).
+ * Each channel is a different noise (R: super_noise_low / G: super_perlin /
+ * B: grainy / A: cracks) — that variety per-channel is what gives the wind
+ * its organic feel, vs. same FBM at different frequencies.
+ */
+const REVO_NOISE_ATLAS_URL = "/textures/revo_noise_atlas.png";
+let _revoNoiseAtlasPromise = null;
+function loadRevoNoiseAtlas() {
+  if (_revoNoiseAtlasPromise) return _revoNoiseAtlasPromise;
+  _revoNoiseAtlasPromise = new THREE.TextureLoader()
+    .loadAsync(REVO_NOISE_ATLAS_URL)
+    .then((tex) => {
+      tex.wrapS = tex.wrapT = THREE.RepeatWrapping;
+      tex.minFilter = THREE.LinearFilter;
+      tex.magFilter = THREE.LinearFilter;
+      tex.colorSpace = THREE.NoColorSpace;
+      tex.flipY = false;
+      tex.needsUpdate = true;
+      return tex;
+    });
+  return _revoNoiseAtlasPromise;
+}
 import { getRevoGrassConfig } from "../../core/revoGrass/revoGrassConfig.js";
 import { RevoGrassMask } from "../../core/revoGrass/revoGrassMask.js";
 import { createRevoBladeGeometry } from "../../core/revoGrass/revoGrassGeometry.js";
@@ -455,7 +478,7 @@ export class RevoGrassSystem {
     this._ssbo = null;
     this._uniforms = null;
     this._revoConfig = null;
-    this._windTex = createWindTexture();
+    this._windTex = null;
     this.mask = new RevoGrassMask(512);
     this._exclusionTex = this.mask.texture;
     this._exclusionSource = "mask";
@@ -487,6 +510,16 @@ export class RevoGrassSystem {
       toolState.revoGrass,
       this._geminiDensityTex,
     );
+    if (!this._windTex) {
+      try {
+        this._windTex = await loadRevoNoiseAtlas();
+      } catch (err) {
+        console.error(
+          `[RevoGrass] failed to load ${REVO_NOISE_ATLAS_URL}:`,
+          err,
+        );
+      }
+    }
     this._initialized = true;
     this.setEnabled(toolState.revoGrass?.enabled);
     if (toolState.revoGrass?.enabled) {
