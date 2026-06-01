@@ -591,6 +591,99 @@ export class ModularRoadBuilder {
     this._notify();
   }
 
+  /**
+   * Load a large, coherent CLOSED circuit — a flowing flat lap that returns
+   * exactly onto its own start line. The design rules that make it work:
+   *
+   *  - **Exact closure via 180° rotational symmetry.** The lap is two identical
+   *    halves; each turns exactly 180°, so placing the half twice turns a full
+   *    360° and lands back on the start. Provided each half's NET heading change
+   *    is exactly 180°, the position closes automatically — no hand-tuned side
+   *    lengths. (Chicanes are two opposite, equal curves so they net 0°.)
+   *
+   *  - **Curve-angle compensation.** The connector chain is tangent-continuous,
+   *    but a swept curve's exit tangent is a chord approximation that
+   *    under-rotates by ~segLen/radius. A nominal 90° corner would only turn
+   *    ~87°, so four of them miss 360° by ~12° and the loop spirals away. We
+   *    measure the real exit yaw and solve for the curveAngle that yields a true
+   *    90°/45°, so the lap closes to floating-point precision at any segLen.
+   *
+   *  - **Dead flat, so it can never go underground.** Slope/crest pieces don't
+   *    sample to perfectly level end-tangents — the residual pitch a following
+   *    curve bakes in both breaks closure AND drives the deck below ground;
+   *    banked corners likewise sink their low edge underground at ground level.
+   *    Keeping every piece at y = 0 sidesteps both. Variety comes from corners,
+   *    a chicane, a tunnel, and game lines. (Elevation belongs on the open,
+   *    non-closed chains the free demo builds — see loadDemo.)
+   */
+  loadBigCircuit() {
+    this.clear();
+    const saved = { ...pieceParams };
+    const put = (id, overrides = {}) => {
+      Object.assign(pieceParams, overrides);
+      this.activePieceId = id;
+      this.place();
+    };
+
+    // Measure the actual heading change (signed deg) a piece produces, so we can
+    // cancel the swept-curve chord under-rotation for exact closure.
+    const measureTurn = (id, ov) => {
+      Object.assign(pieceParams, ov);
+      const built = buildPiece(
+        id,
+        initialConnector(),
+        pieceParams,
+        roadParams,
+        guardrailParams,
+        guardrailParams.enabled,
+      );
+      const h = new THREE.Vector3(0, 0, -1).transformDirection(built.connectorOut);
+      return THREE.MathUtils.radToDeg(Math.atan2(h.x, -h.z));
+    };
+    // Solve the curveAngle that makes a curve of radius R actually turn `want`°.
+    const solveCurveAngle = (want, R, dir) => {
+      let A = Math.abs(want);
+      for (let i = 0; i < 5; i++) {
+        const got = Math.abs(measureTurn("curve", { curveRadius: R, curveAngle: A, curveDir: dir }));
+        const err = Math.abs(want) - got;
+        if (Math.abs(err) < 0.005) break;
+        A += err; // exit yaw is ~linear in A (slope ≈ 1) → converges in 1–2 steps
+      }
+      return A;
+    };
+
+    const R = 34; // sweeping corner radius (m)
+    const Rc = 22; // tighter chicane radius (m)
+    const A90 = solveCurveAngle(90, R, 1); // true 90° corner
+    const A45 = solveCurveAngle(45, Rc, 1); // true 45° (used both ways → net 0)
+
+    // One half-lap: turns exactly 180° (two 90° corners; the chicane nets 0°)
+    // and stays perfectly flat. `gameId` opens the half with its game line.
+    const half = (gameId) => {
+      put(gameId, { gameLineLength: 22 }); // start / finish line on the straight
+      put("straight", { straightLength: 36 });
+      put("straight", { straightLength: 30 });
+      put("curve", { curveRadius: R, curveAngle: A90, curveDir: 1 }); // corner (90°)
+      put("straight", { straightLength: 28 });
+      // Chicane: equal-and-opposite curves → an S-kink that nets exactly 0°.
+      put("curve", { curveRadius: Rc, curveAngle: A45, curveDir: -1 });
+      put("curve", { curveRadius: Rc, curveAngle: A45, curveDir: 1 });
+      put("straight", { straightLength: 24 });
+      put("checkpoint", { gameLineLength: 16 }); // mid-half checkpoint
+      put("tunnel", { straightLength: 30 }); // enclosed section
+      put("straight", { straightLength: 28 });
+      put("curve", { curveRadius: R, curveAngle: A90, curveDir: 1 }); // corner (90°)
+    };
+
+    half("start"); // first half opens on the start line
+    half("finish"); // second half opens on the finish line, then closes onto start
+
+    Object.assign(pieceParams, saved);
+    this.activePieceId = PIECE_CATALOG[0].id;
+    this.refreshGhost();
+    this._notify();
+  }
+
   /** @returns {{id:string, chainId:number, pp:object, edges:boolean, connectorIn:number[]}[]} */
   exportTrackPieces() {
     return this.pieces.map((p) => ({
@@ -1258,6 +1351,10 @@ export function buildRoadPaletteUI(builder, opts = {}) {
   });
   document.getElementById("road-demo")?.addEventListener("click", () => {
     builder.loadDemo();
+    refreshStatus();
+  });
+  document.getElementById("road-circuit")?.addEventListener("click", () => {
+    builder.loadBigCircuit();
     refreshStatus();
   });
   document.getElementById("road-clear")?.addEventListener("click", () => {
