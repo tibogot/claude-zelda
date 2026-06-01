@@ -65,6 +65,11 @@
       import { createOceanFFTSimulation, OCEAN_FFT_DEFAULTS, sampleOceanSurface } from "./ocean-fft.js";
       import { createOceanFFTGPUSimulation, OCEAN_FFT_GPU_DEFAULTS } from "./ocean-fft-gpu.js";
       import { OceanBoatPhysics, DEFAULT_BOAT_HULL } from "./ocean-buoyancy.js";
+      import {
+        uniform as tUniform, float as tF, vec2 as tV2, positionWorld,
+        mx_noise_float, attribute as tAttr, abs as tAbs, pow as tPow,
+        saturate as tSat, smoothstep as tSmooth,
+      } from "three/tsl";
 
       // ─────────────────────────────────────────────────────────────────────
       //  Map presets — the three world sizes the v2 map supports.
@@ -407,7 +412,7 @@
         const controls = new OrbitControls(camera, renderer.domElement);
         controls.enableDamping = true;
         controls.target.set(-80, 42, 40);
-        controls.maxPolarAngle = Math.PI * 0.495;
+        controls.maxPolarAngle = Math.PI * 0.96; // allow orbiting below the surface (diving)
         controls.maxDistance = 12000;
         controls.update();
 
@@ -465,6 +470,19 @@
           skyMieG: 0.8,
           fogDensity: 0.0,
           terrainRoughness: 0.92,
+          // underwater (phase 1: fog + tint + caustics, gated by submersion)
+          uwEyeOffset: 0.0,
+          uwTransitionSpeed: 5.0,
+          uwFogColor: "#0d3b46",
+          uwFogDensity: 0.04,
+          uwTint: "#0a3a44",
+          uwTintMax: 0.6,
+          causticsEnabled: true,
+          causticScale: 0.18,
+          causticSpeed: 0.6,
+          causticIntensity: 0.9,
+          causticSharp: 3.0,
+          causticColor: "#86ecdb",
           // boat (VVV-style buoyancy, no Rapier)
           boatEnabled: false,
           boatFollowCam: false,
@@ -489,6 +507,59 @@
         const fog = new THREE.FogExp2(0x9fb8c4, 0);
         scene.fog = fog;
         const pmrem = new THREE.PMREMGenerator(renderer);
+
+        // ── Underwater state + seabed caustics uniforms ───────────────────────
+        const uCaustTime = tUniform(0);
+        const uUnderwater = tUniform(0);
+        const uCausticScale = tUniform(params.causticScale);
+        const uCausticSpeed = tUniform(params.causticSpeed);
+        const uCausticIntensity = tUniform(params.causticsEnabled ? params.causticIntensity : 0);
+        const uCausticSharp = tUniform(params.causticSharp);
+        const uCausticColor = tUniform(new THREE.Color(params.causticColor));
+
+        /** Emissive caustics node for the seabed (terrain below sea level). */
+        function buildCausticsNode() {
+          const cP = positionWorld.xz.mul(uCausticScale);
+          const cT = uCaustTime.mul(uCausticSpeed);
+          const n1 = mx_noise_float(cP.add(tV2(cT, cT.mul(0.6))));
+          const n2 = mx_noise_float(cP.mul(1.7).add(tV2(cT.mul(-0.8), cT.mul(0.5))));
+          const ridge = tSat(tF(1).sub(tAbs(n1.sub(n2))));
+          const caust = tPow(ridge, uCausticSharp);
+          const depth = tF(SEA_LEVEL).sub(positionWorld.y); // >0 below water
+          const depthMask = tSmooth(tF(0), tF(1.5), depth).mul(tSat(tF(1).sub(depth.mul(0.02))));
+          return uCausticColor.mul(caust.mul(uCausticIntensity).mul(uUnderwater).mul(depthMask));
+        }
+
+        function syncUnderwater() {
+          uCausticScale.value = params.causticScale;
+          uCausticSpeed.value = params.causticSpeed;
+          uCausticIntensity.value = params.causticsEnabled ? params.causticIntensity : 0;
+          uCausticSharp.value = params.causticSharp;
+          uCausticColor.value.set(params.causticColor);
+        }
+
+        // Near-field underwater tint (covers what fog can't, e.g. the sky).
+        const uwOverlay = document.createElement("div");
+        uwOverlay.style.cssText =
+          "position:fixed;inset:0;pointer-events:none;z-index:5;opacity:0;";
+        document.body.appendChild(uwOverlay);
+        let uwT = 0;
+        const ABOVE_FOG_COLOR = new THREE.Color(0x9fb8c4);
+        const _uwFogTmp = new THREE.Color();
+        const _uwFogTarget = new THREE.Color();
+        function updateUnderwater(dt, elapsed) {
+          uCaustTime.value = elapsed;
+          const submerged = camera.position.y < SEA_LEVEL + params.uwEyeOffset;
+          const target = submerged ? 1 : 0;
+          uwT += (target - uwT) * (1 - Math.exp(-params.uwTransitionSpeed * Math.max(dt, 1e-4)));
+          uUnderwater.value = uwT;
+          _uwFogTarget.set(params.uwFogColor);
+          _uwFogTmp.copy(ABOVE_FOG_COLOR).lerp(_uwFogTarget, uwT);
+          fog.color.copy(_uwFogTmp);
+          fog.density = params.fogDensity * (1 - uwT) + params.uwFogDensity * uwT;
+          uwOverlay.style.background = params.uwTint;
+          uwOverlay.style.opacity = (uwT * params.uwTintMax).toFixed(3);
+        }
 
         function applySky() {
           sky.turbidity.value = params.skyTurbidity;
@@ -743,10 +814,12 @@
           heightTex.needsUpdate = true;
 
           if (!terrainMat) {
-            terrainMat = new THREE.MeshStandardMaterial({
-              vertexColors: true, roughness: params.terrainRoughness, metalness: 0,
+            terrainMat = new THREE.MeshStandardNodeMaterial({
+              roughness: params.terrainRoughness, metalness: 0,
               side: THREE.DoubleSide, // no see-through ("hollow") at sloped/cut edges
             });
+            terrainMat.colorNode = tAttr("color", "vec3"); // vertex colours (sand→grass→rock)
+            terrainMat.emissiveNode = buildCausticsNode();  // animated seabed caustics
           }
           rebuildTerrainMesh();
 
@@ -779,6 +852,7 @@
 
         bakeSkyEnv();
         rebuildWorld();
+        syncUnderwater();
 
         // ── Tweakpane ─────────────────────────────────────────────────────────
         const pane = new Pane({ title: "Ocean Lab" });
@@ -941,6 +1015,20 @@
         fRefl.addBinding(params, "fresnelMax", { min: 0.2, max: 1, step: 0.02, label: "fresnel max" }).on("change", sync);
         fRefl.addBinding(params, "fresnelSky", { min: 0, max: 0.6, step: 0.02, label: "sky tint (fallback)" }).on("change", sync);
 
+        const fUW = pane.addFolder({ title: "Underwater", expanded: false });
+        fUW.addBinding(params, "uwEyeOffset", { min: -2, max: 2, step: 0.05, label: "eye offset" });
+        fUW.addBinding(params, "uwTransitionSpeed", { min: 1, max: 14, step: 0.5, label: "transition" });
+        fUW.addBinding(params, "uwFogColor", { label: "fog colour" });
+        fUW.addBinding(params, "uwFogDensity", { min: 0, max: 0.15, step: 0.002, label: "fog density" });
+        fUW.addBinding(params, "uwTint", { label: "tint" });
+        fUW.addBinding(params, "uwTintMax", { min: 0, max: 1, step: 0.02, label: "tint max" });
+        fUW.addBinding(params, "causticsEnabled", { label: "caustics" }).on("change", syncUnderwater);
+        fUW.addBinding(params, "causticScale", { min: 0.02, max: 0.6, step: 0.01, label: "caust scale" }).on("change", syncUnderwater);
+        fUW.addBinding(params, "causticSpeed", { min: 0, max: 2, step: 0.05, label: "caust speed" }).on("change", syncUnderwater);
+        fUW.addBinding(params, "causticIntensity", { min: 0, max: 3, step: 0.05, label: "caust intensity" }).on("change", syncUnderwater);
+        fUW.addBinding(params, "causticSharp", { min: 1, max: 8, step: 0.1, label: "caust sharp" }).on("change", syncUnderwater);
+        fUW.addBinding(params, "causticColor", { label: "caust colour" }).on("change", syncUnderwater);
+
         pane.addButton({ title: "Export params JSON" }).on("click", () => {
           const blob = new Blob([JSON.stringify(params, null, 2)], { type: "application/json" });
           const a = document.createElement("a");
@@ -1035,6 +1123,7 @@
           );
           ocean.uniforms.waterY.value = SEA_LEVEL;
           ocean.update(dt, elapsed, null);
+          updateUnderwater(dt, elapsed);
           // GPU compute: time-evolve + IFFT the cascades, throttled to sim rate
           // (waves don't need 60 Hz; decouples the ~100 dispatches from render fps).
           if (params.fftEnabled) {
