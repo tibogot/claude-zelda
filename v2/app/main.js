@@ -3206,6 +3206,8 @@ export async function startV2App(opts = {}) {
           waterSystem.applyBodies(project.settings.waterBodies);
           waterMaterials.syncUniforms(toolState.water);
         }
+        // Re-apply the loaded world-ocean state (enable / sea level / look / LOD).
+        worldOcean.syncParams(toolState.worldOcean);
         waterfallSystem.syncMaterial();
         if (project.settings?.waterfallItems) {
           waterfallSystem.importData(project.settings.waterfallItems);
