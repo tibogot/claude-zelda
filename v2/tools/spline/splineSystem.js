@@ -15,9 +15,9 @@ import {
   buildFenceGeometry,
 } from "./splineLinearMesh.js";
 
-const KERB_DIFFUSE_TEX_PATH = "../textures/asphalt_track/asphalt_track_diff_2k.jpg";
-const KERB_ARM_TEX_PATH = "../textures/asphalt_track/asphalt_track_arm_2k.jpg";
-const KERB_NORMAL_TEX_PATH = "../textures/asphalt_track/asphalt_track_nor_gl_2k.jpg";
+const KERB_DIFFUSE_TEX_PATH = "../textures/pbr_materials/asphalt_track/asphalt_track_diff_2k.jpg";
+const KERB_ARM_TEX_PATH = "../textures/pbr_materials/asphalt_track/asphalt_track_arm_2k.jpg";
+const KERB_NORMAL_TEX_PATH = "../textures/pbr_materials/asphalt_track/asphalt_track_nor_gl_2k.jpg";
 let _kerbTexLoadStarted = false;
 let _kerbDiffuseTex = null;
 let _kerbArmTex = null;

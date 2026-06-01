@@ -8,7 +8,7 @@
  *    camera target in editor) each frame. Independent of world size.
  *
  *  - Surface material: `MeshStandardNodeMaterial` driven by real PBR snow
- *    textures (`textures/Snow010A/*`) — color, roughness, normal-GL, AO,
+ *    textures (`textures/pbr_materials/Snow010A/*`) — color, roughness, normal-GL, AO,
  *    displacement — tiled by world XZ. Adds a soft glitter highlight on
  *    top of the PBR roughness for visual sparkle.
  *
@@ -64,7 +64,7 @@ import {
 import { SnowMask } from "../../core/snow/snowMask.js";
 import { getSnowConfig } from "../../core/snow/snowConfig.js";
 
-const SNOW_TEX_BASE = "/textures/Snow010A/";
+const SNOW_TEX_BASE = "/textures/pbr_materials/Snow010A/";
 const SNOW_TEX_FILES = {
   color: "Snow010A_1K-JPG_Color.jpg",
   rough: "Snow010A_1K-JPG_Roughness.jpg",

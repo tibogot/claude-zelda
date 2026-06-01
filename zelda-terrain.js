@@ -244,14 +244,14 @@ export function createTerrain(scene, PARAMS, options = {}) {
   let grassColorTex, grassNormalTex, grassRoughTex, grassAOTex;
   const terrainReadyPromise = new Promise((resolve, reject) => {
     const paths = [
-      "textures/Ground037_1K-JPG_Color.jpg",
-      "textures/Ground037_1K-JPG_NormalGL.jpg",
-      "textures/Ground037_1K-JPG_Roughness.jpg",
-      "textures/Ground037_1K-JPG_AmbientOcclusion.jpg",
-      "textures/Grass005_1K-JPG_Color.jpg",
-      "textures/Grass005_1K-JPG_NormalGL.jpg",
-      "textures/Grass005_1K-JPG_Roughness.jpg",
-      "textures/Grass005_1K-JPG_AmbientOcclusion.jpg",
+      "textures/pbr_materials/Ground037/Ground037_1K-JPG_Color.jpg",
+      "textures/pbr_materials/Ground037/Ground037_1K-JPG_NormalGL.jpg",
+      "textures/pbr_materials/Ground037/Ground037_1K-JPG_Roughness.jpg",
+      "textures/pbr_materials/Ground037/Ground037_1K-JPG_AmbientOcclusion.jpg",
+      "textures/pbr_materials/Grass005/Grass005_1K-JPG_Color.jpg",
+      "textures/pbr_materials/Grass005/Grass005_1K-JPG_NormalGL.jpg",
+      "textures/pbr_materials/Grass005/Grass005_1K-JPG_Roughness.jpg",
+      "textures/pbr_materials/Grass005/Grass005_1K-JPG_AmbientOcclusion.jpg",
     ];
     let pending = paths.length;
     const onLoad = () => {

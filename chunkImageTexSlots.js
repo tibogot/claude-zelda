@@ -133,24 +133,24 @@ export function createChunkImageSlotSystem() {
   const loader = new THREE.TextureLoader();
 
   const ROCK = {
-    albedo: "textures/Cobblestone_Irregular_Floor_001_SD/Cobblestone_Irregular_Floor_001_basecolor.png",
-    normal: "textures/Cobblestone_Irregular_Floor_001_SD/Cobblestone_Irregular_Floor_001_normal.png",
-    ao: "textures/Cobblestone_Irregular_Floor_001_SD/Cobblestone_Irregular_Floor_001_ambientOcclusion.png",
-    rough: "textures/Cobblestone_Irregular_Floor_001_SD/Cobblestone_Irregular_Floor_001_roughness.png",
+    albedo: "textures/pbr_materials/Cobblestone_Irregular_Floor_001_SD/Cobblestone_Irregular_Floor_001_basecolor.png",
+    normal: "textures/pbr_materials/Cobblestone_Irregular_Floor_001_SD/Cobblestone_Irregular_Floor_001_normal.png",
+    ao: "textures/pbr_materials/Cobblestone_Irregular_Floor_001_SD/Cobblestone_Irregular_Floor_001_ambientOcclusion.png",
+    rough: "textures/pbr_materials/Cobblestone_Irregular_Floor_001_SD/Cobblestone_Irregular_Floor_001_roughness.png",
   };
 
   const GRASS = {
-    albedo: "textures/Grass005_1K-JPG_Color.jpg",
-    normal: "textures/Grass005_1K-JPG_NormalGL.jpg",
-    ao: "textures/Grass005_1K-JPG_AmbientOcclusion.jpg",
-    rough: "textures/Grass005_1K-JPG_Roughness.jpg",
+    albedo: "textures/pbr_materials/Grass005/Grass005_1K-JPG_Color.jpg",
+    normal: "textures/pbr_materials/Grass005/Grass005_1K-JPG_NormalGL.jpg",
+    ao: "textures/pbr_materials/Grass005/Grass005_1K-JPG_AmbientOcclusion.jpg",
+    rough: "textures/pbr_materials/Grass005/Grass005_1K-JPG_Roughness.jpg",
   };
 
   const GROUND = {
-    albedo: "textures/Ground037_1K-JPG_Color.jpg",
-    normal: "textures/Ground037_1K-JPG_NormalGL.jpg",
-    ao: "textures/Ground037_1K-JPG_AmbientOcclusion.jpg",
-    rough: "textures/Ground037_1K-JPG_Roughness.jpg",
+    albedo: "textures/pbr_materials/Ground037/Ground037_1K-JPG_Color.jpg",
+    normal: "textures/pbr_materials/Ground037/Ground037_1K-JPG_NormalGL.jpg",
+    ao: "textures/pbr_materials/Ground037/Ground037_1K-JPG_AmbientOcclusion.jpg",
+    rough: "textures/pbr_materials/Ground037/Ground037_1K-JPG_Roughness.jpg",
   };
 
   function loadSlotPacked(slot, maps, enableFlags) {

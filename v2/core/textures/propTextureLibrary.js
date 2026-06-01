@@ -67,10 +67,10 @@ const DEFAULT_MATERIALS = [
     name: "Cobblestone",
     uvScale: 2.0,
     paths: {
-      albedo: "/textures/Cobblestone_Irregular_Floor_001_SD/Cobblestone_Irregular_Floor_001_basecolor.png",
-      normal: "/textures/Cobblestone_Irregular_Floor_001_SD/Cobblestone_Irregular_Floor_001_normal.png",
-      rough: "/textures/Cobblestone_Irregular_Floor_001_SD/Cobblestone_Irregular_Floor_001_roughness.png",
-      ao: "/textures/Cobblestone_Irregular_Floor_001_SD/Cobblestone_Irregular_Floor_001_ambientOcclusion.png",
+      albedo: "/textures/pbr_materials/Cobblestone_Irregular_Floor_001_SD/Cobblestone_Irregular_Floor_001_basecolor.png",
+      normal: "/textures/pbr_materials/Cobblestone_Irregular_Floor_001_SD/Cobblestone_Irregular_Floor_001_normal.png",
+      rough: "/textures/pbr_materials/Cobblestone_Irregular_Floor_001_SD/Cobblestone_Irregular_Floor_001_roughness.png",
+      ao: "/textures/pbr_materials/Cobblestone_Irregular_Floor_001_SD/Cobblestone_Irregular_Floor_001_ambientOcclusion.png",
     },
   },
   {
@@ -78,10 +78,10 @@ const DEFAULT_MATERIALS = [
     name: "Concrete 030",
     uvScale: 2.0,
     paths: {
-      albedo: "/textures/Concrete030_1K-JPG/Concrete030_1K-JPG_Color.jpg",
-      normal: "/textures/Concrete030_1K-JPG/Concrete030_1K-JPG_NormalGL.jpg",
-      rough: "/textures/Concrete030_1K-JPG/Concrete030_1K-JPG_Roughness.jpg",
-      ao: "/textures/Concrete030_1K-JPG/Concrete030_1K-JPG_AmbientOcclusion.jpg",
+      albedo: "/textures/pbr_materials/Concrete030_1K-JPG/Concrete030_1K-JPG_Color.jpg",
+      normal: "/textures/pbr_materials/Concrete030_1K-JPG/Concrete030_1K-JPG_NormalGL.jpg",
+      rough: "/textures/pbr_materials/Concrete030_1K-JPG/Concrete030_1K-JPG_Roughness.jpg",
+      ao: "/textures/pbr_materials/Concrete030_1K-JPG/Concrete030_1K-JPG_AmbientOcclusion.jpg",
     },
   },
   {
@@ -89,10 +89,10 @@ const DEFAULT_MATERIALS = [
     name: "Ground Tiles 01",
     uvScale: 2.0,
     paths: {
-      albedo: "/textures/ground_tiles_01_2k/ground_tiles_01_color_2k.png",
-      normal: "/textures/ground_tiles_01_2k/ground_tiles_01_normal_gl_2k.png",
-      rough: "/textures/ground_tiles_01_2k/ground_tiles_01_roughness_2k.png",
-      ao: "/textures/ground_tiles_01_2k/ground_tiles_01_ambient_occlusion_2k.png",
+      albedo: "/textures/pbr_materials/ground_tiles_01_2k/ground_tiles_01_color_2k.png",
+      normal: "/textures/pbr_materials/ground_tiles_01_2k/ground_tiles_01_normal_gl_2k.png",
+      rough: "/textures/pbr_materials/ground_tiles_01_2k/ground_tiles_01_roughness_2k.png",
+      ao: "/textures/pbr_materials/ground_tiles_01_2k/ground_tiles_01_ambient_occlusion_2k.png",
     },
   },
 ];

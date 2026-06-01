@@ -151,10 +151,10 @@ const DEFAULT_SLOT_PRESETS = [
     name: "Cliff Rock (Rock028)",
     uvScale: 20.0,
     paths: {
-      albedo: "/textures/Rock028/Rock028_2K-JPG_Color.jpg",
-      normal: "/textures/Rock028/Rock028_2K-JPG_NormalGL.jpg",
-      ao: "/textures/Rock028/Rock028_2K-JPG_AmbientOcclusion.jpg",
-      rough: "/textures/Rock028/Rock028_2K-JPG_Roughness.jpg",
+      albedo: "/textures/pbr_materials/Rock028/Rock028_2K-JPG_Color.jpg",
+      normal: "/textures/pbr_materials/Rock028/Rock028_2K-JPG_NormalGL.jpg",
+      ao: "/textures/pbr_materials/Rock028/Rock028_2K-JPG_AmbientOcclusion.jpg",
+      rough: "/textures/pbr_materials/Rock028/Rock028_2K-JPG_Roughness.jpg",
     },
   },
   {
@@ -163,12 +163,12 @@ const DEFAULT_SLOT_PRESETS = [
     uvScale: 20.0,
     paths: {
       albedo:
-        "/textures/Cobblestone_Irregular_Floor_001_SD/Cobblestone_Irregular_Floor_001_basecolor.png",
+        "/textures/pbr_materials/Cobblestone_Irregular_Floor_001_SD/Cobblestone_Irregular_Floor_001_basecolor.png",
       normal:
-        "/textures/Cobblestone_Irregular_Floor_001_SD/Cobblestone_Irregular_Floor_001_normal.png",
-      ao: "/textures/Cobblestone_Irregular_Floor_001_SD/Cobblestone_Irregular_Floor_001_ambientOcclusion.png",
+        "/textures/pbr_materials/Cobblestone_Irregular_Floor_001_SD/Cobblestone_Irregular_Floor_001_normal.png",
+      ao: "/textures/pbr_materials/Cobblestone_Irregular_Floor_001_SD/Cobblestone_Irregular_Floor_001_ambientOcclusion.png",
       rough:
-        "/textures/Cobblestone_Irregular_Floor_001_SD/Cobblestone_Irregular_Floor_001_roughness.png",
+        "/textures/pbr_materials/Cobblestone_Irregular_Floor_001_SD/Cobblestone_Irregular_Floor_001_roughness.png",
     },
   },
   {
@@ -176,10 +176,10 @@ const DEFAULT_SLOT_PRESETS = [
     name: "Grass 005",
     uvScale: 3.0,
     paths: {
-      albedo: "/textures/Grass005_1K-JPG_Color.jpg",
-      normal: "/textures/Grass005_1K-JPG_NormalGL.jpg",
-      ao: "/textures/Grass005_1K-JPG_AmbientOcclusion.jpg",
-      rough: "/textures/Grass005_1K-JPG_Roughness.jpg",
+      albedo: "/textures/pbr_materials/Grass005/Grass005_1K-JPG_Color.jpg",
+      normal: "/textures/pbr_materials/Grass005/Grass005_1K-JPG_NormalGL.jpg",
+      ao: "/textures/pbr_materials/Grass005/Grass005_1K-JPG_AmbientOcclusion.jpg",
+      rough: "/textures/pbr_materials/Grass005/Grass005_1K-JPG_Roughness.jpg",
     },
   },
   {
@@ -187,10 +187,10 @@ const DEFAULT_SLOT_PRESETS = [
     name: "Ground 037",
     uvScale: 3.0,
     paths: {
-      albedo: "/textures/Ground037_1K-JPG_Color.jpg",
-      normal: "/textures/Ground037_1K-JPG_NormalGL.jpg",
-      ao: "/textures/Ground037_1K-JPG_AmbientOcclusion.jpg",
-      rough: "/textures/Ground037_1K-JPG_Roughness.jpg",
+      albedo: "/textures/pbr_materials/Ground037/Ground037_1K-JPG_Color.jpg",
+      normal: "/textures/pbr_materials/Ground037/Ground037_1K-JPG_NormalGL.jpg",
+      ao: "/textures/pbr_materials/Ground037/Ground037_1K-JPG_AmbientOcclusion.jpg",
+      rough: "/textures/pbr_materials/Ground037/Ground037_1K-JPG_Roughness.jpg",
     },
   },
   {
@@ -198,10 +198,10 @@ const DEFAULT_SLOT_PRESETS = [
     name: "Snow 010A",
     uvScale: 3.0,
     paths: {
-      albedo: "/textures/Snow010A/Snow010A_1K-JPG_Color.jpg",
-      normal: "/textures/Snow010A/Snow010A_1K-JPG_NormalGL.jpg",
-      ao: "/textures/Snow010A/Snow010A_1K-JPG_AmbientOcclusion.jpg",
-      rough: "/textures/Snow010A/Snow010A_1K-JPG_Roughness.jpg",
+      albedo: "/textures/pbr_materials/Snow010A/Snow010A_1K-JPG_Color.jpg",
+      normal: "/textures/pbr_materials/Snow010A/Snow010A_1K-JPG_NormalGL.jpg",
+      ao: "/textures/pbr_materials/Snow010A/Snow010A_1K-JPG_AmbientOcclusion.jpg",
+      rough: "/textures/pbr_materials/Snow010A/Snow010A_1K-JPG_Roughness.jpg",
     },
   },
 ];

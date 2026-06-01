@@ -10,9 +10,9 @@ import {
 } from "../../core/road/roadMaterial.js";
 import { createDecalMaterial } from "./roadDecalMaterial.js";
 
-const DIFFUSE_TEX_PATH = "../textures/asphalt_track/asphalt_track_diff_2k.jpg";
-const ARM_TEX_PATH = "../textures/asphalt_track/asphalt_track_arm_2k.jpg";
-const NORMAL_TEX_PATH = "../textures/asphalt_track/asphalt_track_nor_gl_2k.jpg";
+const DIFFUSE_TEX_PATH = "../textures/pbr_materials/asphalt_track/asphalt_track_diff_2k.jpg";
+const ARM_TEX_PATH = "../textures/pbr_materials/asphalt_track/asphalt_track_arm_2k.jpg";
+const NORMAL_TEX_PATH = "../textures/pbr_materials/asphalt_track/asphalt_track_nor_gl_2k.jpg";
 
 const STYLE_KEYS = [
   "lineColor", "lineWidth", "lineSoftness", "lineInset",

@@ -2,9 +2,9 @@ import * as THREE from "three";
 import { generateRoadGeometry } from "../../core/road/roadMesh.js";
 import { createRoadUniforms, createRoadMaterial, syncRoadUniforms } from "../../core/road/roadMaterial.js";
 
-const DIFFUSE_TEX_PATH = "../textures/asphalt_track/asphalt_track_diff_2k.jpg";
-const ARM_TEX_PATH = "../textures/asphalt_track/asphalt_track_arm_2k.jpg";
-const NORMAL_TEX_PATH = "../textures/asphalt_track/asphalt_track_nor_gl_2k.jpg";
+const DIFFUSE_TEX_PATH = "../textures/pbr_materials/asphalt_track/asphalt_track_diff_2k.jpg";
+const ARM_TEX_PATH = "../textures/pbr_materials/asphalt_track/asphalt_track_arm_2k.jpg";
+const NORMAL_TEX_PATH = "../textures/pbr_materials/asphalt_track/asphalt_track_nor_gl_2k.jpg";
 
 const SNAP_THRESHOLD = 3.0;
 
