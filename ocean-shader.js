@@ -266,6 +266,18 @@ export const OCEAN_DEFAULTS = {
   /** Camera distance where water is fully the horizon colour. */
   horizonFadeEnd:     9000.0,
 
+  // ── Underwater (surface seen from below: Snell window + total internal refl) ─
+  // `underwaterT` is a live uniform (0 above water → 1 submerged), driven by the
+  // host from camera submersion; the rest are look tunables.
+  /** cos of the water critical angle (~48.6°): above this verticality = sky window. */
+  snellCritCos:       0.66,
+  /** Soft width of the Snell-window edge. */
+  snellSoft:          0.12,
+  /** Brightness of the refracted sky seen through the window. */
+  underwaterSkyBoost: 1.1,
+  /** TIR (mirror) darkness — scales deepColor outside the window. */
+  underwaterMurk:     0.5,
+
   // Alpha
   opacity:            1.0,
 
@@ -417,6 +429,13 @@ export function createOceanShader({ heightTex, terrainSize, fft = null, envMap =
   u.horizonColor       = uniform(new THREE.Color(OCEAN_DEFAULTS.horizonColor));
   u.horizonFadeStart   = uniform(OCEAN_DEFAULTS.horizonFadeStart);
   u.horizonFadeEnd     = uniform(OCEAN_DEFAULTS.horizonFadeEnd);
+
+  // Underwater (surface from below)
+  u.underwaterT        = uniform(0);
+  u.snellCritCos       = uniform(OCEAN_DEFAULTS.snellCritCos);
+  u.snellSoft          = uniform(OCEAN_DEFAULTS.snellSoft);
+  u.underwaterSkyBoost = uniform(OCEAN_DEFAULTS.underwaterSkyBoost);
+  u.underwaterMurk     = uniform(OCEAN_DEFAULTS.underwaterMurk);
 
   // Alpha
   u.opacity = uniform(OCEAN_DEFAULTS.opacity);
@@ -829,7 +848,38 @@ export function createOceanShader({ heightTex, terrainSize, fft = null, envMap =
       });
       horizonTarget.assign(mix(u.horizonColor, skyCol, u.horizonUseSky));
     });
-    const finalColor = mix(composited, horizonTarget, hf);
+    const aboveColor = mix(composited, horizonTarget, hf);
+
+    // ── Underwater: surface seen from below (Snell window + TIR) ─────────────
+    // Only when submerged (uniform-gated → free above water). Verticality of the
+    // view (|N·V|) selects the bright refracted-sky disc straight up vs. the
+    // dark total-internal-reflection mirror toward the horizon; wave normals
+    // ripple the boundary and the sun shows through the window.
+    const underside = u.deepColor.toVar();
+    If(u.underwaterT.greaterThan(float(0.001)), () => {
+      const viewDirU = normalize(cameraPosition.sub(positionWorld));
+      const cosT = abs(dot(worldN, viewDirU)); // 1 = looking straight up
+      const win = smoothstep(
+        u.snellCritCos.sub(u.snellSoft),
+        u.snellCritCos.add(u.snellSoft),
+        cosT,
+      );
+      const refrDir = normalize(vec3(
+        worldN.x.negate().mul(0.6).add(viewDirU.x.mul(0.4)),
+        float(1.0),
+        worldN.z.negate().mul(0.6).add(viewDirU.z.mul(0.4)),
+      ));
+      const skyU = envPmrem.context({
+        getUV: () => refrDir,
+        getTextureLevel: () => float(1.0),
+      });
+      const sunWin = pow(max(dot(refrDir, u.sunDir), float(0)), float(48)).mul(win);
+      const windowCol = skyU.mul(u.underwaterSkyBoost).add(u.glintColor.mul(sunWin.mul(0.7)));
+      const tirCol = u.deepColor.mul(u.underwaterMurk);
+      underside.assign(mix(tirCol, windowCol, win));
+    });
+
+    const finalColor = mix(aboveColor, underside, u.underwaterT);
     return vec4(finalColor, u.opacity);
   });
 
@@ -930,6 +980,11 @@ export function createOceanShader({ heightTex, terrainSize, fft = null, envMap =
     if (p.horizonColor       != null) c(p.horizonColor, u.horizonColor.value);
     if (p.horizonFadeStart   != null) u.horizonFadeStart.value = p.horizonFadeStart;
     if (p.horizonFadeEnd     != null) u.horizonFadeEnd.value = p.horizonFadeEnd;
+
+    if (p.snellCritCos       != null) u.snellCritCos.value = p.snellCritCos;
+    if (p.snellSoft          != null) u.snellSoft.value = p.snellSoft;
+    if (p.underwaterSkyBoost != null) u.underwaterSkyBoost.value = p.underwaterSkyBoost;
+    if (p.underwaterMurk     != null) u.underwaterMurk.value = p.underwaterMurk;
 
     if (p.opacity != null) u.opacity.value = p.opacity;
 

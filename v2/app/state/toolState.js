@@ -714,6 +714,13 @@ export function createToolState() {
       whitecapIntensity: 0.88,
       // horizon
       horizonFadeEnabled: true,
+      // underwater (DOM tint overlay; toggleable, ~zero GPU cost)
+      underwaterEnabled: false,
+      uwEyeOffset: 0,
+      uwTransitionSpeed: 5,
+      uwTint: "#0a3a44",
+      uwTintMax: 0.72,
+      uwDepthDarken: 0.015,
       // LOD / perf
       levels: 7,
       gridM: 64,

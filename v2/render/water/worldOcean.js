@@ -108,6 +108,26 @@ export function createWorldOcean({ renderer, scene, heightTex, terrainSize }) {
   group.visible = false;
   scene.add(group);
 
+  // Underwater tint overlay — renderer/fog-agnostic (v2 uses scene.fogNode, which
+  // must not be toggled at runtime). A DOM layer over the viewport: zero GPU cost,
+  // only updated while submerged. Caustics/true fog are a deferred follow-up.
+  const uwOverlay = document.createElement("div");
+  // Absolute (not fixed) so it's scoped to the canvas's container (#viewport in
+  // the editor) and sits just above the canvas (z-index 2) but under the UI
+  // panels, which live in separate layout cells.
+  uwOverlay.style.cssText =
+    "position:absolute;inset:0;pointer-events:none;z-index:3;opacity:0;";
+  (renderer.domElement.parentElement || document.body).appendChild(uwOverlay);
+  let uwT = 0;
+  const uw = {
+    enabled: false,
+    eyeOffset: 0,
+    transitionSpeed: 5,
+    tint: "#0a3a44",
+    tintMax: 0.72,
+    depthDarken: 0.015,
+  };
+
   let enabled = false;
   let seaLevel = 0;
   let fftHz = 30;
@@ -115,6 +135,20 @@ export function createWorldOcean({ renderer, scene, heightTex, terrainSize }) {
   let snapStep = 2;
   let lodSig = "";
   let baked = false; // first enabled-frame FFT bake done?
+
+  function updateUnderwater(dt, camera) {
+    const active = enabled && uw.enabled;
+    const submerged = active && camera.position.y < seaLevel + uw.eyeOffset;
+    uwT += ((submerged ? 1 : 0) - uwT) * (1 - Math.exp(-uw.transitionSpeed * Math.max(dt, 1e-4)));
+    if (uwT < 0.001) {
+      if (uwOverlay.style.opacity !== "0") uwOverlay.style.opacity = "0";
+      return;
+    }
+    const depthBelow = Math.max(0, seaLevel - camera.position.y);
+    const op = uwT * Math.min(0.95, uw.tintMax + depthBelow * uw.depthDarken);
+    uwOverlay.style.background = uw.tint;
+    uwOverlay.style.opacity = op.toFixed(3);
+  }
 
   function rebuildClip(p) {
     const sig = `${p.levels}|${p.gridM}|${p.baseCell}|${p.horizonScale}`;
@@ -163,10 +197,18 @@ export function createWorldOcean({ renderer, scene, heightTex, terrainSize }) {
       fft.syncParams(p);
       this.setSeaLevel(p.seaLevel ?? 0);
       this.setEnabled(!!p.enabled);
+      // underwater overlay params
+      uw.enabled = !!p.underwaterEnabled;
+      uw.eyeOffset = p.uwEyeOffset ?? 0;
+      uw.transitionSpeed = p.uwTransitionSpeed ?? 5;
+      uw.tint = p.uwTint ?? "#0a3a44";
+      uw.tintMax = p.uwTintMax ?? 0.72;
+      uw.depthDarken = p.uwDepthDarken ?? 0.015;
     },
 
     /** Call each frame before renderer.render. */
     update(dt, elapsed, camera) {
+      updateUnderwater(dt, camera); // cheap; also fades the overlay out when off
       if (!enabled || group.children.length === 0) return;
       group.position.set(
         Math.round(camera.position.x / snapStep) * snapStep,
@@ -196,6 +238,7 @@ export function createWorldOcean({ renderer, scene, heightTex, terrainSize }) {
       scene.remove(group);
       ocean.material.dispose();
       fft.dispose();
+      uwOverlay.remove();
     },
   };
 }
