@@ -1,6 +1,6 @@
 import * as THREE from "three";
 import { TransformControls } from "three/addons/controls/TransformControls.js";
-import { ParkourMover } from "./modularRoadParkour.js";
+import { ParkourMover, enableMeshShadows } from "./modularRoadParkour.js";
 
 /**
  * Placeable moving obstacles — same gizmo workflow as static props, backed by
@@ -258,6 +258,7 @@ export class MoverPropManager {
     const def = MOVER_BY_ID.get(typeId);
     if (!def) return null;
     const root = def.make();
+    enableMeshShadows(root);
     root.userData.isMoverProp = true;
     if (this.orbit?.target) {
       root.position.set(this.orbit.target.x, Math.max(0, this.orbit.target.y), this.orbit.target.z);
@@ -283,6 +284,7 @@ export class MoverPropManager {
     if (!this.selected) return;
     const src = this.selected;
     const root = src.def.make();
+    enableMeshShadows(root);
     root.userData.isMoverProp = true;
     root.position.copy(src.root.position).add(new V3(4, 0, 4));
     root.quaternion.copy(src.root.quaternion);
@@ -361,6 +363,7 @@ export class MoverPropManager {
       const def = MOVER_BY_ID.get(item.type);
       if (!def || !Array.isArray(item.position)) continue;
       const root = def.make();
+      enableMeshShadows(root);
       root.userData.isMoverProp = true;
       root.position.fromArray(item.position);
       if (Array.isArray(item.quaternion) && item.quaternion.length === 4) {

@@ -133,6 +133,7 @@ import { createCollectibleSfx } from "../play/collectibleSfx.js";
 import { TransformControls } from "three/addons/controls/TransformControls.js";
 import { WaterStore } from "../core/water/waterStore.js";
 import { createWaterMaterials } from "../render/water/waterMaterial.js";
+import { createWorldOcean } from "../render/water/worldOcean.js";
 import { WaterSystem } from "../tools/water/waterSystem.js";
 import { DecalSystem } from "../tools/decals/decalSystem.js";
 import { WaterfallSystem } from "../tools/waterfall/waterfallSystem.js";
@@ -1220,6 +1221,14 @@ export async function startV2App(opts = {}) {
     toolState,
     transformControls,
   });
+  // Global map-covering LOD ocean (additive; independent of the placed bodies).
+  const worldOcean = createWorldOcean({
+    renderer,
+    scene,
+    heightTex: globalHeightTex,
+    terrainSize: config.world.size,
+  });
+  let _oceanEnvRef = null; // track scene.environment changes to refresh ocean reflections
   const waterfallSystem = new WaterfallSystem({
     scene,
     toolState,
@@ -4822,6 +4831,12 @@ export async function startV2App(opts = {}) {
   let _lastLightSnap = "";
   let _lastInteriorSnap = "";
   const _interiorFocusPos = new THREE.Vector3();
+  // World ocean: initial sun/env + params (sky & sun are set up by now).
+  worldOcean.setSunDir(sunDir);
+  worldOcean.setEnvMap(scene.environment);
+  _oceanEnvRef = scene.environment;
+  worldOcean.syncParams(toolState.worldOcean);
+
   renderer.setAnimationLoop(() => {
     const now = performance.now();
     const dtMs = now - last;
@@ -4857,6 +4872,7 @@ export async function startV2App(opts = {}) {
       foliageLodRenderer.updateSunDirection(sunDir);
       billboardRenderer.updateSunDirection(sunDir);
       billboardGrassRenderer.updateSunDirection(sunDir);
+      worldOcean.setSunDir(sunDir);
     }
     lensFlare.update();
 
@@ -5045,6 +5061,13 @@ export async function startV2App(opts = {}) {
       }
     }
     waterfallSystem.update(dtSec);
+
+    // Global world ocean — FFT compute + recenter run here, before renderer.render.
+    if (scene.environment !== _oceanEnvRef) {
+      _oceanEnvRef = scene.environment;
+      worldOcean.setEnvMap(scene.environment);
+    }
+    worldOcean.update(dtSec, _appTimeSec, camera);
 
     if (now - hudLastMs > 180) {
       let tris = 0;
@@ -5449,6 +5472,10 @@ export async function startV2App(opts = {}) {
     },
     clearAllWater() {
       _clearAllWater();
+    },
+    worldOcean,
+    worldOceanChanged() {
+      worldOcean.syncParams(toolState.worldOcean);
     },
     waterfallChanged() {
       _waterfallChanged();

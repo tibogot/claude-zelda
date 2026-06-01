@@ -5,6 +5,16 @@ import { RoadBvh } from "./modularRoadBvh.js";
  * Shared geometry + ParkourMover — used by placeable static props and moving obstacles.
  */
 
+/** Enable directional-light shadows on every mesh under root. */
+export function enableMeshShadows(root) {
+  root.traverse((o) => {
+    if (o.isMesh) {
+      o.castShadow = true;
+      o.receiveShadow = true;
+    }
+  });
+}
+
 /* ----------------------------------------------------------------------- */
 /* Geometry helpers                                                         */
 /* ----------------------------------------------------------------------- */

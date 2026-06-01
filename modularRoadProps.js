@@ -1,7 +1,12 @@
 import * as THREE from "three";
 import { TransformControls } from "three/addons/controls/TransformControls.js";
 import { computeFrames, buildProfile, buildTunnelGeometry } from "./modularRoadKit.js";
-import { kickerRampGeometry, jumpRampGeometry, buildSlopeLabGroup } from "./modularRoadParkour.js";
+import {
+  kickerRampGeometry,
+  jumpRampGeometry,
+  buildSlopeLabGroup,
+  enableMeshShadows,
+} from "./modularRoadParkour.js";
 
 /**
  * Free-placement props for the modular road. Unlike auto-chained track pieces,
@@ -322,6 +327,7 @@ export class PropManager {
     const def = PROP_BY_ID.get(typeId);
     if (!def) return null;
     const root = def.make();
+    enableMeshShadows(root);
     root.userData.isProp = true;
     if (this.orbit?.target) {
       root.position.set(this.orbit.target.x, Math.max(0, this.orbit.target.y), this.orbit.target.z);
@@ -339,6 +345,7 @@ export class PropManager {
     if (!this.selected) return;
     const src = this.selected;
     const root = src.def.make();
+    enableMeshShadows(root);
     root.userData.isProp = true;
     root.position.copy(src.root.position).add(new V3(4, 0, 4));
     root.quaternion.copy(src.root.quaternion);
@@ -412,6 +419,7 @@ export class PropManager {
       const def = PROP_BY_ID.get(item.type);
       if (!def || !Array.isArray(item.position)) continue;
       const root = def.make();
+      enableMeshShadows(root);
       root.userData.isProp = true;
       root.position.fromArray(item.position);
       if (Array.isArray(item.quaternion) && item.quaternion.length === 4) {

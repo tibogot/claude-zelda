@@ -681,6 +681,45 @@ export function createToolState() {
       reflectionScale: 0.5,
       reflectionEveryN: 2,
     },
+    /**
+     * Global map-covering LOD ocean (render/water/worldOcean.js). Distinct from
+     * the placed water bodies above — this is one world-spanning sea with waves,
+     * islands = terrain above seaLevel. Disabled by default.
+     */
+    worldOcean: {
+      enabled: false,
+      seaLevel: 0,
+      // waves (GPU FFT)
+      windSpeed: 14,
+      windAngleDeg: 38,
+      fftChoppiness: 1.28,
+      fftSwellAmp: 1.15,
+      fftRippleAmp: 0.55,
+      fftUpdateHz: 30,
+      // colour / depth
+      shoreColor: "#8fe5d8",
+      midColor: "#2ca8a8",
+      deepColor: "#0b3a4a",
+      highlightColor: "#a0e6e0",
+      depthAbsorb: 0.14,
+      opacity: 1.0,
+      // reflections / fresnel
+      envReflectIntensity: 1.05,
+      fresnelMax: 0.72,
+      // foam / whitecaps
+      foamEnabled: true,
+      foamColor: "#f0fbfa",
+      foamIntensity: 1.25,
+      whitecapEnabled: true,
+      whitecapIntensity: 0.88,
+      // horizon
+      horizonFadeEnabled: true,
+      // LOD / perf
+      levels: 7,
+      gridM: 64,
+      baseCell: 1.0,
+      horizonScale: 6.0,
+    },
     /** NPC / enemy spawn authoring (capsule placeholders → GLB later). */
     actors: {
       placeTool: "npc",
