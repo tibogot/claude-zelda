@@ -55,6 +55,9 @@ export const pieceParams = {
   // Jump / launch ramp:
   jumpLength: 18, // arc length of the ramp (m)
   jumpAngle: 28, // takeoff angle at the exit (deg)
+  // Dive / down ramp (mirror of the jump — flat entry, exit pitched down):
+  diveLength: 18, // arc length of the ramp (m)
+  diveAngle: 28, // down-pitch angle at the exit (deg)
   // Drivable vertical looping (round ring split at the bottom, feet slid apart
   // sideways so both stay flat on the floor). Tunable shape controls:
   loopRadius: 25, // ring radius (m)
@@ -84,6 +87,9 @@ export const pieceParams = {
   // Landing ramp (enters pitched down, eases to level):
   landLength: 16,
   landAngle: 30, // entry down-pitch (deg)
+  // Brow ramp (mirror of landing — enters pitched up, eases to level):
+  browLength: 16,
+  browAngle: 30, // entry up-pitch (deg)
   // Tunnel shell:
   tunnelHeight: 7, // interior clearance from deck to crown (m)
   onChange: null,
@@ -570,6 +576,24 @@ function jumpPoints(pp) {
   return pts;
 }
 
+/** Dive ramp: vertical mirror of the jump — flat at the start, pitches DOWN to
+ * diveAngle at the exit so the track crests an edge and keeps heading downhill. */
+function divePoints(pp) {
+  const L = Math.max(2, pp.diveLength);
+  const ang = THREE.MathUtils.degToRad(THREE.MathUtils.clamp(pp.diveAngle, 0, 80));
+  const n = Math.max(2, Math.ceil(L / roadParams.segLen));
+  const ds = L / n;
+  const cur = new V3(0, 0, 0);
+  const pts = [cur.clone()];
+  for (let i = 1; i <= n; i++) {
+    const ph = -ang * (i / n) * (i / n); // ease-in: horizontal at start, pitched down at exit
+    cur.y += Math.sin(ph) * ds;
+    cur.z += -Math.cos(ph) * ds;
+    pts.push(cur.clone());
+  }
+  return pts;
+}
+
 /**
  * One side of a *drivable* vertical loop: ground → over the top, built by
  * integrating a pitch angle from horizontal (0) to inverted (π). Two fixes over
@@ -816,6 +840,25 @@ function landingPoints(pp) {
   return pts;
 }
 
+/** Brow ramp: vertical mirror of the landing — enters pitched UP at browAngle and
+ * eases to level at the exit, so a sustained climb crests over the top to flat. */
+function browPoints(pp) {
+  const L = Math.max(2, pp.browLength);
+  const ang = THREE.MathUtils.degToRad(THREE.MathUtils.clamp(pp.browAngle, 0, 80));
+  const n = Math.max(2, Math.ceil(L / roadParams.segLen));
+  const ds = L / n;
+  const cur = new V3(0, 0, 0);
+  const pts = [cur.clone()];
+  for (let i = 1; i <= n; i++) {
+    const u = 1 - i / n; // 1 at entry → 0 at exit
+    const ph = ang * u * u; // pitched up at entry, level at exit
+    cur.y += Math.sin(ph) * ds;
+    cur.z += -Math.cos(ph) * ds;
+    pts.push(cur.clone());
+  }
+  return pts;
+}
+
 /** @type {{id:string,label:string,hint:string,swatch:string,key:string,points:(pp:any)=>THREE.Vector3[]}[]} */
 export const PIECE_CATALOG = [
   {
@@ -900,6 +943,14 @@ export const PIECE_CATALOG = [
     swatch: "#e74c3c",
     key: "5",
     points: jumpPoints,
+  },
+  {
+    id: "dive",
+    label: "Dive / down ramp",
+    hint: "Flat → pitched down (mirror of jump)",
+    swatch: "#d98c3f",
+    key: "d",
+    points: divePoints,
   },
   {
     id: "start",
@@ -997,6 +1048,14 @@ export const PIECE_CATALOG = [
     swatch: "#c0392b",
     key: "l",
     points: landingPoints,
+  },
+  {
+    id: "brow",
+    label: "Brow / hill top",
+    hint: "Up-pitch easing to flat (mirror of landing)",
+    swatch: "#3fa07d",
+    key: "b",
+    points: browPoints,
   },
 ];
 

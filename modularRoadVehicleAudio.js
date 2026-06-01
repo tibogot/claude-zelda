@@ -11,7 +11,14 @@ const RATE_MAX = 4;
 const DRIFT_ANGLE_MIN = 0.1;
 const DRIFT_ENTRY_SPEED = 8;
 
-export const AUDIO_BUS_IDS = ["master", "sfx", "music", "voice", "ui", "vehicle"];
+export const AUDIO_BUS_IDS = [
+  "master",
+  "sfx",
+  "music",
+  "voice",
+  "ui",
+  "vehicle",
+];
 
 export const DEFAULT_MIXER = {
   muteAll: true,
@@ -104,11 +111,18 @@ export function createModularRoadAudioSystem({ mixerState }) {
   document.addEventListener("visibilitychange", onVisibility);
 
   function tryStartPlayback(item) {
-    if (disposed || !audioUnlocked || !item._startWhenUnlocked || item._playbackStarted) return;
+    if (
+      disposed ||
+      !audioUnlocked ||
+      !item._startWhenUnlocked ||
+      item._playbackStarted
+    )
+      return;
     const h = item.howl;
     if (h.state() !== "loaded") return;
     try {
-      const id = item._spritePlayId != null ? h.play(item._spritePlayId) : h.play();
+      const id =
+        item._spritePlayId != null ? h.play(item._spritePlayId) : h.play();
       if (id != null) item._playbackStarted = true;
     } catch (_) {
       /* autoplay policy */
@@ -143,8 +157,10 @@ export function createModularRoadAudioSystem({ mixerState }) {
         pool: options.pool ?? 2,
         ...(useSprite ? { sprite: spriteDef } : {}),
         onload: () => tryStartPlayback(item),
-        onloaderror: options.onLoadError ?? ((_id, err) =>
-          console.warn("[modular-road audio] load error", options.src, err)),
+        onloaderror:
+          options.onLoadError ??
+          ((_id, err) =>
+            console.warn("[modular-road audio] load error", options.src, err)),
       }),
     };
     howls.push(item.howl);
@@ -177,6 +193,20 @@ export function createModularRoadAudioSystem({ mixerState }) {
     for (const item of items) tryStartPlayback(item);
   }
 
+  // Howler caps per-sound volume at 1.0, so a quiet source can never be
+  // boosted past its native loudness. When a layer asks for >1 gain we keep
+  // Howler at unity and set the underlying GainNode(s) to the absolute target.
+  // NOTE: absolute assignment (not multiply) — multiplying compounds every
+  // frame and runs away into ear-splitting distortion.
+  function applyAbsoluteGain(howl, gain) {
+    const sounds = howl?._sounds;
+    if (!sounds || !sounds.length) return;
+    for (const s of sounds) {
+      const node = s?._node;
+      if (node && node.gain) node.gain.value = gain;
+    }
+  }
+
   function update(dtSec) {
     if (disposed) return;
     if (audioUnlocked) {
@@ -185,9 +215,14 @@ export function createModularRoadAudioSystem({ mixerState }) {
     for (const item of items) {
       if (typeof item.onPlaying === "function") item.onPlaying(item, dtSec);
       const busScalar = getEffectiveBusScalar(item.bus);
-      const vol = Math.max(0, Math.min(1, item.volume * busScalar));
-      item.howl.volume(vol);
-      item.howl.mute(vol < 1e-4);
+      const desired = Math.max(0, item.volume * busScalar); // may exceed 1
+      const base = Math.min(1, desired);
+      item.howl.volume(base);
+      item.howl.mute(base < 1e-4);
+      // Per-sound node gain = the howl's linear volume (Howler's global
+      // volume is applied downstream at masterGain). Set it absolutely to the
+      // above-unity target so there's no frame-to-frame compounding.
+      if (desired > 1.0001) applyAbsoluteGain(item.howl, desired);
       const r = Math.max(RATE_MIN, Math.min(RATE_MAX, item.rate));
       item.howl.rate(r);
     }
@@ -209,7 +244,15 @@ export function createModularRoadAudioSystem({ mixerState }) {
     items.length = 0;
   }
 
-  return { register, unregister, update, dispose, unlock, getEffectiveBusScalar, Howler };
+  return {
+    register,
+    unregister,
+    update,
+    dispose,
+    unlock,
+    getEffectiveBusScalar,
+    Howler,
+  };
 }
 
 function howlerLoopLayerOptions(settings, layer) {
@@ -260,14 +303,25 @@ function enginePitchFromSpeed(st, curSpeed, normalMax) {
   const pow = Math.max(0.25, st.enginePitchCurvePow);
   const pitchMin = st.enginePitchMin;
   const pitchMax = st.enginePitchMax;
-  const pitchBoostMax = Math.max(pitchMax, st.enginePitchBoostMax ?? pitchMax * 1.24);
+  const pitchBoostMax = Math.max(
+    pitchMax,
+    st.enginePitchBoostMax ?? pitchMax * 1.24,
+  );
 
   if (curSpeed <= idleBand) return pitchMin;
   if (curSpeed <= normalMax) {
-    const t = THREE.MathUtils.clamp((curSpeed - idleBand) / (normalMax - idleBand), 0, 1);
+    const t = THREE.MathUtils.clamp(
+      (curSpeed - idleBand) / (normalMax - idleBand),
+      0,
+      1,
+    );
     return THREE.MathUtils.lerp(pitchMin, pitchMax, Math.pow(t, pow));
   }
-  const t = THREE.MathUtils.clamp((curSpeed - normalMax) / (boostMax - normalMax), 0, 1);
+  const t = THREE.MathUtils.clamp(
+    (curSpeed - normalMax) / (boostMax - normalMax),
+    0,
+    1,
+  );
   return THREE.MathUtils.lerp(pitchMax, pitchBoostMax, Math.pow(t, pow));
 }
 
@@ -285,7 +339,12 @@ function enginePitchFromSpeed(st, curSpeed, normalMax) {
 export function setupModularRoadVehicleAudio(audioSystem, ctx) {
   if (!audioSystem) return () => {};
 
-  const { vehicle, settings: settingsRef, getKeys = () => ({}), pathOverrides = {} } = ctx;
+  const {
+    vehicle,
+    settings: settingsRef,
+    getKeys = () => ({}),
+    pathOverrides = {},
+  } = ctx;
   const paths = { ...DEFAULT_PATHS, ...pathOverrides };
   const registered = [];
 
@@ -344,15 +403,21 @@ export function setupModularRoadVehicleAudio(audioSystem, ctx) {
       bus: "vehicle",
       src: paths.engine,
       loop: engLoop.loop,
-      ...(engLoop.sprite ? { sprite: engLoop.sprite, spritePlayId: engLoop.spritePlayId } : {}),
+      ...(engLoop.sprite
+        ? { sprite: engLoop.sprite, spritePlayId: engLoop.spritePlayId }
+        : {}),
       autoplay: true,
       volume: 0,
       onPlaying: whenDriving((item, dt) => {
         const st = settings();
         const curSpeed = horizontalSpeed(vehicle.body);
-        const targetVol = Math.min(1.5, st.engineVol * st.engineMul);
+        const targetVol = Math.min(3, st.engineVol * st.engineMul);
         smoothVolume(item, targetVol, dt, st.engineFadeEaseUp, 2.5);
-        const rateTarget = enginePitchFromSpeed(st, curSpeed, normalTopSpeed(st));
+        const rateTarget = enginePitchFromSpeed(
+          st,
+          curSpeed,
+          normalTopSpeed(st),
+        );
         item.rate = smoothScalar(item.rate, rateTarget, dt, st.enginePitchEase);
       }),
     }),
@@ -364,7 +429,9 @@ export function setupModularRoadVehicleAudio(audioSystem, ctx) {
       bus: "vehicle",
       src: paths.wind,
       loop: windLoop.loop,
-      ...(windLoop.sprite ? { sprite: windLoop.sprite, spritePlayId: windLoop.spritePlayId } : {}),
+      ...(windLoop.sprite
+        ? { sprite: windLoop.sprite, spritePlayId: windLoop.spritePlayId }
+        : {}),
       autoplay: true,
       volume: 0,
       onPlaying: whenDriving((item, dt) => {
@@ -423,7 +490,9 @@ export function setupModularRoadVehicleAudio(audioSystem, ctx) {
       bus: "vehicle",
       src: paths.driftBrake,
       loop: driftLoop.loop,
-      ...(driftLoop.sprite ? { sprite: driftLoop.sprite, spritePlayId: driftLoop.spritePlayId } : {}),
+      ...(driftLoop.sprite
+        ? { sprite: driftLoop.sprite, spritePlayId: driftLoop.spritePlayId }
+        : {}),
       autoplay: true,
       volume: 0,
       onPlaying: whenDriving((item) => {
@@ -455,14 +524,18 @@ export function setupModularRoadVehicleAudio(audioSystem, ctx) {
       bus: "vehicle",
       src: paths.wheels,
       loop: wheelsLoop.loop,
-      ...(wheelsLoop.sprite ? { sprite: wheelsLoop.sprite, spritePlayId: wheelsLoop.spritePlayId } : {}),
+      ...(wheelsLoop.sprite
+        ? { sprite: wheelsLoop.sprite, spritePlayId: wheelsLoop.spritePlayId }
+        : {}),
       autoplay: true,
       volume: 0,
       onPlaying: whenDriving((item, dt) => {
         const curSpeed = horizontalSpeed(vehicle.body);
         const grounded = vehicle.groundedCount > 0 ? 1 : 0;
         const targetVol =
-          THREE.MathUtils.clamp(curSpeed * 0.1, 0, 1) * grounded * settings().wheelsMul;
+          THREE.MathUtils.clamp(curSpeed * 0.1, 0, 1) *
+          grounded *
+          settings().wheelsMul;
         smoothVolume(item, targetVol, dt);
       }),
     }),
