@@ -3,6 +3,8 @@ import { MeshBasicNodeMaterial } from "three";
 import { texture, uv, mul, uniform } from "three/tsl";
 import { PARAMS } from "./splatmap-chunks-params.js";
 
+const ASSET_BASE = new URL("../", import.meta.url);
+
 /** Sun-anchored lens flare (additive, no post-processing). */
 export function createLensFlare(scene, camera, sunDir) {
   /* ─────────── Lens Flare (sun-anchored, no post-processing) ───────────
@@ -230,10 +232,10 @@ export function createLensFlare(scene, camera, sunDir) {
   }
   {
     const loader = new THREE.TextureLoader();
-    loader.load("textures/lensflare0.png", (tex) => {
+    loader.load(new URL("textures/lensflare0.png", ASSET_BASE).href, (tex) => {
       _swapFlareTexture(_lfHalation, tex, PARAMS.lensFlare.halationColor);
     });
-    loader.load("textures/lensflare3.png", (tex) => {
+    loader.load(new URL("textures/lensflare3.png", ASSET_BASE).href, (tex) => {
       for (const g of _lfGhosts) {
         _swapFlareTexture(g, tex, g.userData.def.color);
       }

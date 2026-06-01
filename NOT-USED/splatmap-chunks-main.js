@@ -47,8 +47,8 @@ import {
   reflector,
   exp,
 } from "three/tsl";
-import { createLakeShader } from "./lake-shader.js";
-import { createOceanShader } from "./ocean-shader.js";
+import { createLakeShader } from "../lake-shader.js";
+import { createOceanShader } from "../ocean-shader.js";
 import { CSMShadowNode } from "three/addons/csm/CSMShadowNode.js";
 import { OrbitControls } from "three/addons/controls/OrbitControls.js";
 import { TransformControls } from "three/addons/controls/TransformControls.js";
@@ -58,54 +58,54 @@ import { GLTFLoader } from "three/addons/loaders/GLTFLoader.js";
 import * as SkeletonUtils from "three/addons/utils/SkeletonUtils.js";
 import { DRACOLoader } from "three/addons/loaders/DRACOLoader.js";
 import { KTX2Loader } from "three/addons/loaders/KTX2Loader.js";
-import { createStylizedSky } from "./stylized-sky.js";
+import { createStylizedSky } from "../stylized-sky.js";
 import { MeshBVH } from "three-mesh-bvh";
-import { createCliffInstancer } from "./cliff-instancer.js";
-import { createCliffInstancerBlendMaterial } from "./cliffInstancerBlendMaterial.js";
+import { createCliffInstancer } from "../cliff-instancer.js";
+import { createCliffInstancerBlendMaterial } from "../cliffInstancerBlendMaterial.js";
 import { Pane } from "tweakpane";
-import { createTileMaterial } from "./tileMaterial.js";
+import { createTileMaterial } from "../tileMaterial.js";
 import {
   createChunkPainterGroundMaterial,
   setupTslGroundMeshSwap,
   createSharedImgTexMaterial,
   setupImgTexMeshSwap,
-} from "./chunkPainterGroundMaterial.js";
+} from "../chunkPainterGroundMaterial.js";
 import {
   loadRock028Textures,
   createAutoCliffUniforms,
   createChunkSplatCliffMaterial,
-} from "./chunkTerrainAutoCliff.js";
-import { createChunkImageSlotSystem } from "./chunkImageTexSlots.js";
+} from "../chunkTerrainAutoCliff.js";
+import { createChunkImageSlotSystem } from "../chunkImageTexSlots.js";
 import {
   applyImageSlotAlbedoAndAO,
   applyImageSlotRoughness,
   createImageSlotNormalNode,
-} from "./chunkTerrainImageSlotsTsl.js";
+} from "../chunkTerrainImageSlotsTsl.js";
 import {
   createMeadowTslBundle,
   MEADOW_PRESETS,
   applyMeadowPresetToParams,
-} from "./chunkMeadowTsl.js";
+} from "../chunkMeadowTsl.js";
 import {
   createGroundTslBundle,
   GROUND_PRESETS,
   applyGroundPresetToParams,
-} from "./chunkGroundTsl.js";
+} from "../chunkGroundTsl.js";
 import {
   createBladeGeometry as geminiBladeGeo,
   createFieldInstancedGeometry as geminiFieldGeo,
   createGrassMaterial as geminiGrassMat,
   createGrassMaterialMega as geminiGrassMatMega,
   setupGrassPatches as geminiSetupPatches,
-} from "./grass-gemini3.js";
-import { createFleurSystem, FLEUR_PRESETS } from "./fleur-painter.js";
-import { createAmbientFXSystem } from "./ambientfx-painter.js";
-import { createFoliageSlot } from "./foliage-painter.js";
-import { createOctahedralImpostorForestWebgpu } from "./octahedralImpostorForestWebgpu.js";
+} from "../grass-gemini3.js";
+import { createFleurSystem, FLEUR_PRESETS } from "../fleur-painter.js";
+import { createAmbientFXSystem } from "../ambientfx-painter.js";
+import { createFoliageSlot } from "../foliage-painter.js";
+import { createOctahedralImpostorForestWebgpu } from "../octahedralImpostorForestWebgpu.js";
 import {
   TreeLodChunkGpuCull,
   treeLodGpuCanUseForDefs,
-} from "./treeLodGpuCull.js";
+} from "../treeLodGpuCull.js";
 import { PARAMS } from "./splatmap-chunks-params.js";
 import {
   TERRAIN_SURFACE_LABEL,
@@ -305,7 +305,7 @@ const gltfLoader = new GLTFLoader();
 gltfLoader.setDRACOLoader(dracoLoader);
 gltfLoader.setKTX2Loader(ktx2Loader);
 
-const ASSET_BASE = new URL(".", import.meta.url);
+const ASSET_BASE = new URL("../", import.meta.url);
 function resolveModelUrl(relPath) {
   const parts = relPath.split("/").filter((p) => p.length > 0);
   const encodedPath = parts.map(encodeURIComponent).join("/");
@@ -956,10 +956,7 @@ function syncFog() {
 syncFog();
 
 let hdrTexture = null;
-const DEFAULT_HDR_URL = new URL(
-  "textures/animestyled_hdr.hdr",
-  import.meta.url,
-).href;
+const DEFAULT_HDR_URL = new URL("textures/animestyled_hdr.hdr", ASSET_BASE).href;
 
 function assignHdrTexture(tex) {
   tex.mapping = THREE.EquirectangularReflectionMapping;

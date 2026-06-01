@@ -1,6 +1,6 @@
-import { OCEAN_DEFAULTS } from "./ocean-shader.js";
-import { MEADOW_DEFAULT_PARAMS } from "./chunkMeadowTsl.js";
-import { GROUND_DEFAULT_PARAMS } from "./chunkGroundTsl.js";
+import { OCEAN_DEFAULTS } from "../ocean-shader.js";
+import { MEADOW_DEFAULT_PARAMS } from "../chunkMeadowTsl.js";
+import { GROUND_DEFAULT_PARAMS } from "../chunkGroundTsl.js";
 
 /** Tweakpane + lighting — sky defaults to Physical (SkyMesh + PMREM); HDR available in UI. */
 export const PARAMS = {
@@ -106,7 +106,7 @@ export const PARAMS = {
     poolYOffset: 0.03,
     flashDuration: 0.12,
     flashColor: "#ff2200",
-    poolAtlasBasePath: "./textures/BloodPool/",
+    poolAtlasBasePath: "textures/BloodPool/",
     poolColorAtlasFile: "ContactSheet.png",
     poolAlphaAtlasFile: "ContactSheet-001.png",
     poolAtlasCols: 14,
