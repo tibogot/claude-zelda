@@ -19,7 +19,7 @@ import {
   float, vec3, vec4, Fn, uniform,
   positionWorld, cameraPosition,
   normalize, dot, max, mix, smoothstep, clamp, step,
-  pow, sin, floor, fract, length, abs,
+  pow, sin, floor, fract, length, abs, exp, sub, mul,
 } from "three/tsl";
 
 const SKY_RADIUS = 9000;
@@ -54,6 +54,10 @@ export function createDayNightSky() {
   const uStarSize = uniform(0.08);
   const uStarBrightness = uniform(1.0);
   const uStarTwinkle = uniform(3.0);
+
+  const uFogEnabled = uniform(0);
+  const uFogColor = uniform(new THREE.Color(0x9fb8c4));
+  const uFogDensity = uniform(0.0003);
 
   // ── Hash + star field ────────────────────────────────────────────────────
   const hash33 = Fn(([p]) => {
@@ -110,6 +114,17 @@ export function createDayNightSky() {
     skyCol.assign(
       mix(skyCol, uGroundColor.mul(mix(float(0.12), float(1.0), dayF)), groundMix),
     );
+
+    // Horizon + under-horizon haze (matches scene FogExp2 on terrain).
+    const fogHorizon = smoothstep(float(0.34), float(0.02), up);
+    const fogGround = smoothstep(float(0.06), float(-0.2), up);
+    const fogMask = max(fogHorizon, fogGround);
+    const fogDepth = fogMask.mul(float(SKY_RADIUS));
+    const fogFac = sub(
+      float(1),
+      exp(fogDepth.mul(fogDepth).mul(uFogDensity).mul(uFogDensity).negate()),
+    );
+    skyCol.assign(mix(skyCol, uFogColor, mul(fogFac, uFogEnabled)));
 
     // Stars (above the horizon, night only).
     const stars = starField(dir)
@@ -181,6 +196,12 @@ export function createDayNightSky() {
     uStarSize.value = P.starSize;
     uStarBrightness.value = P.starBrightness;
     uStarTwinkle.value = P.starTwinkle;
+
+    if (frame.fog) {
+      uFogEnabled.value = frame.fog.enabled ? 1 : 0;
+      uFogColor.value.copy(frame.fog.color);
+      uFogDensity.value = frame.fog.density;
+    }
   }
 
   function dispose() {
