@@ -421,7 +421,7 @@
     <div id="lab-title">RTS Lab</div>
     <div id="info">
       <span id="backend">loading…</span> &bull; LMB <span>select</span> &bull;
-      RMB <span>move</span> &bull; [A] <span>attack-move</span> &bull; Ctrl+#
+      RMB <span>move</span> &bull; [A] <span>attack-move</span> &bull; Shift+#
       group / # recall &bull; [C] camera: <span id="cammode">ORBIT</span> &bull;
       <span id="selcount">0</span>/<span id="unitcount">0</span> selected
     </div>
@@ -1143,12 +1143,28 @@
           return bar;
         }
 
-        // Per-unit ground ring shown when selected.
-        const ringGeo = new THREE.RingGeometry(1.7, 2.0, 28);
+        // Ground rings (selection + hover) live at scene root, NOT parented to
+        // the tank (whose slope/heading rotation would tilt them). Each frame
+        // they conform to the heightmap so they hug hills instead of clipping
+        // through. Per-vertex displacement needs an own geometry (a clone) and
+        // plenty of theta segments for a smooth curve.
+        const ringsGroup = new THREE.Group();
+        scene.add(ringsGroup);
+        const ringGeo = new THREE.RingGeometry(1.7, 2.05, 64);
         ringGeo.rotateX(-Math.PI / 2);
+        // Place a flat ring at (x,z) and lift every vertex to the terrain
+        // height under it (+offset), so the ring drapes over the surface.
+        function conformRing(ring, x, z, offset) {
+          ring.position.set(x, 0, z);
+          const pa = ring.geometry.attributes.position;
+          for (let i = 0; i < pa.count; i++) {
+            pa.setY(i, terrainHeight(x + pa.getX(i), z + pa.getZ(i)) + offset);
+          }
+          pa.needsUpdate = true;
+        }
         function makeSelectionRing() {
           const m = new THREE.Mesh(
-            ringGeo,
+            ringGeo.clone(),
             new THREE.MeshBasicMaterial({
               color: 0x49e0ff,
               transparent: true,
@@ -1158,13 +1174,13 @@
           );
           m.visible = false;
           m.renderOrder = 2;
+          ringsGroup.add(m);
           return m;
         }
 
         function spawnUnit(x, z, faction) {
           const group = buildTankMesh(faction);
-          const ring = makeSelectionRing();
-          group.add(ring);
+          const ring = makeSelectionRing(); // added to ringsGroup, not the tank
           unitsGroup.add(group);
           const u = {
             group,
@@ -1212,6 +1228,7 @@
           for (const u of units) {
             unitsGroup.remove(u.group);
             barsGroup.remove(u.bar);
+            ringsGroup.remove(u.ring);
           }
           units.length = 0;
           tankBodies.length = 0;
@@ -1247,7 +1264,7 @@
         const HOVER_RED = new THREE.Color(0xff5a4a);
         const HOVER_ATTACK = new THREE.Color(0xffa033); // attack-move pending
         const hoverRing = new THREE.Mesh(
-          ringGeo,
+          ringGeo.clone(),
           new THREE.MeshBasicMaterial({
             color: HOVER_GREEN,
             transparent: true,
@@ -1445,17 +1462,19 @@
           const m = /^Digit(\d)$/.exec(e.code);
           if (!m) return;
           const d = m[1];
-          if (e.ctrlKey || e.metaKey) {
-            // Bind selection → group.
+          // Bind selection → group. Shift+# works everywhere (Chrome doesn't
+          // reserve it); Ctrl/Meta+# also works but only reaches us in the
+          // fullscreen "Play" mode where the Keyboard Lock API is active.
+          if (e.shiftKey || e.ctrlKey || e.metaKey) {
             groups[d] = units.filter((u) => u.selected && !u.dead);
             e.preventDefault();
             return;
           }
-          // Recall group.
+          // Plain # → recall group (replace selection).
           const grp = (groups[d] || []).filter((u) => !u.dead);
           groups[d] = grp;
           if (!grp.length) return;
-          if (!e.shiftKey) clearSelection();
+          clearSelection();
           for (const u of grp) u.selected = true;
           updateCountUI();
           const now = performance.now();
@@ -1478,7 +1497,7 @@
             hoverRing.material.color.copy(
               attackMovePending ? HOVER_ATTACK : HOVER_RED,
             );
-            hoverRing.position.set(u.pos.x, u.pos.y + 0.12, u.pos.z);
+            conformRing(hoverRing, u.pos.x, u.pos.z, 0.1);
             hoverRing.visible = true;
             dom.style.cursor = "crosshair";
             return;
@@ -1488,11 +1507,7 @@
             hoverRing.material.color.copy(
               attackMovePending ? HOVER_ATTACK : HOVER_GREEN,
             );
-            hoverRing.position.set(
-              gHit.point.x,
-              gHit.point.y + 0.08,
-              gHit.point.z,
-            );
+            conformRing(hoverRing, gHit.point.x, gHit.point.z, 0.08);
             hoverRing.visible = true;
           } else {
             hoverRing.visible = false;
@@ -1811,7 +1826,13 @@
               u.group.rotation.y = u.heading;
             }
 
-            u.ring.visible = u.selected;
+            // Selection ring drapes over the terrain (conformed per-frame).
+            if (u.selected) {
+              u.ring.visible = true;
+              conformRing(u.ring, u.pos.x, u.pos.z, 0.08);
+            } else {
+              u.ring.visible = false;
+            }
 
             // Billboard health bar — shown when damaged, selected, or fighting.
             const show = u.selected || u.hp < u.maxHp || u.attackTarget;
@@ -2025,11 +2046,52 @@
             e.target.textContent = hidden ? "Show" : "Hide";
           });
 
-        // "Hide UI" — clean fullscreen view of the battlefield.
-        const hideUiBtn = document.getElementById("immersive-toggle");
-        hideUiBtn.addEventListener("click", () => {
-          const on = document.body.classList.toggle("immersive");
-          hideUiBtn.classList.toggle("active", on);
+        // "Play" — true fullscreen + Keyboard Lock so browser-reserved combos
+        // (Ctrl+1..0, etc.) are delivered to the game instead of switching
+        // Chrome tabs. We lock only the digit keys, so Esc still exits
+        // fullscreen normally. Chromium-only; degrades gracefully elsewhere
+        // (Shift+# bindings keep working without it). Entering fullscreen also
+        // hides the UI via the body.immersive class (see fullscreenchange).
+        const playBtn = document.getElementById("immersive-toggle");
+        playBtn.textContent = "Play ▶";
+        const DIGIT_CODES = [
+          "Digit1", "Digit2", "Digit3", "Digit4", "Digit5",
+          "Digit6", "Digit7", "Digit8", "Digit9", "Digit0",
+        ];
+        async function enterPlay() {
+          try {
+            await document.documentElement.requestFullscreen?.();
+            try {
+              await navigator.keyboard?.lock?.(DIGIT_CODES);
+            } catch (err) {
+              console.warn("[rts] Keyboard Lock unavailable.", err);
+            }
+          } catch (err) {
+            console.warn("[rts] Fullscreen request failed.", err);
+          }
+        }
+        function exitPlay() {
+          try {
+            navigator.keyboard?.unlock?.();
+          } catch {}
+          if (document.fullscreenElement) document.exitFullscreen?.();
+        }
+        playBtn.addEventListener("click", () => {
+          if (document.fullscreenElement) exitPlay();
+          else enterPlay();
+        });
+        // Single source of truth for play state: react to fullscreen changes
+        // (covers Esc-to-exit too).
+        document.addEventListener("fullscreenchange", () => {
+          const on = !!document.fullscreenElement;
+          document.body.classList.toggle("immersive", on);
+          playBtn.classList.toggle("active", on);
+          playBtn.textContent = on ? "Exit (Esc)" : "Play ▶";
+          if (!on) {
+            try {
+              navigator.keyboard?.unlock?.();
+            } catch {}
+          }
         });
 
         // Drag-to-resize the inspector panel.

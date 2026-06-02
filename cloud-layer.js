@@ -150,6 +150,10 @@ export function createCloudLayer({ camera }) {
   const depthSampler = texture(sceneRT.depthTexture);
   // +1 for conventional depth (far = 1), -1 for reversed depth (far = 0).
   const uDepthSign = uniform(1);
+  // Env-bake mode: render the cloud dome into a reflection cubemap. Skips the
+  // screen-depth occlusion (no scene geometry in the bake) and marches cheaper.
+  const uEnvMode = uniform(0);
+  const uEnvSteps = uniform(40);
 
   // ── Density (samples the seamless 3D volume) ───────────────────────────────
   // Planet center sits directly under the camera at depth R (ground ≈ y 0).
@@ -254,16 +258,18 @@ export function createCloudLayer({ camera }) {
     const scattered = vec3(0.0).toVar();
 
     If(valid, () => {
-      const stepLen = tFar.sub(tNear).div(uSteps.max(1)).toVar();
+      const isEnv = uEnvMode.greaterThan(0.5);
+      const effSteps = isEnv.select(uEnvSteps, uSteps).toVar();
+      const stepLen = tFar.sub(tNear).div(effSteps.max(1)).toVar();
       Loop(MAX_STEPS, ({ i }) => {
-        If(float(i).greaterThanEqual(uSteps), () => Break());
+        If(float(i).greaterThanEqual(effSteps), () => Break());
         If(transmittance.r.lessThan(0.01), () => Break());
         const t = tNear.add(float(i).add(jitter).add(0.5).mul(stepLen));
         const p = cameraPosition.add(rayDir.mul(t));
-        // Stop where world geometry is in front of this sample.
+        // Stop where world geometry is in front of this sample (skip in env bake).
         const clip = cameraProjectionMatrix.mul(cameraViewMatrix.mul(vec4(p, 1.0)));
         const sampleDepth = clip.z.div(clip.w);
-        If(sampleDepth.sub(sceneDepth).mul(uDepthSign).greaterThan(0.0), () => Break());
+        If(isEnv.not().and(sampleDepth.sub(sceneDepth).mul(uDepthSign).greaterThan(0.0)), () => Break());
         const density = sampleDensity(p).toVar();
         If(density.greaterThan(0.001), () => {
           const light = lightMarch(p);
@@ -576,6 +582,8 @@ export function createCloudLayer({ camera }) {
     render,
     layer: CLOUD_LAYER,
     compositeRT,
+    /** Toggle env-bake mode (skip depth occlusion, cheaper march) for PMREM. */
+    setEnvMode: (on) => { uEnvMode.value = on ? 1 : 0; },
     dispose,
   };
 }

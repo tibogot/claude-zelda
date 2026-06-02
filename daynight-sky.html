@@ -71,7 +71,10 @@
         },
         godRays: { ...GOD_RAYS_DEFAULTS },
         shadows: { enabled: true, normalBias: 3, bias: -0.0005 },
-        ocean: { enabled: true, waterY: -20 },
+        ocean: {
+          enabled: true, waterY: -20,
+          waveHeight: 1.8, choppiness: 1.5, reflectClouds: true,
+        },
       };
 
       // ── Celestial driver: time-of-day → sun/moon directions + light ────────
@@ -212,7 +215,19 @@
           const skyClone = sky.mesh.clone();
           skyClone.position.set(0, 0, 0); // bake from origin, not the camera-followed pose
           tmp.add(skyClone);
-          const rt = pmrem.fromScene(tmp, 0.04);
+          // Option B: render the cloud dome into the reflection cubemap too.
+          const withClouds = PARAMS.ocean.reflectClouds && PARAMS.clouds.enabled;
+          if (withClouds) {
+            clouds.setEnvMode(true); // skip depth occlusion, cheaper march
+            const cloudClone = clouds.mesh.clone();
+            cloudClone.position.set(0, 0, 0);
+            cloudClone.layers.set(0); // PMREM cube camera renders layer 0
+            tmp.add(cloudClone);
+          }
+          // Explicit far plane: the sky dome (r≈9000) and cloud shell (~2900 up)
+          // are far beyond fromScene's default far (~100) and would be clipped.
+          const rt = pmrem.fromScene(tmp, 0.04, 0.1, 20000);
+          if (withClouds) clouds.setEnvMode(false);
           ocean.setEnvMap(rt.texture);
           if (_envRT) _envRT.dispose();
           _envRT = rt;
@@ -240,6 +255,9 @@
         const fOcean = pane.addFolder({ title: "Ocean" });
         fOcean.addBinding(PARAMS.ocean, "enabled");
         fOcean.addBinding(PARAMS.ocean, "waterY", { min: -200, max: 200, step: 1, label: "Sea level Y" });
+        fOcean.addBinding(PARAMS.ocean, "waveHeight", { min: 0.2, max: 3.5, step: 0.05, label: "Wave height" });
+        fOcean.addBinding(PARAMS.ocean, "choppiness", { min: 0.5, max: 3, step: 0.05 });
+        fOcean.addBinding(PARAMS.ocean, "reflectClouds", { label: "Reflect clouds" });
 
         const fFog = pane.addFolder({ title: "Fog" });
         fFog.addBinding(PARAMS.fog, "enabled");
@@ -375,6 +393,11 @@
           if (PARAMS.ocean.enabled) {
             ocean.setVisible(true);
             ocean.setWaterY(PARAMS.ocean.waterY);
+            // Only the large-tile swell scales with the slider; the small ripple
+            // tile (48u) stays fixed or it repeats as visible squares when amplified.
+            ocean.uniforms.fftSwellAmp.value = PARAMS.ocean.waveHeight;
+            ocean.uniforms.fftRippleAmp.value = 0.55;
+            ocean.uniforms.fftNormalStrength.value = PARAMS.ocean.choppiness;
             _envTimer -= dt;
             if (_envTimer <= 0) { bakeSkyEnv(); _envTimer = 0.4; }
             ocean.update(dt, elapsed, camera, L.lightDir);
