@@ -122,6 +122,10 @@ export function createCloudLayer({ camera }) {
   const uLightSteps = uniform(6);
   const uOccMaxSteps = uniform(14);
   const uMaxDist = uniform(24000);
+  // Empty-space skipping: advance faster through air, fine steps only inside
+  // clouds. Same in-cloud sampling, far fewer wasted samples in clear sky.
+  const uEmptyStepMul = uniform(2.0);    // 1 = uniform march (off)
+  const uEmptyThreshold = uniform(0.01); // density below this counts as empty
   const uPlanetRadius = uniform(60000); // smaller = more horizon curvature
 
   const uOpacity = uniform(1.0);     // extinction strength along the view ray
@@ -260,18 +264,22 @@ export function createCloudLayer({ camera }) {
     If(valid, () => {
       const isEnv = uEnvMode.greaterThan(0.5);
       const effSteps = isEnv.select(uEnvSteps, uSteps).toVar();
-      const stepLen = tFar.sub(tNear).div(effSteps.max(1)).toVar();
+      // baseStep = the fine in-cloud step; empty regions advance by a multiple of
+      // it. Integration always uses baseStep, so in-cloud quality is unchanged.
+      const baseStep = tFar.sub(tNear).div(effSteps.max(1)).toVar();
+      const travel = tNear.add(jitter.mul(baseStep)).toVar();
       Loop(MAX_STEPS, ({ i }) => {
-        If(float(i).greaterThanEqual(effSteps), () => Break());
+        If(travel.greaterThanEqual(tFar), () => Break());
         If(transmittance.r.lessThan(0.01), () => Break());
-        const t = tNear.add(float(i).add(jitter).add(0.5).mul(stepLen));
-        const p = cameraPosition.add(rayDir.mul(t));
+        const p = cameraPosition.add(rayDir.mul(travel));
         // Stop where world geometry is in front of this sample (skip in env bake).
         const clip = cameraProjectionMatrix.mul(cameraViewMatrix.mul(vec4(p, 1.0)));
         const sampleDepth = clip.z.div(clip.w);
         If(isEnv.not().and(sampleDepth.sub(sceneDepth).mul(uDepthSign).greaterThan(0.0)), () => Break());
         const density = sampleDensity(p).toVar();
-        If(density.greaterThan(0.001), () => {
+        const isEmpty = density.lessThan(uEmptyThreshold);
+        const advance = isEmpty.select(baseStep.mul(uEmptyStepMul), baseStep);
+        If(isEmpty.not(), () => {
           const light = lightMarch(p);
           const powder = exp(density.mul(2.0).negate()).oneMinus()
             .mul(uPowder).add(uPowder.oneMinus());
@@ -279,11 +287,12 @@ export function createCloudLayer({ camera }) {
             .div(uThickness).clamp(0.0, 1.0);
           const sun = uLightColor.mul(uLightIntensity).mul(light).mul(phase).mul(powder);
           const amb = uAmbientColor.mul(uAmbientIntensity).mul(mix(float(0.4), float(1.0), h));
-          const lum = sun.add(amb).mul(density).mul(stepLen);
-          const stepT = exp(density.mul(stepLen).mul(uOpacity).mul(EXTINCTION).negate());
+          const lum = sun.add(amb).mul(density).mul(baseStep);
+          const stepT = exp(density.mul(baseStep).mul(uOpacity).mul(EXTINCTION).negate());
           scattered.addAssign(transmittance.mul(lum));
           transmittance.mulAssign(stepT);
         });
+        travel.addAssign(advance);
       });
     });
 
@@ -476,6 +485,7 @@ export function createCloudLayer({ camera }) {
     uDensityMul.value = P.densityMul;
     uSteps.value = P.steps;
     uLightSteps.value = P.lightSteps;
+    uEmptyStepMul.value = P.emptySkip ?? 2.0;
     uMaxDist.value = P.maxDist;
     uPlanetRadius.value = P.planetRadius;
     uOpacity.value = P.opacity;
@@ -602,6 +612,7 @@ export const CLOUD_DEFAULTS = {
   densityMul: 12.0,
   steps: 64,
   lightSteps: 6,
+  emptySkip: 2.0,
   maxDist: 24000,
   planetRadius: 60000,
   opacity: 1.0,
