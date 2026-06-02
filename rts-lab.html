@@ -1,0 +1,2325 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>RTS Lab</title>
+    <style>
+      :root {
+        --bg-dark: #222222;
+        --bg-panel: #2a2a2a;
+        --bg-item: #333333;
+        --bg-hover: #3a3a3a;
+        --bg-input: #1e1e1e;
+        --border: #3c3c3c;
+        --border-light: #4a4a4a;
+        --text: #cccccc;
+        --text-dim: #888888;
+        --accent: #4a9eff;
+        --green: #5cb85c;
+        --font: "Segoe UI", system-ui, -apple-system, sans-serif;
+        --font-mono: "Cascadia Code", "Fira Code", "Consolas", monospace;
+        --radius: 4px;
+      }
+      * {
+        margin: 0;
+        padding: 0;
+        box-sizing: border-box;
+      }
+      body {
+        overflow: hidden;
+        background: #000;
+        font-family: var(--font);
+        color: var(--text);
+      }
+      canvas {
+        display: block;
+        width: 100vw;
+        height: 100vh;
+      }
+      #info {
+        position: fixed;
+        bottom: 16px;
+        left: 16px;
+        z-index: 10;
+        font:
+          12px/1.5 "SF Mono",
+          "Fira Code",
+          monospace;
+        color: #b0d890;
+        background: rgba(0, 0, 0, 0.55);
+        padding: 8px 12px;
+        border-radius: 6px;
+        pointer-events: none;
+        user-select: none;
+        backdrop-filter: blur(4px);
+      }
+      #info span {
+        color: #e0f0c0;
+        font-weight: 600;
+      }
+
+      #lab-title {
+        position: fixed;
+        top: 14px;
+        left: 50%;
+        transform: translateX(-50%);
+        z-index: 15;
+        pointer-events: none;
+        user-select: none;
+        font-size: 13px;
+        font-weight: 600;
+        letter-spacing: 0.28em;
+        text-transform: uppercase;
+        color: var(--text);
+        padding: 8px 18px;
+        border-radius: 6px;
+        background: rgba(0, 0, 0, 0.45);
+        border: 1px solid rgba(255, 255, 255, 0.08);
+        backdrop-filter: blur(6px);
+        box-shadow: 0 2px 12px rgba(0, 0, 0, 0.25);
+      }
+
+      /* Drag-to-select marquee box */
+      #sel-rect {
+        position: fixed;
+        border: 1px solid #6cf;
+        background: rgba(100, 200, 255, 0.15);
+        pointer-events: none;
+        z-index: 30;
+        display: none;
+      }
+
+      /* === RIGHT PANEL (v2/editor.html inspector look) === */
+      #inspector {
+        position: fixed;
+        top: 0;
+        right: 0;
+        width: var(--inspector-width, 300px);
+        min-width: 240px;
+        max-width: 70vw;
+        height: 100vh;
+        background: var(--bg-panel);
+        border-left: 1px solid var(--border);
+        display: flex;
+        flex-direction: column;
+        overflow: hidden;
+        z-index: 20;
+        box-shadow: -2px 0 10px rgba(0, 0, 0, 0.3);
+      }
+      #inspector-resize-handle {
+        position: absolute;
+        top: 0;
+        left: -3px;
+        width: 8px;
+        height: 100%;
+        cursor: ew-resize;
+        z-index: 21;
+        background: transparent;
+        transition: background 0.15s;
+      }
+      #inspector-resize-handle:hover,
+      body.inspector-resizing #inspector-resize-handle {
+        background: var(--accent);
+        opacity: 0.6;
+      }
+      body.inspector-resizing {
+        cursor: ew-resize;
+        user-select: none;
+      }
+      body.inspector-hidden #inspector-resize-handle,
+      body.immersive #inspector-resize-handle {
+        display: none;
+      }
+      #inspector-header {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        padding: 0 12px;
+        height: 32px;
+        background: var(--bg-dark);
+        border-bottom: 1px solid var(--border);
+        font-size: 11px;
+        font-weight: 600;
+        letter-spacing: 0.4px;
+        text-transform: uppercase;
+        color: var(--text-dim);
+      }
+      #inspector-toggle,
+      #immersive-toggle {
+        background: none;
+        border: 1px solid var(--border-light);
+        border-radius: var(--radius);
+        color: var(--text-dim);
+        cursor: pointer;
+        padding: 2px 8px;
+        font-size: 10px;
+      }
+      #inspector-toggle:hover,
+      #immersive-toggle:hover {
+        color: var(--text);
+        background: var(--bg-hover);
+      }
+      #immersive-toggle.active {
+        background: var(--accent);
+        border-color: var(--accent);
+        color: white;
+      }
+      body.immersive #inspector,
+      body.immersive #info,
+      body.immersive #lab-title {
+        display: none;
+      }
+      #inspector-body {
+        flex: 1;
+        overflow-y: auto;
+        padding-bottom: 24px;
+      }
+      body.inspector-hidden #inspector-body,
+      body.inspector-hidden #inspector-header span {
+        display: none;
+      }
+      body.inspector-hidden #inspector {
+        width: auto;
+        height: auto;
+        border-left: none;
+        background: transparent;
+        box-shadow: none;
+      }
+      body.inspector-hidden #inspector-header {
+        background: transparent;
+        border: none;
+        padding: 6px;
+      }
+
+      .inspector-section {
+        border-bottom: 1px solid var(--border);
+      }
+      .section-header {
+        display: flex;
+        align-items: center;
+        gap: 6px;
+        padding: 6px 12px;
+        cursor: pointer;
+        font-size: 11px;
+        font-weight: 600;
+        text-transform: uppercase;
+        letter-spacing: 0.4px;
+        color: var(--text-dim);
+        user-select: none;
+      }
+      .section-header:hover {
+        background: var(--bg-hover);
+      }
+      .section-header .section-arrow {
+        width: 14px;
+        height: 14px;
+        transition: transform 0.15s;
+        flex-shrink: 0;
+      }
+      .section-header.collapsed .section-arrow {
+        transform: rotate(-90deg);
+      }
+      .section-body {
+        padding: 6px 12px 10px;
+      }
+      .section-body.hidden {
+        display: none;
+      }
+      .prop-row {
+        display: flex;
+        align-items: center;
+        gap: 8px;
+        padding: 3px 0;
+        min-height: 26px;
+      }
+      .prop-label {
+        width: 90px;
+        min-width: 90px;
+        font-size: 11px;
+        color: var(--text-dim);
+        text-align: right;
+        padding-right: 4px;
+      }
+      .prop-value {
+        flex: 1;
+        display: flex;
+        gap: 4px;
+        align-items: center;
+      }
+      .prop-color-wrap {
+        display: flex;
+        align-items: center;
+        gap: 6px;
+        flex: 1;
+      }
+      .prop-color {
+        width: 22px;
+        height: 22px;
+        border-radius: var(--radius);
+        border: 1px solid var(--border);
+        cursor: pointer;
+        flex-shrink: 0;
+        padding: 0;
+        -webkit-appearance: none;
+        appearance: none;
+      }
+      .prop-color::-webkit-color-swatch-wrapper {
+        padding: 0;
+      }
+      .prop-color::-webkit-color-swatch {
+        border: none;
+        border-radius: 2px;
+      }
+      .prop-slider-wrap {
+        flex: 1;
+        display: flex;
+        align-items: center;
+        gap: 6px;
+        min-width: 0;
+      }
+      .prop-num-input {
+        width: 72px;
+        height: 22px;
+        flex-shrink: 0;
+        box-sizing: border-box;
+        background: var(--bg-input);
+        border: 1px solid var(--border);
+        border-radius: var(--radius);
+        padding: 0 5px;
+        color: var(--text);
+        font-size: 11px;
+        font-family: var(--font-mono);
+        text-align: right;
+        outline: none;
+      }
+      .prop-num-input:focus {
+        border-color: var(--accent);
+      }
+      .prop-num-input::-webkit-outer-spin-button,
+      .prop-num-input::-webkit-inner-spin-button {
+        -webkit-appearance: none;
+        margin: 0;
+      }
+      .prop-num-input[type="number"] {
+        appearance: textfield;
+        -moz-appearance: textfield;
+      }
+      .prop-slider {
+        flex: 1;
+        height: 4px;
+        -webkit-appearance: none;
+        appearance: none;
+        background: var(--bg-input);
+        border-radius: 2px;
+        outline: none;
+      }
+      .prop-slider::-webkit-slider-thumb {
+        -webkit-appearance: none;
+        width: 12px;
+        height: 12px;
+        border-radius: 50%;
+        background: var(--accent);
+        cursor: pointer;
+      }
+      .prop-slider-val {
+        width: 44px;
+        font-size: 11px;
+        color: var(--text-dim);
+        font-family: var(--font-mono);
+        text-align: right;
+      }
+      .prop-dropdown {
+        flex: 1;
+        height: 22px;
+        background: var(--bg-input);
+        border: 1px solid var(--border);
+        border-radius: var(--radius);
+        padding: 0 6px;
+        color: var(--text);
+        font-size: 12px;
+        font-family: var(--font);
+        outline: none;
+        cursor: pointer;
+      }
+      .prop-toggle {
+        width: 14px;
+        height: 14px;
+        border: 1px solid var(--border-light);
+        border-radius: 3px;
+        background: var(--bg-input);
+        cursor: pointer;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        flex-shrink: 0;
+        padding: 0;
+        color: transparent;
+      }
+      .prop-toggle.checked {
+        background: var(--accent);
+        border-color: var(--accent);
+        color: white;
+      }
+      .prop-toggle svg {
+        width: 10px;
+        height: 10px;
+      }
+      .section-btn {
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        gap: 4px;
+        width: 100%;
+        height: 26px;
+        margin-top: 4px;
+        background: var(--bg-item);
+        border: 1px solid var(--border);
+        border-radius: var(--radius);
+        color: var(--text-dim);
+        cursor: pointer;
+        font-size: 11px;
+        font-family: var(--font);
+      }
+      .section-btn:hover {
+        background: var(--bg-hover);
+        color: var(--text);
+        border-color: var(--border-light);
+      }
+      .section-separator {
+        height: 1px;
+        background: var(--border);
+        margin: 6px 0;
+      }
+      #inspector-body::-webkit-scrollbar {
+        width: 8px;
+      }
+      #inspector-body::-webkit-scrollbar-track {
+        background: transparent;
+      }
+      #inspector-body::-webkit-scrollbar-thumb {
+        background: var(--border);
+        border-radius: 4px;
+      }
+      #inspector-body::-webkit-scrollbar-thumb:hover {
+        background: var(--border-light);
+      }
+    </style>
+    <script type="importmap">
+      {
+        "imports": {
+          "three": "https://cdn.jsdelivr.net/npm/three@0.183.1/build/three.webgpu.js",
+          "three/webgpu": "https://cdn.jsdelivr.net/npm/three@0.183.1/build/three.webgpu.js",
+          "three/tsl": "https://cdn.jsdelivr.net/npm/three@0.183.1/build/three.tsl.js",
+          "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.183.1/examples/jsm/",
+          "stats-gl": "https://cdn.jsdelivr.net/npm/stats-gl/dist/main.js"
+        }
+      }
+    </script>
+  </head>
+  <body>
+    <div id="lab-title">RTS Lab</div>
+    <div id="info">
+      <span id="backend">loading…</span> &bull; LMB <span>select</span> &bull;
+      RMB <span>move</span> &bull; Wheel zoom &bull; WASD/Arrows pan &bull; [C]
+      camera: <span id="cammode">RTS</span> &bull;
+      <span id="selcount">0</span>/<span id="unitcount">0</span> selected
+    </div>
+    <div id="sel-rect"></div>
+    <div id="inspector">
+      <div id="inspector-resize-handle" title="Drag to resize"></div>
+      <div id="inspector-header">
+        <span>Inspector</span>
+        <div style="display: flex; gap: 4px">
+          <button id="immersive-toggle">Hide UI</button>
+          <button id="inspector-toggle">Hide</button>
+        </div>
+      </div>
+      <div id="inspector-body"></div>
+    </div>
+    <script type="module">
+      import * as THREE from "three";
+      import Stats from "stats-gl";
+      import { OrbitControls } from "three/addons/controls/OrbitControls.js";
+      import { SkyMesh } from "three/addons/objects/SkyMesh.js";
+      import { CSMShadowNode } from "three/addons/csm/CSMShadowNode.js";
+      import { createTileMaterial } from "./tileMaterial.js";
+
+      const PARAMS = {
+        camera: {
+          fov: 55,
+          panSpeed: 1.0,
+          edgeSpeed: 1.0, // edge-scroll speed (RTS mode)
+          edgeSize: 26, // px from a screen edge that triggers scrolling
+        },
+        ground: { size: 240, segments: 240 },
+        tile: {
+          textureScale: 1500,
+          gradientIntensity: 0.5,
+          gradientBias: 0.1,
+          tileColor: "#d4d4d4",
+          gridColor: "#707070",
+          gridLineColor: "#404040",
+          roughness: 1,
+          metalness: 0,
+        },
+        // RTS gameplay knobs.
+        rts: {
+          count: 6,
+          enemyCount: 6,
+          speed: 14,
+          turnRate: 8, // rad/s — how fast a unit swings to face its heading
+          spacing: 4, // formation gap when many units share one order
+          slopeAlign: true, // tilt unit body to match terrain slope
+          arrive: 0.15, // stop distance from target
+          separation: true, // push overlapping units apart each frame
+          sepRadius: 3.0, // desired min gap between unit centers
+          // Combat.
+          combat: true, // units auto-fire at enemies in range
+          maxHp: 100,
+          range: 24, // weapon range (world units)
+          damage: 16, // damage per shot
+          fireRate: 1.4, // shots per second
+        },
+        // Navigation grid + pathfinding.
+        nav: {
+          cellSize: 2.5, // world units per grid cell
+          areaSize: 220, // square nav area centered on origin
+          clearance: 1.8, // obstacle padding so units route around, not into
+          showGrid: false, // debug: paint blocked cells
+        },
+        // Same defaults as v2/editor (config.js light block).
+        light: {
+          sunAzimuth: 135,
+          sunElevation: 43,
+          dirColor: "#fff5e0",
+          dirIntensity: 2.2,
+          hemiSkyColor: "#c8e0ff",
+          hemiGroundColor: "#88aa55",
+          hemiIntensity: 0.4,
+          envIntensity: 0.2,
+          exposure: 0.5,
+          sunDistance: 600,
+          shadowBias: -0.0005,
+          shadowNormalBias: 0.02,
+        },
+        // Same defaults as v2/editor (config.js physicalSky block).
+        physicalSky: {
+          turbidity: 2,
+          rayleigh: 1.5,
+          mie: 0.005,
+          mieG: 0.8,
+          cloudCoverage: 0.4,
+          cloudDensity: 0.4,
+          cloudElevation: 0.5,
+          meshScale: 10000,
+        },
+        csm: {
+          cascades: 2,
+          maxFar: 300,
+          lightMargin: 100,
+          mapSize: 2048,
+        },
+      };
+
+      // ── TERRAIN ──────────────────────────────────────────────────────────
+      // Single source of truth for ground height. Used both to displace the
+      // plane geometry AND to keep units glued to the surface every frame, so
+      // visual mesh and logical height never drift apart. Swap this body for
+      // real heightmap sampling when porting to v2.
+      function terrainHeight(x, z) {
+        return (
+          Math.sin(x * 0.06) * Math.cos(z * 0.05) * 4.0 +
+          Math.sin(x * 0.13 + z * 0.07) * 2.0 +
+          Math.cos(z * 0.1) * 1.5
+        );
+      }
+
+      // Surface normal via finite differences — used to tilt units on slopes.
+      const _nL = new THREE.Vector3();
+      function terrainNormal(x, z, out = new THREE.Vector3()) {
+        const e = 0.5;
+        const hL = terrainHeight(x - e, z);
+        const hR = terrainHeight(x + e, z);
+        const hD = terrainHeight(x, z - e);
+        const hU = terrainHeight(x, z + e);
+        return out.set(hL - hR, 2 * e, hD - hU).normalize();
+      }
+
+      function sunDirectionFromAngles(
+        azDeg,
+        elDeg,
+        target = new THREE.Vector3(),
+      ) {
+        const az = THREE.MathUtils.degToRad(azDeg);
+        const el = THREE.MathUtils.degToRad(elDeg);
+        return target
+          .set(
+            Math.cos(el) * Math.cos(az),
+            Math.sin(el),
+            Math.cos(el) * Math.sin(az),
+          )
+          .normalize();
+      }
+
+      async function init() {
+        const renderer = new THREE.WebGPURenderer({ antialias: true });
+
+        const stats = new Stats({ trackGPU: true });
+        await stats.init(renderer);
+
+        await renderer.init();
+        renderer.setSize(innerWidth, innerHeight);
+        renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
+        renderer.toneMapping = THREE.ACESFilmicToneMapping;
+        renderer.toneMappingExposure = PARAMS.light.exposure;
+        renderer.shadowMap.enabled = true;
+        renderer.shadowMap.type = THREE.PCFSoftShadowMap;
+        document.body.appendChild(renderer.domElement);
+        document.body.appendChild(stats.dom);
+
+        document.getElementById("backend").textContent =
+          renderer.backend?.constructor?.name?.includes("WebGPU")
+            ? "WebGPU ✓"
+            : "WebGL fallback";
+
+        const scene = new THREE.Scene();
+        const camera = new THREE.PerspectiveCamera(
+          PARAMS.camera.fov,
+          innerWidth / innerHeight,
+          0.5,
+          5000,
+        );
+        camera.position.set(70, 80, 90);
+
+        // RTS camera: OrbitControls, but LEFT/RIGHT mouse are freed for unit
+        // selection + orders. Rotate is moved to the middle button; wheel
+        // zooms; WASD/Arrows pan the focus point across the map.
+        const controls = new OrbitControls(camera, renderer.domElement);
+        controls.target.set(0, 0, 0);
+        controls.enableDamping = true;
+        controls.dampingFactor = 0.08;
+        controls.maxPolarAngle = Math.PI * 0.48;
+        controls.minDistance = 20;
+        controls.maxDistance = 280;
+        controls.mouseButtons = {
+          LEFT: null,
+          MIDDLE: THREE.MOUSE.ROTATE,
+          RIGHT: null,
+        };
+
+        // ── LIGHTS ──
+        const sunDir = new THREE.Vector3();
+        const hemi = new THREE.HemisphereLight(0xffffff, 0xffffff, 1);
+        scene.add(hemi);
+
+        const sun = new THREE.DirectionalLight(0xffffff, 1);
+        sun.castShadow = true;
+        sun.shadow.mapSize.set(PARAMS.csm.mapSize, PARAMS.csm.mapSize);
+        sun.shadow.camera.near = 1;
+        sun.shadow.camera.far = 300;
+        sun.shadow.camera.left = sun.shadow.camera.bottom = -300;
+        sun.shadow.camera.right = sun.shadow.camera.top = 300;
+        const shadowTarget = new THREE.Object3D();
+        scene.add(shadowTarget);
+        sun.target = shadowTarget;
+        scene.add(sun);
+
+        let csm = null;
+        try {
+          csm = new CSMShadowNode(sun, {
+            cascades: PARAMS.csm.cascades,
+            maxFar: PARAMS.csm.maxFar,
+            mode: "practical",
+            lightMargin: PARAMS.csm.lightMargin,
+          });
+          sun.shadow.shadowNode = csm;
+        } catch (err) {
+          console.warn("[rts] CSMShadowNode init failed.", err);
+        }
+
+        // ── SKY (SkyMesh physical sky + PMREM IBL) ──
+        const sky = new SkyMesh();
+        if (sky.material) sky.material.fog = false;
+        scene.add(sky);
+
+        let pmremGenerator = null;
+        let _disposePmrem = null;
+
+        function applySkyUniforms() {
+          const S = PARAMS.physicalSky;
+          sky.turbidity.value = S.turbidity;
+          sky.rayleigh.value = S.rayleigh;
+          sky.mieCoefficient.value = S.mie;
+          sky.mieDirectionalG.value = S.mieG;
+          sky.cloudCoverage.value = S.cloudCoverage;
+          sky.cloudDensity.value = S.cloudDensity;
+          sky.cloudElevation.value = S.cloudElevation;
+          sky.scale.setScalar(S.meshScale);
+          if (sky.sunPosition?.value?.copy) sky.sunPosition.value.copy(sunDir);
+          else if (sky.sunPosition?.copy) sky.sunPosition.copy(sunDir);
+        }
+
+        function rebuildSkyEnv() {
+          try {
+            applySkyUniforms();
+            if (_disposePmrem) {
+              _disposePmrem();
+              _disposePmrem = null;
+            }
+            pmremGenerator =
+              pmremGenerator ?? new THREE.PMREMGenerator(renderer);
+            const envScene = new THREE.Scene();
+            envScene.add(sky.clone());
+            const pmremRT = pmremGenerator.fromScene(envScene, 0.04);
+            scene.environment = pmremRT.texture;
+            _disposePmrem = () => pmremRT.dispose();
+          } catch (err) {
+            console.warn("[rts] PMREM from SkyMesh failed.", err);
+          }
+        }
+
+        function updateSun() {
+          const L = PARAMS.light;
+          sunDirectionFromAngles(L.sunAzimuth, L.sunElevation, sunDir);
+          sun.position.copy(sunDir).multiplyScalar(L.sunDistance);
+          sun.color.set(L.dirColor);
+          sun.intensity = L.dirIntensity;
+          sun.shadow.bias = L.shadowBias;
+          sun.shadow.normalBias = L.shadowNormalBias;
+          hemi.color.set(L.hemiSkyColor);
+          hemi.groundColor.set(L.hemiGroundColor);
+          hemi.intensity = L.hemiIntensity;
+          renderer.toneMappingExposure = L.exposure;
+          scene.environmentIntensity = L.envIntensity;
+          applySkyUniforms();
+        }
+
+        updateSun();
+        rebuildSkyEnv();
+
+        // ── GROUND (displaced tile terrain) ──
+        const floorGeo = new THREE.PlaneGeometry(
+          PARAMS.ground.size,
+          PARAMS.ground.size,
+          PARAMS.ground.segments,
+          PARAMS.ground.segments,
+        );
+        floorGeo.rotateX(-Math.PI / 2);
+        // Push every vertex up to the terrain height (XZ plane after rotate).
+        {
+          const p = floorGeo.attributes.position;
+          for (let i = 0; i < p.count; i++) {
+            p.setY(i, terrainHeight(p.getX(i), p.getZ(i)));
+          }
+          p.needsUpdate = true;
+          floorGeo.computeVertexNormals();
+        }
+        const floorMat = createTileMaterial({
+          textureScale: PARAMS.tile.textureScale,
+          gradientIntensity: PARAMS.tile.gradientIntensity,
+          gradientBias: PARAMS.tile.gradientBias,
+          tileColor: PARAMS.tile.tileColor,
+          gridColor: PARAMS.tile.gridColor,
+          gridLineColor: PARAMS.tile.gridLineColor,
+          roughness: PARAMS.tile.roughness,
+          metalness: PARAMS.tile.metalness,
+        });
+        const terrain = new THREE.Mesh(floorGeo, floorMat);
+        terrain.receiveShadow = true;
+        scene.add(terrain);
+
+        // ── OBSTACLES + NAVIGATION GRID ───────────────────────────────────
+        // Rocks in the mid-field force units to route around them. Each rock's
+        // (x,z,r) footprint also stamps blocked cells into the nav grid.
+        const OBSTACLES = [];
+        {
+          const defs = [
+            { x: -30, z: 0, r: 5 },
+            { x: 30, z: -6, r: 4 },
+            { x: 0, z: 8, r: 6 },
+            { x: -12, z: -18, r: 3.5 },
+            { x: 18, z: 14, r: 3.5 },
+            { x: -42, z: 16, r: 4 },
+            { x: 42, z: 12, r: 4.5 },
+            { x: 10, z: -16, r: 3 },
+          ];
+          const rockMat = new THREE.MeshStandardMaterial({
+            color: 0x6f6a63,
+            roughness: 0.95,
+            metalness: 0,
+          });
+          for (const d of defs) {
+            const h = d.r * 1.5;
+            const mesh = new THREE.Mesh(
+              new THREE.CylinderGeometry(d.r * 0.65, d.r, h, 7),
+              rockMat,
+            );
+            mesh.position.set(
+              d.x,
+              terrainHeight(d.x, d.z) + h * 0.5 - 0.4,
+              d.z,
+            );
+            mesh.rotation.y = (d.x * 13.1 + d.z * 7.7) % Math.PI;
+            mesh.castShadow = true;
+            mesh.receiveShadow = true;
+            scene.add(mesh);
+            OBSTACLES.push(d);
+          }
+        }
+
+        // Uniform grid. grid[r*cols+c] = 1 (blocked) | 0 (walkable).
+        const nav = {
+          cell: PARAMS.nav.cellSize,
+          cols: 0,
+          rows: 0,
+          minX: 0,
+          minZ: 0,
+          grid: null,
+        };
+        function buildNavGrid() {
+          const cs = PARAMS.nav.cellSize;
+          const size = PARAMS.nav.areaSize;
+          nav.cell = cs;
+          nav.cols = Math.floor(size / cs);
+          nav.rows = nav.cols;
+          nav.minX = -size / 2;
+          nav.minZ = -size / 2;
+          nav.grid = new Uint8Array(nav.cols * nav.rows);
+          const clr = PARAMS.nav.clearance;
+          for (let r = 0; r < nav.rows; r++) {
+            for (let c = 0; c < nav.cols; c++) {
+              const wx = nav.minX + (c + 0.5) * cs;
+              const wz = nav.minZ + (r + 0.5) * cs;
+              let blocked = 0;
+              for (const o of OBSTACLES) {
+                const dx = wx - o.x;
+                const dz = wz - o.z;
+                const rr = o.r + clr;
+                if (dx * dx + dz * dz < rr * rr) {
+                  blocked = 1;
+                  break;
+                }
+              }
+              nav.grid[r * nav.cols + c] = blocked;
+            }
+          }
+        }
+        const inBounds = (c, r) =>
+          c >= 0 && r >= 0 && c < nav.cols && r < nav.rows;
+        const isBlockedCell = (c, r) =>
+          !inBounds(c, r) || nav.grid[r * nav.cols + c] === 1;
+        const worldToCell = (x, z) => ({
+          c: Math.floor((x - nav.minX) / nav.cell),
+          r: Math.floor((z - nav.minZ) / nav.cell),
+        });
+        const cellCenter = (c, r) => ({
+          x: nav.minX + (c + 0.5) * nav.cell,
+          z: nav.minZ + (r + 0.5) * nav.cell,
+        });
+        // Spiral out to the closest walkable cell (for goals dropped on a rock).
+        function nearestFree(c, r) {
+          if (!isBlockedCell(c, r)) return { c, r };
+          for (let rad = 1; rad < 60; rad++) {
+            for (let dr = -rad; dr <= rad; dr++) {
+              for (let dc = -rad; dc <= rad; dc++) {
+                if (Math.max(Math.abs(dr), Math.abs(dc)) !== rad) continue;
+                const nc = c + dc;
+                const nr = r + dr;
+                if (inBounds(nc, nr) && !isBlockedCell(nc, nr))
+                  return { c: nc, r: nr };
+              }
+            }
+          }
+          return { c, r };
+        }
+        // Supercover line test — true if every cell on the segment is walkable.
+        function lineClear(c0, r0, c1, r1) {
+          let dx = Math.abs(c1 - c0);
+          let dy = Math.abs(r1 - r0);
+          let x = c0;
+          let y = r0;
+          let n = 1 + dx + dy;
+          const xi = c1 > c0 ? 1 : -1;
+          const yi = r1 > r0 ? 1 : -1;
+          let err = dx - dy;
+          dx *= 2;
+          dy *= 2;
+          for (; n > 0; n--) {
+            if (isBlockedCell(x, y)) return false;
+            if (err > 0) {
+              x += xi;
+              err -= dy;
+            } else {
+              y += yi;
+              err += dx;
+            }
+          }
+          return true;
+        }
+
+        // A* on the grid → array of {x,z} world waypoints (smoothed). Falls
+        // back to a single straight waypoint if no path exists.
+        const _heap = []; // binary min-heap of cell indices, keyed by fScore
+        function astar(sx, sz, gx, gz) {
+          if (!nav.grid) return [{ x: gx, z: gz }];
+          let s = worldToCell(sx, sz);
+          let g = worldToCell(gx, gz);
+          const goalBlocked = isBlockedCell(g.c, g.r);
+          s = nearestFree(s.c, s.r);
+          g = nearestFree(g.c, g.r);
+          const cols = nav.cols;
+          const N = cols * nav.rows;
+          const sIdx = s.r * cols + s.c;
+          const gIdx = g.r * cols + g.c;
+          if (sIdx === gIdx) return [{ x: gx, z: gz }];
+
+          const gScore = new Float32Array(N).fill(Infinity);
+          const fScore = new Float32Array(N).fill(Infinity);
+          const came = new Int32Array(N).fill(-1);
+          const closed = new Uint8Array(N);
+          const heuristic = (c, r) => {
+            const dc = Math.abs(c - g.c);
+            const dr = Math.abs(r - g.r);
+            const m = Math.min(dc, dr);
+            return Math.max(dc, dr) - m + m * 1.4142136;
+          };
+          gScore[sIdx] = 0;
+          fScore[sIdx] = heuristic(s.c, s.r);
+
+          _heap.length = 0;
+          const push = (idx) => {
+            _heap.push(idx);
+            let i = _heap.length - 1;
+            while (i > 0) {
+              const p = (i - 1) >> 1;
+              if (fScore[_heap[p]] <= fScore[_heap[i]]) break;
+              [_heap[p], _heap[i]] = [_heap[i], _heap[p]];
+              i = p;
+            }
+          };
+          const pop = () => {
+            const top = _heap[0];
+            const last = _heap.pop();
+            if (_heap.length) {
+              _heap[0] = last;
+              let i = 0;
+              for (;;) {
+                const l = 2 * i + 1;
+                const rr = l + 1;
+                let sm = i;
+                if (l < _heap.length && fScore[_heap[l]] < fScore[_heap[sm]])
+                  sm = l;
+                if (rr < _heap.length && fScore[_heap[rr]] < fScore[_heap[sm]])
+                  sm = rr;
+                if (sm === i) break;
+                [_heap[sm], _heap[i]] = [_heap[i], _heap[sm]];
+                i = sm;
+              }
+            }
+            return top;
+          };
+          push(sIdx);
+
+          const DIRS = [
+            [1, 0, 1],
+            [-1, 0, 1],
+            [0, 1, 1],
+            [0, -1, 1],
+            [1, 1, 1.4142136],
+            [1, -1, 1.4142136],
+            [-1, 1, 1.4142136],
+            [-1, -1, 1.4142136],
+          ];
+          let found = false;
+          while (_heap.length) {
+            const cur = pop();
+            if (cur === gIdx) {
+              found = true;
+              break;
+            }
+            if (closed[cur]) continue;
+            closed[cur] = 1;
+            const cc = cur % cols;
+            const cr = (cur - cc) / cols;
+            for (const [dc, dr, cost] of DIRS) {
+              const nc = cc + dc;
+              const nr = cr + dr;
+              if (isBlockedCell(nc, nr)) continue;
+              // No corner-cutting through a blocked orthogonal neighbor.
+              if (dc !== 0 && dr !== 0) {
+                if (isBlockedCell(cc + dc, cr) || isBlockedCell(cc, cr + dr))
+                  continue;
+              }
+              const nIdx = nr * cols + nc;
+              if (closed[nIdx]) continue;
+              const tentative = gScore[cur] + cost;
+              if (tentative < gScore[nIdx]) {
+                came[nIdx] = cur;
+                gScore[nIdx] = tentative;
+                fScore[nIdx] = tentative + heuristic(nc, nr);
+                push(nIdx);
+              }
+            }
+          }
+          if (!found) return [{ x: gx, z: gz }];
+
+          // Reconstruct cell path start→goal.
+          const cells = [];
+          for (let cur = gIdx; cur !== -1; cur = came[cur]) {
+            const cc = cur % cols;
+            const cr = (cur - cc) / cols;
+            cells.push({ c: cc, r: cr });
+          }
+          cells.reverse();
+
+          // String-pull smoothing: keep only waypoints that need a turn.
+          const keep = [cells[0]];
+          let i = 0;
+          while (i < cells.length - 1) {
+            let j = cells.length - 1;
+            while (
+              j > i + 1 &&
+              !lineClear(cells[i].c, cells[i].r, cells[j].c, cells[j].r)
+            )
+              j--;
+            keep.push(cells[j]);
+            i = j;
+          }
+
+          const pts = keep.slice(1).map((cl) => cellCenter(cl.c, cl.r));
+          // Final waypoint: exact click point, unless it was inside a rock.
+          if (pts.length) {
+            pts[pts.length - 1] = goalBlocked
+              ? cellCenter(g.c, g.r)
+              : { x: gx, z: gz };
+          } else {
+            pts.push(goalBlocked ? cellCenter(g.c, g.r) : { x: gx, z: gz });
+          }
+          return pts;
+        }
+        buildNavGrid();
+
+        // Debug overlay: red quads over blocked cells.
+        const gridQuadGeo = new THREE.PlaneGeometry(1, 1);
+        gridQuadGeo.rotateX(-Math.PI / 2);
+        let gridDebug = null;
+        function buildGridDebug() {
+          if (gridDebug) {
+            scene.remove(gridDebug);
+            gridDebug.dispose?.();
+            gridDebug = null;
+          }
+          if (!PARAMS.nav.showGrid || !nav.grid) return;
+          let n = 0;
+          for (let k = 0; k < nav.grid.length; k++) if (nav.grid[k]) n++;
+          if (!n) return;
+          const mat = new THREE.MeshBasicMaterial({
+            color: 0xff3b30,
+            transparent: true,
+            opacity: 0.28,
+            depthWrite: false,
+          });
+          gridDebug = new THREE.InstancedMesh(gridQuadGeo, mat, n);
+          const m = new THREE.Matrix4();
+          const s = nav.cell * 0.92;
+          let idx = 0;
+          for (let r = 0; r < nav.rows; r++) {
+            for (let c = 0; c < nav.cols; c++) {
+              if (!nav.grid[r * nav.cols + c]) continue;
+              const ctr = cellCenter(c, r);
+              m.makeScale(s, 1, s);
+              m.setPosition(ctr.x, terrainHeight(ctr.x, ctr.z) + 0.12, ctr.z);
+              gridDebug.setMatrixAt(idx++, m);
+            }
+          }
+          gridDebug.instanceMatrix.needsUpdate = true;
+          gridDebug.renderOrder = 1;
+          scene.add(gridDebug);
+        }
+
+        // ── UNITS ────────────────────────────────────────────────────────
+        // Source of truth is the data object; the Three.js group just renders
+        // it. This is the split that lets selection / orders / (later) AI grow
+        // without rewiring the visuals.
+        const units = [];
+        const tankBodies = []; // raycast targets → userData.unit back-ref
+        const unitsGroup = new THREE.Group();
+        scene.add(unitsGroup);
+
+        // Per-faction look. Player = khaki, enemy = red.
+        const FACTIONS = {
+          player: {
+            hull: new THREE.MeshStandardMaterial({
+              color: 0x6b7a3a,
+              roughness: 0.75,
+              metalness: 0.1,
+            }),
+          },
+          enemy: {
+            hull: new THREE.MeshStandardMaterial({
+              color: 0x9a3b2e,
+              roughness: 0.75,
+              metalness: 0.1,
+            }),
+          },
+        };
+        const barrelMat = new THREE.MeshStandardMaterial({
+          color: 0x3a3f28,
+          roughness: 0.6,
+          metalness: 0.2,
+        });
+
+        function buildTankMesh(faction) {
+          const hullMat = FACTIONS[faction].hull;
+          const g = new THREE.Group();
+          // Hull (front = +Z).
+          const hull = new THREE.Mesh(
+            new THREE.BoxGeometry(2.2, 0.8, 3.0),
+            hullMat,
+          );
+          hull.position.y = 0.55;
+          hull.castShadow = true;
+          g.add(hull);
+          // Turret.
+          const turret = new THREE.Mesh(
+            new THREE.BoxGeometry(1.3, 0.6, 1.3),
+            hullMat,
+          );
+          turret.position.set(0, 1.15, -0.1);
+          turret.castShadow = true;
+          g.add(turret);
+          // Barrel.
+          const barrel = new THREE.Mesh(
+            new THREE.CylinderGeometry(0.12, 0.12, 1.6, 8),
+            barrelMat,
+          );
+          barrel.rotation.x = Math.PI / 2;
+          barrel.position.set(0, 1.2, 1.1);
+          barrel.castShadow = true;
+          g.add(barrel);
+          return g;
+        }
+
+        // Health bars live in their own group so they can billboard toward
+        // the camera independent of unit body rotation.
+        const barsGroup = new THREE.Group();
+        scene.add(barsGroup);
+        const BAR_W = 2.4;
+        const BAR_H = 0.28;
+        // Fill geometry is left-anchored (origin at its left edge) so scaling
+        // x by the HP ratio drains it from the right, like a real health bar.
+        const barFillGeo = new THREE.PlaneGeometry(1, BAR_H);
+        barFillGeo.translate(0.5, 0, 0);
+        function makeHealthBar(faction) {
+          const bar = new THREE.Group();
+          const bg = new THREE.Mesh(
+            new THREE.PlaneGeometry(BAR_W + 0.12, BAR_H + 0.12),
+            new THREE.MeshBasicMaterial({
+              color: 0x000000,
+              transparent: true,
+              opacity: 0.55,
+              depthTest: false,
+              depthWrite: false,
+            }),
+          );
+          bg.renderOrder = 10;
+          const fill = new THREE.Mesh(
+            barFillGeo,
+            new THREE.MeshBasicMaterial({
+              color: faction === "player" ? 0x59d35a : 0xe0503a,
+              depthTest: false,
+              depthWrite: false,
+            }),
+          );
+          fill.position.x = -BAR_W / 2;
+          fill.scale.x = BAR_W;
+          fill.renderOrder = 11;
+          bar.add(bg);
+          bar.add(fill);
+          bar.userData.fill = fill;
+          bar.visible = false;
+          barsGroup.add(bar);
+          return bar;
+        }
+
+        // Per-unit ground ring shown when selected.
+        const ringGeo = new THREE.RingGeometry(1.7, 2.0, 28);
+        ringGeo.rotateX(-Math.PI / 2);
+        function makeSelectionRing() {
+          const m = new THREE.Mesh(
+            ringGeo,
+            new THREE.MeshBasicMaterial({
+              color: 0x49e0ff,
+              transparent: true,
+              opacity: 0.9,
+              depthWrite: false,
+            }),
+          );
+          m.visible = false;
+          m.renderOrder = 2;
+          return m;
+        }
+
+        function spawnUnit(x, z, faction) {
+          const group = buildTankMesh(faction);
+          const ring = makeSelectionRing();
+          group.add(ring);
+          unitsGroup.add(group);
+          const u = {
+            group,
+            ring,
+            bar: makeHealthBar(faction),
+            faction, // "player" | "enemy"
+            pos: new THREE.Vector3(x, terrainHeight(x, z), z),
+            path: null, // array of {x,z} waypoints from A*
+            heading: faction === "enemy" ? Math.PI : 0, // enemies face player
+            wantHeading: faction === "enemy" ? Math.PI : 0,
+            selected: false,
+            hp: PARAMS.rts.maxHp,
+            maxHp: PARAMS.rts.maxHp,
+            cooldown: 0, // seconds until next shot
+            attackTarget: null,
+            dead: false,
+          };
+          group.traverse((o) => {
+            if (o.isMesh) {
+              o.userData.unit = u;
+              if (o.geometry?.type === "BoxGeometry") tankBodies.push(o);
+            }
+          });
+          units.push(u);
+          return u;
+        }
+
+        // Lay one faction out in a tidy grid centered on (0, baseZ).
+        function spawnSide(faction, n, baseZ) {
+          const cols = Math.ceil(Math.sqrt(n));
+          const sp = 6;
+          for (let i = 0; i < n; i++) {
+            const cx = i % cols;
+            const cz = Math.floor(i / cols);
+            const x = (cx - (cols - 1) / 2) * sp;
+            const z = (cz - (cols - 1) / 2) * sp + baseZ;
+            spawnUnit(x, z, faction);
+          }
+        }
+
+        function spawnArmies() {
+          // Clear existing.
+          for (const u of units) {
+            unitsGroup.remove(u.group);
+            barsGroup.remove(u.bar);
+          }
+          units.length = 0;
+          tankBodies.length = 0;
+          spawnSide("player", PARAMS.rts.count, 36);
+          spawnSide("enemy", PARAMS.rts.enemyCount, -36);
+          updateCountUI();
+        }
+
+        // ── MOVE-ORDER PING (fades after a click order) ──
+        const ping = new THREE.Mesh(
+          ringGeo,
+          new THREE.MeshBasicMaterial({
+            color: 0xffe14a,
+            transparent: true,
+            opacity: 0,
+            depthWrite: false,
+          }),
+        );
+        ping.renderOrder = 3;
+        ping.visible = false;
+        scene.add(ping);
+        let pingLife = 0;
+        function showPing(p) {
+          ping.position.set(p.x, terrainHeight(p.x, p.z) + 0.08, p.z);
+          pingLife = 0.6;
+          ping.visible = true;
+        }
+
+        // ── CONTEXT CURSOR ──
+        // A ground ring that tracks the mouse: green over open ground (move
+        // here), red snapped onto an enemy (your future attack target).
+        const HOVER_GREEN = new THREE.Color(0x6cff6c);
+        const HOVER_RED = new THREE.Color(0xff5a4a);
+        const hoverRing = new THREE.Mesh(
+          ringGeo,
+          new THREE.MeshBasicMaterial({
+            color: HOVER_GREEN,
+            transparent: true,
+            opacity: 0.85,
+            depthWrite: false,
+          }),
+        );
+        hoverRing.renderOrder = 2;
+        hoverRing.visible = false;
+        scene.add(hoverRing);
+
+        // ── SELECTION + ORDERS ─────────────────────────────────────────────
+        const raycaster = new THREE.Raycaster();
+        const ndc = new THREE.Vector2();
+        const selRect = document.getElementById("sel-rect");
+        const selCountEl = document.getElementById("selcount");
+        const unitCountEl = document.getElementById("unitcount");
+        function updateCountUI() {
+          // Denominator = controllable (player) units; enemies aren't ours.
+          unitCountEl.textContent = String(
+            units.reduce((a, u) => a + (u.faction === "player" ? 1 : 0), 0),
+          );
+          selCountEl.textContent = String(
+            units.reduce((a, u) => a + (u.selected ? 1 : 0), 0),
+          );
+        }
+
+        function clearSelection() {
+          for (const u of units) u.selected = false;
+        }
+
+        function screenToNDC(cx, cy) {
+          ndc.set((cx / innerWidth) * 2 - 1, -(cy / innerHeight) * 2 + 1);
+          return ndc;
+        }
+
+        function clickSelect(cx, cy, additive) {
+          raycaster.setFromCamera(screenToNDC(cx, cy), camera);
+          const hits = raycaster.intersectObjects(tankBodies, false);
+          if (!additive) clearSelection();
+          // Only our own units are selectable; ignore clicks on enemies.
+          const hit = hits.find((h) => {
+            const u = h.object.userData.unit;
+            return u.faction === "player" && !u.dead;
+          });
+          if (hit) {
+            const u = hit.object.userData.unit;
+            u.selected = additive ? !u.selected : true;
+          }
+          updateCountUI();
+        }
+
+        const _proj = new THREE.Vector3();
+        function boxSelect(x0, y0, x1, y1, additive) {
+          const minX = Math.min(x0, x1);
+          const maxX = Math.max(x0, x1);
+          const minY = Math.min(y0, y1);
+          const maxY = Math.max(y0, y1);
+          if (!additive) clearSelection();
+          for (const u of units) {
+            if (u.faction !== "player" || u.dead) continue; // not selectable
+            _proj.copy(u.pos);
+            _proj.y += 1.0;
+            _proj.project(camera);
+            if (_proj.z > 1) continue; // behind camera
+            const sx = (_proj.x * 0.5 + 0.5) * innerWidth;
+            const sy = (-_proj.y * 0.5 + 0.5) * innerHeight;
+            if (sx >= minX && sx <= maxX && sy >= minY && sy <= maxY)
+              u.selected = true;
+          }
+          updateCountUI();
+        }
+
+        function issueMove(cx, cy) {
+          raycaster.setFromCamera(screenToNDC(cx, cy), camera);
+          const hit = raycaster.intersectObject(terrain, false)[0];
+          if (!hit) return;
+          const center = hit.point;
+          const sel = units.filter((u) => u.selected && !u.dead);
+          if (!sel.length) return;
+          showPing(center);
+          // Grid formation centered on the click so units don't pile up.
+          const cols = Math.ceil(Math.sqrt(sel.length));
+          const rows = Math.ceil(sel.length / cols);
+          const sp = PARAMS.rts.spacing;
+          sel.forEach((u, i) => {
+            const gx = i % cols;
+            const gz = Math.floor(i / cols);
+            const ox = (gx - (cols - 1) / 2) * sp;
+            const oz = (gz - (rows - 1) / 2) * sp;
+            // A* from the unit to its formation slot, routing around rocks.
+            u.path = astar(u.pos.x, u.pos.z, center.x + ox, center.z + oz);
+          });
+        }
+
+        // Pointer state machine: left = select (click vs drag-box),
+        // right = order. Middle is owned by OrbitControls (rotate).
+        let dragging = false;
+        let dragMoved = false;
+        let startX = 0;
+        let startY = 0;
+        const dom = renderer.domElement;
+        dom.addEventListener("contextmenu", (e) => e.preventDefault());
+        dom.addEventListener("pointerdown", (e) => {
+          if (e.button === 0) {
+            dragging = true;
+            dragMoved = false;
+            startX = e.clientX;
+            startY = e.clientY;
+            selRect.style.display = "none";
+            hoverRing.visible = false;
+          }
+        });
+        window.addEventListener("pointermove", (e) => {
+          if (!dragging) return;
+          const dx = e.clientX - startX;
+          const dy = e.clientY - startY;
+          if (!dragMoved && Math.hypot(dx, dy) > 4) dragMoved = true;
+          if (dragMoved) {
+            selRect.style.left = Math.min(startX, e.clientX) + "px";
+            selRect.style.top = Math.min(startY, e.clientY) + "px";
+            selRect.style.width = Math.abs(dx) + "px";
+            selRect.style.height = Math.abs(dy) + "px";
+            selRect.style.display = "block";
+          }
+        });
+        window.addEventListener("pointerup", (e) => {
+          if (e.button === 0 && dragging) {
+            dragging = false;
+            selRect.style.display = "none";
+            if (dragMoved)
+              boxSelect(startX, startY, e.clientX, e.clientY, e.shiftKey);
+            else clickSelect(e.clientX, e.clientY, e.shiftKey);
+          } else if (e.button === 2) {
+            issueMove(e.clientX, e.clientY);
+          }
+        });
+
+        // Context cursor — recolor + reposition the hover ring as the mouse
+        // moves over the battlefield. Skipped while drag-selecting.
+        function updateHover(cx, cy) {
+          raycaster.setFromCamera(screenToNDC(cx, cy), camera);
+          const eHit = raycaster
+            .intersectObjects(tankBodies, false)
+            .find((h) => {
+              const u = h.object.userData.unit;
+              return u.faction === "enemy" && !u.dead;
+            });
+          if (eHit) {
+            const u = eHit.object.userData.unit;
+            hoverRing.material.color.copy(HOVER_RED);
+            hoverRing.position.set(u.pos.x, u.pos.y + 0.12, u.pos.z);
+            hoverRing.visible = true;
+            dom.style.cursor = "crosshair";
+            return;
+          }
+          const gHit = raycaster.intersectObject(terrain, false)[0];
+          if (gHit) {
+            hoverRing.material.color.copy(HOVER_GREEN);
+            hoverRing.position.set(
+              gHit.point.x,
+              gHit.point.y + 0.08,
+              gHit.point.z,
+            );
+            hoverRing.visible = true;
+          } else {
+            hoverRing.visible = false;
+          }
+          dom.style.cursor = "default";
+        }
+        // Track cursor over the canvas — used by hover ring + edge scrolling.
+        let mouseX = 0;
+        let mouseY = 0;
+        let pointerInCanvas = false;
+        dom.addEventListener("pointermove", (e) => {
+          mouseX = e.clientX;
+          mouseY = e.clientY;
+          pointerInCanvas = true;
+          if (!dragging) updateHover(e.clientX, e.clientY);
+        });
+        dom.addEventListener("pointerenter", () => (pointerInCanvas = true));
+        dom.addEventListener("pointerleave", () => {
+          pointerInCanvas = false;
+          hoverRing.visible = false;
+        });
+
+        // ── CAMERA MODES ──────────────────────────────────────────────────
+        // "rts": fixed angle, edge-scroll + WASD pan, no free rotation (the
+        // classic C&C feel). "orbit": MMB-drag to rotate freely for inspection.
+        const cam = { mode: "rts" };
+        const cammodeEl = document.getElementById("cammode");
+        function setCamMode(m) {
+          cam.mode = m;
+          controls.enableRotate = m === "orbit";
+          cammodeEl.textContent = m === "orbit" ? "ORBIT" : "RTS";
+        }
+        window.addEventListener("keydown", (e) => {
+          if (e.code === "KeyC" && !e.ctrlKey && !e.metaKey) {
+            setCamMode(cam.mode === "rts" ? "orbit" : "rts");
+          }
+        });
+
+        // ── CAMERA PAN (WASD / arrows + RTS edge scroll) ──
+        const keys = Object.create(null);
+        window.addEventListener("keydown", (e) => (keys[e.code] = true));
+        window.addEventListener("keyup", (e) => (keys[e.code] = false));
+
+        const _fwd = new THREE.Vector3();
+        const _right = new THREE.Vector3();
+        const _pan = new THREE.Vector3();
+        const WORLD_UP = new THREE.Vector3(0, 1, 0);
+        // Shared helper: slide the whole view (camera + orbit target) across
+        // the ground plane. ix = right, iz = forward (away from camera).
+        function panView(ix, iz, speedMul, dt) {
+          if (!ix && !iz) return;
+          camera.getWorldDirection(_fwd);
+          _fwd.y = 0;
+          _fwd.normalize();
+          _right.crossVectors(_fwd, WORLD_UP).normalize();
+          // Scale with zoom distance so it feels constant on screen.
+          const dist = camera.position.distanceTo(controls.target);
+          const sp = speedMul * dist * 0.9 * dt;
+          _pan
+            .set(0, 0, 0)
+            .addScaledVector(_fwd, iz * sp)
+            .addScaledVector(_right, ix * sp);
+          camera.position.add(_pan);
+          controls.target.add(_pan);
+        }
+
+        function panCamera(dt) {
+          let ix = 0;
+          let iz = 0;
+          if (keys.KeyW || keys.ArrowUp) iz += 1;
+          if (keys.KeyS || keys.ArrowDown) iz -= 1;
+          if (keys.KeyD || keys.ArrowRight) ix += 1;
+          if (keys.KeyA || keys.ArrowLeft) ix -= 1;
+          panView(ix, iz, PARAMS.camera.panSpeed, dt);
+        }
+
+        // Edge scrolling — only in RTS mode, only while the cursor is over the
+        // canvas and not drag-selecting. Pushing the mouse to a screen edge
+        // slides the map, like every classic RTS.
+        function edgeScroll(dt) {
+          if (cam.mode !== "rts" || !pointerInCanvas || dragging) return;
+          const E = PARAMS.camera.edgeSize;
+          let ix = 0;
+          let iz = 0;
+          if (mouseX < E) ix -= 1;
+          else if (mouseX > innerWidth - E) ix += 1;
+          if (mouseY < E) iz += 1;
+          else if (mouseY > innerHeight - E) iz -= 1;
+          panView(ix, iz, PARAMS.camera.edgeSpeed, dt);
+        }
+
+        // ── COMBAT ──────────────────────────────────────────────────────
+        // Short-lived shot tracers. Pool churn is tiny at lab fire rates.
+        const tracers = [];
+        const _from = new THREE.Vector3();
+        const _to = new THREE.Vector3();
+        function spawnTracer(from, to) {
+          const g = new THREE.BufferGeometry().setFromPoints([
+            from.clone(),
+            to.clone(),
+          ]);
+          const m = new THREE.LineBasicMaterial({
+            color: 0xfff2a0,
+            transparent: true,
+            opacity: 1,
+            depthWrite: false,
+          });
+          const line = new THREE.Line(g, m);
+          line.renderOrder = 5;
+          scene.add(line);
+          tracers.push({ line, life: 0.09 });
+        }
+        function updateTracers(dt) {
+          for (let i = tracers.length - 1; i >= 0; i--) {
+            const t = tracers[i];
+            t.life -= dt;
+            t.line.material.opacity = Math.max(0, t.life / 0.09);
+            if (t.life <= 0) {
+              scene.remove(t.line);
+              t.line.geometry.dispose();
+              t.line.material.dispose();
+              tracers.splice(i, 1);
+            }
+          }
+        }
+
+        function nearestEnemyInRange(u, rangeSq) {
+          let best = null;
+          let bestD = rangeSq;
+          for (const o of units) {
+            if (o.dead || o.faction === u.faction) continue;
+            const dx = o.pos.x - u.pos.x;
+            const dz = o.pos.z - u.pos.z;
+            const d2 = dx * dx + dz * dz;
+            if (d2 <= bestD) {
+              bestD = d2;
+              best = o;
+            }
+          }
+          return best;
+        }
+
+        function fire(shooter, target) {
+          const h = shooter.heading;
+          _from.set(
+            shooter.pos.x + Math.sin(h) * 1.9,
+            shooter.pos.y + 1.2,
+            shooter.pos.z + Math.cos(h) * 1.9,
+          );
+          _to.set(target.pos.x, target.pos.y + 1.1, target.pos.z);
+          spawnTracer(_from, _to);
+          target.hp -= PARAMS.rts.damage;
+          if (target.hp <= 0) killUnit(target);
+        }
+
+        function killUnit(u) {
+          u.dead = true;
+          u.hp = 0;
+          u.selected = false;
+          u.attackTarget = null;
+          u.path = null;
+          u.group.visible = false;
+          u.ring.visible = false;
+          u.bar.visible = false;
+          updateCountUI();
+        }
+
+        // ── UNIT UPDATE ──
+        const _dir = new THREE.Vector3();
+        const _fwdU = new THREE.Vector3();
+        const _rightU = new THREE.Vector3();
+        const _upU = new THREE.Vector3();
+        const _m = new THREE.Matrix4();
+        function updateUnits(dt) {
+          const R = PARAMS.rts;
+
+          // Phase 1 — advance each unit along its path (XZ only). Intermediate
+          // waypoints use a loose arrival radius so corners stay smooth; the
+          // final waypoint uses the tight stop distance.
+          for (const u of units) {
+            if (u.dead || !u.path) continue;
+            const wp = u.path[0];
+            const dx = wp.x - u.pos.x;
+            const dz = wp.z - u.pos.z;
+            const d = Math.hypot(dx, dz);
+            const last = u.path.length === 1;
+            const thr = last ? R.arrive : 0.8;
+            if (d <= thr) {
+              u.path.shift();
+              if (u.path.length === 0) u.path = null;
+            } else {
+              const step = Math.min(R.speed * dt, d);
+              u.pos.x += (dx / d) * step;
+              u.pos.z += (dz / d) * step;
+              u.wantHeading = Math.atan2(dx, dz);
+            }
+          }
+
+          // Phase 2 — separation: nudge overlapping units apart so formations
+          // stay readable instead of stacking. O(n^2), fine for a lab-sized
+          // army. Symmetric push (each pair moves half) avoids order bias.
+          if (R.separation) {
+            const min = R.sepRadius;
+            for (let i = 0; i < units.length; i++) {
+              const a = units[i];
+              if (a.dead) continue;
+              for (let j = i + 1; j < units.length; j++) {
+                const b = units[j];
+                if (b.dead) continue;
+                let dx = a.pos.x - b.pos.x;
+                let dz = a.pos.z - b.pos.z;
+                let d = Math.hypot(dx, dz);
+                if (d > min) continue;
+                if (d < 1e-4) {
+                  // Exactly overlapping — break the tie deterministically.
+                  dx = (i % 2 ? 1 : -1) * 0.05;
+                  dz = 0.05;
+                  d = Math.hypot(dx, dz);
+                }
+                const push = (min - d) * 0.5;
+                const nx = (dx / d) * push;
+                const nz = (dz / d) * push;
+                a.pos.x += nx;
+                a.pos.z += nz;
+                b.pos.x -= nx;
+                b.pos.z -= nz;
+              }
+            }
+          }
+
+          // Phase 2.6 — obstacle push-out: keep units off rock footprints even
+          // when crowding/separation shoves them inward.
+          const PAD = 1.2;
+          for (const u of units) {
+            if (u.dead) continue;
+            for (const o of OBSTACLES) {
+              let dx = u.pos.x - o.x;
+              let dz = u.pos.z - o.z;
+              let d = Math.hypot(dx, dz);
+              const minD = o.r + PAD;
+              if (d < minD) {
+                if (d < 1e-4) {
+                  dx = 1;
+                  dz = 0;
+                  d = 1;
+                }
+                const k = (minD - d) / d;
+                u.pos.x += dx * k;
+                u.pos.z += dz * k;
+              }
+            }
+          }
+
+          // Phase 2.5 — combat: acquire an enemy in range, aim, fire on
+          // cooldown. Units keep firing while executing a move order; they
+          // only turn to aim when idle (so move orders still steer them).
+          const rangeSq = R.range * R.range;
+          for (const u of units) {
+            if (u.dead) continue;
+            if (u.cooldown > 0) u.cooldown -= dt;
+            if (!R.combat) {
+              u.attackTarget = null;
+              continue;
+            }
+            // Drop a target that died or walked out of range.
+            if (u.attackTarget) {
+              const t = u.attackTarget;
+              const dx = t.pos.x - u.pos.x;
+              const dz = t.pos.z - u.pos.z;
+              if (t.dead || dx * dx + dz * dz > rangeSq) u.attackTarget = null;
+            }
+            if (!u.attackTarget) u.attackTarget = nearestEnemyInRange(u, rangeSq);
+            if (u.attackTarget) {
+              if (!u.path) {
+                // Idle + engaged → face the target.
+                u.wantHeading = Math.atan2(
+                  u.attackTarget.pos.x - u.pos.x,
+                  u.attackTarget.pos.z - u.pos.z,
+                );
+              }
+              if (u.cooldown <= 0) {
+                u.cooldown = 1 / R.fireRate;
+                fire(u, u.attackTarget);
+              }
+            }
+          }
+
+          // Phase 3 — heading, grounding, orientation, selection ring, bars.
+          for (const u of units) {
+            if (u.dead) continue;
+            // Smoothly turn current heading toward desired.
+            let dh = u.wantHeading - u.heading;
+            dh = Math.atan2(Math.sin(dh), Math.cos(dh)); // wrap to [-pi,pi]
+            const maxTurn = R.turnRate * dt;
+            u.heading += Math.max(-maxTurn, Math.min(maxTurn, dh));
+
+            u.pos.y = terrainHeight(u.pos.x, u.pos.z);
+            u.group.position.copy(u.pos);
+
+            if (R.slopeAlign) {
+              // Build an orientation that sits flat on the slope and faces
+              // the heading. up = terrain normal; forward = heading projected
+              // onto the slope plane.
+              terrainNormal(u.pos.x, u.pos.z, _upU);
+              _fwdU.set(Math.sin(u.heading), 0, Math.cos(u.heading));
+              _fwdU.addScaledVector(_upU, -_fwdU.dot(_upU)).normalize();
+              if (_fwdU.lengthSq() < 1e-6) _fwdU.set(0, 0, 1);
+              _rightU.crossVectors(_upU, _fwdU).normalize();
+              _m.makeBasis(_rightU, _upU, _fwdU);
+              u.group.quaternion.setFromRotationMatrix(_m);
+            } else {
+              u.group.quaternion.identity();
+              u.group.rotation.y = u.heading;
+            }
+
+            u.ring.visible = u.selected;
+
+            // Billboard health bar — shown when damaged, selected, or fighting.
+            const show = u.selected || u.hp < u.maxHp || u.attackTarget;
+            u.bar.visible = show;
+            if (show) {
+              u.bar.position.set(u.pos.x, u.pos.y + 2.9, u.pos.z);
+              u.bar.quaternion.copy(camera.quaternion);
+              u.bar.userData.fill.scale.x = Math.max(
+                0.0001,
+                BAR_W * Math.max(0, u.hp / u.maxHp),
+              );
+            }
+          }
+        }
+
+        spawnArmies();
+        setCamMode("rts");
+
+        // ── FRAME LOOP ──
+        let lastT = performance.now() / 1000;
+        renderer.setAnimationLoop(() => {
+          const now = performance.now() / 1000;
+          const dt = Math.min(now - lastT, 0.05);
+          lastT = now;
+
+          panCamera(dt);
+          edgeScroll(dt);
+          controls.update();
+          updateUnits(dt);
+          updateTracers(dt);
+
+          if (pingLife > 0) {
+            pingLife -= dt;
+            const t = Math.max(0, pingLife / 0.6);
+            ping.material.opacity = t;
+            ping.scale.setScalar(1 + (1 - t) * 1.8);
+            if (pingLife <= 0) ping.visible = false;
+          }
+
+          renderer.render(scene, camera);
+          renderer.resolveTimestampsAsync(THREE.TimestampQuery.RENDER);
+          stats.update();
+        });
+
+        window.addEventListener("resize", () => {
+          camera.aspect = innerWidth / innerHeight;
+          camera.updateProjectionMatrix();
+          renderer.setSize(innerWidth, innerHeight);
+          if (csm?.mainFrustum) csm.updateFrustums();
+        });
+
+        // ── UI PANEL ──
+        buildInspector({
+          camera,
+          floorMat,
+          updateSun,
+          rebuildSkyEnv,
+          spawnArmies,
+          setCamMode,
+          getCamMode: () => cam.mode,
+          buildNavGrid,
+          buildGridDebug,
+        });
+      }
+
+      // === Widget factory (mirrors v2/editor.html _section/_slider/etc.) ===
+      const _checkSvg =
+        '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12"></polyline></svg>';
+      const _arrowSvg =
+        '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="section-arrow"><polyline points="6 9 12 15 18 9"></polyline></svg>';
+
+      function _fmt(v, step) {
+        if (step >= 1) return String(Math.round(v));
+        const d = Math.max(0, -Math.floor(Math.log10(step)));
+        return v.toFixed(d);
+      }
+      function _clampSnap(v, min, max, step) {
+        if (!Number.isFinite(v)) return min;
+        const n = Math.round((v - min) / step);
+        let out = min + n * step;
+        const stepStr = String(step);
+        let decimals = 0;
+        if (stepStr.includes(".")) decimals = stepStr.split(".")[1].length;
+        else if (stepStr.includes("e-")) decimals = 8;
+        if (decimals > 0) out = Number(out.toFixed(decimals));
+        return Math.min(max, Math.max(min, out));
+      }
+      function _section(parent, title, expanded = true) {
+        const sec = document.createElement("div");
+        sec.className = "inspector-section";
+        const hdr = document.createElement("div");
+        hdr.className = "section-header" + (expanded ? "" : " collapsed");
+        hdr.innerHTML = _arrowSvg + " " + title;
+        const body = document.createElement("div");
+        body.className = "section-body" + (expanded ? "" : " hidden");
+        hdr.addEventListener("click", () => {
+          hdr.classList.toggle("collapsed");
+          body.classList.toggle("hidden");
+        });
+        sec.appendChild(hdr);
+        sec.appendChild(body);
+        parent.appendChild(sec);
+        return body;
+      }
+      function _slider(parent, obj, key, opts) {
+        const { label, min, max, step = 0.01, onChange } = opts;
+        const row = document.createElement("div");
+        row.className = "prop-row";
+        const cur = obj[key];
+        row.innerHTML = `<span class="prop-label">${label}</span><div class="prop-value"><div class="prop-slider-wrap"><input type="range" class="prop-slider" min="${min}" max="${max}" step="${step}" value="${cur}"><input type="number" class="prop-num-input" min="${min}" max="${max}" step="${step}" value="${_fmt(cur, step)}"></div></div>`;
+        const sl = row.querySelector(".prop-slider");
+        const num = row.querySelector(".prop-num-input");
+        sl.addEventListener("input", () => {
+          const v = _clampSnap(parseFloat(sl.value), min, max, step);
+          obj[key] = v;
+          num.value = _fmt(v, step);
+          onChange?.(v);
+        });
+        num.addEventListener("change", () => {
+          const raw = String(num.value).trim();
+          if (raw === "" || raw === "-" || raw === "." || raw === "-.") {
+            num.value = _fmt(obj[key], step);
+            return;
+          }
+          let v = parseFloat(raw);
+          if (!Number.isFinite(v)) {
+            num.value = _fmt(obj[key], step);
+            return;
+          }
+          v = _clampSnap(v, min, max, step);
+          obj[key] = v;
+          sl.value = String(v);
+          num.value = _fmt(v, step);
+          onChange?.(v);
+        });
+        num.addEventListener("keydown", (e) => {
+          if (e.key === "Enter") num.blur();
+        });
+        num.addEventListener(
+          "wheel",
+          (e) => {
+            if (document.activeElement === num) e.preventDefault();
+          },
+          { passive: false },
+        );
+        parent.appendChild(row);
+        return row;
+      }
+      function _color(parent, obj, key, opts) {
+        const { label, onChange } = opts;
+        const row = document.createElement("div");
+        row.className = "prop-row";
+        row.innerHTML = `<span class="prop-label">${label}</span><div class="prop-value"><div class="prop-color-wrap"><input type="color" class="prop-color" value="${obj[key]}"><span class="prop-slider-val" style="width:auto">${obj[key]}</span></div></div>`;
+        const inp = row.querySelector(".prop-color");
+        const hex = row.querySelector(".prop-slider-val");
+        inp.addEventListener("input", () => {
+          obj[key] = inp.value;
+          hex.textContent = inp.value;
+          onChange?.(inp.value);
+        });
+        parent.appendChild(row);
+        return row;
+      }
+      function _toggle(parent, obj, key, opts) {
+        const { label, onChange } = opts;
+        const row = document.createElement("div");
+        row.className = "prop-row";
+        row.innerHTML = `<span class="prop-label">${label}</span><div class="prop-value"><button class="prop-toggle ${obj[key] ? "checked" : ""}">${_checkSvg}</button></div>`;
+        const btn = row.querySelector(".prop-toggle");
+        btn.addEventListener("click", () => {
+          obj[key] = !obj[key];
+          btn.classList.toggle("checked", obj[key]);
+          onChange?.(obj[key]);
+        });
+        parent.appendChild(row);
+        return row;
+      }
+      function _button(parent, opts) {
+        const { title, onClick } = opts;
+        const btn = document.createElement("button");
+        btn.className = "section-btn";
+        btn.textContent = title;
+        btn.addEventListener("click", onClick);
+        parent.appendChild(btn);
+        return btn;
+      }
+      function _separator(parent) {
+        const div = document.createElement("div");
+        div.className = "section-separator";
+        parent.appendChild(div);
+      }
+
+      // === Build inspector panel ===
+      function buildInspector({
+        camera,
+        floorMat,
+        updateSun,
+        rebuildSkyEnv,
+        spawnArmies,
+        setCamMode,
+        getCamMode,
+        buildNavGrid,
+        buildGridDebug,
+      }) {
+        const body = document.getElementById("inspector-body");
+
+        document
+          .getElementById("inspector-toggle")
+          .addEventListener("click", (e) => {
+            const hidden = document.body.classList.toggle("inspector-hidden");
+            e.target.textContent = hidden ? "Show" : "Hide";
+          });
+
+        // "Hide UI" — clean fullscreen view of the battlefield.
+        const hideUiBtn = document.getElementById("immersive-toggle");
+        hideUiBtn.addEventListener("click", () => {
+          const on = document.body.classList.toggle("immersive");
+          hideUiBtn.classList.toggle("active", on);
+        });
+
+        // Drag-to-resize the inspector panel.
+        {
+          const inspectorEl = document.getElementById("inspector");
+          const handle = document.getElementById("inspector-resize-handle");
+          const KEY = "inspectorWidth";
+          const MIN = 240;
+          const MAX_VW = 0.7;
+          const clamp = (w) =>
+            Math.max(MIN, Math.min(window.innerWidth * MAX_VW, w));
+          const applyWidth = (w) => {
+            document.documentElement.style.setProperty(
+              "--inspector-width",
+              clamp(w) + "px",
+            );
+          };
+          const saved = parseFloat(localStorage.getItem(KEY));
+          if (Number.isFinite(saved)) applyWidth(saved);
+
+          let dragging = false;
+          handle.addEventListener("pointerdown", (e) => {
+            dragging = true;
+            document.body.classList.add("inspector-resizing");
+            handle.setPointerCapture?.(e.pointerId);
+            e.preventDefault();
+          });
+          window.addEventListener("pointermove", (e) => {
+            if (!dragging) return;
+            applyWidth(window.innerWidth - e.clientX);
+          });
+          const stopDrag = (e) => {
+            if (!dragging) return;
+            dragging = false;
+            document.body.classList.remove("inspector-resizing");
+            handle.releasePointerCapture?.(e.pointerId);
+            const w = parseFloat(getComputedStyle(inspectorEl).width || "300");
+            if (Number.isFinite(w)) localStorage.setItem(KEY, String(w));
+          };
+          window.addEventListener("pointerup", stopDrag);
+          window.addEventListener("pointercancel", stopDrag);
+          handle.addEventListener("dblclick", () => {
+            document.documentElement.style.removeProperty("--inspector-width");
+            localStorage.removeItem(KEY);
+          });
+        }
+
+        // ── RTS ──
+        {
+          const sec = _section(body, "RTS", true);
+          _slider(sec, PARAMS.rts, "count", {
+            label: "Player tanks",
+            min: 1,
+            max: 60,
+            step: 1,
+          });
+          _slider(sec, PARAMS.rts, "enemyCount", {
+            label: "Enemy tanks",
+            min: 0,
+            max: 60,
+            step: 1,
+          });
+          _button(sec, {
+            title: "Respawn armies",
+            onClick: () => spawnArmies(),
+          });
+          _separator(sec);
+          _slider(sec, PARAMS.rts, "speed", {
+            label: "Move speed",
+            min: 1,
+            max: 50,
+            step: 0.5,
+          });
+          _slider(sec, PARAMS.rts, "turnRate", {
+            label: "Turn rate",
+            min: 1,
+            max: 20,
+            step: 0.5,
+          });
+          _slider(sec, PARAMS.rts, "spacing", {
+            label: "Formation gap",
+            min: 2,
+            max: 12,
+            step: 0.5,
+          });
+          _separator(sec);
+          _toggle(sec, PARAMS.rts, "separation", { label: "Separation" });
+          _slider(sec, PARAMS.rts, "sepRadius", {
+            label: "Sep radius",
+            min: 1,
+            max: 8,
+            step: 0.25,
+          });
+          _toggle(sec, PARAMS.rts, "slopeAlign", { label: "Slope align" });
+          _separator(sec);
+          _toggle(sec, PARAMS.rts, "combat", { label: "Combat" });
+          _slider(sec, PARAMS.rts, "range", {
+            label: "Range",
+            min: 5,
+            max: 60,
+            step: 1,
+          });
+          _slider(sec, PARAMS.rts, "damage", {
+            label: "Damage",
+            min: 1,
+            max: 100,
+            step: 1,
+          });
+          _slider(sec, PARAMS.rts, "fireRate", {
+            label: "Fire rate",
+            min: 0.2,
+            max: 8,
+            step: 0.1,
+          });
+        }
+
+        // ── Navigation ──
+        {
+          const sec = _section(body, "Navigation", false);
+          _toggle(sec, PARAMS.nav, "showGrid", {
+            label: "Show grid",
+            onChange: () => buildGridDebug(),
+          });
+          _slider(sec, PARAMS.nav, "clearance", {
+            label: "Clearance",
+            min: 0,
+            max: 5,
+            step: 0.1,
+            onChange: () => {
+              buildNavGrid();
+              buildGridDebug();
+            },
+          });
+          _slider(sec, PARAMS.nav, "cellSize", {
+            label: "Cell size",
+            min: 1,
+            max: 6,
+            step: 0.5,
+            onChange: () => {
+              buildNavGrid();
+              buildGridDebug();
+            },
+          });
+        }
+
+        // ── Camera ──
+        {
+          const sec = _section(body, "Camera", false);
+          const modeBtn = _button(sec, {
+            title: getCamMode() === "orbit" ? "Mode: Orbit" : "Mode: RTS",
+            onClick: () => {
+              setCamMode(getCamMode() === "rts" ? "orbit" : "rts");
+              modeBtn.textContent =
+                getCamMode() === "orbit" ? "Mode: Orbit" : "Mode: RTS";
+            },
+          });
+          _slider(sec, PARAMS.camera, "fov", {
+            label: "FOV",
+            min: 30,
+            max: 100,
+            step: 1,
+            onChange: (v) => {
+              camera.fov = v;
+              camera.updateProjectionMatrix();
+            },
+          });
+          _slider(sec, PARAMS.camera, "panSpeed", {
+            label: "Pan speed",
+            min: 0.2,
+            max: 3,
+            step: 0.05,
+          });
+          _slider(sec, PARAMS.camera, "edgeSpeed", {
+            label: "Edge speed",
+            min: 0.2,
+            max: 3,
+            step: 0.05,
+          });
+          _slider(sec, PARAMS.camera, "edgeSize", {
+            label: "Edge zone",
+            min: 4,
+            max: 80,
+            step: 1,
+          });
+        }
+
+        // ── Sun + Lights ──
+        {
+          const sec = _section(body, "Lights", false);
+          _slider(sec, PARAMS.light, "sunAzimuth", {
+            label: "Sun azimuth",
+            min: 0,
+            max: 360,
+            step: 1,
+            onChange: () => {
+              updateSun();
+              rebuildSkyEnv();
+            },
+          });
+          _slider(sec, PARAMS.light, "sunElevation", {
+            label: "Sun elev",
+            min: -10,
+            max: 90,
+            step: 1,
+            onChange: () => {
+              updateSun();
+              rebuildSkyEnv();
+            },
+          });
+          _color(sec, PARAMS.light, "dirColor", {
+            label: "Sun color",
+            onChange: () => updateSun(),
+          });
+          _slider(sec, PARAMS.light, "dirIntensity", {
+            label: "Sun int",
+            min: 0,
+            max: 10,
+            step: 0.05,
+            onChange: () => updateSun(),
+          });
+          _separator(sec);
+          _color(sec, PARAMS.light, "hemiSkyColor", {
+            label: "Hemi sky",
+            onChange: () => updateSun(),
+          });
+          _color(sec, PARAMS.light, "hemiGroundColor", {
+            label: "Hemi ground",
+            onChange: () => updateSun(),
+          });
+          _slider(sec, PARAMS.light, "hemiIntensity", {
+            label: "Hemi int",
+            min: 0,
+            max: 3,
+            step: 0.05,
+            onChange: () => updateSun(),
+          });
+          _separator(sec);
+          _slider(sec, PARAMS.light, "envIntensity", {
+            label: "Env int",
+            min: 0,
+            max: 3,
+            step: 0.05,
+            onChange: () => updateSun(),
+          });
+          _slider(sec, PARAMS.light, "exposure", {
+            label: "Exposure",
+            min: 0,
+            max: 3,
+            step: 0.05,
+            onChange: () => updateSun(),
+          });
+        }
+
+        // ── Sky (physical) ──
+        {
+          const sec = _section(body, "Sky", false);
+          const reb = () => rebuildSkyEnv();
+          _slider(sec, PARAMS.physicalSky, "turbidity", {
+            label: "Turbidity",
+            min: 0.1,
+            max: 20,
+            step: 0.1,
+            onChange: reb,
+          });
+          _slider(sec, PARAMS.physicalSky, "rayleigh", {
+            label: "Rayleigh",
+            min: 0,
+            max: 4,
+            step: 0.01,
+            onChange: reb,
+          });
+          _slider(sec, PARAMS.physicalSky, "mie", {
+            label: "Mie",
+            min: 0,
+            max: 0.1,
+            step: 0.0005,
+            onChange: reb,
+          });
+          _slider(sec, PARAMS.physicalSky, "mieG", {
+            label: "Mie G",
+            min: 0,
+            max: 0.999,
+            step: 0.001,
+            onChange: reb,
+          });
+          _slider(sec, PARAMS.physicalSky, "cloudCoverage", {
+            label: "Cloud cov",
+            min: 0,
+            max: 1,
+            step: 0.01,
+            onChange: reb,
+          });
+          _slider(sec, PARAMS.physicalSky, "cloudDensity", {
+            label: "Cloud dens",
+            min: 0,
+            max: 2,
+            step: 0.01,
+            onChange: reb,
+          });
+          _slider(sec, PARAMS.physicalSky, "cloudElevation", {
+            label: "Cloud elev",
+            min: 0,
+            max: 1,
+            step: 0.01,
+            onChange: reb,
+          });
+          _slider(sec, PARAMS.physicalSky, "meshScale", {
+            label: "Mesh scale",
+            min: 1000,
+            max: 50000,
+            step: 100,
+            onChange: () => {
+              rebuildSkyEnv();
+            },
+          });
+        }
+
+        // ── Ground (tile material) ──
+        {
+          const sec = _section(body, "Ground", false);
+          const U = floorMat._tileUniforms;
+          const toLinear = (hex) => new THREE.Color(hex).convertSRGBToLinear();
+
+          _color(sec, PARAMS.tile, "tileColor", {
+            label: "Tile color",
+            onChange: (hex) => U.tileColor.value.copy(toLinear(hex)),
+          });
+          _color(sec, PARAMS.tile, "gridColor", {
+            label: "Grid color",
+            onChange: (hex) => U.gridColor.value.copy(toLinear(hex)),
+          });
+          _color(sec, PARAMS.tile, "gridLineColor", {
+            label: "Grid line",
+            onChange: (hex) => U.gridLineColor.value.copy(toLinear(hex)),
+          });
+          _slider(sec, PARAMS.tile, "textureScale", {
+            label: "Tex scale",
+            min: 50,
+            max: 5000,
+            step: 10,
+            onChange: (v) => (U.textureScale.value = v),
+          });
+          _slider(sec, PARAMS.tile, "gradientIntensity", {
+            label: "Grad int",
+            min: 0,
+            max: 2,
+            step: 0.01,
+            onChange: (v) => (U.gradientIntensity.value = v),
+          });
+          _slider(sec, PARAMS.tile, "gradientBias", {
+            label: "Grad bias",
+            min: -1,
+            max: 1,
+            step: 0.01,
+            onChange: (v) => (U.gradientBias.value = v),
+          });
+          _slider(sec, PARAMS.tile, "roughness", {
+            label: "Roughness",
+            min: 0,
+            max: 1,
+            step: 0.01,
+            onChange: (v) => (floorMat.roughness = v),
+          });
+          _slider(sec, PARAMS.tile, "metalness", {
+            label: "Metalness",
+            min: 0,
+            max: 1,
+            step: 0.01,
+            onChange: (v) => (floorMat.metalness = v),
+          });
+        }
+      }
+
+      init().catch((e) => {
+        console.error("Init failed:", e);
+        document.getElementById("backend").textContent = "Error: " + e.message;
+      });
+    </script>
+  </body>
+</html>
