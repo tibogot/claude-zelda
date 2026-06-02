@@ -37,6 +37,7 @@
       import { createDayNightSky, SKY_DEFAULTS } from "./daynight-sky.js";
       import { createCloudLayer, CLOUD_DEFAULTS, GOD_RAYS_DEFAULTS } from "./cloud-layer.js";
       import { createTerrain } from "./daynight-terrain.js";
+      import { createOcean } from "./daynight-ocean.js";
       import {
         fog, densityFogFactor, uniform, mix, pow, dot, clamp, normalize,
         positionWorld, cameraPosition,
@@ -70,6 +71,7 @@
         },
         godRays: { ...GOD_RAYS_DEFAULTS },
         shadows: { enabled: true, normalBias: 3, bias: -0.0005 },
+        ocean: { enabled: true, waterY: -20 },
       };
 
       // ── Celestial driver: time-of-day → sun/moon directions + light ────────
@@ -193,6 +195,30 @@
         const clouds = createCloudLayer({ camera });
         scene.add(clouds.mesh, clouds.sunMesh);
 
+        // ── Ocean (reuses the shared, unedited ocean modules) ────────────────
+        const ocean = await createOcean({
+          renderer, terrainSize: 1600, getHeight: terrain.getHeight,
+          seaLevel: PARAMS.ocean.waterY,
+        });
+        scene.add(ocean.group);
+        ocean.setVisible(PARAMS.ocean.enabled);
+
+        // Sky → PMREM env map for the ocean's reflections (re-baked on a throttle).
+        const pmrem = new THREE.PMREMGenerator(renderer);
+        let _envRT = null;
+        let _envTimer = 0;
+        function bakeSkyEnv() {
+          const tmp = new THREE.Scene();
+          const skyClone = sky.mesh.clone();
+          skyClone.position.set(0, 0, 0); // bake from origin, not the camera-followed pose
+          tmp.add(skyClone);
+          const rt = pmrem.fromScene(tmp, 0.04);
+          ocean.setEnvMap(rt.texture);
+          if (_envRT) _envRT.dispose();
+          _envRT = rt;
+        }
+        bakeSkyEnv();
+
         // ── GUI ────────────────────────────────────────────────────────────
         const pane = new Pane({ title: "Day/Night Sky" });
         const fTime = pane.addFolder({ title: "Time of day" });
@@ -210,6 +236,10 @@
         fShadow.addBinding(PARAMS.shadows, "enabled");
         fShadow.addBinding(PARAMS.shadows, "normalBias", { min: 0, max: 8, step: 0.1 });
         fShadow.addBinding(PARAMS.shadows, "bias", { min: -0.002, max: 0.002, step: 0.0001 });
+
+        const fOcean = pane.addFolder({ title: "Ocean" });
+        fOcean.addBinding(PARAMS.ocean, "enabled");
+        fOcean.addBinding(PARAMS.ocean, "waterY", { min: -200, max: 200, step: 1, label: "Sea level Y" });
 
         const fFog = pane.addFolder({ title: "Fog" });
         fFog.addBinding(PARAMS.fog, "enabled");
@@ -340,6 +370,17 @@
 
           sky.update(PARAMS.sky, frame);
           clouds.update(PARAMS.clouds, frame);
+
+          // Ocean: re-bake the sky reflection on a throttle, then step the waves.
+          if (PARAMS.ocean.enabled) {
+            ocean.setVisible(true);
+            ocean.setWaterY(PARAMS.ocean.waterY);
+            _envTimer -= dt;
+            if (_envTimer <= 0) { bakeSkyEnv(); _envTimer = 0.4; }
+            ocean.update(dt, elapsed, camera, L.lightDir);
+          } else {
+            ocean.setVisible(false);
+          }
 
           // One call: scene→offscreen (with depth), clouds raymarched half-res
           // with depth occlusion, then composited to the canvas.
