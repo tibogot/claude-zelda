@@ -37,6 +37,10 @@
       import { createDayNightSky, SKY_DEFAULTS } from "./daynight-sky.js";
       import { createCloudLayer, CLOUD_DEFAULTS, GOD_RAYS_DEFAULTS } from "./cloud-layer.js";
       import { createTerrain } from "./daynight-terrain.js";
+      import {
+        fog, densityFogFactor, uniform, mix, pow, dot, clamp, normalize,
+        positionWorld, cameraPosition,
+      } from "three/tsl";
 
       const smoothstep = (e0, e1, x) => {
         const t = THREE.MathUtils.clamp((x - e0) / (e1 - e0), 0, 1);
@@ -61,6 +65,8 @@
           density: 0.0003,
           color: "#9fb8c4",
           matchSky: true,
+          sunTint: "#ffcaa0",
+          tintPow: 3,
         },
         godRays: { ...GOD_RAYS_DEFAULTS },
         shadows: { enabled: true, normalBias: 3, bias: -0.0005 },
@@ -161,8 +167,20 @@
         const hemi = new THREE.HemisphereLight(0xbfe0ff, 0x40424a, 0.4);
         scene.add(hemi);
 
-        const fog = new THREE.FogExp2(PARAMS.fog.color, PARAMS.fog.density);
-        scene.fog = PARAMS.fog.enabled ? fog : null;
+        // ── Aerial perspective (sun-tinted distance haze) ────────────────────
+        // ONE scene.fogNode, driven by uniforms (never reassigned — toggling it
+        // recompiles every material → WebGPU device-loss risk). Distant terrain
+        // fades to a cool haze away from the sun and a warm haze toward it.
+        const uHazeEnabled = uniform(1);
+        const uHazeDensity = uniform(PARAMS.fog.density);
+        const uHazeAway = uniform(new THREE.Color(PARAMS.fog.color).convertSRGBToLinear());
+        const uHazeSun = uniform(new THREE.Color(PARAMS.fog.sunTint).convertSRGBToLinear());
+        const uHazePow = uniform(PARAMS.fog.tintPow);
+        const uHazeSunDir = uniform(new THREE.Vector3(0, 1, 0));
+        const _hazeView = normalize(positionWorld.sub(cameraPosition));
+        const _hazeSunAmt = clamp(dot(_hazeView, uHazeSunDir), 0, 1);
+        const _hazeColor = mix(uHazeAway, uHazeSun, pow(_hazeSunAmt, uHazePow));
+        scene.fogNode = fog(_hazeColor, densityFogFactor(uHazeDensity).mul(uHazeEnabled));
 
         // PBR terrain (grass / rock / snow triplanar) — the showcase landscape.
         const terrain = await createTerrain({ size: 1600, segments: 384 });
@@ -198,6 +216,8 @@
         fFog.addBinding(PARAMS.fog, "matchSky", { label: "Match sky color" });
         fFog.addBinding(PARAMS.fog, "density", { min: 0, max: 0.002, step: 0.00001 });
         fFog.addBinding(PARAMS.fog, "color", { label: "Color (manual)" });
+        fFog.addBinding(PARAMS.fog, "sunTint", { label: "Sun-side tint" });
+        fFog.addBinding(PARAMS.fog, "tintPow", { min: 1, max: 8, step: 0.1, label: "Tint focus" });
 
         const fGod = pane.addFolder({ title: "God rays", expanded: false });
         fGod.addBinding(PARAMS.godRays, "enabled");
@@ -293,18 +313,15 @@
           sunLight.shadow.normalBias = PARAMS.shadows.normalBias;
           if (PARAMS.shadows.enabled) renderer.shadowMap.needsUpdate = true;
 
-          if (PARAMS.fog.enabled) {
-            if (scene.fog !== fog) scene.fog = fog;
-            fog.density = PARAMS.fog.density;
-            if (PARAMS.fog.matchSky) {
-              _fogColor.copy(_ambColor);
-            } else {
-              _fogColor.set(PARAMS.fog.color);
-            }
-            fog.color.copy(_fogColor);
-          } else if (scene.fog !== null) {
-            scene.fog = null;
-          }
+          // Aerial-perspective uniforms (fogNode is assigned once at setup).
+          if (PARAMS.fog.matchSky) _fogColor.copy(_ambColor);
+          else _fogColor.set(PARAMS.fog.color);
+          uHazeEnabled.value = PARAMS.fog.enabled ? 1 : 0;
+          uHazeDensity.value = PARAMS.fog.density;
+          uHazeAway.value.copy(_fogColor).convertSRGBToLinear();
+          uHazeSun.value.set(PARAMS.fog.sunTint).convertSRGBToLinear();
+          uHazePow.value = PARAMS.fog.tintPow;
+          uHazeSunDir.value.copy(_sunDir);
 
           const frame = {
             time: elapsed, dt,
