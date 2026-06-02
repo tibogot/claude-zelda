@@ -8,7 +8,58 @@
       * { margin: 0; padding: 0; box-sizing: border-box; }
       body { background: #04060a; overflow: hidden; font-family: system-ui, sans-serif; }
       canvas { display: block; width: 100vw; height: 100vh; }
-      .tp-dfwv { max-height: calc(100vh - 16px); overflow-y: auto; z-index: 20; }
+      /* ── Custom UI (ported from v2/editor.html) ── */
+      :root {
+        --bg-panel:#2a2a2a; --bg-item:#333; --bg-hover:#3a3a3a; --bg-input:#1e1e1e;
+        --border:#3c3c3c; --border-light:#4a4a4a; --text:#ccc; --text-dim:#888;
+        --accent:#4a9eff; --font:"Segoe UI",system-ui,sans-serif;
+        --font-mono:"Cascadia Code","Consolas",monospace; --radius:4px;
+      }
+      #ui-panel { position:fixed; top:0; right:0; width:var(--ui-width,340px);
+        min-width:240px; max-width:70vw; height:100vh; overflow:hidden; z-index:30;
+        display:flex; flex-direction:column; background:var(--bg-panel);
+        border-left:1px solid var(--border); font-family:var(--font); color:var(--text);
+        box-shadow:-2px 0 10px rgba(0,0,0,.3); }
+      #ui-body { flex:1; overflow-y:auto; overflow-x:hidden; }
+      /* Drag-to-resize strip straddling the panel's left edge. */
+      #ui-resize-handle { position:fixed; top:0; right:var(--ui-width,340px); margin-right:-4px;
+        width:8px; height:100vh; cursor:ew-resize; z-index:31; background:transparent; transition:background .15s; }
+      #ui-resize-handle:hover, body.ui-resizing #ui-resize-handle { background:var(--accent); opacity:.6; }
+      body.ui-resizing { cursor:ew-resize; user-select:none; }
+      #ui-panel .ui-title { flex-shrink:0; padding:9px 12px; font-size:12px; font-weight:700;
+        letter-spacing:.5px; border-bottom:1px solid var(--border); background:var(--bg-item); }
+      .inspector-section { border-bottom:1px solid var(--border); }
+      .section-header { display:flex; align-items:center; gap:6px; padding:6px 12px;
+        cursor:pointer; font-size:11px; font-weight:600; text-transform:uppercase;
+        letter-spacing:.4px; color:var(--text-dim); }
+      .section-header:hover { background:var(--bg-hover); }
+      .section-header .section-arrow { width:14px; height:14px; transition:transform .15s; flex-shrink:0; }
+      .section-header.collapsed .section-arrow { transform:rotate(-90deg); }
+      .section-body { padding:6px 12px 10px; }
+      .section-body.hidden { display:none; }
+      .prop-row { display:flex; align-items:center; gap:8px; padding:3px 0; min-height:26px; }
+      .prop-label { width:96px; min-width:96px; font-size:11px; color:var(--text-dim); text-align:right; padding-right:4px; }
+      .prop-value { flex:1; display:flex; gap:4px; align-items:center; }
+      .prop-color-wrap { display:flex; align-items:center; gap:6px; flex:1; }
+      .prop-color { width:22px; height:22px; border-radius:var(--radius); border:1px solid var(--border);
+        cursor:pointer; flex-shrink:0; padding:0; -webkit-appearance:none; appearance:none; }
+      .prop-color::-webkit-color-swatch-wrapper { padding:0; }
+      .prop-color::-webkit-color-swatch { border:none; border-radius:2px; }
+      .prop-slider-wrap { flex:1; display:flex; align-items:center; gap:6px; min-width:0; }
+      .prop-num-input { width:64px; height:22px; flex-shrink:0; box-sizing:border-box; background:var(--bg-input);
+        border:1px solid var(--border); border-radius:var(--radius); padding:0 5px; color:var(--text);
+        font-size:11px; font-family:var(--font-mono); text-align:right; outline:none; }
+      .prop-num-input:focus { border-color:var(--accent); }
+      .prop-num-input::-webkit-outer-spin-button,.prop-num-input::-webkit-inner-spin-button { -webkit-appearance:none; margin:0; }
+      .prop-num-input[type=number] { appearance:textfield; -moz-appearance:textfield; }
+      .prop-slider { flex:1; min-width:0; height:4px; -webkit-appearance:none; appearance:none; background:var(--bg-input); border-radius:2px; outline:none; }
+      .prop-slider::-webkit-slider-thumb { -webkit-appearance:none; width:12px; height:12px; border-radius:50%; background:var(--accent); cursor:pointer; }
+      .prop-dropdown { flex:1; height:22px; background:var(--bg-input); border:1px solid var(--border); border-radius:var(--radius);
+        padding:0 6px; color:var(--text); font-size:12px; font-family:var(--font); outline:none; cursor:pointer; }
+      .prop-toggle { width:14px; height:14px; border:1px solid var(--border-light); border-radius:3px; background:var(--bg-input);
+        cursor:pointer; display:flex; align-items:center; justify-content:center; flex-shrink:0; padding:0; color:transparent; }
+      .prop-toggle.checked { background:var(--accent); border-color:var(--accent); color:#fff; }
+      .prop-toggle svg { width:10px; height:10px; }
       #hud {
         position: fixed; bottom: 8px; left: 8px; z-index: 25;
         color: #cfe0ff; font: 12px/1.4 ui-monospace, monospace;
@@ -23,7 +74,6 @@
           "three/webgpu": "https://cdn.jsdelivr.net/npm/three@0.183.1/build/three.webgpu.js",
           "three/tsl": "https://cdn.jsdelivr.net/npm/three@0.183.1/build/three.tsl.js",
           "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.183.1/examples/jsm/",
-          "tweakpane": "https://cdn.jsdelivr.net/npm/tweakpane@4.0.5/+esm",
           "stats-gl": "https://cdn.jsdelivr.net/npm/stats-gl/dist/main.js"
         }
       }
@@ -34,7 +84,6 @@
     <script type="module">
       import * as THREE from "three/webgpu";
       import { OrbitControls } from "three/addons/controls/OrbitControls.js";
-      import { Pane } from "tweakpane";
       import Stats from "stats-gl";
       import { createDayNightSky, SKY_DEFAULTS } from "./daynight-sky.js";
       import { createCloudLayer, CLOUD_DEFAULTS, GOD_RAYS_DEFAULTS } from "./cloud-layer.js";
@@ -71,11 +120,16 @@
           sunTint: "#ffcaa0",
           tintPow: 3,
         },
-        godRays: { ...GOD_RAYS_DEFAULTS },
+        godRays: { ...GOD_RAYS_DEFAULTS, enabled: false },
         shadows: { enabled: true, normalBias: 3, bias: -0.0005 },
         ocean: {
-          enabled: true, waterY: -20,
+          enabled: true, waterY: 80,
           waveHeight: 1.8, choppiness: 1.5, reflectClouds: true,
+        },
+        terrain: {
+          grassScale: 0.05, rockScale: 0.0025, snowScale: 0.018,
+          dispStrength: 0, albedoMul: 0.94,
+          snowStart: 158, snowEnd: 268, cliffLow: 0.12, cliffHigh: 0.36,
         },
       };
 
@@ -127,6 +181,105 @@
         const ambIntensity = THREE.MathUtils.lerp(0.12, 0.55, dayF) + moonInt * 0.25;
 
         return { sunUp, dayF, lightDir, lightIntensity, moonInt, ambIntensity };
+      }
+
+      // ── Custom UI helpers (ported from v2/editor.html) ─────────────────────
+      const _checkSvg = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12"></polyline></svg>';
+      const _arrowSvg = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="section-arrow"><polyline points="6 9 12 15 18 9"></polyline></svg>';
+      const _hu = (k) => k.replace(/([A-Z])/g, " $1").replace(/^./, (c) => c.toUpperCase()).trim();
+      function _fmt(v, step) {
+        if (step >= 1) return String(Math.round(v));
+        const d = Math.max(0, -Math.floor(Math.log10(step)));
+        return v.toFixed(d);
+      }
+      function _clampSnap(v, min, max, step) {
+        if (!Number.isFinite(v)) return min;
+        let out = min + Math.round((v - min) / step) * step;
+        const s = String(step);
+        const dec = s.includes(".") ? s.split(".")[1].length : 0;
+        if (dec > 0) out = Number(out.toFixed(dec));
+        return Math.min(max, Math.max(min, out));
+      }
+      function _section(parent, title, expanded = true) {
+        const sec = document.createElement("div");
+        sec.className = "inspector-section";
+        const hdr = document.createElement("div");
+        hdr.className = "section-header" + (expanded ? "" : " collapsed");
+        hdr.innerHTML = _arrowSvg + " " + title;
+        const body = document.createElement("div");
+        body.className = "section-body" + (expanded ? "" : " hidden");
+        hdr.addEventListener("click", () => {
+          hdr.classList.toggle("collapsed");
+          body.classList.toggle("hidden");
+        });
+        sec.appendChild(hdr); sec.appendChild(body); parent.appendChild(sec);
+        return body;
+      }
+      function _slider(parent, obj, key, opts) {
+        const { label, min, max, step = 0.01, onChange } = opts;
+        const row = document.createElement("div");
+        row.className = "prop-row";
+        row.innerHTML = `<span class="prop-label">${label}</span><div class="prop-value"><div class="prop-slider-wrap"><input type="range" class="prop-slider" min="${min}" max="${max}" step="${step}" value="${obj[key]}"><input type="number" class="prop-num-input" min="${min}" max="${max}" step="${step}" value="${_fmt(obj[key], step)}"></div></div>`;
+        const sl = row.querySelector(".prop-slider");
+        const num = row.querySelector(".prop-num-input");
+        sl.addEventListener("input", () => {
+          obj[key] = parseFloat(sl.value);
+          num.value = _fmt(obj[key], step);
+          onChange?.();
+        });
+        const commit = () => {
+          const raw = String(num.value).trim();
+          if (raw === "" || raw === "-" || raw === ".") { num.value = _fmt(obj[key], step); return; }
+          let v = parseFloat(raw);
+          if (!Number.isFinite(v)) { num.value = _fmt(obj[key], step); return; }
+          v = _clampSnap(v, min, max, step);
+          obj[key] = v; sl.value = String(v); num.value = _fmt(v, step); onChange?.();
+        };
+        num.addEventListener("change", commit);
+        num.addEventListener("keydown", (e) => { if (e.key === "Enter") num.blur(); });
+        parent.appendChild(row);
+        return {
+          _sl: sl, _num: num,
+          refresh() { sl.value = String(obj[key]); num.value = _fmt(obj[key], step); },
+        };
+      }
+      function _color(parent, obj, key, opts) {
+        const { label, onChange } = opts;
+        const row = document.createElement("div");
+        row.className = "prop-row";
+        row.innerHTML = `<span class="prop-label">${label}</span><div class="prop-value"><div class="prop-color-wrap"><input type="color" class="prop-color" value="${obj[key]}"></div></div>`;
+        const inp = row.querySelector(".prop-color");
+        inp.addEventListener("input", () => { obj[key] = inp.value; onChange?.(); });
+        parent.appendChild(row);
+      }
+      function _toggle(parent, obj, key, opts) {
+        const { label, onChange } = opts;
+        const row = document.createElement("div");
+        row.className = "prop-row";
+        row.innerHTML = `<span class="prop-label">${label}</span><div class="prop-value"><button class="prop-toggle ${obj[key] ? "checked" : ""}">${_checkSvg}</button></div>`;
+        const btn = row.querySelector(".prop-toggle");
+        btn.addEventListener("click", () => {
+          obj[key] = !obj[key];
+          btn.classList.toggle("checked", obj[key]);
+          onChange?.();
+        });
+        parent.appendChild(row);
+      }
+      function _dropdown(parent, obj, key, opts) {
+        const { label, options, onChange } = opts;
+        const row = document.createElement("div");
+        row.className = "prop-row";
+        let optHtml = "";
+        for (const [text, val] of Object.entries(options))
+          optHtml += `<option value="${val}" ${obj[key] === val ? "selected" : ""}>${text}</option>`;
+        row.innerHTML = `<span class="prop-label">${label}</span><div class="prop-value"><select class="prop-dropdown">${optHtml}</select></div>`;
+        const sel = row.querySelector(".prop-dropdown");
+        const isNum = typeof obj[key] === "number";
+        sel.addEventListener("change", () => {
+          obj[key] = isNum ? Number(sel.value) : sel.value;
+          onChange?.();
+        });
+        parent.appendChild(row);
       }
 
       // ── Init ───────────────────────────────────────────────────────────────
@@ -241,110 +394,162 @@
         }
         bakeSkyEnv();
 
-        // ── GUI ────────────────────────────────────────────────────────────
-        const pane = new Pane({ title: "Day/Night Sky" });
-        const fTime = pane.addFolder({ title: "Time of day" });
-        fTime.addBinding(PARAMS, "timeOfDay", { min: 0, max: 24, step: 0.01 });
-        fTime.addBinding(PARAMS, "autoAdvance");
-        fTime.addBinding(PARAMS, "daySpeed", { min: 0.05, max: 4, step: 0.05 });
-        fTime.addBinding(PARAMS, "exposure", { min: 0.2, max: 2.5, step: 0.01 });
+        // ── GUI (custom panel — Tweakpane removed) ───────────────────────────
+        const panel = document.createElement("div");
+        panel.id = "ui-panel";
+        panel.innerHTML = '<div class="ui-title">Day / Night Sky</div>';
+        document.body.appendChild(panel);
 
-        const fEnv = pane.addFolder({ title: "Sun / moon energy" });
-        fEnv.addBinding(PARAMS.env, "sunIntensity", { min: 0, max: 6, step: 0.1 });
-        fEnv.addBinding(PARAMS.env, "sunHorizonColor");
-        fEnv.addBinding(PARAMS.env, "moonIntensity", { min: 0, max: 2, step: 0.05 });
-
-        const fShadow = pane.addFolder({ title: "Shadows" });
-        fShadow.addBinding(PARAMS.shadows, "enabled");
-        fShadow.addBinding(PARAMS.shadows, "normalBias", { min: 0, max: 8, step: 0.1 });
-        fShadow.addBinding(PARAMS.shadows, "bias", { min: -0.002, max: 0.002, step: 0.0001 });
-
-        const fOcean = pane.addFolder({ title: "Ocean" });
-        fOcean.addBinding(PARAMS.ocean, "enabled");
-        fOcean.addBinding(PARAMS.ocean, "waterY", { min: -200, max: 200, step: 1, label: "Sea level Y" });
-        fOcean.addBinding(PARAMS.ocean, "waveHeight", { min: 0.2, max: 3.5, step: 0.05, label: "Wave height" });
-        fOcean.addBinding(PARAMS.ocean, "choppiness", { min: 0.5, max: 3, step: 0.05 });
-        fOcean.addBinding(PARAMS.ocean, "reflectClouds", { label: "Reflect clouds" });
-
-        const fFog = pane.addFolder({ title: "Fog" });
-        fFog.addBinding(PARAMS.fog, "enabled");
-        fFog.addBinding(PARAMS.fog, "matchSky", { label: "Match sky color" });
-        fFog.addBinding(PARAMS.fog, "density", { min: 0, max: 0.002, step: 0.00001 });
-        fFog.addBinding(PARAMS.fog, "color", { label: "Color (manual)" });
-        fFog.addBinding(PARAMS.fog, "sunTint", { label: "Sun-side tint" });
-        fFog.addBinding(PARAMS.fog, "tintPow", { min: 1, max: 8, step: 0.1, label: "Tint focus" });
-
-        const fGod = pane.addFolder({ title: "God rays", expanded: false });
-        fGod.addBinding(PARAMS.godRays, "enabled");
-        fGod.addBinding(PARAMS.godRays, "skipOffscreen", { label: "Skip off-screen" });
-        fGod.addBinding(PARAMS.godRays, "effectScale", {
-          label: "Buffer scale",
-          min: 0.2,
-          max: 1,
-          step: 0.05,
-        });
-        fGod.addBinding(PARAMS.godRays, "exposure", { min: 0, max: 1, step: 0.01 });
-        fGod.addBinding(PARAMS.godRays, "samples", { min: 16, max: 96, step: 1 });
-        fGod.addBinding(PARAMS.godRays, "density", { min: 0, max: 1, step: 0.01 });
-        fGod.addBinding(PARAMS.godRays, "decay", { min: 0.8, max: 1, step: 0.001 });
-        fGod.addBinding(PARAMS.godRays, "weight", { min: 0, max: 1, step: 0.01 });
-        fGod.addBinding(PARAMS.godRays, "occCloudSteps", { label: "Cloud occ steps", min: 4, max: 16, step: 1 });
-        fGod.addBinding(PARAMS.godRays, "sunDistance", { min: 3500, max: 16000, step: 50 });
-        fGod.addBinding(PARAMS.godRays, "sunDiscRadius", { min: 80, max: 650, step: 5 });
-        fGod.addBinding(PARAMS.godRays, "sunTint", { label: "Sun tint" });
-        fGod.addBinding(PARAMS.godRays, "matchLightColor", { label: "Tint = light color" });
-
-        const fSky = pane.addFolder({ title: "Sky colors", expanded: false });
-        for (const k of ["zenithDay", "horizonDay", "zenithNight", "horizonNight", "sunsetColor", "groundColor", "sunColor", "moonColor"]) {
-          fSky.addBinding(PARAMS.sky, k);
+        // Drag-to-resize the panel (width persists; double-click handle to reset).
+        {
+          const handle = document.createElement("div");
+          handle.id = "ui-resize-handle";
+          handle.title = "Drag to resize · double-click to reset";
+          document.body.appendChild(handle);
+          const UIKEY = "daynightUiWidth";
+          const clampW = (w) => Math.max(240, Math.min(window.innerWidth * 0.7, w));
+          const applyW = (w) =>
+            document.documentElement.style.setProperty("--ui-width", clampW(w) + "px");
+          const savedW = parseFloat(localStorage.getItem(UIKEY));
+          if (Number.isFinite(savedW)) applyW(savedW);
+          let dragging = false;
+          handle.addEventListener("pointerdown", (e) => {
+            dragging = true;
+            document.body.classList.add("ui-resizing");
+            handle.setPointerCapture?.(e.pointerId);
+            e.preventDefault();
+          });
+          window.addEventListener("pointermove", (e) => {
+            if (dragging) applyW(window.innerWidth - e.clientX);
+          });
+          const stopW = (e) => {
+            if (!dragging) return;
+            dragging = false;
+            document.body.classList.remove("ui-resizing");
+            handle.releasePointerCapture?.(e.pointerId);
+            const w = parseFloat(getComputedStyle(panel).width || "300");
+            if (Number.isFinite(w)) localStorage.setItem(UIKEY, String(w));
+          };
+          window.addEventListener("pointerup", stopW);
+          window.addEventListener("pointercancel", stopW);
+          handle.addEventListener("dblclick", () => {
+            document.documentElement.style.removeProperty("--ui-width");
+            localStorage.removeItem(UIKEY);
+          });
         }
-        fSky.addBinding(PARAMS.sky, "sunSizeDeg", { min: 0.3, max: 6, step: 0.1 });
-        fSky.addBinding(PARAMS.sky, "sunGlowStrength", { min: 0, max: 2, step: 0.01 });
-        fSky.addBinding(PARAMS.sky, "moonGlowStrength", { min: 0, max: 2, step: 0.01 });
+        // Shorthands: slider / color / toggle / dropdown.
+        const sl = (b, o, k, min, max, step, label) => _slider(b, o, k, { label: label ?? _hu(k), min, max, step });
+        const col = (b, o, k, label) => _color(b, o, k, { label: label ?? _hu(k) });
+        const tg = (b, o, k, label) => _toggle(b, o, k, { label: label ?? _hu(k) });
+        const dd = (b, o, k, options, label) => _dropdown(b, o, k, { label: label ?? _hu(k), options });
 
-        const fMoon = pane.addFolder({ title: "Moon", expanded: false });
-        fMoon.addBinding(PARAMS.sky, "moonPhase", { min: 0, max: 1, step: 0.01, label: "Phase (new→full)" });
-        fMoon.addBinding(PARAMS.sky, "moonPhaseOrient", { min: 0, max: 360, step: 1, label: "Crescent angle" });
-        fMoon.addBinding(PARAMS.sky, "moonTermSoft", { min: 0.005, max: 0.3, step: 0.005, label: "Terminator soft" });
-        fMoon.addBinding(PARAMS.sky, "moonSurface", { min: 0, max: 1, step: 0.01, label: "Surface detail" });
-        fMoon.addBinding(PARAMS.sky, "moonEarthshine", { min: 0, max: 0.6, step: 0.01, label: "Earthshine" });
-        fMoon.addBinding(PARAMS.sky, "moonSizeDeg", { min: 0.5, max: 8, step: 0.1, label: "Size (deg)" });
-        fMoon.addBinding(PARAMS.sky, "moonDiscBright", { min: 0, max: 8, step: 0.1, label: "Brightness" });
-        fMoon.addBinding(PARAMS.sky, "moonColor");
+        const uiBody = document.createElement("div");
+        uiBody.id = "ui-body";
+        panel.appendChild(uiBody);
 
-        const fStars = pane.addFolder({ title: "Stars", expanded: false });
-        fStars.addBinding(PARAMS.sky, "starDensity", { min: 40, max: 600, step: 1 });
-        fStars.addBinding(PARAMS.sky, "starThreshold", { min: 0.7, max: 0.99, step: 0.005 });
-        fStars.addBinding(PARAMS.sky, "starSize", { min: 0.01, max: 0.3, step: 0.005 });
-        fStars.addBinding(PARAMS.sky, "starBrightness", { min: 0, max: 3, step: 0.05 });
-        fStars.addBinding(PARAMS.sky, "starTwinkle", { min: 0, max: 10, step: 0.1 });
+        let s = _section(uiBody, "Time of day");
+        const timeSlider = sl(s, PARAMS, "timeOfDay", 0, 24, 0.01);
+        tg(s, PARAMS, "autoAdvance");
+        sl(s, PARAMS, "daySpeed", 0.05, 4, 0.05);
+        sl(s, PARAMS, "exposure", 0.2, 2.5, 0.01);
 
-        const fCloud = pane.addFolder({ title: "Cloud layer" });
-        fCloud.addBinding(PARAMS.clouds, "enabled");
-        fCloud.addBinding(PARAMS.clouds, "coverage", { min: 0, max: 1, step: 0.01 });
-        fCloud.addBinding(PARAMS.clouds, "softness", { min: 0.02, max: 0.4, step: 0.01 });
-        fCloud.addBinding(PARAMS.clouds, "densityMul", { min: 0.5, max: 16, step: 0.1 });
-        fCloud.addBinding(PARAMS.clouds, "erode", { min: 0, max: 1, step: 0.01 });
-        fCloud.addBinding(PARAMS.clouds, "detailMul", { min: 1, max: 8, step: 0.1 });
-        fCloud.addBinding(PARAMS.clouds, "base", { min: 600, max: 4000, step: 10 });
-        fCloud.addBinding(PARAMS.clouds, "thickness", { min: 200, max: 2500, step: 10 });
-        fCloud.addBinding(PARAMS.clouds, "planetRadius", { min: 15000, max: 400000, step: 1000 });
-        fCloud.addBinding(PARAMS.clouds, "scale", { min: 0.00005, max: 0.002, step: 0.00001 });
-        fCloud.addBinding(PARAMS.clouds, "bufferScale", {
-          label: "Resolution",
-          options: { "Half (fast)": 0.5, "¾": 0.75, "Full (sharp)": 1.0 },
-        });
-        fCloud.addBinding(PARAMS.clouds, "steps", { min: 16, max: 128, step: 1 });
-        fCloud.addBinding(PARAMS.clouds, "lightSteps", { min: 2, max: 8, step: 1 });
-        fCloud.addBinding(PARAMS.clouds, "emptySkip", { min: 1, max: 4, step: 0.1, label: "Empty-space skip" });
-        fCloud.addBinding(PARAMS.clouds, "opacity", { min: 0.2, max: 3, step: 0.05 });
-        fCloud.addBinding(PARAMS.clouds, "phaseG", { min: 0, max: 0.9, step: 0.01 });
-        fCloud.addBinding(PARAMS.clouds, "powder", { min: 0, max: 1, step: 0.01 });
-        fCloud.addBinding(PARAMS.clouds, "msAmount", { min: 0, max: 1.5, step: 0.05, label: "★ Multi-scatter" });
-        fCloud.addBinding(PARAMS.clouds, "msExtinction", { min: 0.1, max: 0.9, step: 0.05, label: "MS light depth" });
-        fCloud.addBinding(PARAMS.clouds, "msEccentricity", { min: 0.1, max: 0.9, step: 0.05, label: "MS phase broad" });
-        fCloud.addBinding(PARAMS.clouds, "windSpeed", { min: 0, max: 0.2, step: 0.001 });
-        fCloud.addBinding(PARAMS.clouds, "windDeg", { min: 0, max: 360, step: 1 });
+        s = _section(uiBody, "Sun / moon energy");
+        sl(s, PARAMS.env, "sunIntensity", 0, 6, 0.1);
+        col(s, PARAMS.env, "sunHorizonColor");
+        sl(s, PARAMS.env, "moonIntensity", 0, 2, 0.05);
+
+        s = _section(uiBody, "Shadows");
+        tg(s, PARAMS.shadows, "enabled");
+        sl(s, PARAMS.shadows, "normalBias", 0, 8, 0.1);
+        sl(s, PARAMS.shadows, "bias", -0.002, 0.002, 0.0001);
+
+        s = _section(uiBody, "Terrain", false);
+        sl(s, PARAMS.terrain, "grassScale", 0.002, 0.06, 0.001, "Grass UV");
+        sl(s, PARAMS.terrain, "rockScale", 0.0005, 0.02, 0.0005, "Rock UV");
+        sl(s, PARAMS.terrain, "snowScale", 0.002, 0.06, 0.001, "Snow UV");
+        sl(s, PARAMS.terrain, "dispStrength", 0, 40, 0.5, "Displacement");
+        sl(s, PARAMS.terrain, "albedoMul", 0.3, 2, 0.01, "Brightness");
+        sl(s, PARAMS.terrain, "snowStart", 0, 400, 1, "Snow line");
+        sl(s, PARAMS.terrain, "snowEnd", 0, 500, 1, "Snow full");
+        sl(s, PARAMS.terrain, "cliffLow", 0, 1, 0.01, "Rock slope ↓");
+        sl(s, PARAMS.terrain, "cliffHigh", 0, 1, 0.01, "Rock slope ↑");
+
+        s = _section(uiBody, "Ocean");
+        tg(s, PARAMS.ocean, "enabled");
+        sl(s, PARAMS.ocean, "waterY", -200, 200, 1, "Sea level Y");
+        sl(s, PARAMS.ocean, "waveHeight", 0.2, 3.5, 0.05, "Wave height");
+        sl(s, PARAMS.ocean, "choppiness", 0.5, 3, 0.05);
+        tg(s, PARAMS.ocean, "reflectClouds", "Reflect clouds");
+
+        s = _section(uiBody, "Fog");
+        tg(s, PARAMS.fog, "enabled");
+        tg(s, PARAMS.fog, "matchSky", "Match sky color");
+        sl(s, PARAMS.fog, "density", 0, 0.002, 0.00001);
+        col(s, PARAMS.fog, "color", "Color (manual)");
+        col(s, PARAMS.fog, "sunTint", "Sun-side tint");
+        sl(s, PARAMS.fog, "tintPow", 1, 8, 0.1, "Tint focus");
+
+        s = _section(uiBody, "God rays", false);
+        tg(s, PARAMS.godRays, "enabled");
+        tg(s, PARAMS.godRays, "skipOffscreen", "Skip off-screen");
+        sl(s, PARAMS.godRays, "effectScale", 0.2, 1, 0.05, "Buffer scale");
+        sl(s, PARAMS.godRays, "exposure", 0, 1, 0.01);
+        sl(s, PARAMS.godRays, "samples", 16, 96, 1);
+        sl(s, PARAMS.godRays, "density", 0, 1, 0.01);
+        sl(s, PARAMS.godRays, "decay", 0.8, 1, 0.001);
+        sl(s, PARAMS.godRays, "weight", 0, 1, 0.01);
+        sl(s, PARAMS.godRays, "occCloudSteps", 4, 16, 1, "Cloud occ steps");
+        sl(s, PARAMS.godRays, "sunDistance", 3500, 16000, 50);
+        sl(s, PARAMS.godRays, "sunDiscRadius", 80, 650, 5);
+        col(s, PARAMS.godRays, "sunTint", "Sun tint");
+        tg(s, PARAMS.godRays, "matchLightColor", "Tint = light color");
+
+        s = _section(uiBody, "Sky colors", false);
+        for (const k of ["zenithDay", "horizonDay", "zenithNight", "horizonNight", "sunsetColor", "groundColor", "sunColor", "moonColor"]) col(s, PARAMS.sky, k);
+        sl(s, PARAMS.sky, "sunSizeDeg", 0.3, 6, 0.1);
+        sl(s, PARAMS.sky, "sunGlowStrength", 0, 2, 0.01);
+        sl(s, PARAMS.sky, "moonGlowStrength", 0, 2, 0.01);
+
+        s = _section(uiBody, "Moon", false);
+        sl(s, PARAMS.sky, "moonPhase", 0, 1, 0.01, "Phase (new→full)");
+        sl(s, PARAMS.sky, "moonPhaseOrient", 0, 360, 1, "Crescent angle");
+        sl(s, PARAMS.sky, "moonTermSoft", 0.005, 0.3, 0.005, "Terminator soft");
+        sl(s, PARAMS.sky, "moonSurface", 0, 1, 0.01, "Surface detail");
+        sl(s, PARAMS.sky, "moonEarthshine", 0, 0.6, 0.01, "Earthshine");
+        sl(s, PARAMS.sky, "moonSizeDeg", 0.5, 8, 0.1, "Size (deg)");
+        sl(s, PARAMS.sky, "moonDiscBright", 0, 8, 0.1, "Brightness");
+        col(s, PARAMS.sky, "moonColor");
+
+        s = _section(uiBody, "Stars", false);
+        sl(s, PARAMS.sky, "starDensity", 40, 600, 1);
+        sl(s, PARAMS.sky, "starThreshold", 0.7, 0.99, 0.005);
+        sl(s, PARAMS.sky, "starSize", 0.01, 0.3, 0.005);
+        sl(s, PARAMS.sky, "starBrightness", 0, 3, 0.05);
+        sl(s, PARAMS.sky, "starTwinkle", 0, 10, 0.1);
+
+        s = _section(uiBody, "Cloud layer");
+        tg(s, PARAMS.clouds, "enabled");
+        sl(s, PARAMS.clouds, "coverage", 0, 1, 0.01);
+        sl(s, PARAMS.clouds, "softness", 0.02, 0.4, 0.01);
+        sl(s, PARAMS.clouds, "densityMul", 0.5, 16, 0.1);
+        sl(s, PARAMS.clouds, "erode", 0, 1, 0.01);
+        sl(s, PARAMS.clouds, "detailMul", 1, 8, 0.1);
+        sl(s, PARAMS.clouds, "base", 600, 4000, 10);
+        sl(s, PARAMS.clouds, "thickness", 200, 2500, 10);
+        sl(s, PARAMS.clouds, "planetRadius", 15000, 400000, 1000);
+        sl(s, PARAMS.clouds, "scale", 0.00005, 0.002, 0.00001);
+        dd(s, PARAMS.clouds, "bufferScale", { "Half (fast)": 0.5, "¾": 0.75, "Full (sharp)": 1.0 }, "Resolution");
+        sl(s, PARAMS.clouds, "steps", 16, 128, 1);
+        sl(s, PARAMS.clouds, "lightSteps", 2, 8, 1);
+        sl(s, PARAMS.clouds, "emptySkip", 1, 4, 0.1, "Empty-space skip");
+        sl(s, PARAMS.clouds, "opacity", 0.2, 3, 0.05);
+        sl(s, PARAMS.clouds, "phaseG", 0, 0.9, 0.01);
+        sl(s, PARAMS.clouds, "powder", 0, 1, 0.01);
+        sl(s, PARAMS.clouds, "msAmount", 0, 1.5, 0.05, "★ Multi-scatter");
+        sl(s, PARAMS.clouds, "msExtinction", 0.1, 0.9, 0.05, "MS light depth");
+        sl(s, PARAMS.clouds, "msEccentricity", 0.1, 0.9, 0.05, "MS phase broad");
+        sl(s, PARAMS.clouds, "windSpeed", 0, 0.2, 0.001);
+        sl(s, PARAMS.clouds, "windDeg", 0, 360, 1);
 
         // ── Loop ──────────────────────────────────────────────────────────
         const hud = document.getElementById("hud");
@@ -366,6 +571,8 @@
 
           if (PARAMS.autoAdvance) {
             PARAMS.timeOfDay = (PARAMS.timeOfDay + PARAMS.daySpeed * dt) % 24;
+            if (document.activeElement !== timeSlider._sl && document.activeElement !== timeSlider._num)
+              timeSlider.refresh();
           }
           renderer.toneMappingExposure = PARAMS.exposure;
 
@@ -413,6 +620,21 @@
 
           sky.update(PARAMS.sky, frame);
           clouds.update(PARAMS.clouds, frame);
+
+          // Terrain texture/material controls.
+          const tU = terrain.uniforms;
+          if (tU.grassScale) {
+            const T = PARAMS.terrain;
+            tU.grassScale.value = T.grassScale;
+            tU.rockScale.value = T.rockScale;
+            tU.snowScale.value = T.snowScale;
+            tU.dispStrength.value = T.dispStrength;
+            tU.albedoMul.value = T.albedoMul;
+            tU.snowStart.value = T.snowStart;
+            tU.snowEnd.value = T.snowEnd;
+            tU.cliffLow.value = T.cliffLow;
+            tU.cliffHigh.value = T.cliffHigh;
+          }
 
           // Ocean: re-bake the sky reflection on a throttle, then step the waves.
           if (PARAMS.ocean.enabled) {

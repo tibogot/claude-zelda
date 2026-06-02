@@ -171,6 +171,7 @@ export async function createTerrain({ size = 1600, segments = 320, shape = {} } 
 
   const P = "./textures/pbr_materials/";
   let material;
+  const uniforms = {}; // exposed texture/material controls (empty if textures fail)
   const allTextures = [];
   try {
     const set = async (dir, base, withDisp) => {
@@ -193,15 +194,24 @@ export async function createTerrain({ size = 1600, segments = 320, shape = {} } 
     const uSnowScale = uniform(0.018);
     const uDispStrength = uniform(11);
     const uAlbedoMul = uniform(0.94);
+    const uSnowStart = uniform(158); // world Y where snow begins
+    const uSnowEnd = uniform(268);   // world Y where snow is full
+    const uCliffLow = uniform(0.12); // slope where rock starts showing
+    const uCliffHigh = uniform(0.36); // slope where rock is full
+    Object.assign(uniforms, {
+      grassScale: uGrassScale, rockScale: uRockScale, snowScale: uSnowScale,
+      dispStrength: uDispStrength, albedoMul: uAlbedoMul,
+      snowStart: uSnowStart, snowEnd: uSnowEnd, cliffLow: uCliffLow, cliffHigh: uCliffHigh,
+    });
 
     const layerWeights = () => {
       const yW = positionWorld.y;
       const slope = sub(float(1), abs(normalWorld.y));
       const jitter = fract(mul(sin(dot(positionWorld.xz, vec2(127.1, 311.7))), 43758.5453));
-      const wSnow = smoothstep(float(158), float(268), yW);
+      const wSnow = smoothstep(uSnowStart, uSnowEnd, yW);
 
       // Steep faces → cliff rock dominates; starts earlier and reaches full rock sooner.
-      const wCliff = pow(smoothstep(float(0.12), float(0.36), slope), float(0.7));
+      const wCliff = pow(smoothstep(uCliffLow, uCliffHigh, slope), float(0.7));
       const wHeightRock = mul(smoothstep(float(48), float(158), yW), float(0.12));
       const wRock = min(
         add(mul(wCliff, sub(float(1), mul(wSnow, float(0.93)))), wHeightRock),
@@ -281,5 +291,5 @@ export async function createTerrain({ size = 1600, segments = 320, shape = {} } 
     for (const t of allTextures) t.dispose?.();
   }
 
-  return { mesh, getHeight, dispose };
+  return { mesh, getHeight, uniforms, dispose };
 }
