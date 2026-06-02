@@ -421,8 +421,8 @@
     <div id="lab-title">RTS Lab</div>
     <div id="info">
       <span id="backend">loading…</span> &bull; LMB <span>select</span> &bull;
-      RMB <span>move</span> &bull; Wheel zoom &bull; WASD/Arrows pan &bull; [C]
-      camera: <span id="cammode">ORBIT</span> &bull;
+      RMB <span>move</span> &bull; [A] <span>attack-move</span> &bull; Ctrl+#
+      group / # recall &bull; [C] camera: <span id="cammode">ORBIT</span> &bull;
       <span id="selcount">0</span>/<span id="unitcount">0</span> selected
     </div>
     <div id="sel-rect"></div>
@@ -1173,6 +1173,8 @@
             faction, // "player" | "enemy"
             pos: new THREE.Vector3(x, terrainHeight(x, z), z),
             path: null, // array of {x,z} waypoints from A*
+            attackMove: false, // path issued as attack-move (stop to fight)
+            hold: false, // currently halted to engage (attack-move)
             heading: faction === "enemy" ? Math.PI : 0, // enemies face player
             wantHeading: faction === "enemy" ? Math.PI : 0,
             selected: false,
@@ -1243,6 +1245,7 @@
         // here), red snapped onto an enemy (your future attack target).
         const HOVER_GREEN = new THREE.Color(0x6cff6c);
         const HOVER_RED = new THREE.Color(0xff5a4a);
+        const HOVER_ATTACK = new THREE.Color(0xffa033); // attack-move pending
         const hoverRing = new THREE.Mesh(
           ringGeo,
           new THREE.MeshBasicMaterial({
@@ -1318,7 +1321,7 @@
           updateCountUI();
         }
 
-        function issueMove(cx, cy) {
+        function issueMove(cx, cy, attackMove = false) {
           raycaster.setFromCamera(screenToNDC(cx, cy), camera);
           const hit = raycaster.intersectObject(terrain, false)[0];
           if (!hit) return;
@@ -1337,6 +1340,7 @@
             const oz = (gz - (rows - 1) / 2) * sp;
             // A* from the unit to its formation slot, routing around rocks.
             u.path = astar(u.pos.x, u.pos.z, center.x + ox, center.z + oz);
+            u.attackMove = attackMove;
           });
         }
 
@@ -1346,6 +1350,7 @@
         let dragMoved = false;
         let startX = 0;
         let startY = 0;
+        let attackMovePending = false; // armed by [A], consumed by next click
         const dom = renderer.domElement;
         dom.addEventListener("contextmenu", (e) => e.preventDefault());
         dom.addEventListener("pointerdown", (e) => {
@@ -1375,12 +1380,87 @@
           if (e.button === 0 && dragging) {
             dragging = false;
             selRect.style.display = "none";
+            // [A] armed: the next left-click is an attack-move order.
+            if (attackMovePending) {
+              attackMovePending = false;
+              dom.style.cursor = "default";
+              issueMove(e.clientX, e.clientY, true);
+              return;
+            }
             if (dragMoved)
               boxSelect(startX, startY, e.clientX, e.clientY, e.shiftKey);
             else clickSelect(e.clientX, e.clientY, e.shiftKey);
           } else if (e.button === 2) {
-            issueMove(e.clientX, e.clientY);
+            // Right-click cancels a pending attack-move; otherwise normal move.
+            if (attackMovePending) {
+              attackMovePending = false;
+              dom.style.cursor = "default";
+              return;
+            }
+            issueMove(e.clientX, e.clientY, false);
           }
+        });
+
+        // ── CONTROL GROUPS + ATTACK-MOVE KEYS ─────────────────────────────
+        // Ctrl+digit binds the current selection to a group; digit recalls it
+        // (Shift+digit adds; double-tap re-centers the camera). [A] arms an
+        // attack-move; [Esc] cancels a pending attack-move.
+        const groups = Object.create(null);
+        const lastGroupTap = Object.create(null);
+        function focusOnUnits(list) {
+          let x = 0;
+          let z = 0;
+          let n = 0;
+          for (const u of list) {
+            if (u.dead) continue;
+            x += u.pos.x;
+            z += u.pos.z;
+            n++;
+          }
+          if (!n) return;
+          x /= n;
+          z /= n;
+          const dx = x - controls.target.x;
+          const dz = z - controls.target.z;
+          camera.position.x += dx;
+          camera.position.z += dz;
+          controls.target.x += dx;
+          controls.target.z += dz;
+        }
+        window.addEventListener("keydown", (e) => {
+          const tag = e.target?.tagName;
+          if (tag === "INPUT" || tag === "TEXTAREA") return;
+          if (e.code === "KeyA" && !e.ctrlKey && !e.metaKey) {
+            if (units.some((u) => u.selected && !u.dead)) {
+              attackMovePending = true;
+              dom.style.cursor = "crosshair";
+            }
+            return;
+          }
+          if (e.code === "Escape") {
+            attackMovePending = false;
+            dom.style.cursor = "default";
+            return;
+          }
+          const m = /^Digit(\d)$/.exec(e.code);
+          if (!m) return;
+          const d = m[1];
+          if (e.ctrlKey || e.metaKey) {
+            // Bind selection → group.
+            groups[d] = units.filter((u) => u.selected && !u.dead);
+            e.preventDefault();
+            return;
+          }
+          // Recall group.
+          const grp = (groups[d] || []).filter((u) => !u.dead);
+          groups[d] = grp;
+          if (!grp.length) return;
+          if (!e.shiftKey) clearSelection();
+          for (const u of grp) u.selected = true;
+          updateCountUI();
+          const now = performance.now();
+          if (now - (lastGroupTap[d] || 0) < 400) focusOnUnits(grp);
+          lastGroupTap[d] = now;
         });
 
         // Context cursor — recolor + reposition the hover ring as the mouse
@@ -1395,7 +1475,9 @@
             });
           if (eHit) {
             const u = eHit.object.userData.unit;
-            hoverRing.material.color.copy(HOVER_RED);
+            hoverRing.material.color.copy(
+              attackMovePending ? HOVER_ATTACK : HOVER_RED,
+            );
             hoverRing.position.set(u.pos.x, u.pos.y + 0.12, u.pos.z);
             hoverRing.visible = true;
             dom.style.cursor = "crosshair";
@@ -1403,7 +1485,9 @@
           }
           const gHit = raycaster.intersectObject(terrain, false)[0];
           if (gHit) {
-            hoverRing.material.color.copy(HOVER_GREEN);
+            hoverRing.material.color.copy(
+              attackMovePending ? HOVER_ATTACK : HOVER_GREEN,
+            );
             hoverRing.position.set(
               gHit.point.x,
               gHit.point.y + 0.08,
@@ -1413,7 +1497,7 @@
           } else {
             hoverRing.visible = false;
           }
-          dom.style.cursor = "default";
+          dom.style.cursor = attackMovePending ? "crosshair" : "default";
         }
         // Track cursor over the canvas — used by hover ring + edge scrolling.
         let mouseX = 0;
@@ -1481,7 +1565,7 @@
           if (keys.KeyW || keys.ArrowUp) iz += 1;
           if (keys.KeyS || keys.ArrowDown) iz -= 1;
           if (keys.KeyD || keys.ArrowRight) ix += 1;
-          if (keys.KeyA || keys.ArrowLeft) ix -= 1;
+          if (keys.ArrowLeft) ix -= 1; // KeyA reserved for attack-move
           panView(ix, iz, PARAMS.camera.panSpeed, dt);
         }
 
@@ -1585,11 +1669,48 @@
         function updateUnits(dt) {
           const R = PARAMS.rts;
 
-          // Phase 1 — advance each unit along its path (XZ only). Intermediate
-          // waypoints use a loose arrival radius so corners stay smooth; the
-          // final waypoint uses the tight stop distance.
+          const rangeSq = R.range * R.range;
+
+          // Phase 0 — combat: acquire an enemy in range, aim, fire on cooldown.
+          // Runs before movement so attack-move units can halt when engaged.
           for (const u of units) {
-            if (u.dead || !u.path) continue;
+            if (u.dead) continue;
+            if (u.cooldown > 0) u.cooldown -= dt;
+            u.hold = false;
+            if (!R.combat) {
+              u.attackTarget = null;
+              continue;
+            }
+            // Drop a target that died or walked out of range.
+            if (u.attackTarget) {
+              const t = u.attackTarget;
+              const dx = t.pos.x - u.pos.x;
+              const dz = t.pos.z - u.pos.z;
+              if (t.dead || dx * dx + dz * dz > rangeSq) u.attackTarget = null;
+            }
+            if (!u.attackTarget) u.attackTarget = nearestEnemyInRange(u, rangeSq);
+            if (u.attackTarget) {
+              // Attack-move units stop and fight while an enemy is in range;
+              // normal-move units keep driving (firing on the move).
+              u.hold = u.attackMove && !!u.path;
+              if (!u.path || u.hold) {
+                u.wantHeading = Math.atan2(
+                  u.attackTarget.pos.x - u.pos.x,
+                  u.attackTarget.pos.z - u.pos.z,
+                );
+              }
+              if (u.cooldown <= 0) {
+                u.cooldown = 1 / R.fireRate;
+                fire(u, u.attackTarget);
+              }
+            }
+          }
+
+          // Phase 1 — advance each unit along its path (XZ only) unless it's an
+          // attack-move unit holding to fight. Intermediate waypoints use a
+          // loose arrival radius so corners stay smooth; the final uses tight.
+          for (const u of units) {
+            if (u.dead || !u.path || u.hold) continue;
             const wp = u.path[0];
             const dx = wp.x - u.pos.x;
             const dz = wp.z - u.pos.z;
@@ -1658,40 +1779,6 @@
                 const k = (minD - d) / d;
                 u.pos.x += dx * k;
                 u.pos.z += dz * k;
-              }
-            }
-          }
-
-          // Phase 2.5 — combat: acquire an enemy in range, aim, fire on
-          // cooldown. Units keep firing while executing a move order; they
-          // only turn to aim when idle (so move orders still steer them).
-          const rangeSq = R.range * R.range;
-          for (const u of units) {
-            if (u.dead) continue;
-            if (u.cooldown > 0) u.cooldown -= dt;
-            if (!R.combat) {
-              u.attackTarget = null;
-              continue;
-            }
-            // Drop a target that died or walked out of range.
-            if (u.attackTarget) {
-              const t = u.attackTarget;
-              const dx = t.pos.x - u.pos.x;
-              const dz = t.pos.z - u.pos.z;
-              if (t.dead || dx * dx + dz * dz > rangeSq) u.attackTarget = null;
-            }
-            if (!u.attackTarget) u.attackTarget = nearestEnemyInRange(u, rangeSq);
-            if (u.attackTarget) {
-              if (!u.path) {
-                // Idle + engaged → face the target.
-                u.wantHeading = Math.atan2(
-                  u.attackTarget.pos.x - u.pos.x,
-                  u.attackTarget.pos.z - u.pos.z,
-                );
-              }
-              if (u.cooldown <= 0) {
-                u.cooldown = 1 / R.fireRate;
-                fire(u, u.attackTarget);
               }
             }
           }
