@@ -1,0 +1,278 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Day ↔ Night Sky + Volumetric Cloud Layer · WebGPU + TSL</title>
+    <style>
+      * { margin: 0; padding: 0; box-sizing: border-box; }
+      body { background: #04060a; overflow: hidden; font-family: system-ui, sans-serif; }
+      canvas { display: block; width: 100vw; height: 100vh; }
+      .tp-dfwv { max-height: calc(100vh - 16px); overflow-y: auto; z-index: 20; }
+      #hud {
+        position: fixed; bottom: 8px; left: 8px; z-index: 25;
+        color: #cfe0ff; font: 12px/1.4 ui-monospace, monospace;
+        background: rgba(8, 14, 26, 0.55); padding: 6px 9px; border-radius: 6px;
+        pointer-events: none; white-space: pre;
+      }
+    </style>
+    <script type="importmap">
+      {
+        "imports": {
+          "three": "https://cdn.jsdelivr.net/npm/three@0.183.1/build/three.webgpu.js",
+          "three/webgpu": "https://cdn.jsdelivr.net/npm/three@0.183.1/build/three.webgpu.js",
+          "three/tsl": "https://cdn.jsdelivr.net/npm/three@0.183.1/build/three.tsl.js",
+          "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.183.1/examples/jsm/",
+          "tweakpane": "https://cdn.jsdelivr.net/npm/tweakpane@4.0.5/+esm"
+        }
+      }
+    </script>
+  </head>
+  <body>
+    <div id="hud"></div>
+    <script type="module">
+      import * as THREE from "three/webgpu";
+      import { OrbitControls } from "three/addons/controls/OrbitControls.js";
+      import { Pane } from "tweakpane";
+      import { createDayNightSky, SKY_DEFAULTS } from "./daynight-sky.js";
+      import { createCloudLayer, CLOUD_DEFAULTS } from "./cloud-layer.js";
+
+      const smoothstep = (e0, e1, x) => {
+        const t = THREE.MathUtils.clamp((x - e0) / (e1 - e0), 0, 1);
+        return t * t * (3 - 2 * t);
+      };
+
+      // ── PARAMS ───────────────────────────────────────────────────────────
+      const PARAMS = {
+        timeOfDay: 9.5,      // 0..24
+        autoAdvance: false,
+        daySpeed: 0.5,       // hours per second
+        exposure: 1.0,
+        env: {
+          sunIntensity: 3.2,
+          sunHorizonColor: "#ff6a2c",
+          moonIntensity: 0.45,
+        },
+        sky: { ...SKY_DEFAULTS },
+        clouds: { ...CLOUD_DEFAULTS },
+      };
+
+      // ── Celestial driver: time-of-day → sun/moon directions + light ────────
+      const SKY_TILT = 0.28;
+      const _sunDir = new THREE.Vector3();
+      const _moonDir = new THREE.Vector3();
+      const _sunHigh = new THREE.Color();
+      const _sunWarm = new THREE.Color();
+      const _lightColor = new THREE.Color();
+      const _ambColor = new THREE.Color();
+      const _dayHorizon = new THREE.Color();
+      const _nightHorizon = new THREE.Color();
+
+      function computeFrameLighting() {
+        const ang = (PARAMS.timeOfDay / 24) * Math.PI * 2;
+        const elev = -Math.cos(ang);
+        const sx = Math.sin(ang);
+        _sunDir.set(sx, elev, SKY_TILT).normalize();
+        _moonDir.copy(_sunDir).negate();
+
+        const sunUp = _sunDir.y;
+        const dayF = smoothstep(-0.15, 0.25, sunUp);
+
+        _sunHigh.set(PARAMS.sky.sunColor);
+        _sunWarm.set(PARAMS.env.sunHorizonColor);
+        // Warm at the horizon, neutral-warm high up.
+        _sunWarm.lerp(_sunHigh, smoothstep(0.0, 0.35, sunUp));
+        const sunInt = smoothstep(-0.08, 0.2, sunUp) * PARAMS.env.sunIntensity;
+        const moonInt = (1 - dayF) * PARAMS.env.moonIntensity;
+
+        // Dominant light: sun while above horizon, otherwise the moon.
+        let lightDir, lightIntensity;
+        if (sunUp >= 0) {
+          _lightColor.copy(_sunWarm);
+          lightDir = _sunDir;
+          lightIntensity = sunInt;
+        } else {
+          _lightColor.set(PARAMS.sky.moonColor);
+          lightDir = _moonDir;
+          lightIntensity = moonInt;
+        }
+
+        // Ambient = horizon color crossfaded day↔night, with a moon floor.
+        _dayHorizon.set(PARAMS.sky.horizonDay);
+        _nightHorizon.set(PARAMS.sky.horizonNight);
+        _ambColor.copy(_nightHorizon).lerp(_dayHorizon, dayF);
+        const ambIntensity = THREE.MathUtils.lerp(0.12, 0.55, dayF) + moonInt * 0.25;
+
+        return { sunUp, dayF, lightDir, lightIntensity, moonInt, ambIntensity };
+      }
+
+      // ── Init ───────────────────────────────────────────────────────────────
+      async function init() {
+        const renderer = new THREE.WebGPURenderer({ antialias: true });
+        renderer.setSize(window.innerWidth, window.innerHeight);
+        renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+        renderer.toneMapping = THREE.ACESFilmicToneMapping;
+        renderer.toneMappingExposure = PARAMS.exposure;
+        document.body.appendChild(renderer.domElement);
+        await renderer.init();
+
+        const scene = new THREE.Scene();
+        const camera = new THREE.PerspectiveCamera(
+          55, window.innerWidth / window.innerHeight, 0.1, 30000,
+        );
+        camera.position.set(0, 140, 620);
+        const controls = new OrbitControls(camera, renderer.domElement);
+        controls.enableDamping = true;
+        controls.target.set(0, 180, 0);
+        controls.maxPolarAngle = Math.PI * 0.92;
+        controls.maxDistance = 6000;
+        controls.update();
+
+        // Lights (driven by the celestial solver each frame).
+        const sunLight = new THREE.DirectionalLight(0xffffff, 3.0);
+        scene.add(sunLight, sunLight.target);
+        const hemi = new THREE.HemisphereLight(0xbfe0ff, 0x40424a, 0.4);
+        scene.add(hemi);
+
+        const fog = new THREE.FogExp2(0x9fb8c4, 0.00012);
+        scene.fog = fog;
+
+        // Simple reference ground + a few objects so lighting reads.
+        const ground = new THREE.Mesh(
+          new THREE.CircleGeometry(4000, 64),
+          new THREE.MeshStandardMaterial({ color: 0x3a4a32, roughness: 1.0 }),
+        );
+        ground.rotation.x = -Math.PI / 2;
+        scene.add(ground);
+        for (let i = 0; i < 14; i++) {
+          const s = 30 + Math.random() * 90;
+          const m = new THREE.Mesh(
+            Math.random() > 0.5
+              ? new THREE.BoxGeometry(s, s * (1 + Math.random()), s)
+              : new THREE.SphereGeometry(s * 0.6, 24, 16),
+            new THREE.MeshStandardMaterial({
+              color: new THREE.Color().setHSL(Math.random(), 0.4, 0.5),
+              roughness: 0.8,
+            }),
+          );
+          const a = Math.random() * Math.PI * 2;
+          const r = 200 + Math.random() * 1400;
+          m.position.set(Math.cos(a) * r, s * 0.5, Math.sin(a) * r);
+          scene.add(m);
+        }
+
+        // ── Sky + clouds ─────────────────────────────────────────────────────
+        const sky = createDayNightSky();
+        scene.add(sky.mesh);
+        const clouds = createCloudLayer({ camera });
+        scene.add(clouds.mesh);
+
+        // ── GUI ────────────────────────────────────────────────────────────
+        const pane = new Pane({ title: "Day/Night Sky" });
+        const fTime = pane.addFolder({ title: "Time of day" });
+        fTime.addBinding(PARAMS, "timeOfDay", { min: 0, max: 24, step: 0.01 });
+        fTime.addBinding(PARAMS, "autoAdvance");
+        fTime.addBinding(PARAMS, "daySpeed", { min: 0.05, max: 4, step: 0.05 });
+        fTime.addBinding(PARAMS, "exposure", { min: 0.2, max: 2.5, step: 0.01 });
+
+        const fEnv = pane.addFolder({ title: "Sun / moon energy" });
+        fEnv.addBinding(PARAMS.env, "sunIntensity", { min: 0, max: 6, step: 0.1 });
+        fEnv.addBinding(PARAMS.env, "sunHorizonColor");
+        fEnv.addBinding(PARAMS.env, "moonIntensity", { min: 0, max: 2, step: 0.05 });
+
+        const fSky = pane.addFolder({ title: "Sky colors", expanded: false });
+        for (const k of ["zenithDay", "horizonDay", "zenithNight", "horizonNight", "sunsetColor", "groundColor", "sunColor", "moonColor"]) {
+          fSky.addBinding(PARAMS.sky, k);
+        }
+        fSky.addBinding(PARAMS.sky, "sunSizeDeg", { min: 0.3, max: 6, step: 0.1 });
+        fSky.addBinding(PARAMS.sky, "sunGlowStrength", { min: 0, max: 2, step: 0.01 });
+        fSky.addBinding(PARAMS.sky, "moonGlowStrength", { min: 0, max: 2, step: 0.01 });
+
+        const fStars = pane.addFolder({ title: "Stars", expanded: false });
+        fStars.addBinding(PARAMS.sky, "starDensity", { min: 40, max: 600, step: 1 });
+        fStars.addBinding(PARAMS.sky, "starThreshold", { min: 0.7, max: 0.99, step: 0.005 });
+        fStars.addBinding(PARAMS.sky, "starSize", { min: 0.01, max: 0.3, step: 0.005 });
+        fStars.addBinding(PARAMS.sky, "starBrightness", { min: 0, max: 3, step: 0.05 });
+        fStars.addBinding(PARAMS.sky, "starTwinkle", { min: 0, max: 10, step: 0.1 });
+
+        const fCloud = pane.addFolder({ title: "Cloud layer" });
+        fCloud.addBinding(PARAMS.clouds, "enabled");
+        fCloud.addBinding(PARAMS.clouds, "coverage", { min: 0, max: 1, step: 0.01 });
+        fCloud.addBinding(PARAMS.clouds, "softness", { min: 0.02, max: 0.4, step: 0.01 });
+        fCloud.addBinding(PARAMS.clouds, "densityMul", { min: 0.5, max: 16, step: 0.1 });
+        fCloud.addBinding(PARAMS.clouds, "erode", { min: 0, max: 1, step: 0.01 });
+        fCloud.addBinding(PARAMS.clouds, "detailMul", { min: 1, max: 8, step: 0.1 });
+        fCloud.addBinding(PARAMS.clouds, "base", { min: 600, max: 4000, step: 10 });
+        fCloud.addBinding(PARAMS.clouds, "thickness", { min: 200, max: 2500, step: 10 });
+        fCloud.addBinding(PARAMS.clouds, "planetRadius", { min: 15000, max: 400000, step: 1000 });
+        fCloud.addBinding(PARAMS.clouds, "scale", { min: 0.00005, max: 0.002, step: 0.00001 });
+        fCloud.addBinding(PARAMS.clouds, "steps", { min: 16, max: 128, step: 1 });
+        fCloud.addBinding(PARAMS.clouds, "lightSteps", { min: 2, max: 8, step: 1 });
+        fCloud.addBinding(PARAMS.clouds, "opacity", { min: 0.2, max: 3, step: 0.05 });
+        fCloud.addBinding(PARAMS.clouds, "phaseG", { min: 0, max: 0.9, step: 0.01 });
+        fCloud.addBinding(PARAMS.clouds, "powder", { min: 0, max: 1, step: 0.01 });
+        fCloud.addBinding(PARAMS.clouds, "windSpeed", { min: 0, max: 0.2, step: 0.001 });
+        fCloud.addBinding(PARAMS.clouds, "windDeg", { min: 0, max: 360, step: 1 });
+
+        // ── Loop ──────────────────────────────────────────────────────────
+        const hud = document.getElementById("hud");
+        const timer = new THREE.Timer();
+        let elapsed = 0;
+
+        function onResize() {
+          camera.aspect = window.innerWidth / window.innerHeight;
+          camera.updateProjectionMatrix();
+          renderer.setSize(window.innerWidth, window.innerHeight);
+        }
+        window.addEventListener("resize", onResize);
+
+        renderer.setAnimationLoop(() => {
+          timer.update();
+          const dt = Math.min(timer.getDelta(), 0.05);
+          elapsed += dt;
+          controls.update();
+
+          if (PARAMS.autoAdvance) {
+            PARAMS.timeOfDay = (PARAMS.timeOfDay + PARAMS.daySpeed * dt) % 24;
+          }
+          renderer.toneMappingExposure = PARAMS.exposure;
+
+          const L = computeFrameLighting();
+
+          // Scene lights follow the celestial solver.
+          sunLight.position.copy(L.lightDir).multiplyScalar(1000);
+          sunLight.target.position.set(0, 0, 0);
+          sunLight.color.copy(_lightColor);
+          sunLight.intensity = L.lightIntensity;
+          hemi.color.copy(_ambColor);
+          hemi.intensity = L.ambIntensity;
+          hemi.groundColor.set(PARAMS.sky.groundColor);
+          fog.color.copy(_ambColor);
+
+          const frame = {
+            time: elapsed, dt,
+            sunDir: _sunDir, moonDir: _moonDir, camera,
+            lightDir: L.lightDir,
+            lightColor: _lightColor,
+            lightIntensity: Math.max(L.lightIntensity, 0.15),
+            ambientColor: _ambColor,
+            ambientIntensity: L.ambIntensity,
+          };
+
+          sky.update(PARAMS.sky, frame);
+          clouds.update(PARAMS.clouds, frame);
+
+          // One call: scene→offscreen (with depth), clouds raymarched half-res
+          // with depth occlusion, then composited to the canvas.
+          clouds.render(renderer, scene, camera);
+
+          hud.textContent =
+            `time ${PARAMS.timeOfDay.toFixed(2)}h  sunUp ${L.sunUp.toFixed(2)}  ` +
+            `day ${(L.dayF * 100) | 0}%`;
+        });
+      }
+
+      init();
+    </script>
+  </body>
+</html>
