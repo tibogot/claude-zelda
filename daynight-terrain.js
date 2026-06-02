@@ -26,6 +26,9 @@ const DEFAULT_SHAPE = {
   macroOctaves: 4, peakBias: 0.1, ridgeBoost: 0.038, ridgeFreq: 1.15,
   ridgeOctaves: 2, floorY: -145, mountainReliefMul: 0.34,
   heroRidgeAmp: 68, heroRidgeR: 320000,
+  // Island falloff — sinks the outer margin below sea level (coastline + hides
+  // the square edge). Large landmass = coast sits near the border.
+  coastStart: 0.7, coastEnd: 1.0, sinkDepth: 240, coastNoise: 0.16,
 };
 
 function createSeededRandom(seed) {
@@ -47,6 +50,21 @@ function fbm(perlin, x, y, z, octaves, persistence, lacunarity) {
   }
   return total / Math.max(1e-6, maxValue);
 }
+
+function smoothstepJS(e0, e1, x) {
+  const t = Math.max(0, Math.min(1, (x - e0) / Math.max(1e-6, e1 - e0)));
+  return t * t * (3 - 2 * t);
+}
+
+// Scattered islands out in the surrounding water (Gaussian bumps placed near the
+// coast margin so they poke above the sunk seabed as separate islands).
+const ISLANDS = [
+  { cx: 740, cz: 120, r: 7000, a: 250 },
+  { cx: -720, cz: -200, r: 6000, a: 225 },
+  { cx: 180, cz: 760, r: 5500, a: 210 },
+  { cx: -300, cz: 750, r: 6000, a: 230 },
+  { cx: 620, cz: -640, r: 5000, a: 200 },
+];
 
 export async function createTerrain({ size = 1600, segments = 320, shape = {} } = {}) {
   const ts = { ...DEFAULT_SHAPE, ...shape };
@@ -88,6 +106,21 @@ export async function createTerrain({ size = 1600, segments = 320, shape = {} } 
     const pk = Math.max(0, h);
     h += pk * pk * Math.max(0, ts.peakBias);
     let y = h * ts.heightScale + mountainRelief(x, z);
+
+    // Island falloff: sink the outer margin below sea level so the land meets the
+    // water at an irregular coastline and the square edge is hidden underwater.
+    const half = size * 0.5;
+    const coastN = fbm(perlin, x * 0.004 + 11, 5.1, z * 0.004 - 7, 3, 0.5, 2.0) * ts.coastNoise;
+    const edge = Math.max(Math.abs(x), Math.abs(z)) / half + coastN;
+    const sink = smoothstepJS(ts.coastStart, ts.coastEnd, edge);
+    y -= sink * ts.sinkDepth;
+
+    // Scattered islands out in the surrounding water.
+    for (const is of ISLANDS) {
+      const dx = x - is.cx, dz = z - is.cz;
+      y += Math.exp(-(dx * dx + dz * dz) / is.r) * is.a;
+    }
+
     return Math.max(ts.floorY, y);
   }
 

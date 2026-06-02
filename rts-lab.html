@@ -59,6 +59,101 @@
         font-weight: 600;
       }
 
+      /* Control-group HUD bar (bottom center) */
+      #groupbar {
+        position: fixed;
+        bottom: 14px;
+        left: 50%;
+        transform: translateX(-50%);
+        z-index: 12;
+        display: flex;
+        gap: 6px;
+        user-select: none;
+      }
+      .group-slot {
+        position: relative;
+        width: 34px;
+        height: 34px;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        font:
+          600 14px/1 "SF Mono",
+          monospace;
+        color: #cfe6ff;
+        background: rgba(0, 0, 0, 0.5);
+        border: 1px solid rgba(255, 255, 255, 0.14);
+        border-radius: 6px;
+        cursor: pointer;
+        backdrop-filter: blur(4px);
+        transition:
+          border-color 0.12s,
+          background 0.12s,
+          transform 0.08s;
+      }
+      .group-slot:hover {
+        border-color: rgba(255, 255, 255, 0.35);
+      }
+      .group-slot.empty {
+        color: #5a6470;
+        cursor: default;
+      }
+      .group-slot.active {
+        border-color: #49e0ff;
+        background: rgba(73, 224, 255, 0.18);
+        color: #eafaff;
+      }
+      .group-slot .count {
+        position: absolute;
+        top: -6px;
+        right: -6px;
+        min-width: 16px;
+        height: 16px;
+        padding: 0 3px;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        font-size: 10px;
+        font-weight: 700;
+        color: #0a0a0a;
+        background: #49e0ff;
+        border-radius: 8px;
+      }
+      .group-slot.empty .count {
+        display: none;
+      }
+
+      /* Transient toast (bind / recall confirmation) */
+      #toast {
+        position: fixed;
+        bottom: 60px;
+        left: 50%;
+        transform: translateX(-50%) translateY(6px);
+        z-index: 13;
+        padding: 7px 14px;
+        font:
+          600 12px/1 "SF Mono",
+          monospace;
+        color: #eafaff;
+        background: rgba(20, 30, 40, 0.85);
+        border: 1px solid rgba(73, 224, 255, 0.4);
+        border-radius: 6px;
+        pointer-events: none;
+        user-select: none;
+        opacity: 0;
+        transition:
+          opacity 0.15s,
+          transform 0.15s;
+        backdrop-filter: blur(4px);
+      }
+      #toast.show {
+        opacity: 1;
+        transform: translateX(-50%) translateY(0);
+      }
+      body.immersive #groupbar {
+        bottom: 14px;
+      }
+
       #lab-title {
         position: fixed;
         top: 14px;
@@ -426,6 +521,8 @@
       <span id="selcount">0</span>/<span id="unitcount">0</span> selected
     </div>
     <div id="sel-rect"></div>
+    <div id="groupbar"></div>
+    <div id="toast"></div>
     <div id="inspector">
       <div id="inspector-resize-handle" title="Drag to resize"></div>
       <div id="inspector-header">
@@ -1143,37 +1240,39 @@
           return bar;
         }
 
-        // Ground rings (selection + hover) live at scene root, NOT parented to
-        // the tank (whose slope/heading rotation would tilt them). Each frame
-        // they conform to the heightmap so they hug hills instead of clipping
-        // through. Per-vertex displacement needs an own geometry (a clone) and
-        // plenty of theta segments for a smooth curve.
+        // Ground rings (selection + hover + move ping) live at scene root, NOT
+        // parented to the tank (whose slope/heading rotation would tilt them).
+        // v2/play technique for "circle on the floor": keep ONE shared flat
+        // ring geometry and just reposition it — no per-vertex conforming (that
+        // re-uploads the vertex buffer every frame and tanks FPS). To avoid
+        // clipping into hills we (a) draw with depthTest off so it's always
+        // visible on any surface, and (b) tilt the flat disc to the terrain
+        // normal so it sits flush on slopes. Cost per ring = a few trig ops.
         const ringsGroup = new THREE.Group();
         scene.add(ringsGroup);
-        const ringGeo = new THREE.RingGeometry(1.7, 2.05, 64);
-        ringGeo.rotateX(-Math.PI / 2);
-        // Place a flat ring at (x,z) and lift every vertex to the terrain
-        // height under it (+offset), so the ring drapes over the surface.
-        function conformRing(ring, x, z, offset) {
-          ring.position.set(x, 0, z);
-          const pa = ring.geometry.attributes.position;
-          for (let i = 0; i < pa.count; i++) {
-            pa.setY(i, terrainHeight(x + pa.getX(i), z + pa.getZ(i)) + offset);
-          }
-          pa.needsUpdate = true;
+        const ringGeo = new THREE.RingGeometry(1.7, 2.05, 48);
+        ringGeo.rotateX(-Math.PI / 2); // lie flat, geometry normal = +Y
+        const _ringNormal = new THREE.Vector3();
+        const _ringUp = new THREE.Vector3(0, 1, 0);
+        function placeRing(ring, x, z, offset) {
+          ring.position.set(x, terrainHeight(x, z) + offset, z);
+          terrainNormal(x, z, _ringNormal);
+          ring.quaternion.setFromUnitVectors(_ringUp, _ringNormal);
+        }
+        function makeRingMaterial(color, opacity) {
+          return new THREE.MeshBasicMaterial({
+            color,
+            transparent: true,
+            opacity,
+            depthWrite: false,
+            depthTest: false, // always visible on any ground surface
+            side: THREE.DoubleSide,
+          });
         }
         function makeSelectionRing() {
-          const m = new THREE.Mesh(
-            ringGeo.clone(),
-            new THREE.MeshBasicMaterial({
-              color: 0x49e0ff,
-              transparent: true,
-              opacity: 0.9,
-              depthWrite: false,
-            }),
-          );
+          const m = new THREE.Mesh(ringGeo, makeRingMaterial(0x49e0ff, 0.9));
           m.visible = false;
-          m.renderOrder = 2;
+          m.renderOrder = 4;
           ringsGroup.add(m);
           return m;
         }
@@ -1232,27 +1331,23 @@
           }
           units.length = 0;
           tankBodies.length = 0;
+          // Old groups reference removed units — wipe them.
+          for (const k of Object.keys(groups)) delete groups[k];
+          activeGroup = null;
           spawnSide("player", PARAMS.rts.count, 36);
           spawnSide("enemy", PARAMS.rts.enemyCount, -36);
           updateCountUI();
+          refreshGroupBar();
         }
 
         // ── MOVE-ORDER PING (fades after a click order) ──
-        const ping = new THREE.Mesh(
-          ringGeo,
-          new THREE.MeshBasicMaterial({
-            color: 0xffe14a,
-            transparent: true,
-            opacity: 0,
-            depthWrite: false,
-          }),
-        );
+        const ping = new THREE.Mesh(ringGeo, makeRingMaterial(0xffe14a, 0));
         ping.renderOrder = 3;
         ping.visible = false;
         scene.add(ping);
         let pingLife = 0;
         function showPing(p) {
-          ping.position.set(p.x, terrainHeight(p.x, p.z) + 0.08, p.z);
+          placeRing(ping, p.x, p.z, 0.1); // sits on + tilts to the terrain
           pingLife = 0.6;
           ping.visible = true;
         }
@@ -1263,15 +1358,7 @@
         const HOVER_GREEN = new THREE.Color(0x6cff6c);
         const HOVER_RED = new THREE.Color(0xff5a4a);
         const HOVER_ATTACK = new THREE.Color(0xffa033); // attack-move pending
-        const hoverRing = new THREE.Mesh(
-          ringGeo.clone(),
-          new THREE.MeshBasicMaterial({
-            color: HOVER_GREEN,
-            transparent: true,
-            opacity: 0.85,
-            depthWrite: false,
-          }),
-        );
+        const hoverRing = new THREE.Mesh(ringGeo, makeRingMaterial(0x6cff6c, 0.85));
         hoverRing.renderOrder = 2;
         hoverRing.visible = false;
         scene.add(hoverRing);
@@ -1339,10 +1426,8 @@
         }
 
         function issueMove(cx, cy, attackMove = false) {
-          raycaster.setFromCamera(screenToNDC(cx, cy), camera);
-          const hit = raycaster.intersectObject(terrain, false)[0];
-          if (!hit) return;
-          const center = hit.point;
+          const center = pickGround(cx, cy);
+          if (!center) return;
           const sel = units.filter((u) => u.selected && !u.dead);
           if (!sel.length) return;
           showPing(center);
@@ -1419,11 +1504,77 @@
         });
 
         // ── CONTROL GROUPS + ATTACK-MOVE KEYS ─────────────────────────────
-        // Ctrl+digit binds the current selection to a group; digit recalls it
-        // (Shift+digit adds; double-tap re-centers the camera). [A] arms an
-        // attack-move; [Esc] cancels a pending attack-move.
+        // Shift+digit binds the current selection to a group; digit recalls it
+        // (double-tap re-centers the camera). [A] arms an attack-move; [Esc]
+        // cancels a pending attack-move. A HUD bar + toast give feedback.
         const groups = Object.create(null);
         const lastGroupTap = Object.create(null);
+        let activeGroup = null;
+
+        // Build the bottom HUD bar of group slots (1..9, 0). Clicking a slot
+        // recalls it, same as pressing the number.
+        const groupbarEl = document.getElementById("groupbar");
+        const toastEl = document.getElementById("toast");
+        const GROUP_DIGITS = ["1", "2", "3", "4", "5", "6", "7", "8", "9", "0"];
+        const groupSlots = GROUP_DIGITS.map((d) => {
+          const slot = document.createElement("div");
+          slot.className = "group-slot empty";
+          slot.dataset.digit = d;
+          slot.innerHTML = `${d}<span class="count"></span>`;
+          slot.addEventListener("click", () => recallGroup(d));
+          groupbarEl.appendChild(slot);
+          return slot;
+        });
+        function liveCount(d) {
+          return (groups[d] || []).filter((u) => !u.dead).length;
+        }
+        function refreshGroupBar() {
+          for (const slot of groupSlots) {
+            const d = slot.dataset.digit;
+            const n = liveCount(d);
+            slot.classList.toggle("empty", n === 0);
+            slot.classList.toggle("active", d === activeGroup && n > 0);
+            slot.querySelector(".count").textContent = n || "";
+          }
+        }
+        let toastTimer = null;
+        function showToast(msg) {
+          toastEl.textContent = msg;
+          toastEl.classList.add("show");
+          clearTimeout(toastTimer);
+          toastTimer = setTimeout(() => toastEl.classList.remove("show"), 1400);
+        }
+
+        function assignGroup(d) {
+          groups[d] = units.filter((u) => u.selected && !u.dead);
+          const n = groups[d].length;
+          activeGroup = n ? d : activeGroup;
+          refreshGroupBar();
+          showToast(
+            n
+              ? `Group ${d} set · ${n} unit${n !== 1 ? "s" : ""}`
+              : `Group ${d} cleared`,
+          );
+        }
+        function recallGroup(d) {
+          const grp = (groups[d] || []).filter((u) => !u.dead);
+          groups[d] = grp;
+          if (!grp.length) {
+            refreshGroupBar();
+            return;
+          }
+          clearSelection();
+          for (const u of grp) u.selected = true;
+          updateCountUI();
+          activeGroup = d;
+          refreshGroupBar();
+          showToast(`Group ${d} · ${grp.length}`);
+          // Double-tap same number re-centers the camera on the group.
+          const now = performance.now();
+          if (now - (lastGroupTap[d] || 0) < 400) focusOnUnits(grp);
+          lastGroupTap[d] = now;
+        }
+
         function focusOnUnits(list) {
           let x = 0;
           let z = 0;
@@ -1466,25 +1617,42 @@
           // reserve it); Ctrl/Meta+# also works but only reaches us in the
           // fullscreen "Play" mode where the Keyboard Lock API is active.
           if (e.shiftKey || e.ctrlKey || e.metaKey) {
-            groups[d] = units.filter((u) => u.selected && !u.dead);
+            assignGroup(d);
             e.preventDefault();
             return;
           }
-          // Plain # → recall group (replace selection).
-          const grp = (groups[d] || []).filter((u) => !u.dead);
-          groups[d] = grp;
-          if (!grp.length) return;
-          clearSelection();
-          for (const u of grp) u.selected = true;
-          updateCountUI();
-          const now = performance.now();
-          if (now - (lastGroupTap[d] || 0) < 400) focusOnUnits(grp);
-          lastGroupTap[d] = now;
+          recallGroup(d); // plain # → recall (replace selection)
         });
+        refreshGroupBar();
 
-        // Context cursor — recolor + reposition the hover ring as the mouse
-        // moves over the battlefield. Skipped while drag-selecting.
+        // Analytic ground pick (v2/play technique): intersect the camera ray
+        // with the height FUNCTION, not the terrain mesh — a mesh raycast on a
+        // 240×240 grid every mouse-move is what was tanking the FPS. We march
+        // the ray onto a horizontal plane and refine a few times against
+        // terrainHeight; cheap and accurate enough for a cursor.
+        const _pickPt = { x: 0, z: 0 };
+        function pickGround(cx, cy) {
+          raycaster.setFromCamera(screenToNDC(cx, cy), camera);
+          const o = raycaster.ray.origin;
+          const d = raycaster.ray.direction;
+          if (d.y > -1e-4) return null; // ray pointing up — no ground hit
+          let y = 0;
+          for (let k = 0; k < 4; k++) {
+            const t = (y - o.y) / d.y;
+            if (t < 0) return null;
+            _pickPt.x = o.x + d.x * t;
+            _pickPt.z = o.z + d.z * t;
+            y = terrainHeight(_pickPt.x, _pickPt.z);
+          }
+          return _pickPt;
+        }
+
+        // Context cursor — recolor + reposition the hover ring. Throttled so it
+        // runs at most ~every 16ms regardless of mouse event rate.
+        const HOVER_PICK_MIN_MS = 16;
+        let lastHoverMs = 0;
         function updateHover(cx, cy) {
+          // Enemy under cursor → red ring snapped onto it (few boxes; cheap).
           raycaster.setFromCamera(screenToNDC(cx, cy), camera);
           const eHit = raycaster
             .intersectObjects(tankBodies, false)
@@ -1497,17 +1665,17 @@
             hoverRing.material.color.copy(
               attackMovePending ? HOVER_ATTACK : HOVER_RED,
             );
-            conformRing(hoverRing, u.pos.x, u.pos.z, 0.1);
+            placeRing(hoverRing, u.pos.x, u.pos.z, 0.1);
             hoverRing.visible = true;
             dom.style.cursor = "crosshair";
             return;
           }
-          const gHit = raycaster.intersectObject(terrain, false)[0];
-          if (gHit) {
+          const g = pickGround(cx, cy);
+          if (g) {
             hoverRing.material.color.copy(
               attackMovePending ? HOVER_ATTACK : HOVER_GREEN,
             );
-            conformRing(hoverRing, gHit.point.x, gHit.point.z, 0.08);
+            placeRing(hoverRing, g.x, g.z, 0.08);
             hoverRing.visible = true;
           } else {
             hoverRing.visible = false;
@@ -1522,7 +1690,10 @@
           mouseX = e.clientX;
           mouseY = e.clientY;
           pointerInCanvas = true;
-          if (!dragging) updateHover(e.clientX, e.clientY);
+          if (dragging) return;
+          if (e.timeStamp - lastHoverMs < HOVER_PICK_MIN_MS) return;
+          lastHoverMs = e.timeStamp;
+          updateHover(e.clientX, e.clientY);
         });
         dom.addEventListener("pointerenter", () => (pointerInCanvas = true));
         dom.addEventListener("pointerleave", () => {
@@ -1673,6 +1844,7 @@
           u.ring.visible = false;
           u.bar.visible = false;
           updateCountUI();
+          refreshGroupBar();
         }
 
         // ── UNIT UPDATE ──
@@ -1826,10 +1998,11 @@
               u.group.rotation.y = u.heading;
             }
 
-            // Selection ring drapes over the terrain (conformed per-frame).
+            // Selection ring sits on + tilts to the terrain (cheap; no
+            // per-vertex conforming).
             if (u.selected) {
               u.ring.visible = true;
-              conformRing(u.ring, u.pos.x, u.pos.z, 0.08);
+              placeRing(u.ring, u.pos.x, u.pos.z, 0.08);
             } else {
               u.ring.visible = false;
             }

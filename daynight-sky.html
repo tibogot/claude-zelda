@@ -23,7 +23,8 @@
           "three/webgpu": "https://cdn.jsdelivr.net/npm/three@0.183.1/build/three.webgpu.js",
           "three/tsl": "https://cdn.jsdelivr.net/npm/three@0.183.1/build/three.tsl.js",
           "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.183.1/examples/jsm/",
-          "tweakpane": "https://cdn.jsdelivr.net/npm/tweakpane@4.0.5/+esm"
+          "tweakpane": "https://cdn.jsdelivr.net/npm/tweakpane@4.0.5/+esm",
+          "stats-gl": "https://cdn.jsdelivr.net/npm/stats-gl/dist/main.js"
         }
       }
     </script>
@@ -34,6 +35,7 @@
       import * as THREE from "three/webgpu";
       import { OrbitControls } from "three/addons/controls/OrbitControls.js";
       import { Pane } from "tweakpane";
+      import Stats from "stats-gl";
       import { createDayNightSky, SKY_DEFAULTS } from "./daynight-sky.js";
       import { createCloudLayer, CLOUD_DEFAULTS, GOD_RAYS_DEFAULTS } from "./cloud-layer.js";
       import { createTerrain } from "./daynight-terrain.js";
@@ -141,6 +143,11 @@
         renderer.shadowMap.enabled = true;
         renderer.shadowMap.type = THREE.PCFSoftShadowMap;
         renderer.shadowMap.autoUpdate = false;
+
+        // FPS / CPU / GPU stats (same as template-unreal-objects.html).
+        const stats = new Stats({ trackGPU: true });
+        await stats.init(renderer);
+        document.body.appendChild(stats.dom);
 
         const scene = new THREE.Scene();
         const camera = new THREE.PerspectiveCamera(
@@ -295,6 +302,16 @@
         fSky.addBinding(PARAMS.sky, "sunGlowStrength", { min: 0, max: 2, step: 0.01 });
         fSky.addBinding(PARAMS.sky, "moonGlowStrength", { min: 0, max: 2, step: 0.01 });
 
+        const fMoon = pane.addFolder({ title: "Moon", expanded: false });
+        fMoon.addBinding(PARAMS.sky, "moonPhase", { min: 0, max: 1, step: 0.01, label: "Phase (new→full)" });
+        fMoon.addBinding(PARAMS.sky, "moonPhaseOrient", { min: 0, max: 360, step: 1, label: "Crescent angle" });
+        fMoon.addBinding(PARAMS.sky, "moonTermSoft", { min: 0.005, max: 0.3, step: 0.005, label: "Terminator soft" });
+        fMoon.addBinding(PARAMS.sky, "moonSurface", { min: 0, max: 1, step: 0.01, label: "Surface detail" });
+        fMoon.addBinding(PARAMS.sky, "moonEarthshine", { min: 0, max: 0.6, step: 0.01, label: "Earthshine" });
+        fMoon.addBinding(PARAMS.sky, "moonSizeDeg", { min: 0.5, max: 8, step: 0.1, label: "Size (deg)" });
+        fMoon.addBinding(PARAMS.sky, "moonDiscBright", { min: 0, max: 8, step: 0.1, label: "Brightness" });
+        fMoon.addBinding(PARAMS.sky, "moonColor");
+
         const fStars = pane.addFolder({ title: "Stars", expanded: false });
         fStars.addBinding(PARAMS.sky, "starDensity", { min: 40, max: 600, step: 1 });
         fStars.addBinding(PARAMS.sky, "starThreshold", { min: 0.7, max: 0.99, step: 0.005 });
@@ -417,6 +434,13 @@
           hud.textContent =
             `time ${PARAMS.timeOfDay.toFixed(2)}h  sunUp ${L.sunUp.toFixed(2)}  ` +
             `day ${(L.dayF * 100) | 0}%`;
+
+          stats.update();
+          // Drain the GPU timestamp query pools each frame (our pipeline issues
+          // many render + compute passes; the compute ones — the ocean FFT —
+          // otherwise overflow the pool). Fire-and-forget.
+          renderer.resolveTimestampsAsync(THREE.TimestampQuery.RENDER);
+          renderer.resolveTimestampsAsync(THREE.TimestampQuery.COMPUTE);
         });
       }
 
