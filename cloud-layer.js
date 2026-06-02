@@ -25,8 +25,10 @@ import {
   length, sqrt,
 } from "three/tsl";
 import { ImprovedNoise } from "three/addons/math/ImprovedNoise.js";
+import { createGodRaysPass } from "./god-rays-pass.js";
 
 const CLOUD_LAYER = 18;
+const MAX_OCC_STEPS = 16;
 const CLOUD_RADIUS = 8000;
 const MAX_STEPS = 128;
 const MAX_LIGHT_STEPS = 8;
@@ -118,6 +120,7 @@ export function createCloudLayer({ camera }) {
   const uBaseSoft = uniform(0.2);
   const uSteps = uniform(64);
   const uLightSteps = uniform(6);
+  const uOccMaxSteps = uniform(14);
   const uMaxDist = uniform(24000);
   const uPlanetRadius = uniform(60000); // smaller = more horizon curvature
 
@@ -282,6 +285,66 @@ export function createCloudLayer({ camera }) {
     return vec4(scattered, alpha);
   });
 
+  // Cheap silhouette for god-rays occlusion (no lighting).
+  const cloudOccColorNode = Fn(() => {
+    const rayDir = normalize(positionWorld.sub(cameraPosition)).toVar();
+    const oc = cameraPosition.sub(planetCenter());
+    const b = dot(oc, rayDir);
+    const ococ = dot(oc, oc);
+    const rIn = uPlanetRadius.add(uBase);
+    const rOut = uPlanetRadius.add(uBase).add(uThickness);
+    const discIn = b.mul(b).sub(ococ.sub(rIn.mul(rIn)));
+    const discOut = b.mul(b).sub(ococ.sub(rOut.mul(rOut)));
+    const discG = b.mul(b).sub(ococ.sub(uPlanetRadius.mul(uPlanetRadius)));
+
+    const sqOut = sqrt(discOut.max(0.0));
+    const tNear = b.negate().sub(sqOut).max(0.0).toVar();
+    const tFar = b.negate().add(sqOut).toVar();
+    If(discIn.greaterThan(0.0), () => {
+      const sqIn = sqrt(discIn);
+      const innerT1 = b.negate().sub(sqIn);
+      const innerT2 = b.negate().add(sqIn);
+      If(innerT1.greaterThan(0.0), () => {
+        tNear.assign(b.negate().sub(sqOut).max(0.0));
+        tFar.assign(innerT1);
+      }).Else(() => {
+        tNear.assign(innerT2.max(0.0));
+        tFar.assign(b.negate().add(sqOut));
+      });
+    });
+    const tGround = b.negate().sub(sqrt(discG.max(0.0)));
+    If(discG.greaterThan(0.0).and(tGround.greaterThan(0.0)), () => {
+      tFar.assign(min(tFar, tGround));
+    });
+    tFar.assign(min(tFar, uMaxDist));
+    const valid = discOut.greaterThan(0.0).and(tFar.greaterThan(tNear));
+    const transmittance = float(1.0).toVar();
+    const jitter = fract(sin(dot(screenUV, vec2(12.9898, 78.233))).mul(43758.5453));
+
+    If(valid, () => {
+      const stepLen = tFar.sub(tNear).div(uOccMaxSteps.max(1));
+      Loop(MAX_OCC_STEPS, ({ i }) => {
+        If(float(i).greaterThanEqual(uOccMaxSteps), () => Break());
+        If(transmittance.lessThan(0.02), () => Break());
+        const t = tNear.add(float(i).add(jitter).add(0.5).mul(stepLen));
+        const p = cameraPosition.add(rayDir.mul(t));
+        const density = sampleDensity(p);
+        If(density.greaterThan(0.01), () => {
+          transmittance.mulAssign(exp(density.mul(stepLen).mul(uOpacity).negate()));
+        });
+      });
+    });
+    return vec4(vec3(0.0), float(1.0).sub(transmittance));
+  });
+
+  const cloudOccMaterial = new THREE.MeshBasicNodeMaterial();
+  cloudOccMaterial.colorNode = cloudOccColorNode();
+  cloudOccMaterial.side = THREE.BackSide;
+  cloudOccMaterial.transparent = true;
+  cloudOccMaterial.depthWrite = false;
+  cloudOccMaterial.depthTest = false;
+  cloudOccMaterial.fog = false;
+
   const material = new THREE.MeshBasicNodeMaterial();
   material.colorNode = cloudColorNode();
   material.side = THREE.BackSide;
@@ -311,6 +374,17 @@ export function createCloudLayer({ camera }) {
   });
   let fullW = 0, fullH = 0, rtW = 0, rtH = 0;
 
+  // HDR-ish composite before god rays / future bloom (HalfFloat, linear from tone-mapped passes).
+  const compositeRT = new THREE.RenderTarget(1, 1, {
+    minFilter: THREE.LinearFilter,
+    magFilter: THREE.LinearFilter,
+    format: THREE.RGBAFormat,
+    type: THREE.HalfFloatType,
+    depthBuffer: false,
+  });
+
+  const godRays = createGodRaysPass();
+
   const postScene = new THREE.Scene();
   const postCam = new THREE.OrthographicCamera(-1, 1, 1, -1, 0, 1);
   const postQuad = new THREE.Mesh(new THREE.PlaneGeometry(2, 2));
@@ -318,7 +392,10 @@ export function createCloudLayer({ camera }) {
 
   const sceneColorNode = texture(sceneRT.texture);
   const cloudTexNode = texture(cloudRT.texture);
+  const compositeTexNode = texture(compositeRT.texture);
+  const godraysTexNode = godRays.godraysTex;
   const uCloudTexel = uniform(new THREE.Vector2());
+  const uGodRaysMix = uniform(0);
 
   // Single opaque pass: scene color + a 5-tap blur of the (premultiplied) low-res
   // cloud buffer, composited as `scene*(1-a) + cloud`. The blur softens the
@@ -334,15 +411,27 @@ export function createCloudLayer({ camera }) {
     const c4 = cloudTexNode.sample(fuv.add(vec2(o.x.negate(), o.y.negate())));
     const cloud = c0.mul(0.4).add(c1.add(c2).add(c3).add(c4).mul(0.15));
     const sceneCol = sceneColorNode.sample(fuv).rgb;
-    return vec4(sceneCol.mul(cloud.a.oneMinus()).add(cloud.rgb), 1.0);
+    const raysCol = godraysTexNode.sample(fuv).rgb;
+    const base = sceneCol.add(raysCol.mul(uGodRaysMix));
+    return vec4(base.mul(cloud.a.oneMinus()).add(cloud.rgb), 1.0);
   });
 
   const compositeMat = new THREE.MeshBasicNodeMaterial();
   compositeMat.colorNode = compositeColor();
-  compositeMat.toneMapped = false; // scene + clouds were each tone-mapped already
+  compositeMat.toneMapped = false;
   compositeMat.depthTest = false;
   compositeMat.depthWrite = false;
-  postQuad.material = compositeMat;
+
+  const presentColor = Fn(() => {
+    const fuv = vec2(uv().x, uv().y.oneMinus());
+    return vec4(compositeTexNode.sample(fuv).rgb, 1);
+  });
+  const presentMat = new THREE.MeshBasicNodeMaterial();
+  presentMat.colorNode = presentColor();
+  presentMat.toneMapped = false;
+  presentMat.depthTest = false;
+  presentMat.depthWrite = false;
+  postQuad.material = presentMat;
 
   const _bufSize = new THREE.Vector2();
   function ensureSize(renderer) {
@@ -351,7 +440,8 @@ export function createCloudLayer({ camera }) {
     const fh = Math.max(1, Math.floor(_bufSize.y));
     if (fw !== fullW || fh !== fullH) {
       fullW = fw; fullH = fh;
-      sceneRT.setSize(fw, fh); // also resizes the attached depth texture
+      sceneRT.setSize(fw, fh);
+      compositeRT.setSize(fw, fh);
     }
     const w = Math.max(1, Math.floor(fw * 0.5));
     const h = Math.max(1, Math.floor(fh * 0.5));
@@ -409,7 +499,7 @@ export function createCloudLayer({ camera }) {
    * Replaces the page's `renderer.render(scene, camera)`. The cloud dome is on
    * its own layer, so the scene pass (default camera layers) skips it.
    */
-  function render(renderer, scene, camera) {
+  function render(renderer, scene, camera, renderOpts = {}) {
     ensureSize(renderer);
     uDepthSign.value = camera.reversedDepth ? -1 : 1;
 
@@ -430,7 +520,37 @@ export function createCloudLayer({ camera }) {
     camera.layers.mask = prevMask;
     renderer.setClearColor(prevClear, prevClearA);
 
-    // 3) Composite scene + clouds → canvas.
+    // 3) God rays (scene only; clouds composite on top — matches superjet).
+    const godP = renderOpts.godRays;
+    const frame = renderOpts.frame;
+    let raysOk = false;
+    if (godP?.enabled && frame) {
+      uOccMaxSteps.value = godP.occCloudSteps ?? 12;
+      raysOk = godRays.render(renderer, {
+        scene,
+        camera,
+        cloudMesh: mesh,
+        cloudOccMaterial,
+        cloudLayer: CLOUD_LAYER,
+        skyMesh: renderOpts.skyMesh,
+        occluders: renderOpts.occluders ?? [],
+        P: godP,
+        frame,
+        fullWidth: fullW,
+        fullHeight: fullH,
+      });
+    }
+    uGodRaysMix.value = raysOk ? 1 : 0;
+
+    // 4) scene + rays + clouds → compositeRT (bloom hook).
+    postQuad.material = compositeMat;
+    renderer.setRenderTarget(compositeRT);
+    renderer.setClearColor(0x000000, 1);
+    renderer.clear();
+    renderer.render(postScene, postCam);
+
+    // 5) Present → canvas (later: bloom reads compositeRT before this step).
+    postQuad.material = presentMat;
     renderer.setRenderTarget(null);
     renderer.render(postScene, postCam);
   }
@@ -441,12 +561,26 @@ export function createCloudLayer({ camera }) {
     volumeTexture.dispose();
     sceneRT.dispose();
     cloudRT.dispose();
+    compositeRT.dispose();
+    cloudOccMaterial.dispose();
     postQuad.geometry.dispose();
     compositeMat.dispose();
+    presentMat.dispose();
+    godRays.dispose();
   }
 
-  return { mesh, update, render, layer: CLOUD_LAYER, dispose };
+  return {
+    mesh,
+    sunMesh: godRays.sunMesh,
+    update,
+    render,
+    layer: CLOUD_LAYER,
+    compositeRT,
+    dispose,
+  };
 }
+
+export { GOD_RAYS_DEFAULTS } from "./god-rays-pass.js";
 
 export const CLOUD_DEFAULTS = {
   enabled: true,

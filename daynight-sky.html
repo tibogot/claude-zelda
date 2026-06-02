@@ -35,7 +35,7 @@
       import { OrbitControls } from "three/addons/controls/OrbitControls.js";
       import { Pane } from "tweakpane";
       import { createDayNightSky, SKY_DEFAULTS } from "./daynight-sky.js";
-      import { createCloudLayer, CLOUD_DEFAULTS } from "./cloud-layer.js";
+      import { createCloudLayer, CLOUD_DEFAULTS, GOD_RAYS_DEFAULTS } from "./cloud-layer.js";
       import { createTerrain } from "./daynight-terrain.js";
 
       const smoothstep = (e0, e1, x) => {
@@ -62,6 +62,7 @@
           color: "#9fb8c4",
           matchSky: true,
         },
+        godRays: { ...GOD_RAYS_DEFAULTS },
       };
 
       // ── Celestial driver: time-of-day → sun/moon directions + light ────────
@@ -153,7 +154,7 @@
         const sky = createDayNightSky();
         scene.add(sky.mesh);
         const clouds = createCloudLayer({ camera });
-        scene.add(clouds.mesh);
+        scene.add(clouds.mesh, clouds.sunMesh);
 
         // ── GUI ────────────────────────────────────────────────────────────
         const pane = new Pane({ title: "Day/Night Sky" });
@@ -173,6 +174,26 @@
         fFog.addBinding(PARAMS.fog, "matchSky", { label: "Match sky color" });
         fFog.addBinding(PARAMS.fog, "density", { min: 0, max: 0.002, step: 0.00001 });
         fFog.addBinding(PARAMS.fog, "color", { label: "Color (manual)" });
+
+        const fGod = pane.addFolder({ title: "God rays", expanded: false });
+        fGod.addBinding(PARAMS.godRays, "enabled");
+        fGod.addBinding(PARAMS.godRays, "skipOffscreen", { label: "Skip off-screen" });
+        fGod.addBinding(PARAMS.godRays, "effectScale", {
+          label: "Buffer scale",
+          min: 0.2,
+          max: 1,
+          step: 0.05,
+        });
+        fGod.addBinding(PARAMS.godRays, "exposure", { min: 0, max: 1, step: 0.01 });
+        fGod.addBinding(PARAMS.godRays, "samples", { min: 16, max: 96, step: 1 });
+        fGod.addBinding(PARAMS.godRays, "density", { min: 0, max: 1, step: 0.01 });
+        fGod.addBinding(PARAMS.godRays, "decay", { min: 0.8, max: 1, step: 0.001 });
+        fGod.addBinding(PARAMS.godRays, "weight", { min: 0, max: 1, step: 0.01 });
+        fGod.addBinding(PARAMS.godRays, "occCloudSteps", { label: "Cloud occ steps", min: 4, max: 16, step: 1 });
+        fGod.addBinding(PARAMS.godRays, "sunDistance", { min: 3500, max: 16000, step: 50 });
+        fGod.addBinding(PARAMS.godRays, "sunDiscRadius", { min: 80, max: 650, step: 5 });
+        fGod.addBinding(PARAMS.godRays, "sunTint", { label: "Sun tint" });
+        fGod.addBinding(PARAMS.godRays, "matchLightColor", { label: "Tint = light color" });
 
         const fSky = pane.addFolder({ title: "Sky colors", expanded: false });
         for (const k of ["zenithDay", "horizonDay", "zenithNight", "horizonNight", "sunsetColor", "groundColor", "sunColor", "moonColor"]) {
@@ -275,7 +296,12 @@
 
           // One call: scene→offscreen (with depth), clouds raymarched half-res
           // with depth occlusion, then composited to the canvas.
-          clouds.render(renderer, scene, camera);
+          clouds.render(renderer, scene, camera, {
+            godRays: PARAMS.godRays,
+            frame,
+            skyMesh: sky.mesh,
+            occluders: [terrain.mesh],
+          });
 
           hud.textContent =
             `time ${PARAMS.timeOfDay.toFixed(2)}h  sunUp ${L.sunUp.toFixed(2)}  ` +
