@@ -133,6 +133,12 @@ export function createCloudLayer({ camera }) {
   const uPhaseG = uniform(0.3);
   const uPhaseW = uniform(0.8);      // dual-lobe forward weight
   const uPowder = uniform(0.5);
+  // Multiple-scattering approximation (Frostbite-style octaves). 0 = single
+  // scatter (the current look) → silver-lined, glowing interior as it rises.
+  const uMsAmount = uniform(0.7);        // strength of the extra octaves (0 = off)
+  const uMsExtinction = uniform(0.5);    // less light extinction per octave (deeper)
+  const uMsContribution = uniform(0.5);  // brightness falloff per octave
+  const uMsEccentricity = uniform(0.5);  // phase broadening per octave
 
   const uWind = uniform(new THREE.Vector3());
   const uLightDir = uniform(new THREE.Vector3(0, 1, 0));
@@ -186,9 +192,9 @@ export function createCloudLayer({ camera }) {
       .div(pow(float(1.0).add(g2).sub(g.mul(mu).mul(2.0)), 1.5))
       .mul(INV_4PI);
   });
-  const phaseFn = Fn(([mu]) =>
-    HG(uPhaseG.negate(), mu).mul(uPhaseW.oneMinus())
-      .add(HG(uPhaseG, mu).mul(uPhaseW)),
+  const phaseAt = Fn(([mu, g]) =>
+    HG(g.negate(), mu).mul(uPhaseW.oneMinus())
+      .add(HG(g, mu).mul(uPhaseW)),
   );
 
   const lightMarch = Fn(([p]) => {
@@ -199,7 +205,7 @@ export function createCloudLayer({ camera }) {
       const lp = p.add(uLightDir.mul(stepLen.mul(float(i).add(1.0))));
       tau.addAssign(sampleDensity(lp));
     });
-    return exp(tau.mul(stepLen).mul(uLightAbsorb).negate());
+    return tau.mul(stepLen); // optical depth toward the light (octaves re-extinct it)
   });
 
   const cloudColorNode = Fn(() => {
@@ -252,7 +258,11 @@ export function createCloudLayer({ camera }) {
     const valid = discOut.greaterThan(0.0).and(tFar.greaterThan(tNear));
 
     const mu = dot(rayDir, normalize(uLightDir));
-    const phase = phaseFn(mu);
+    // Per-octave phases (constant per ray): each octave broadens the lobe.
+    const ecc1 = uPhaseG.mul(uMsEccentricity);
+    const ph0 = phaseAt(mu, uPhaseG);
+    const ph1 = phaseAt(mu, ecc1);
+    const ph2 = phaseAt(mu, ecc1.mul(uMsEccentricity));
     const jitter = fract(sin(dot(screenUV, vec2(12.9898, 78.233))).mul(43758.5453));
 
     // Scene depth for occlusion (NDC-space compare, reversed-depth agnostic).
@@ -280,12 +290,20 @@ export function createCloudLayer({ camera }) {
         const isEmpty = density.lessThan(uEmptyThreshold);
         const advance = isEmpty.select(baseStep.mul(uEmptyStepMul), baseStep);
         If(isEmpty.not(), () => {
-          const light = lightMarch(p);
+          const tauL = lightMarch(p); // optical depth toward the sun
           const powder = exp(density.mul(2.0).negate()).oneMinus()
             .mul(uPowder).add(uPowder.oneMinus());
           const h = length(p.sub(planetCenter())).sub(uPlanetRadius.add(uBase))
             .div(uThickness).clamp(0.0, 1.0);
-          const sun = uLightColor.mul(uLightIntensity).mul(light).mul(phase).mul(powder);
+          // Multiple-scattering octaves: each is dimmer, less-extincted, broader.
+          // Octave 0 is exactly the old single-scatter term (uMsAmount = 0 → off).
+          const t0 = exp(tauL.mul(uLightAbsorb).negate());
+          const t1 = exp(tauL.mul(uLightAbsorb).mul(uMsExtinction).negate());
+          const t2 = exp(tauL.mul(uLightAbsorb).mul(uMsExtinction).mul(uMsExtinction).negate());
+          const w1 = uMsContribution.mul(uMsAmount);
+          const w2 = uMsContribution.mul(uMsContribution).mul(uMsAmount);
+          const sunMS = t0.mul(ph0).add(t1.mul(ph1).mul(w1)).add(t2.mul(ph2).mul(w2));
+          const sun = uLightColor.mul(uLightIntensity).mul(sunMS).mul(powder);
           const amb = uAmbientColor.mul(uAmbientIntensity).mul(mix(float(0.4), float(1.0), h));
           const lum = sun.add(amb).mul(density).mul(baseStep);
           const stepT = exp(density.mul(baseStep).mul(uOpacity).mul(EXTINCTION).negate());
@@ -449,6 +467,7 @@ export function createCloudLayer({ camera }) {
   postQuad.material = presentMat;
 
   const _bufSize = new THREE.Vector2();
+  let _cloudScale = 0.5; // cloud raymarch buffer scale (0.5 half … 1.0 full)
   function ensureSize(renderer) {
     renderer.getDrawingBufferSize(_bufSize);
     const fw = Math.max(1, Math.floor(_bufSize.x));
@@ -458,8 +477,8 @@ export function createCloudLayer({ camera }) {
       sceneRT.setSize(fw, fh);
       compositeRT.setSize(fw, fh);
     }
-    const w = Math.max(1, Math.floor(fw * 0.5));
-    const h = Math.max(1, Math.floor(fh * 0.5));
+    const w = Math.max(1, Math.floor(fw * _cloudScale));
+    const h = Math.max(1, Math.floor(fh * _cloudScale));
     if (w !== rtW || h !== rtH) {
       rtW = w; rtH = h;
       cloudRT.setSize(w, h);
@@ -492,6 +511,11 @@ export function createCloudLayer({ camera }) {
     uLightAbsorb.value = P.lightAbsorb;
     uPhaseG.value = P.phaseG;
     uPowder.value = P.powder;
+    uMsAmount.value = P.msAmount ?? 0.7;
+    uMsExtinction.value = P.msExtinction ?? 0.5;
+    uMsContribution.value = P.msContribution ?? 0.5;
+    uMsEccentricity.value = P.msEccentricity ?? 0.5;
+    _cloudScale = P.bufferScale ?? 0.5; // ensureSize() resizes the buffer if changed
 
     // coverage slider → smoothstep thresholds (more coverage = lower threshold).
     const thresh = 1.0 - P.coverage;
@@ -613,12 +637,17 @@ export const CLOUD_DEFAULTS = {
   steps: 64,
   lightSteps: 6,
   emptySkip: 2.0,
+  bufferScale: 0.5,
   maxDist: 24000,
   planetRadius: 60000,
   opacity: 1.0,
   lightAbsorb: 1.1,
   phaseG: 0.3,
   powder: 0.5,
+  msAmount: 0.7,
+  msExtinction: 0.5,
+  msContribution: 0.5,
+  msEccentricity: 0.5,
   windDeg: 35,
   windSpeed: 0.02,
 };
