@@ -21,11 +21,11 @@ import {
 import { ImprovedNoise } from "three/addons/math/ImprovedNoise.js";
 
 const DEFAULT_SHAPE = {
-  fbmScale: 0.0046, octaves: 6, persistence: 0.5, lacunarity: 2.0,
-  heightScale: 255, flatness: 2.6, macroBlend: 0.2, macroFreq: 0.55,
-  macroOctaves: 4, peakBias: 0.28, ridgeBoost: 0.09, ridgeFreq: 1.35,
-  ridgeOctaves: 3, floorY: -145, mountainReliefMul: 0.42,
-  heroRidgeAmp: 95, heroRidgeR: 240000,
+  fbmScale: 0.0042, octaves: 5, persistence: 0.48, lacunarity: 1.92,
+  heightScale: 235, flatness: 3.4, macroBlend: 0.28, macroFreq: 0.48,
+  macroOctaves: 4, peakBias: 0.1, ridgeBoost: 0.038, ridgeFreq: 1.15,
+  ridgeOctaves: 2, floorY: -145, mountainReliefMul: 0.34,
+  heroRidgeAmp: 68, heroRidgeR: 320000,
 };
 
 function createSeededRandom(seed) {
@@ -54,9 +54,9 @@ export async function createTerrain({ size = 1600, segments = 320, shape = {} } 
 
   function mountainRelief(x, z) {
     const peaks = [
-      { cx: -320, cz: 240, r: 195000, a: 210 },
-      { cx: 380, cz: -300, r: 220000, a: 265 },
-      { cx: 40, cz: -120, r: 150000, a: 175 },
+      { cx: -320, cz: 240, r: 280000, a: 175 },
+      { cx: 380, cz: -300, r: 310000, a: 220 },
+      { cx: 40, cz: -120, r: 240000, a: 145 },
     ];
     let sum = 0;
     for (const p of peaks) {
@@ -158,23 +158,31 @@ export async function createTerrain({ size = 1600, segments = 320, shape = {} } 
     const uGrassScale = uniform(0.016);
     const uRockScale = uniform(0.003);
     const uSnowScale = uniform(0.018);
-    const uDispStrength = uniform(16);
+    const uDispStrength = uniform(11);
     const uAlbedoMul = uniform(0.94);
 
     const layerWeights = () => {
       const yW = positionWorld.y;
       const slope = sub(float(1), abs(normalWorld.y));
       const jitter = fract(mul(sin(dot(positionWorld.xz, vec2(127.1, 311.7))), 43758.5453));
-      const wSnow = smoothstep(float(78), float(178), yW);
-      const wRock = add(
-        mul(smoothstep(float(0.09), float(0.58), slope), sub(float(1), mul(wSnow, float(0.91)))),
-        mul(smoothstep(float(22), float(128), yW), float(0.28)),
+      const wSnow = smoothstep(float(158), float(268), yW);
+
+      // Steep faces → cliff rock dominates; starts earlier and reaches full rock sooner.
+      const wCliff = pow(smoothstep(float(0.12), float(0.36), slope), float(0.7));
+      const wHeightRock = mul(smoothstep(float(48), float(158), yW), float(0.12));
+      const wRock = min(
+        add(mul(wCliff, sub(float(1), mul(wSnow, float(0.93)))), wHeightRock),
+        float(1),
       );
-      const wRock2 = mul(wRock, sub(float(1), mul(wSnow, float(0.74))));
+      const wRock2 = mul(wRock, sub(float(1), mul(wSnow, float(0.8))));
+
+      // Grass only on flatter ground — cliffs zero it out instead of leaking through normalization.
+      const wGrassFlat = mul(sub(float(1), wCliff), sub(float(1), min(wSnow, float(0.98))));
       const wGrass = mul(
-        sub(float(1), add(min(wSnow, float(0.99)), wRock2)),
-        add(float(0.84), mul(jitter, float(0.16))),
+        mul(wGrassFlat, sub(float(1), mul(wRock2, float(0.25)))),
+        add(float(0.9), mul(jitter, float(0.1))),
       );
+
       const wSum = add(add(wGrass, wRock2), wSnow);
       return vec3(wGrass, wRock2, wSnow).div(max(wSum, float(0.001)));
     };
@@ -208,8 +216,13 @@ export async function createTerrain({ size = 1600, segments = 320, shape = {} } 
       const dR = texture(rock.displacement, tu).x;
       const dS = texture(snow.displacement, tu).x;
       const h = positionGeometry.y;
-      const wS = smoothstep(float(88), float(175), h);
-      const wR = mul(smoothstep(float(6), float(130), h), sub(float(1), mul(wS, float(0.94))));
+      const slopeD = sub(float(1), abs(normalGeometry.y));
+      const wCliffD = pow(smoothstep(float(0.12), float(0.36), slopeD), float(0.7));
+      const wS = smoothstep(float(168), float(262), h);
+      const wR = mul(
+        max(wCliffD, mul(smoothstep(float(12), float(148), h), float(0.55))),
+        sub(float(1), mul(wS, float(0.94))),
+      );
       const blended = add(mul(dR, wR), mul(dS, wS));
       const lift = sub(blended, mul(float(0.5), add(wR, wS)));
       return positionGeometry.add(normalGeometry.normalize().mul(mul(lift, uDispStrength)));
