@@ -124,6 +124,7 @@
         },
         godRays: { ...GOD_RAYS_DEFAULTS, enabled: false },
         bloom: { enabled: true, strength: 0.4, radius: 0.6, threshold: 0.92 },
+        cloudShadows: { enabled: true, strength: 0.5 },
         lensFlare: { ...LENS_FLARE_DEFAULTS },
         shadows: { enabled: true, normalBias: 3, bias: -0.0005 },
         ocean: {
@@ -355,15 +356,18 @@
         const _hazeColor = mix(uHazeAway, uHazeSun, pow(_hazeSunAmt, uHazePow).mul(uHazeSunStrength));
         scene.fogNode = fog(_hazeColor, densityFogFactor(uHazeDensity).mul(uHazeEnabled));
 
+        // ── Clouds (built BEFORE the terrain so the terrain can share the
+        //    cloud density field and cast matching cloud shadows) ─────────────
+        const clouds = createCloudLayer({ camera });
+
         // PBR terrain (grass / rock / snow triplanar) — the showcase landscape.
-        const terrain = await createTerrain({ size: 1600, segments: 384 });
+        const terrain = await createTerrain({ size: 1600, segments: 384, cloudShadow: clouds.cloudShadow });
         scene.add(terrain.mesh);
         terrain.mesh.castShadow = true; // ridges shadow the valleys (receiveShadow set in module)
 
-        // ── Sky + clouds ─────────────────────────────────────────────────────
+        // ── Sky ──────────────────────────────────────────────────────────────
         const sky = createDayNightSky();
         scene.add(sky.mesh);
-        const clouds = createCloudLayer({ camera });
         scene.add(clouds.mesh, clouds.sunMesh);
 
         // Sun-anchored lens flare (own layer; drawn as an overlay after clouds).
@@ -474,6 +478,10 @@
         tg(s, PARAMS.shadows, "enabled");
         sl(s, PARAMS.shadows, "normalBias", 0, 8, 0.1);
         sl(s, PARAMS.shadows, "bias", -0.002, 0.002, 0.0001);
+
+        s = _section(uiBody, "Cloud shadows", false);
+        tg(s, PARAMS.cloudShadows, "enabled");
+        sl(s, PARAMS.cloudShadows, "strength", 0, 2, 0.01);
 
         s = _section(uiBody, "Terrain", false);
         sl(s, PARAMS.terrain, "grassScale", 0.002, 0.06, 0.001, "Grass UV");
@@ -784,6 +792,13 @@
             tU.snowEnd.value = T.snowEnd;
             tU.cliffLow.value = T.cliffLow;
             tU.cliffHigh.value = T.cliffHigh;
+          }
+          // Cloud shadows: track the sun; fade out at night (no sun = no shadow)
+          // and when the cloud layer itself is off.
+          if (tU.cloudShadowStrength) {
+            tU.cloudShadowSunDir.value.copy(_sunDir);
+            const csOn = PARAMS.cloudShadows.enabled && PARAMS.clouds.enabled;
+            tU.cloudShadowStrength.value = csOn ? PARAMS.cloudShadows.strength * L.dayF : 0;
           }
 
           // Ocean: re-bake the sky reflection on a throttle, then step the waves.

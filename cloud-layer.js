@@ -626,6 +626,15 @@ export function createCloudLayer({ camera }) {
     compositeRT,
     /** Toggle env-bake mode (skip depth occlusion, cheaper march) for PMREM. */
     setEnvMode: (on) => { uEnvMode.value = on ? 1 : 0; },
+    /**
+     * Shared nodes so other materials (the terrain/ocean) can cast cloud
+     * shadows: they march a surface point up the sun ray to the cloud shell and
+     * sample this SAME density field — so the shadow exactly matches the cloud
+     * overhead, wind-animated, for free. `sampleDensity(p)` is camera-relative
+     * via `cameraPosition`, which is valid in any material drawn by the main
+     * camera. `uBase`/`uThickness` locate the shell for the projection.
+     */
+    cloudShadow: { sampleDensity, uBase, uThickness },
     /** Drive the post bloom: { enabled, strength, radius, threshold }. */
     setBloom: (b) => {
       uBloomMix.value = b.enabled ? 1 : 0;

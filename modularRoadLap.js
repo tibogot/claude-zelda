@@ -93,6 +93,25 @@ export class LapTracker {
     return this.gates.length > 0 && this.startIndex >= 0;
   }
 
+  /** Seed the best lap from a persisted record (so the HUD shows it and only a
+   *  faster lap beats it). Call after buildGates() / reset(). */
+  applyStoredBest(t) {
+    if (Number.isFinite(t)) this.bestLap = t;
+  }
+
+  /**
+   * Stable id for the current course, so a saved record only applies to the same
+   * layout. Built from the gate types + their rounded positions, so re-driving an
+   * identical track matches but editing the gates starts a fresh record.
+   * @returns {string} empty when there's no course
+   */
+  courseSignature() {
+    if (!this.hasCourse) return "";
+    const r = (n) => Math.round(n); // 1 m resolution
+    const parts = this.gates.map((g) => `${g.type}:${r(g.pos.x)},${r(g.pos.z)},${r(g.yaw * 100)}`);
+    return `${this.gates.length}|${parts.join("|")}`;
+  }
+
   /** Total mandatory waypoints in one lap (everything that isn't the lap line). */
   get waypointCount() {
     return Math.max(0, this.gates.length - 1);
@@ -156,9 +175,11 @@ export class LapTracker {
       // Returned to the line → lap complete.
       const lapTime = this.currentTime;
       this.lastLap = lapTime;
-      if (!Number.isFinite(this.bestLap) || lapTime < this.bestLap) {
+      const prevBest = this.bestLap;
+      const isRecord = !Number.isFinite(prevBest) || lapTime < prevBest;
+      if (isRecord) {
         this.bestLap = lapTime;
-        this._flash(`LAP ${this.lapCount + 1} — ${formatLapTime(lapTime)}  ★ BEST`);
+        this._flash(`★ NEW RECORD ★  ${formatLapTime(lapTime)}`);
       } else {
         this._flash(`LAP ${this.lapCount + 1} — ${formatLapTime(lapTime)}`);
       }
@@ -166,7 +187,7 @@ export class LapTracker {
       this.currentTime = 0;
       this.passedThisLap = 0;
       this._advance();
-      return { kind: "lap", gate, lapTime };
+      return { kind: "lap", gate, lapTime, isRecord, prevBest };
     }
     // A mandatory waypoint.
     this.passedThisLap++;

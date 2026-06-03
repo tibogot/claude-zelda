@@ -804,6 +804,58 @@
       <div id="lap-next" style="font-size: 12px; margin-top: 3px; color: #ffd54a; text-shadow: 0 1px 4px rgba(0,0,0,0.7)"></div>
       <div id="lap-flash" style="font-size: 16px; font-weight: 700; margin-top: 6px; color: #7CFFB4; min-height: 20px; text-shadow: 0 2px 8px rgba(0,0,0,0.8)"></div>
     </div>
+    <style>
+      @keyframes recordPulse {
+        0% { transform: scale(1); }
+        30% { transform: scale(1.1); }
+        100% { transform: scale(1); }
+      }
+      #record-card.record-hit {
+        animation: recordPulse 0.65s ease-out;
+        border-color: rgba(255, 213, 74, 0.95);
+        box-shadow: 0 0 26px rgba(255, 213, 74, 0.55);
+      }
+      #record-clear {
+        margin-top: 8px;
+        width: 100%;
+        font: 11px/1 var(--font-mono);
+        color: #cdd7e2;
+        background: rgba(255, 255, 255, 0.06);
+        border: 1px solid rgba(255, 255, 255, 0.16);
+        border-radius: 6px;
+        padding: 5px 8px;
+        cursor: pointer;
+        pointer-events: auto;
+      }
+      #record-clear:hover {
+        background: rgba(255, 90, 90, 0.18);
+        border-color: rgba(255, 120, 120, 0.5);
+        color: #fff;
+      }
+    </style>
+    <div
+      id="record-card"
+      style="
+        position: fixed;
+        left: 14px;
+        bottom: 14px;
+        z-index: 15;
+        display: none;
+        font-family: var(--font-mono);
+        background: rgba(10, 14, 20, 0.72);
+        border: 1px solid rgba(255, 213, 74, 0.4);
+        border-radius: 10px;
+        padding: 10px 14px;
+        min-width: 172px;
+        color: #eaf2ff;
+        pointer-events: none;
+      "
+    >
+      <div style="font-size: 10px; letter-spacing: 0.18em; opacity: 0.7; text-transform: uppercase">🏆 Track record</div>
+      <div id="record-time" style="font-size: 24px; font-weight: 700; color: #ffd54a; margin-top: 2px">—</div>
+      <div id="record-meta" style="font-size: 10px; opacity: 0.65; margin-top: 2px"></div>
+      <button id="record-clear" type="button">Clear record</button>
+    </div>
     <div
       id="pause-badge"
       style="
@@ -1642,7 +1694,65 @@
             lapNextEl.textContent = lap.nextLabel ? `▸ ${lap.nextLabel}` : "";
           }
           lapFlashEl.textContent = lap.message;
+          lapFlashEl.style.color = lap.message.includes("RECORD") ? "#ffd54a" : "#7CFFB4";
         }
+
+        // ── BEST-LAP PERSISTENCE (per-course record in localStorage) ──
+        const recordCard = document.getElementById("record-card");
+        const recordTimeEl = document.getElementById("record-time");
+        const recordMetaEl = document.getElementById("record-meta");
+        const recordClearBtn = document.getElementById("record-clear");
+        const BEST_PREFIX = "mr_bestlap_v1_";
+        let courseKey = "";
+        function loadStoredBest(sig) {
+          if (!sig) return NaN;
+          try {
+            const v = localStorage.getItem(BEST_PREFIX + sig);
+            const t = v != null ? parseFloat(v) : NaN;
+            return Number.isFinite(t) ? t : NaN;
+          } catch (e) {
+            return NaN;
+          }
+        }
+        function saveStoredBest(sig, t) {
+          if (!sig) return;
+          try {
+            localStorage.setItem(BEST_PREFIX + sig, String(t));
+          } catch (e) {
+            /* storage disabled / full — keep the in-memory best */
+          }
+        }
+        function refreshRecordCard() {
+          if (!lap.hasCourse) {
+            recordTimeEl.textContent = "—";
+            recordMetaEl.textContent = "Add Start / Checkpoint pieces";
+            recordClearBtn.style.display = "none";
+            return;
+          }
+          const best = loadStoredBest(courseKey);
+          recordTimeEl.textContent = Number.isFinite(best) ? formatLapTime(best) : "—";
+          recordMetaEl.textContent = Number.isFinite(best)
+            ? `${lap.gates.length} gates · saved`
+            : `${lap.gates.length} gates · set a record!`;
+          recordClearBtn.style.display = Number.isFinite(best) ? "" : "none";
+        }
+        function celebrateRecord() {
+          recordCard.classList.remove("record-hit");
+          void recordCard.offsetWidth; // reflow → restart the CSS animation
+          recordCard.classList.add("record-hit");
+        }
+        recordClearBtn?.addEventListener("click", () => {
+          if (courseKey) {
+            try {
+              localStorage.removeItem(BEST_PREFIX + courseKey);
+            } catch (e) {
+              /* ignore */
+            }
+          }
+          lap.bestLap = NaN;
+          refreshRecordCard();
+          updateLapHud();
+        });
 
         function setBuildMode(on) {
           state.buildMode = on;
@@ -1675,6 +1785,7 @@
           driveBtn.textContent = on ? "Stop driving (T)" : "Test drive (T)";
           driveHud.style.display = on ? "" : "none";
           lapHud.style.display = on ? "" : "none";
+          recordCard.style.display = on ? "" : "none";
           camModeEl.textContent = on
             ? "DRIVE"
             : state.buildMode
@@ -1701,6 +1812,9 @@
             spawnOnTrack();
             lap.buildGates(builder.pieces); // re-scan game pieces for this run
             lap.reset();
+            courseKey = lap.courseSignature();
+            lap.applyStoredBest(loadStoredBest(courseKey)); // seed the saved record
+            refreshRecordCard();
             updateLapHud();
             tireMarks.reset();
             driftSmoke.reset();
@@ -2083,7 +2197,14 @@
               // Lap timing: a returned event means a gate was crossed → park the
               // respawn point there so R / the next fall return to it.
               const lapEv = lap.update(simDt, vehicle.body.pos, vehicle.body.vel);
-              if (lapEv) setRespawnToLastGate();
+              if (lapEv) {
+                setRespawnToLastGate();
+                if (lapEv.kind === "lap" && lapEv.isRecord) {
+                  saveStoredBest(courseKey, lapEv.lapTime); // persist the new best
+                  refreshRecordCard();
+                  celebrateRecord();
+                }
+              }
             }
             if (state.paused) {
               controls.target.copy(vehicle.body.pos); // orbit around the frozen car
