@@ -1011,6 +1011,75 @@ export const CATEGORY_PRESETS = {
       preview: `<svg viewBox="0 0 80 80"><line x1="8" y1="14" x2="72" y2="14" stroke="#c0392b" stroke-width="1.5"/><path d="M12 64 Q40 14 70 14" ${_RS}/></svg>`,
     },
   ],
+  slopes: [
+    // Climbs — slope base levels off (smoothstep) at both ends, so they chain cleanly.
+    {
+      id: "slope_up_gentle",
+      label: "Up Gentle",
+      base: "slope",
+      params: { slopeLength: 30, slopeRise: 5 },
+      preview: `<svg viewBox="0 0 80 80"><polygon points="10,64 70,64 70,48" ${_RB}/><line x1="12" y1="62" x2="68" y2="50" ${_RS}/></svg>`,
+    },
+    {
+      id: "slope_up_medium",
+      label: "Up Medium",
+      base: "slope",
+      params: { slopeLength: 28, slopeRise: 10 },
+      preview: `<svg viewBox="0 0 80 80"><polygon points="10,64 70,64 70,34" ${_RB}/><line x1="12" y1="62" x2="68" y2="36" ${_RS}/></svg>`,
+    },
+    {
+      id: "slope_up_steep",
+      label: "Up Steep",
+      base: "slope",
+      params: { slopeLength: 26, slopeRise: 16 },
+      preview: `<svg viewBox="0 0 80 80"><polygon points="10,64 70,64 70,20" ${_RB}/><line x1="12" y1="62" x2="68" y2="22" ${_RS}/></svg>`,
+    },
+    // Descents — same shape, negative rise.
+    {
+      id: "slope_down_gentle",
+      label: "Down Gentle",
+      base: "slope",
+      params: { slopeLength: 30, slopeRise: -5 },
+      preview: `<svg viewBox="0 0 80 80"><polygon points="10,48 10,64 70,64" ${_RB}/><line x1="12" y1="50" x2="68" y2="62" ${_RS}/></svg>`,
+    },
+    {
+      id: "slope_down_medium",
+      label: "Down Medium",
+      base: "slope",
+      params: { slopeLength: 28, slopeRise: -10 },
+      preview: `<svg viewBox="0 0 80 80"><polygon points="10,34 10,64 70,64" ${_RB}/><line x1="12" y1="36" x2="68" y2="62" ${_RS}/></svg>`,
+    },
+    {
+      id: "slope_down_steep",
+      label: "Down Steep",
+      base: "slope",
+      params: { slopeLength: 26, slopeRise: -16 },
+      preview: `<svg viewBox="0 0 80 80"><polygon points="10,20 10,64 70,64" ${_RB}/><line x1="12" y1="22" x2="68" y2="62" ${_RS}/></svg>`,
+    },
+    // Crests — net-zero bump / dip (rise to the middle, level at both ends).
+    {
+      id: "slope_hill",
+      label: "Hill",
+      base: "crest",
+      params: { slopeLength: 32, slopeRise: 8 },
+      preview: `<svg viewBox="0 0 80 80"><path d="M10 64 L10 52 Q40 18 70 52 L70 64 Z" ${_RB}/><path d="M12 52 Q40 24 68 52" fill="none" ${_RS}/></svg>`,
+    },
+    {
+      id: "slope_dip",
+      label: "Dip",
+      base: "crest",
+      params: { slopeLength: 32, slopeRise: -8 },
+      preview: `<svg viewBox="0 0 80 80"><path d="M10 34 Q40 70 70 34 L70 64 L10 64 Z" ${_RB}/><path d="M10 34 Q40 66 70 34" fill="none" ${_RS}/></svg>`,
+    },
+    // Climbing turn — stack to gain height.
+    {
+      id: "slope_helix",
+      label: "Helix",
+      base: "spiral",
+      params: { spiralRadius: 18, spiralAngle: 180, spiralRise: 10, curveDir: 1 },
+      preview: `<svg viewBox="0 0 80 80"><path d="M20 64 L20 44 Q20 26 40 26 Q60 26 60 44" ${_RS}/><path d="M26 54 Q40 40 56 48" fill="none" stroke="#c0392b" stroke-width="1.4" opacity="0.7"/></svg>`,
+    },
+  ],
   turns: [
     {
       id: "turn_smooth_small",

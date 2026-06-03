@@ -5,6 +5,7 @@ import {
   kickerRampGeometry,
   jumpRampGeometry,
   buildSlopeLabGroup,
+  buildJumpLabGroup,
   enableMeshShadows,
 } from "./modularRoadParkour.js";
 
@@ -141,6 +142,12 @@ export const PROP_CATALOG = [
     label: "Slope lab",
     collision: "both",
     make: () => buildSlopeLabGroup(),
+  },
+  {
+    id: "jumplab",
+    label: "Jump lab",
+    collision: "both",
+    make: () => buildJumpLabGroup(),
   },
   {
     id: "glowbox",
@@ -330,7 +337,12 @@ export class PropManager {
     enableMeshShadows(root);
     root.userData.isProp = true;
     if (this.orbit?.target) {
-      root.position.set(this.orbit.target.x, Math.max(0, this.orbit.target.y), this.orbit.target.z);
+      // Spawn under wherever the camera is looking, but keep the prop's authored
+      // rest height (make() leaves y = 0 for ground-flush props, or sets a resting
+      // offset like the pipe's radius) — don't yank it up to the camera target's y,
+      // which is what made props hover above the ground.
+      root.position.x = this.orbit.target.x;
+      root.position.z = this.orbit.target.z;
     }
     this.group.add(root);
     const inst = { id: typeId, def, root, collision: def.collision };

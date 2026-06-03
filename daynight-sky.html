@@ -343,9 +343,10 @@
         const uHazeSun = uniform(new THREE.Color(PARAMS.fog.sunTint).convertSRGBToLinear());
         const uHazePow = uniform(PARAMS.fog.tintPow);
         const uHazeSunDir = uniform(new THREE.Vector3(0, 1, 0));
+        const uHazeSunStrength = uniform(1); // fades the warm sun tint out at night
         const _hazeView = normalize(positionWorld.sub(cameraPosition));
         const _hazeSunAmt = clamp(dot(_hazeView, uHazeSunDir), 0, 1);
-        const _hazeColor = mix(uHazeAway, uHazeSun, pow(_hazeSunAmt, uHazePow));
+        const _hazeColor = mix(uHazeAway, uHazeSun, pow(_hazeSunAmt, uHazePow).mul(uHazeSunStrength));
         scene.fogNode = fog(_hazeColor, densityFogFactor(uHazeDensity).mul(uHazeEnabled));
 
         // PBR terrain (grass / rock / snow triplanar) — the showcase landscape.
@@ -605,6 +606,8 @@
           uHazeSun.value.set(PARAMS.fog.sunTint).convertSRGBToLinear();
           uHazePow.value = PARAMS.fog.tintPow;
           uHazeSunDir.value.copy(_sunDir);
+          // Warm tint = sunlight in the haze → full by day, gone at night.
+          uHazeSunStrength.value = smoothstep(-0.1, 0.05, L.sunUp);
 
           const frame = {
             time: elapsed, dt,

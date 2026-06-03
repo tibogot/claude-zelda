@@ -77,6 +77,41 @@ export function buildSlopeLabGroup() {
 }
 
 /**
+ * Jump-lab counterpart to buildSlopeLabGroup: five side-by-side concave jump
+ * ramps (kicker scoop) of increasing rise, so the takeoff lip gets steeper
+ * left→right — same flat-entry shape as the "Jump ramp" prop, laid out as a
+ * test row. Feet on y = 0, centred on XZ.
+ */
+export function buildJumpLabGroup() {
+  const group = new THREE.Group();
+  group.name = "JumpLab";
+  const rises = [4, 7, 10, 14, 18]; // increasing lip steepness ≈ different takeoff angles
+  const w = 12;
+  const l = 22;
+  const z = 48;
+  for (let i = 0; i < rises.length; i++) {
+    const tint = 0.52 - i * 0.055;
+    const color = new THREE.Color().setHSL(0.085, 0.42, tint).getHex();
+    const m = new THREE.Mesh(
+      jumpRampGeometry(w, l, rises[i]),
+      new THREE.MeshStandardMaterial({ color, roughness: 0.85, side: THREE.DoubleSide }),
+    );
+    m.position.set(-42 + i * 21, 0, z);
+    m.castShadow = true;
+    m.receiveShadow = true;
+    group.add(m);
+  }
+  const box = new THREE.Box3().setFromObject(group);
+  const cx = (box.min.x + box.max.x) * 0.5;
+  const cz = (box.min.z + box.max.z) * 0.5;
+  for (const child of group.children) {
+    child.position.x -= cx;
+    child.position.z -= cz;
+  }
+  return group;
+}
+
+/**
  * Curved drive ramp: starts at local (0,0,0) heading −Z, turns by `angleDeg`
  * (curveDir ±1), rises to `rise` with smoothstep. Low edge at y = 0.
  */
