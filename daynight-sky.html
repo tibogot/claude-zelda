@@ -99,8 +99,6 @@
         const t = THREE.MathUtils.clamp((x - e0) / (e1 - e0), 0, 1);
         return t * t * (3 - 2 * t);
       };
-      // Curated subset of the ocean shader's params (driven via ocean.syncParams).
-      const _pickOcean = (ks) => Object.fromEntries(ks.map((k) => [k, OCEAN_DEFAULTS[k]]));
 
       // ── PARAMS ───────────────────────────────────────────────────────────
       const PARAMS = {
@@ -136,18 +134,8 @@
           dispStrength: 0, albedoMul: 0.94,
           snowStart: 158, snowEnd: 268, cliffLow: 0.12, cliffHigh: 0.36,
         },
-        // Deeper ocean look/shaping params (defaults pulled from OCEAN_DEFAULTS).
-        oceanFx: _pickOcean([
-          "shoreColor", "midColor", "deepColor", "highlightColor",
-          "depthAbsorb", "depthRampShoreMid", "depthRampMidDeep", "openOceanDepth",
-          "fftRippleAmp", "gerstnerBlend", "surfNormalStrength",
-          "whitecapEnabled", "whitecapIntensity", "whitecapThreshold", "whitecapSoftness",
-          "envReflectEnabled", "envReflectIntensity", "envRoughnessCalm", "envRoughnessRipple",
-          "fresnelExp", "fresnelSky", "fresnelMax",
-          "glintColor", "glintIntensity", "glintPower",
-          "sssEnabled", "sssIntensity", "sssColor",
-          "horizonFadeEnabled", "horizonColor", "horizonFadeStart", "horizonFadeEnd",
-        ]),
+        // Full ocean look/shaping set (defaults from OCEAN_DEFAULTS, driven via syncParams).
+        oceanFx: { ...OCEAN_DEFAULTS },
       };
 
       // ── Celestial driver: time-of-day → sun/moon directions + light ────────
@@ -502,7 +490,7 @@
         tg(s, PARAMS.ocean, "reflectClouds", "Reflect clouds");
         {
           const fx = PARAMS.oceanFx;
-          let sub = _section(s, "Color", false);
+          let sub = _section(s, "Color & depth", false);
           col(sub, fx, "shoreColor", "Shore");
           col(sub, fx, "midColor", "Mid");
           col(sub, fx, "deepColor", "Deep");
@@ -511,21 +499,81 @@
           sl(sub, fx, "depthRampShoreMid", 0, 1, 0.01, "Ramp shore→mid");
           sl(sub, fx, "depthRampMidDeep", 0, 1, 0.01, "Ramp mid→deep");
           sl(sub, fx, "openOceanDepth", 0, 200, 1, "Open depth");
+          sl(sub, fx, "opacity", 0, 1, 0.01);
 
-          sub = _section(s, "Waves+", false);
+          sub = _section(s, "Shore damping", false);
+          tg(sub, fx, "shoreDampEnabled", "Enabled");
+          sl(sub, fx, "shoreDampStart", 0, 20, 0.1, "Damp start");
+          sl(sub, fx, "shoreDampEnd", 1, 60, 0.5, "Damp end");
+          sl(sub, fx, "shoreLandMargin", 0, 3, 0.05, "Land margin");
+          sl(sub, fx, "shoreVertKeep", 0, 1, 0.01, "Vertical keep");
+          sl(sub, fx, "shoreSurfFoamBoost", 0, 4, 0.05, "Surf foam boost");
+          sl(sub, fx, "shoreSurfWidth", 0, 20, 0.1, "Surf width");
+          sl(sub, fx, "shoreReflDamp", 0, 1, 0.01, "Refl damp");
+          tg(sub, fx, "shoreWhitecapDamp", "Whitecap damp");
+
+          sub = _section(s, "Surface normals", false);
+          sl(sub, fx, "surfNormalStrength", 0, 1, 0.01, "Strength");
+          sl(sub, fx, "surfNoiseScale1", 0, 0.3, 0.005, "Noise scale 1");
+          sl(sub, fx, "surfNoiseScale2", 0, 0.3, 0.005, "Noise scale 2");
+          sl(sub, fx, "surfNoiseSpeed1", -1, 1, 0.01, "Noise speed 1");
+          sl(sub, fx, "surfNoiseSpeed2", -1, 1, 0.01, "Noise speed 2");
+          sl(sub, fx, "procNoiseSpeed", 0, 3, 0.05, "Proc speed");
+
+          sub = _section(s, "Waves (FFT)", false);
+          tg(sub, fx, "fftEnabled", "FFT enabled");
           sl(sub, fx, "fftRippleAmp", 0, 2, 0.05, "Ripple amp");
           sl(sub, fx, "gerstnerBlend", 0, 1, 0.01, "Gerstner blend");
-          sl(sub, fx, "surfNormalStrength", 0, 1, 0.01, "Surf normal");
+
+          sub = _section(s, "Gerstner waves", false);
+          tg(sub, fx, "waveEnabled", "Enabled");
+          sl(sub, fx, "waveAmp", 0, 3, 0.05, "Amplitude");
+          sl(sub, fx, "waveLength", 5, 150, 1, "Wavelength");
+          sl(sub, fx, "waveSteep", 0, 1, 0.01, "Steepness");
+          sl(sub, fx, "waveSpeed", 0, 3, 0.05, "Speed");
+          sl(sub, fx, "windAngleDeg", 0, 360, 1, "Wind angle");
+          sl(sub, fx, "windSpreadDeg", 0, 180, 1, "Wind spread");
+          sl(sub, fx, "waveAmpFalloff", 0.3, 1, 0.01, "Amp falloff");
+          sl(sub, fx, "waveLenFalloff", 0.3, 1, 0.01, "Len falloff");
+          sl(sub, fx, "waveNormalStrength", 0, 3, 0.05, "Normal strength");
 
           sub = _section(s, "Whitecaps", false);
           tg(sub, fx, "whitecapEnabled", "Enabled");
           sl(sub, fx, "whitecapIntensity", 0, 3, 0.05, "Intensity");
           sl(sub, fx, "whitecapThreshold", 0, 1, 0.01, "Threshold");
           sl(sub, fx, "whitecapSoftness", 0, 1, 0.01, "Softness");
+          sl(sub, fx, "whitecapNoiseScale", 0, 2, 0.01, "Noise scale");
+          sl(sub, fx, "whitecapNoiseSpeed", 0, 2, 0.01, "Noise speed");
+          sl(sub, fx, "whitecapWarpStrength", 0, 2, 0.01, "Warp strength");
+          sl(sub, fx, "whitecapWarpScale", 0, 1, 0.01, "Warp scale");
+          sl(sub, fx, "whitecapContrast", 0, 4, 0.05, "Contrast");
+          sl(sub, fx, "whitecapBrightness", 0, 3, 0.05, "Brightness");
+          sl(sub, fx, "whitecapProcThreshold", 0, 1, 0.01, "Proc threshold");
+          sl(sub, fx, "whitecapProcSoftness", 0, 1, 0.01, "Proc softness");
 
-          sub = _section(s, "Reflection", false);
-          tg(sub, fx, "envReflectEnabled", "Enabled");
-          sl(sub, fx, "envReflectIntensity", 0, 3, 0.05, "Intensity");
+          sub = _section(s, "Coastal foam", false);
+          tg(sub, fx, "foamEnabled", "Enabled");
+          col(sub, fx, "foamColor", "Color");
+          sl(sub, fx, "foamBandWidth", 0, 20, 0.1, "Band width");
+          sl(sub, fx, "foamIntensity", 0, 3, 0.05, "Intensity");
+          sl(sub, fx, "foamSharpness", 0.2, 4, 0.05, "Sharpness");
+          sl(sub, fx, "foamNoiseAmt", 0, 1, 0.01, "Noise amt");
+          sl(sub, fx, "foamNoiseScale", 0, 2, 0.01, "Noise scale");
+          sl(sub, fx, "foamNoiseSpeed", 0, 2, 0.01, "Noise speed");
+          sl(sub, fx, "foamWarpStrength", 0, 2, 0.01, "Warp strength");
+          sl(sub, fx, "foamWarpScale", 0, 1, 0.01, "Warp scale");
+          sl(sub, fx, "foamFineScale", 0, 3, 0.05, "Fine scale");
+          sl(sub, fx, "foamFineAmt", 0, 1, 0.01, "Fine amt");
+          sl(sub, fx, "foamFineSpeed", 0, 2, 0.01, "Fine speed");
+          sl(sub, fx, "foamContrast", 0, 3, 0.05, "Contrast");
+          sl(sub, fx, "foamCutoff", 0, 1, 0.01, "Cutoff");
+          sl(sub, fx, "foamTransitionWidth", 0, 1, 0.01, "Transition");
+          sl(sub, fx, "foamBreatheAmp", 0, 2, 0.01, "Breathe amp");
+          sl(sub, fx, "foamBreatheHz", 0, 2, 0.01, "Breathe Hz");
+
+          sub = _section(s, "Reflection & Fresnel", false);
+          tg(sub, fx, "envReflectEnabled", "Env enabled");
+          sl(sub, fx, "envReflectIntensity", 0, 3, 0.05, "Env intensity");
           sl(sub, fx, "envRoughnessCalm", 0, 0.5, 0.01, "Rough calm");
           sl(sub, fx, "envRoughnessRipple", 0, 1, 0.01, "Rough ripple");
           sl(sub, fx, "fresnelExp", 0.5, 8, 0.1, "Fresnel exp");
@@ -544,9 +592,16 @@
 
           sub = _section(s, "Horizon fade", false);
           tg(sub, fx, "horizonFadeEnabled", "Enabled");
+          tg(sub, fx, "horizonUseSky", "Use sky");
           col(sub, fx, "horizonColor", "Color");
           sl(sub, fx, "horizonFadeStart", 0, 10000, 50, "Start");
           sl(sub, fx, "horizonFadeEnd", 100, 20000, 100, "End");
+
+          sub = _section(s, "Underwater", false);
+          sl(sub, fx, "snellCritCos", 0, 1, 0.01, "Snell cos");
+          sl(sub, fx, "snellSoft", 0, 0.5, 0.01, "Snell soft");
+          sl(sub, fx, "underwaterSkyBoost", 0, 3, 0.05, "Sky boost");
+          sl(sub, fx, "underwaterMurk", 0, 1, 0.01, "Murk");
         }
 
         s = _section(uiBody, "Fog");
