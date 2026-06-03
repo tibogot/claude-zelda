@@ -97,6 +97,10 @@ export function createDayNightSky() {
   const uFogEnabled = uniform(0);
   const uFogColor = uniform(new THREE.Color(0x9fb8c4));
   const uFogDensity = uniform(0.0003);
+  // How high up the sky the horizon haze climbs (in `up`, i.e. sin of elevation).
+  // Smaller = the haze hugs the waterline, leaving the scattering's bright
+  // horizon band visible instead of washing it out.
+  const uFogHazeHeight = uniform(0.12);
 
   // ── Hash + star field ────────────────────────────────────────────────────
   const hash33 = Fn(([p]) => {
@@ -277,7 +281,7 @@ export function createDayNightSky() {
     );
 
     // Horizon + under-horizon haze (matches scene FogExp2 on terrain).
-    const fogHorizon = smoothstep(float(0.34), float(0.02), up);
+    const fogHorizon = smoothstep(uFogHazeHeight, float(0.0), up);
     const fogGround = smoothstep(float(0.06), float(-0.2), up);
     const fogMask = max(fogHorizon, fogGround);
     const fogDepth = fogMask.mul(float(SKY_RADIUS));
@@ -426,6 +430,7 @@ export function createDayNightSky() {
       uFogEnabled.value = frame.fog.enabled ? 1 : 0;
       uFogColor.value.copy(frame.fog.color);
       uFogDensity.value = frame.fog.density;
+      if (frame.fog.hazeHeight !== undefined) uFogHazeHeight.value = frame.fog.hazeHeight;
     }
   }
 
