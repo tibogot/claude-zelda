@@ -938,6 +938,14 @@ function gapEndTangents(pp) {
   const L = Math.max(4, pp.gapLength);
   return { entry: new V3(0, 0, -1), exit: new V3(0, -2 * pp.gapDrop, -L) };
 }
+// Climbing helix ramp: a horizontal turn of 2π·turns with the climb eased flat at
+// both ends, so the end tangents are horizontal (entry −Z, exit rotated by the
+// full turn). fixFrames runs after this and only re-levels up/right.
+function loopSpiralEndTangents(pp) {
+  const dir = pp.curveDir >= 0 ? 1 : -1;
+  const A = 2 * Math.PI * Math.max(0.25, pp.loopSpiralTurns ?? 1);
+  return { entry: new V3(0, 0, -1), exit: rotateY(new V3(0, 0, -1), -dir * A) };
+}
 
 /** @type {{id:string,label:string,hint:string,swatch:string,key:string,points:(pp:any)=>THREE.Vector3[]}[]} */
 export const PIECE_CATALOG = [
@@ -1166,6 +1174,8 @@ const _END_TANGENTS = {
   brow: browEndTangents,
   spiral: spiralEndTangents,
   gap: gapEndTangents,
+  loop_spiral: loopSpiralEndTangents,
+  // loop / loop_half intentionally omitted — already exact via loopFixFrames.
 };
 for (const def of PIECE_CATALOG) {
   const fn = _END_TANGENTS[def.id];

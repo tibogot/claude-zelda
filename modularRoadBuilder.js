@@ -77,6 +77,16 @@ export class ModularRoadBuilder {
     this.root.name = "ModularRoad";
     scene.add(this.root);
 
+    // Instanced render layer. The per-piece meshes below are kept (invisible) as
+    // collision/edit/undo handles, but rendering is done by one InstancedMesh per
+    // unique (role + geometry) — so a track of mostly-repeated canonical pieces
+    // draws in a handful of calls instead of one per piece. Rebuilt on any change.
+    this.instGroup = new THREE.Group();
+    this.instGroup.name = "ModularRoadInstances";
+    this.root.add(this.instGroup);
+    /** @type {THREE.InstancedMesh[]} */
+    this._instMeshes = [];
+
     this.ghostMat = new THREE.MeshBasicMaterial({
       color: 0x4a9eff,
       transparent: true,
@@ -328,14 +338,76 @@ export class ModularRoadBuilder {
     else this._hidePlacementGizmo();
   }
 
+  /**
+   * Build a per-piece mesh. It is kept (in root, but INVISIBLE) purely as a
+   * collision / undo / edit handle — `bakeFromMeshes` reads its geometry +
+   * matrixWorld, and undo/rebuild dispose its geometry. Visible rendering is the
+   * InstancedMesh layer (see _rebuildInstances), so these never draw.
+   */
   _makeMesh(geometry, material, world) {
     const mesh = new THREE.Mesh(geometry, material);
     mesh.matrixAutoUpdate = false;
     mesh.matrix.copy(world);
-    mesh.castShadow = true;
-    mesh.receiveShadow = true;
+    mesh.visible = false; // collision/edit proxy only — instances do the drawing
     this.root.add(mesh);
     return mesh;
+  }
+
+  /** Stable 32-bit hash of a geometry's vertex positions (cached on the geometry),
+   *  so identical pieces group into the same InstancedMesh. */
+  _hashGeometry(geometry) {
+    const ud = geometry.userData;
+    if (ud._rhash !== undefined) return ud._rhash;
+    const a = geometry.getAttribute("position").array;
+    let h = 2166136261;
+    h = Math.imul(h ^ a.length, 16777619);
+    for (let i = 0; i < a.length; i++) h = Math.imul(h ^ Math.round(a[i] * 4096), 16777619);
+    ud._rhash = h >>> 0;
+    return ud._rhash;
+  }
+
+  /**
+   * Rebuild the instanced render layer from the current pieces: group every
+   * renderable sub-mesh by (role + geometry hash) and emit one InstancedMesh per
+   * group with the pieces' world matrices. Cheap — called after any change; the
+   * per-geometry hash is cached so repeats are O(pieces).
+   */
+  _rebuildInstances() {
+    for (const im of this._instMeshes) {
+      this.instGroup.remove(im);
+      im.dispose();
+    }
+    this._instMeshes.length = 0;
+
+    const groups = new Map(); // key -> { geometry, material, role, mats: Matrix4[] }
+    const add = (proxy, material, role) => {
+      if (!proxy || !material || proxy.userData.noRender) return;
+      const g = proxy.geometry;
+      const key = role + ":" + this._hashGeometry(g);
+      let grp = groups.get(key);
+      if (!grp) {
+        grp = { geometry: g, material, role, mats: [] };
+        groups.set(key, grp);
+      }
+      grp.mats.push(proxy.matrix);
+    };
+    for (const p of this.pieces) {
+      add(p.mesh, this.material, "road");
+      add(p.railMesh, this.railMaterial, "rail");
+      add(p.shellMesh, this.shellMaterial, "shell");
+      add(p.decorMesh, this.decorMaterial, "decor");
+    }
+    for (const grp of groups.values()) {
+      const im = new THREE.InstancedMesh(grp.geometry, grp.material, grp.mats.length);
+      for (let i = 0; i < grp.mats.length; i++) im.setMatrixAt(i, grp.mats[i]);
+      im.instanceMatrix.needsUpdate = true;
+      im.matrixAutoUpdate = false; // root/instGroup at origin → instance mats are world
+      im.frustumCulled = false; // a track spans a large area; skip per-mesh culling
+      im.castShadow = grp.role !== "decor";
+      im.receiveShadow = true;
+      this.instGroup.add(im);
+      this._instMeshes.push(im);
+    }
   }
 
   /** Place the active piece onto the open end. */
@@ -353,8 +425,8 @@ export class ModularRoadBuilder {
     const mesh = this._makeMesh(built.geometry, this.material, built.world);
     mesh.userData.pieceId = this.activePieceId;
     if (built.def.noMesh) {
-      mesh.visible = false;
       mesh.userData.noCollision = true;
+      mesh.userData.noRender = true; // gap = invisible spacer, nothing to instance
     }
     const railMesh =
       built.railGeometry && this.railMaterial
@@ -368,7 +440,6 @@ export class ModularRoadBuilder {
       built.decorGeometry && this.decorMaterial
         ? this._makeMesh(built.decorGeometry, this.decorMaterial, built.world)
         : null;
-    if (decorMesh) decorMesh.castShadow = false;
 
     this.pieces.push({
       id: this.activePieceId,
@@ -383,6 +454,7 @@ export class ModularRoadBuilder {
       connectorOut: built.connectorOut.clone(),
     });
     this.currentConnector = built.connectorOut.clone();
+    this._rebuildInstances();
     // Keep the anchor gizmo on the active chain so the whole chain stays movable.
     this._showPlacementGizmo();
     this.refreshGhost();
@@ -416,6 +488,7 @@ export class ModularRoadBuilder {
     const idx = this.pieces.indexOf(last);
     this.pieces.splice(idx, 1);
     this._removePiece(last);
+    this._rebuildInstances();
     this._syncCurrentConnector();
     this._showPlacementGizmo();
     this.refreshGhost();
@@ -426,6 +499,7 @@ export class ModularRoadBuilder {
   clear() {
     for (const p of this.pieces) this._removePiece(p);
     this.pieces = [];
+    this._rebuildInstances();
     this.chains = [{ id: 0, anchor: initialConnector() }];
     this.chainSeq = 1;
     this.activeChainId = 0;
@@ -456,6 +530,7 @@ export class ModularRoadBuilder {
         conn = built.connectorOut.clone();
       }
     }
+    this._rebuildInstances();
     this._syncCurrentConnector();
     this.refreshGhost();
     this._notify();
@@ -528,8 +603,8 @@ export class ModularRoadBuilder {
       const mesh = this._makeMesh(built.geometry, this.material, built.world);
       mesh.userData.pieceId = e.id;
       if (built.def.noMesh) {
-        mesh.visible = false;
         mesh.userData.noCollision = true;
+        mesh.userData.noRender = true;
       }
       const railMesh =
         built.railGeometry && this.railMaterial
@@ -543,7 +618,6 @@ export class ModularRoadBuilder {
         built.decorGeometry && this.decorMaterial
           ? this._makeMesh(built.decorGeometry, this.decorMaterial, built.world)
           : null;
-      if (decorMesh) decorMesh.castShadow = false;
 
       this.pieces.push({
         id: e.id,
@@ -558,6 +632,7 @@ export class ModularRoadBuilder {
         connectorOut: built.connectorOut.clone(),
       });
     }
+    this._rebuildInstances();
     // Reconstruct chains from the loaded pieces (anchor = first piece's entry).
     const seen = new Map();
     for (const p of this.pieces) {
