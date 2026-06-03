@@ -123,6 +123,21 @@
         display: none;
       }
 
+      /* Minimap (bottom-left, above the info line) */
+      #minimap {
+        position: fixed;
+        left: 12px;
+        bottom: 44px;
+        width: 180px;
+        height: 180px;
+        z-index: 12;
+        border: 1px solid rgba(255, 255, 255, 0.18);
+        border-radius: 6px;
+        background: rgba(0, 0, 0, 0.45);
+        cursor: crosshair;
+        backdrop-filter: blur(4px);
+      }
+
       /* Transient toast (bind / recall confirmation) */
       #toast {
         position: fixed;
@@ -523,6 +538,7 @@
     <div id="sel-rect"></div>
     <div id="groupbar"></div>
     <div id="toast"></div>
+    <canvas id="minimap" width="180" height="180" title="Click/drag to move camera"></canvas>
     <div id="inspector">
       <div id="inspector-resize-handle" title="Drag to resize"></div>
       <div id="inspector-header">
@@ -560,24 +576,27 @@
           roughness: 1,
           metalness: 0,
         },
-        // RTS gameplay knobs.
+        // Army composition (per side; both sides mirror it). Per-unit stats
+        // (speed/range/damage/hp/sight) live in UNIT_TYPES, not here.
+        army: { scout: 3, tank: 4, artillery: 2 },
+        enemies: true, // spawn an opposing mirror army
+        // RTS gameplay knobs (global behaviors; stats are per-type).
         rts: {
-          count: 6,
-          enemyCount: 6,
-          speed: 14,
           turnRate: 8, // rad/s — how fast a unit swings to face its heading
           spacing: 4, // formation gap when many units share one order
           slopeAlign: true, // tilt unit body to match terrain slope
           arrive: 0.15, // stop distance from target
           separation: true, // push overlapping units apart each frame
           sepRadius: 3.0, // desired min gap between unit centers
-          // Combat.
           combat: true, // units auto-fire at enemies in range
-          maxHp: 100,
-          range: 24, // weapon range (world units)
-          damage: 16, // damage per shot
-          fireRate: 1.4, // shots per second
         },
+        // Enemy AI.
+        ai: {
+          enabled: true,
+          repathInterval: 0.6, // seconds between AI re-decisions
+        },
+        // Selection / hover / move-ping ground rings.
+        rings: { offset: 0.1 }, // height above terrain (raise if edges sink)
         // Navigation grid + pathfinding.
         nav: {
           cellSize: 2.5, // world units per grid cell
@@ -1167,34 +1186,98 @@
           metalness: 0.2,
         });
 
-        function buildTankMesh(faction) {
+        // ── UNIT TYPES ────────────────────────────────────────────────────
+        // Data-driven roster. Stats are copied onto each unit at spawn (the
+        // data/visual split means combat/movement/AI just read u.<stat>).
+        // Each type also has a DISTINCT silhouette (see buildUnitMesh) so you
+        // recognise it at a glance, plus a ringScale for the selection ring.
+        // Rock-paper-scissors: scout = fast/weak/short range, tank = balanced,
+        // artillery = slow/long range/high damage/slow reload.
+        const UNIT_TYPES = {
+          scout: {
+            label: "Scout",
+            hp: 55, speed: 24, range: 16, damage: 7, fireRate: 2.6, sight: 75,
+            ringScale: 0.7,
+          },
+          tank: {
+            label: "Tank",
+            hp: 120, speed: 13, range: 24, damage: 18, fireRate: 1.3, sight: 55,
+            ringScale: 1.0,
+          },
+          artillery: {
+            label: "Artillery",
+            hp: 80, speed: 9, range: 46, damage: 34, fireRate: 0.5, sight: 60,
+            ringScale: 1.2,
+          },
+        };
+
+        // Distinct silhouette per type. Convention: front = +Z (matches heading
+        // / barrel direction). Each returns a Group with shadow-casting meshes.
+        function buildUnitMesh(faction, type) {
           const hullMat = FACTIONS[faction].hull;
           const g = new THREE.Group();
-          // Hull (front = +Z).
-          const hull = new THREE.Mesh(
-            new THREE.BoxGeometry(2.2, 0.8, 3.0),
-            hullMat,
-          );
-          hull.position.y = 0.55;
-          hull.castShadow = true;
-          g.add(hull);
-          // Turret.
-          const turret = new THREE.Mesh(
-            new THREE.BoxGeometry(1.3, 0.6, 1.3),
-            hullMat,
-          );
-          turret.position.set(0, 1.15, -0.1);
-          turret.castShadow = true;
-          g.add(turret);
-          // Barrel.
-          const barrel = new THREE.Mesh(
-            new THREE.CylinderGeometry(0.12, 0.12, 1.6, 8),
-            barrelMat,
-          );
-          barrel.rotation.x = Math.PI / 2;
-          barrel.position.set(0, 1.2, 1.1);
-          barrel.castShadow = true;
-          g.add(barrel);
+          const add = (mesh, x, y, z) => {
+            mesh.position.set(x, y, z);
+            mesh.castShadow = true;
+            g.add(mesh);
+            return mesh;
+          };
+
+          if (type === "scout") {
+            // Light recon: a small upright capsule (infantry-pod look) with a
+            // stubby gun — clearly NOT a tank.
+            const body = new THREE.Mesh(
+              new THREE.CapsuleGeometry(0.45, 0.7, 6, 12),
+              hullMat,
+            );
+            add(body, 0, 1.0, 0);
+            // Little head/sensor dome.
+            add(
+              new THREE.Mesh(new THREE.SphereGeometry(0.26, 12, 10), hullMat),
+              0,
+              1.7,
+              0,
+            );
+            // Stubby forward gun.
+            const gun = new THREE.Mesh(
+              new THREE.CylinderGeometry(0.06, 0.06, 0.8, 8),
+              barrelMat,
+            );
+            gun.rotation.x = Math.PI / 2;
+            add(gun, 0.28, 1.05, 0.55);
+          } else if (type === "artillery") {
+            // Howitzer: wide low hex base + a long barrel angled UP. Reads as
+            // heavy siege at a glance.
+            const base = new THREE.Mesh(
+              new THREE.CylinderGeometry(1.5, 1.7, 0.7, 6),
+              hullMat,
+            );
+            add(base, 0, 0.5, 0);
+            // Mantlet block the barrel pivots from.
+            add(
+              new THREE.Mesh(new THREE.BoxGeometry(1.2, 0.7, 1.2), hullMat),
+              0,
+              1.05,
+              -0.1,
+            );
+            // Long angled barrel.
+            const barrel = new THREE.Mesh(
+              new THREE.CylinderGeometry(0.17, 0.2, 3.0, 10),
+              barrelMat,
+            );
+            barrel.rotation.x = Math.PI / 2 - 0.5; // tilt muzzle upward
+            add(barrel, 0, 1.5, 1.0);
+          } else {
+            // Tank (default): boxy hull + turret + barrel.
+            add(new THREE.Mesh(new THREE.BoxGeometry(2.2, 0.8, 3.0), hullMat), 0, 0.55, 0);
+            add(new THREE.Mesh(new THREE.BoxGeometry(1.3, 0.6, 1.3), hullMat), 0, 1.15, -0.1);
+            const barrel = new THREE.Mesh(
+              new THREE.CylinderGeometry(0.12, 0.12, 1.6, 8),
+              barrelMat,
+            );
+            barrel.rotation.x = Math.PI / 2;
+            add(barrel, 0, 1.2, 1.1);
+          }
           return g;
         }
 
@@ -1254,11 +1337,13 @@
         ringGeo.rotateX(-Math.PI / 2); // lie flat, geometry normal = +Y
         const _ringNormal = new THREE.Vector3();
         const _ringUp = new THREE.Vector3(0, 1, 0);
-        function placeRing(ring, x, z, offset) {
+        function placeRing(ring, x, z, offset = PARAMS.rings.offset) {
           ring.position.set(x, terrainHeight(x, z) + offset, z);
           terrainNormal(x, z, _ringNormal);
           ring.quaternion.setFromUnitVectors(_ringUp, _ringNormal);
         }
+        // Default offset reads the live-tunable param; explicit callers may
+        // still pass their own.
         function makeRingMaterial(color, opacity) {
           return new THREE.MeshBasicMaterial({
             color,
@@ -1285,15 +1370,18 @@
           return m;
         }
 
-        function spawnUnit(x, z, faction) {
-          const group = buildTankMesh(faction);
+        function spawnUnit(x, z, faction, type) {
+          const T = UNIT_TYPES[type];
+          const group = buildUnitMesh(faction, type);
           const ring = makeSelectionRing(); // added to ringsGroup, not the tank
+          ring.scale.setScalar(T.ringScale); // ring sized to the unit
           unitsGroup.add(group);
           const u = {
             group,
             ring,
             bar: makeHealthBar(faction),
             faction, // "player" | "enemy"
+            type, // "scout" | "tank" | "artillery"
             pos: new THREE.Vector3(x, terrainHeight(x, z), z),
             path: null, // array of {x,z} waypoints from A*
             attackMove: false, // path issued as attack-move (stop to fight)
@@ -1301,24 +1389,38 @@
             heading: faction === "enemy" ? Math.PI : 0, // enemies face player
             wantHeading: faction === "enemy" ? Math.PI : 0,
             selected: false,
-            hp: PARAMS.rts.maxHp,
-            maxHp: PARAMS.rts.maxHp,
+            // Per-type stats (the data the systems read).
+            hp: T.hp,
+            maxHp: T.hp,
+            speed: T.speed,
+            range: T.range,
+            damage: T.damage,
+            fireRate: T.fireRate,
+            sight: T.sight,
             cooldown: 0, // seconds until next shot
             attackTarget: null,
             dead: false,
           };
+          // Every mesh of the unit is a pick target (shapes differ per type).
           group.traverse((o) => {
             if (o.isMesh) {
               o.userData.unit = u;
-              if (o.geometry?.type === "BoxGeometry") tankBodies.push(o);
+              tankBodies.push(o);
             }
           });
           units.push(u);
           return u;
         }
 
-        // Lay one faction out in a tidy grid centered on (0, baseZ).
-        function spawnSide(faction, n, baseZ) {
+        // Lay one faction's mixed army out in a tidy grid centered on (0,baseZ).
+        function spawnSide(faction, baseZ) {
+          // Flatten the composition into a type list.
+          const roster = [];
+          for (const t of ["scout", "tank", "artillery"]) {
+            for (let i = 0; i < (PARAMS.army[t] | 0); i++) roster.push(t);
+          }
+          const n = roster.length;
+          if (!n) return;
           const cols = Math.ceil(Math.sqrt(n));
           const sp = 6;
           for (let i = 0; i < n; i++) {
@@ -1326,7 +1428,7 @@
             const cz = Math.floor(i / cols);
             const x = (cx - (cols - 1) / 2) * sp;
             const z = (cz - (cols - 1) / 2) * sp + baseZ;
-            spawnUnit(x, z, faction);
+            spawnUnit(x, z, faction, roster[i]);
           }
         }
 
@@ -1342,8 +1444,8 @@
           // Old groups reference removed units — wipe them.
           for (const k of Object.keys(groups)) delete groups[k];
           activeGroup = null;
-          spawnSide("player", PARAMS.rts.count, 36);
-          spawnSide("enemy", PARAMS.rts.enemyCount, -36);
+          spawnSide("player", 36);
+          if (PARAMS.enemies) spawnSide("enemy", -36);
           updateCountUI();
           refreshGroupBar();
         }
@@ -1355,7 +1457,7 @@
         scene.add(ping);
         let pingLife = 0;
         function showPing(p) {
-          placeRing(ping, p.x, p.z, 0.1); // sits on + tilts to the terrain
+          placeRing(ping, p.x, p.z); // sits on + tilts to the terrain
           pingLife = 0.6;
           ping.visible = true;
         }
@@ -1583,6 +1685,15 @@
           lastGroupTap[d] = now;
         }
 
+        // Slide camera + orbit target so (x,z) becomes the focus point.
+        function focusOnPoint(x, z) {
+          const dx = x - controls.target.x;
+          const dz = z - controls.target.z;
+          camera.position.x += dx;
+          camera.position.z += dz;
+          controls.target.x += dx;
+          controls.target.z += dz;
+        }
         function focusOnUnits(list) {
           let x = 0;
           let z = 0;
@@ -1594,15 +1705,75 @@
             n++;
           }
           if (!n) return;
-          x /= n;
-          z /= n;
-          const dx = x - controls.target.x;
-          const dz = z - controls.target.z;
-          camera.position.x += dx;
-          camera.position.z += dz;
-          controls.target.x += dx;
-          controls.target.z += dz;
+          focusOnPoint(x / n, z / n);
         }
+
+        // ── MINIMAP ───────────────────────────────────────────────────────
+        // 2D top-down radar: obstacles + unit blips (green player / red enemy)
+        // + the camera view box. Click or drag to jump the camera.
+        const miniCanvas = document.getElementById("minimap");
+        const miniCtx = miniCanvas.getContext("2d");
+        const MINI = miniCanvas.width; // 180
+        const MAP_EXTENT = PARAMS.ground.size; // world units across the radar
+        const worldToMiniX = (x) => (x / MAP_EXTENT + 0.5) * MINI;
+        const worldToMiniY = (z) => (z / MAP_EXTENT + 0.5) * MINI;
+        function drawMinimap() {
+          const c = miniCtx;
+          c.clearRect(0, 0, MINI, MINI);
+          c.fillStyle = "rgba(24,30,22,0.65)";
+          c.fillRect(0, 0, MINI, MINI);
+          // Obstacles.
+          c.fillStyle = "#6f6a63";
+          for (const o of OBSTACLES) {
+            const r = Math.max(1.5, (o.r / MAP_EXTENT) * MINI);
+            c.beginPath();
+            c.arc(worldToMiniX(o.x), worldToMiniY(o.z), r, 0, 7);
+            c.fill();
+          }
+          // Units (size hints the type).
+          for (const u of units) {
+            if (u.dead) continue;
+            c.fillStyle =
+              u.faction === "player"
+                ? u.selected
+                  ? "#eaffea"
+                  : "#5fe05f"
+                : "#ff5a4a";
+            const s = u.type === "artillery" ? 4 : u.type === "tank" ? 3 : 2.2;
+            c.fillRect(
+              worldToMiniX(u.pos.x) - s / 2,
+              worldToMiniY(u.pos.z) - s / 2,
+              s,
+              s,
+            );
+          }
+          // Camera view box (rough, from zoom distance).
+          const dist = camera.position.distanceTo(controls.target);
+          const half = (dist * 0.5 / MAP_EXTENT) * MINI;
+          const cx = worldToMiniX(controls.target.x);
+          const cy = worldToMiniY(controls.target.z);
+          c.strokeStyle = "rgba(255,255,255,0.65)";
+          c.lineWidth = 1;
+          c.strokeRect(cx - half, cy - half * 0.62, half * 2, half * 1.24);
+        }
+        let miniDragging = false;
+        function miniJump(ev) {
+          const rect = miniCanvas.getBoundingClientRect();
+          const px = ((ev.clientX - rect.left) / rect.width) * MINI;
+          const py = ((ev.clientY - rect.top) / rect.height) * MINI;
+          const wx = (px / MINI - 0.5) * MAP_EXTENT;
+          const wz = (py / MINI - 0.5) * MAP_EXTENT;
+          focusOnPoint(wx, wz);
+        }
+        miniCanvas.addEventListener("pointerdown", (e) => {
+          miniDragging = true;
+          miniJump(e);
+          e.preventDefault();
+        });
+        window.addEventListener("pointermove", (e) => {
+          if (miniDragging) miniJump(e);
+        });
+        window.addEventListener("pointerup", () => (miniDragging = false));
         window.addEventListener("keydown", (e) => {
           const tag = e.target?.tagName;
           if (tag === "INPUT" || tag === "TEXTAREA") return;
@@ -1673,7 +1844,7 @@
             hoverRing.material.color.copy(
               attackMovePending ? HOVER_ATTACK : HOVER_RED,
             );
-            placeRing(hoverRing, u.pos.x, u.pos.z, 0.1);
+            placeRing(hoverRing, u.pos.x, u.pos.z);
             hoverRing.visible = true;
             dom.style.cursor = "crosshair";
             return;
@@ -1683,7 +1854,7 @@
             hoverRing.material.color.copy(
               attackMovePending ? HOVER_ATTACK : HOVER_GREEN,
             );
-            placeRing(hoverRing, g.x, g.z, 0.08);
+            placeRing(hoverRing, g.x, g.z);
             hoverRing.visible = true;
           } else {
             hoverRing.visible = false;
@@ -1838,7 +2009,7 @@
           );
           _to.set(target.pos.x, target.pos.y + 1.1, target.pos.z);
           spawnTracer(_from, _to);
-          target.hp -= PARAMS.rts.damage;
+          target.hp -= shooter.damage;
           if (target.hp <= 0) killUnit(target);
         }
 
@@ -1855,6 +2026,34 @@
           refreshGroupBar();
         }
 
+        // ── ENEMY AI ──────────────────────────────────────────────────────
+        // Decisions run on a timer (pathfinding is too costly every frame).
+        // Per enemy: spot the nearest player within sight; if it's in weapon
+        // range, stop (the combat phase handles facing + firing); otherwise
+        // path toward it and advance. No target in sight → hold position.
+        let aiTimer = 0;
+        function updateAI(dt) {
+          if (!PARAMS.ai.enabled) return;
+          aiTimer -= dt;
+          if (aiTimer > 0) return;
+          aiTimer = PARAMS.ai.repathInterval;
+          for (const u of units) {
+            if (u.dead || u.faction !== "enemy") continue;
+            const foe = nearestEnemyInRange(u, u.sight * u.sight); // player in sight
+            if (!foe) {
+              u.path = null;
+              continue;
+            }
+            const dx = foe.pos.x - u.pos.x;
+            const dz = foe.pos.z - u.pos.z;
+            if (dx * dx + dz * dz <= u.range * u.range) {
+              u.path = null; // in firing range → hold and shoot
+            } else {
+              u.path = astar(u.pos.x, u.pos.z, foe.pos.x, foe.pos.z); // advance
+            }
+          }
+        }
+
         // ── UNIT UPDATE ──
         const _dir = new THREE.Vector3();
         const _fwdU = new THREE.Vector3();
@@ -1864,10 +2063,9 @@
         function updateUnits(dt) {
           const R = PARAMS.rts;
 
-          const rangeSq = R.range * R.range;
-
           // Phase 0 — combat: acquire an enemy in range, aim, fire on cooldown.
           // Runs before movement so attack-move units can halt when engaged.
+          // Range/damage/reload are per-unit (UNIT_TYPES).
           for (const u of units) {
             if (u.dead) continue;
             if (u.cooldown > 0) u.cooldown -= dt;
@@ -1876,6 +2074,7 @@
               u.attackTarget = null;
               continue;
             }
+            const rangeSq = u.range * u.range;
             // Drop a target that died or walked out of range.
             if (u.attackTarget) {
               const t = u.attackTarget;
@@ -1895,7 +2094,7 @@
                 );
               }
               if (u.cooldown <= 0) {
-                u.cooldown = 1 / R.fireRate;
+                u.cooldown = 1 / u.fireRate;
                 fire(u, u.attackTarget);
               }
             }
@@ -1916,7 +2115,7 @@
               u.path.shift();
               if (u.path.length === 0) u.path = null;
             } else {
-              const step = Math.min(R.speed * dt, d);
+              const step = Math.min(u.speed * dt, d);
               u.pos.x += (dx / d) * step;
               u.pos.z += (dz / d) * step;
               u.wantHeading = Math.atan2(dx, dz);
@@ -2010,7 +2209,7 @@
             // per-vertex conforming).
             if (u.selected) {
               u.ring.visible = true;
-              placeRing(u.ring, u.pos.x, u.pos.z, 0.08);
+              placeRing(u.ring, u.pos.x, u.pos.z);
             } else {
               u.ring.visible = false;
             }
@@ -2042,8 +2241,10 @@
           panCamera(dt);
           edgeScroll(dt);
           controls.update();
+          updateAI(dt);
           updateUnits(dt);
           updateTracers(dt);
+          drawMinimap();
 
           if (pingLife > 0) {
             pingLife -= dt;
@@ -2320,32 +2521,37 @@
           });
         }
 
-        // ── RTS ──
+        // ── Army (composition, mirrored to both sides) ──
         {
-          const sec = _section(body, "RTS", true);
-          _slider(sec, PARAMS.rts, "count", {
-            label: "Player tanks",
-            min: 1,
-            max: 60,
-            step: 1,
-          });
-          _slider(sec, PARAMS.rts, "enemyCount", {
-            label: "Enemy tanks",
+          const sec = _section(body, "Army", true);
+          _slider(sec, PARAMS.army, "scout", {
+            label: "Scouts",
             min: 0,
-            max: 60,
+            max: 30,
             step: 1,
           });
+          _slider(sec, PARAMS.army, "tank", {
+            label: "Tanks",
+            min: 0,
+            max: 30,
+            step: 1,
+          });
+          _slider(sec, PARAMS.army, "artillery", {
+            label: "Artillery",
+            min: 0,
+            max: 30,
+            step: 1,
+          });
+          _toggle(sec, PARAMS, "enemies", { label: "Spawn enemies" });
           _button(sec, {
             title: "Respawn armies",
             onClick: () => spawnArmies(),
           });
-          _separator(sec);
-          _slider(sec, PARAMS.rts, "speed", {
-            label: "Move speed",
-            min: 1,
-            max: 50,
-            step: 0.5,
-          });
+        }
+
+        // ── RTS (global behaviors; per-unit stats live in UNIT_TYPES) ──
+        {
+          const sec = _section(body, "RTS", true);
           _slider(sec, PARAMS.rts, "turnRate", {
             label: "Turn rate",
             min: 1,
@@ -2369,22 +2575,16 @@
           _toggle(sec, PARAMS.rts, "slopeAlign", { label: "Slope align" });
           _separator(sec);
           _toggle(sec, PARAMS.rts, "combat", { label: "Combat" });
-          _slider(sec, PARAMS.rts, "range", {
-            label: "Range",
-            min: 5,
-            max: 60,
-            step: 1,
-          });
-          _slider(sec, PARAMS.rts, "damage", {
-            label: "Damage",
-            min: 1,
-            max: 100,
-            step: 1,
-          });
-          _slider(sec, PARAMS.rts, "fireRate", {
-            label: "Fire rate",
-            min: 0.2,
-            max: 8,
+        }
+
+        // ── Enemy AI ──
+        {
+          const sec = _section(body, "Enemy AI", false);
+          _toggle(sec, PARAMS.ai, "enabled", { label: "Enabled" });
+          _slider(sec, PARAMS.ai, "repathInterval", {
+            label: "Repath (s)",
+            min: 0.1,
+            max: 2,
             step: 0.1,
           });
         }
@@ -2415,6 +2615,13 @@
               buildNavGrid();
               buildGridDebug();
             },
+          });
+          _separator(sec);
+          _slider(sec, PARAMS.rings, "offset", {
+            label: "Ring height",
+            min: 0,
+            max: 1,
+            step: 0.01,
           });
         }
 

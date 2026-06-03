@@ -86,6 +86,15 @@ export class ModularRoadBuilder {
     this.root.add(this.instGroup);
     /** @type {THREE.InstancedMesh[]} */
     this._instMeshes = [];
+    /**
+     * Default OFF: draw the per-piece meshes directly (each frustum-culled
+     * individually, which CSM shadow cascades rely on). Instancing-by-type
+     * groups pieces that are spread across the whole track and can't be region-
+     * culled, so it re-renders everything into every shadow cascade — a net loss
+     * for a spread-out track with shadows. Kept as a toggle (`setInstancing` / the
+     * `I` key) for measuring; the real perf path is spatial-chunk merging.
+     */
+    this.instancingEnabled = false;
 
     this.ghostMat = new THREE.MeshBasicMaterial({
       color: 0x4a9eff,
@@ -348,9 +357,23 @@ export class ModularRoadBuilder {
     const mesh = new THREE.Mesh(geometry, material);
     mesh.matrixAutoUpdate = false;
     mesh.matrix.copy(world);
-    mesh.visible = false; // collision/edit proxy only — instances do the drawing
+    // Invisible while instancing draws the road; visible (real mesh) when off.
+    mesh.visible = !this.instancingEnabled;
+    mesh.castShadow = mesh.receiveShadow = true;
     this.root.add(mesh);
     return mesh;
+  }
+
+  /** Toggle GPU instancing vs. drawing the per-piece meshes directly. */
+  setInstancing(on) {
+    this.instancingEnabled = !!on;
+    for (const p of this.pieces) {
+      for (const m of [p.mesh, p.railMesh, p.shellMesh, p.decorMesh]) {
+        if (m) m.visible = !this.instancingEnabled && !m.userData.noRender;
+      }
+    }
+    this._rebuildInstances();
+    this._notify();
   }
 
   /** Stable 32-bit hash of a geometry's vertex positions (cached on the geometry),
@@ -378,6 +401,7 @@ export class ModularRoadBuilder {
       im.dispose();
     }
     this._instMeshes.length = 0;
+    if (!this.instancingEnabled) return; // proxies render directly instead
 
     const groups = new Map(); // key -> { geometry, material, role, mats: Matrix4[] }
     const add = (proxy, material, role) => {
@@ -440,6 +464,7 @@ export class ModularRoadBuilder {
       built.decorGeometry && this.decorMaterial
         ? this._makeMesh(built.decorGeometry, this.decorMaterial, built.world)
         : null;
+    if (decorMesh) decorMesh.castShadow = false; // flat markings don't cast
 
     this.pieces.push({
       id: this.activePieceId,
@@ -618,6 +643,7 @@ export class ModularRoadBuilder {
         built.decorGeometry && this.decorMaterial
           ? this._makeMesh(built.decorGeometry, this.decorMaterial, built.world)
           : null;
+      if (decorMesh) decorMesh.castShadow = false;
 
       this.pieces.push({
         id: e.id,

@@ -750,7 +750,8 @@
           "three/tsl": "https://cdn.jsdelivr.net/npm/three@0.184.0/build/three.tsl.js",
           "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.184.0/examples/jsm/",
           "three-mesh-bvh": "https://cdn.jsdelivr.net/npm/three-mesh-bvh@0.9.9/build/index.module.js",
-          "howler": "https://esm.sh/howler@2.2.4"
+          "howler": "https://esm.sh/howler@2.2.4",
+          "stats-gl": "https://cdn.jsdelivr.net/npm/stats-gl/dist/main.js"
         }
       }
     </script>
@@ -760,6 +761,7 @@
     <div id="info">
       <span id="backend">loading…</span> &bull;
       <span id="cammode">BUILD</span> &bull;
+      <span id="perf-readout" style="color: #9fd0ff">—</span> &bull;
       <span id="mode-hint"
         >LMB place &bull; MMB orbit &bull; <kbd>1</kbd>–<kbd>0</kbd>/<kbd
           >c</kbd
@@ -1028,6 +1030,7 @@
       import { bakeRoadThumbnails } from "./modularRoadThumbnails.js";
       import { LapTracker, formatLapTime } from "./modularRoadLap.js";
       import { GhostTrack, createGhostMesh } from "./modularRoadGhost.js";
+      import Stats from "stats-gl";
       import {
         Vehicle,
         TIRE,
@@ -1162,6 +1165,15 @@
 
       async function init() {
         const renderer = new THREE.WebGPURenderer({ antialias: true });
+
+        // FPS / CPU / GPU stats (stats-gl, GPU timing via WebGPU timestamps).
+        const stats = new Stats({ trackGPU: true, horizontal: false });
+        await stats.init(renderer);
+        stats.dom.style.position = "fixed";
+        stats.dom.style.left = "10px";
+        stats.dom.style.top = "44px";
+        stats.dom.style.zIndex = "40";
+
         await renderer.init();
         renderer.setSize(innerWidth, innerHeight);
         renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
@@ -1170,6 +1182,7 @@
         renderer.shadowMap.enabled = true;
         renderer.shadowMap.type = THREE.PCFSoftShadowMap;
         document.body.appendChild(renderer.domElement);
+        document.body.appendChild(stats.dom);
 
         document.getElementById("backend").textContent =
           renderer.backend?.constructor?.name?.includes("WebGPU")
@@ -1672,6 +1685,8 @@
         const driveHud = document.getElementById("drive-hud");
         const modeHint = document.getElementById("mode-hint");
         const pauseBadge = document.getElementById("pause-badge");
+        const perfReadout = document.getElementById("perf-readout");
+        let _perfT = 0; // throttle the draw-call/triangle readout (~4 Hz)
 
         // ── LAP TIMING (start / checkpoints / finish gates → timed laps) ──
         const lap = new LapTracker({ roadWidth: roadParams.width });
@@ -2008,6 +2023,12 @@
             setDriveMode(state.mode !== "drive");
             return;
           }
+          if (e.code === "KeyI") {
+            const on = !builder.instancingEnabled;
+            builder.setInstancing(on);
+            console.log(`[modular-road] instancing ${on ? "ON" : "OFF"} · ${builder._instMeshes.length} instanced draws`);
+            return;
+          }
           if (e.code === "KeyN" && state.mode === "build" && state.buildMode) {
             beginFreeChain();
             return;
@@ -2315,6 +2336,10 @@
             csm.updateFrustums();
           if (PARAMS.bloom.enabled && post) post.render();
           else renderer.render(scene, camera);
+          // Drain the GPU timestamp pool each frame (required by stats-gl's
+          // trackGPU on WebGPU; otherwise the query pool overflows + errors).
+          renderer.resolveTimestampsAsync?.().catch(() => {});
+          stats.update();
         });
         window.addEventListener("resize", () => {
           camera.aspect = innerWidth / innerHeight;
