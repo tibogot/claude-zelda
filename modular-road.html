@@ -938,6 +938,28 @@
       ⏸ Paused &bull;
       <span style="color: #7fa8d8">N step &bull; LMB orbit</span>
     </div>
+    <div
+      id="slowmo-badge"
+      style="
+        position: fixed;
+        top: 50px;
+        left: 50%;
+        transform: translateX(-50%);
+        z-index: 16;
+        display: none;
+        font: 600 12px/1 var(--font-mono);
+        letter-spacing: 0.22em;
+        text-transform: uppercase;
+        color: #ffd54a;
+        background: rgba(30, 22, 6, 0.82);
+        border: 1px solid rgba(255, 213, 74, 0.45);
+        border-radius: 20px;
+        padding: 8px 16px;
+        pointer-events: none;
+      "
+    >
+      🐢 Slow-mo
+    </div>
     <div id="palette">
       <div id="palette-rail">
         <button id="edges-toggle" class="on" type="button">
@@ -1252,6 +1274,7 @@
           orbitInDrive: false,
           paused: false,
           frameStep: false,
+          slowmo: false,
         };
         function syncOrbitButtons() {
           const build = state.mode === "build" && state.buildMode;
@@ -1727,6 +1750,8 @@
         const driveHud = document.getElementById("drive-hud");
         const modeHint = document.getElementById("mode-hint");
         const pauseBadge = document.getElementById("pause-badge");
+        const slowmoBadge = document.getElementById("slowmo-badge");
+        const SLOWMO_FACTOR = 0.3; // sim speed while slow-mo is on
         const perfReadout = document.getElementById("perf-readout");
         let _perfT = 0; // throttle the draw-call/triangle readout (~4 Hz)
 
@@ -2005,7 +2030,7 @@
               ? "BUILD"
               : "ORBIT";
           modeHint.innerHTML = on
-            ? "WASD drive &bull; Space handbrake &bull; F flip &bull; R respawn &bull; Enter restart race &bull; P pause &bull; Tab orbit"
+            ? "WASD drive &bull; Space handbrake &bull; F flip &bull; R respawn &bull; M slow-mo &bull; Enter restart &bull; P pause &bull; Tab orbit"
             : "LMB place &bull; N new chain + gizmo &bull; W move Shift+E rotate &bull; 1–0 pick &bull; R flip &bull; Backspace undo";
           builder.setGhostVisible(!on && state.buildMode);
           props.setEnabled(!on);
@@ -2042,7 +2067,9 @@
           state.orbitInDrive = false;
           state.paused = false;
           state.frameStep = false;
+          state.slowmo = false;
           pauseBadge.style.display = "none";
+          slowmoBadge.style.display = "none";
           controls.enabled = !on; // chase cam drives in drive mode
           syncOrbitButtons();
         }
@@ -2176,6 +2203,11 @@
             if (e.code === "Enter") {
               e.preventDefault();
               startRace(); // restart the race from the countdown
+              return;
+            }
+            if (e.code === "KeyM") {
+              state.slowmo = !state.slowmo;
+              slowmoBadge.style.display = state.slowmo ? "" : "none";
               return;
             }
             if (e.code === "KeyF") vehicle.flipUpright();
@@ -2402,7 +2434,9 @@
           lastT = now;
           if (state.mode === "drive") {
             // Paused → freeze the sim (simDt 0); N requests a single frame step.
-            let simDt = state.paused ? 0 : dt;
+            // Slow-mo scales sim time only (camera stays on real dt); lap times are
+            // unaffected since the clock + the car's motion scale together.
+            let simDt = state.paused ? 0 : dt * (state.slowmo ? SLOWMO_FACTOR : 1);
             if (state.paused && state.frameStep) {
               simDt = 1 / 60;
               state.frameStep = false;

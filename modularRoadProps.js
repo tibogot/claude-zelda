@@ -101,29 +101,28 @@ function openTubeGroup(outerR = 9, length = 30, wall = 0.65, segments = 40) {
 }
 
 /**
- * Boost pad: a flush deck decal (dark slab + bright emissive chevrons pointing
- * along its local −Z) that the car drives over. The acceleration itself comes
- * from the prop's `field` trigger zone (see PropManager.applyFields), not from
- * geometry — this is just the look. Local +Z is "back", −Z is "forward".
+ * Flush deck pad: dark slab + bright emissive chevrons pointing along local −Z
+ * (the "forward" the car is meant to enter from). The effect (boost / launch)
+ * comes from the prop's `field` trigger zone (see PropManager.applyFields), not
+ * the geometry — this is just the look. Used by both the boost and launch pads.
  */
-function boostPadGroup() {
+function flatPadGroup(w, d, color, name = "Pad") {
   const g = new THREE.Group();
-  g.name = "BoostPad";
+  g.name = name;
   const base = new THREE.Mesh(
-    new THREE.BoxGeometry(BOOST_W, BOOST_H, BOOST_D),
+    new THREE.BoxGeometry(w, BOOST_H, d),
     mat(0x0d1116, { roughness: 0.5, metalness: 0.25, emissive: 0x0a1f24, emissiveIntensity: 0.5 }),
   );
   base.position.y = BOOST_H / 2 + 0.04; // sit flush just above the deck
   g.add(base);
 
-  // Three forward-pointing emissive arrowheads marching toward −Z.
   const y = BOOST_H + 0.06;
-  const hw = BOOST_W * 0.34;
-  const aLen = 3.4; // arrowhead length
-  const gap = 4.6;
+  const hw = w * 0.34;
+  const aLen = Math.min(3.4, d * 0.22); // arrowhead length
+  const gap = d * 0.24;
   const pos = [];
   for (let i = 0; i < 3; i++) {
-    const zBack = 6 - i * gap; // base edge; tip is aLen further forward (−Z)
+    const zBack = gap - i * gap; // base edge; tip is aLen further forward (−Z)
     pos.push(0, y, zBack - aLen, hw, y, zBack, -hw, y, zBack); // tip, right, left
   }
   const chevGeo = new THREE.BufferGeometry();
@@ -131,11 +130,21 @@ function boostPadGroup() {
   chevGeo.computeVertexNormals();
   const chev = new THREE.Mesh(
     chevGeo,
-    mat(0x18ffd0, { roughness: 0.3, emissive: 0x18ffd0, emissiveIntensity: 5, side: THREE.DoubleSide }),
+    mat(color, { roughness: 0.3, emissive: color, emissiveIntensity: 5, side: THREE.DoubleSide }),
   );
-  chev.userData.isGlow = false;
   g.add(chev);
   return g;
+}
+
+/** Functional boost ring: an emissive cyan torus gate that slingshots the car
+ *  forward when driven through. Distinct cyan glow (vs the orange Glow ring). */
+function boostRingGroup() {
+  const m = new THREE.Mesh(
+    new THREE.TorusGeometry(8.5, 0.9, 18, 56),
+    mat(0x18ffd0, { roughness: 0.35, metalness: 0.1, emissive: 0x18ffd0, emissiveIntensity: 4.5 }),
+  );
+  m.geometry.translate(0, 10, 0); // lift so the hole clears the ground
+  return m;
 }
 
 /* ----------------------------------------------------------------------- */
@@ -219,16 +228,56 @@ export const PROP_CATALOG = [
     id: "boostpad",
     label: "Boost pad",
     collision: "none", // flush decal — you drive through it; the field does the work
-    make: () => boostPadGroup(),
-    // Trigger zone: while the car is inside this local box, accelerate it along
-    // the pad's forward (−Z). `apply` is the reusable effect hook (see applyFields).
+    make: () => flatPadGroup(BOOST_W, BOOST_D, 0x18ffd0, "BoostPad"),
+    // Trigger zone (local box around `center`): while inside, accelerate along the
+    // pad's forward (−Z). `apply` is the reusable effect hook (see applyFields).
     field: {
-      half: [BOOST_W / 2, 3.5, BOOST_D / 2],
+      center: [0, 1.5, 0],
+      half: [BOOST_W / 2, 2.5, BOOST_D / 2],
       apply(vehicle, dt, fwd) {
         const body = vehicle.body;
         const target = 62; // ~223 km/h target speed along the pad
         const along = body.vel.dot(fwd);
         if (along < target) body.vel.addScaledVector(fwd, Math.min(150 * dt, target - along));
+      },
+    },
+  },
+  {
+    id: "launchpad",
+    label: "Launch pad",
+    collision: "none",
+    make: () => flatPadGroup(11, 12, 0xffae33, "LaunchPad"),
+    // Flings the car UP (set, not add → one clean launch) with a forward arc.
+    field: {
+      center: [0, 1.5, 0],
+      half: [5.5, 2.5, 6],
+      apply(vehicle, dt, fwd) {
+        const body = vehicle.body;
+        const up = 18; // launch speed (≈16 m of air)
+        if (body.vel.y < up) body.vel.y = up;
+        const fwdTarget = 22; // a little forward so it arcs, not straight up
+        const along = body.vel.dot(fwd);
+        if (along < fwdTarget) body.vel.addScaledVector(fwd, Math.min(90 * dt, fwdTarget - along));
+      },
+    },
+  },
+  {
+    id: "boostring",
+    label: "Boost ring",
+    collision: "none",
+    make: () => boostRingGroup(),
+    // Slingshot forward when flying through the hole (trigger sits at the lifted
+    // ring centre, a thin slab along the ring's axis).
+    field: {
+      // Tall, thin slab spanning the ring's vertical plane (ground → hole), so it
+      // fires whether you drive through the arch or fly through the hole mid-jump.
+      center: [0, 7, 0],
+      half: [8, 9, 3.5],
+      apply(vehicle, dt, fwd) {
+        const body = vehicle.body;
+        const target = 70; // strong punch through the gate
+        const along = body.vel.dot(fwd);
+        if (along < target) body.vel.addScaledVector(fwd, Math.min(700 * dt, target - along));
       },
     },
   },
@@ -429,11 +478,13 @@ export class PropManager {
       _fieldInv.copy(root.matrixWorld).invert();
       _fieldLocal.copy(vehicle.body.pos).applyMatrix4(_fieldInv); // car in pad space
       const [hx, hy, hz] = f.half;
+      const cx = f.center?.[0] ?? 0;
+      const cy = f.center?.[1] ?? 0;
+      const cz = f.center?.[2] ?? 0;
       if (
-        Math.abs(_fieldLocal.x) <= hx &&
-        Math.abs(_fieldLocal.z) <= hz &&
-        _fieldLocal.y >= -1 &&
-        _fieldLocal.y <= hy
+        Math.abs(_fieldLocal.x - cx) <= hx &&
+        Math.abs(_fieldLocal.y - cy) <= hy &&
+        Math.abs(_fieldLocal.z - cz) <= hz
       ) {
         // Pad forward = local −Z in world, flattened horizontal.
         _fieldFwd.set(0, 0, -1).applyQuaternion(root.quaternion);

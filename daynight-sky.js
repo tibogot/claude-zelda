@@ -19,7 +19,7 @@ import {
   float, vec2, vec3, vec4, Fn, If, Loop, Break, uniform,
   positionWorld, cameraPosition,
   normalize, dot, max, min, mix, smoothstep, clamp, step, sqrt,
-  pow, sin, floor, fract, length, abs, exp, sub, mul,
+  pow, sin, cos, floor, fract, length, abs, exp, sub, mul,
 } from "three/tsl";
 
 const SKY_RADIUS = 9000;
@@ -94,6 +94,23 @@ export function createDayNightSky() {
   const uStarBrightness = uniform(1.0);
   const uStarTwinkle = uniform(3.0);
 
+  // ── Milky Way band ────────────────────────────────────────────────────────
+  const uMilkyWayEnabled = uniform(1);
+  const uMilkyWayIntensity = uniform(1.0);
+  const uMilkyWayWidth = uniform(0.32);     // half-width of the band (|latitude|)
+  const uMilkyWayScale = uniform(4.0);      // noise feature scale
+  const uMilkyWayColor1 = uniform(new THREE.Color(0x5566a0)); // cool dust
+  const uMilkyWayColor2 = uniform(new THREE.Color(0xefe6cf)); // warm star clouds
+  const uGalacticPole = uniform(new THREE.Vector3(0.34, 0.5, 0.8).normalize());
+
+  // ── Shooting stars (procedural, stateless) ────────────────────────────────
+  const uMeteorEnabled = uniform(1);
+  const uMeteorIntensity = uniform(1.0);
+  const uMeteorRate = uniform(0.45);   // fraction of epochs that spawn a meteor
+  const uMeteorSpeed = uniform(1.0);
+  const uMeteorWidth = uniform(0.006); // streak thickness (radians of arc)
+  const uMeteorLength = uniform(0.10); // trail length (radians of arc)
+
   const uFogEnabled = uniform(0);
   const uFogColor = uniform(new THREE.Color(0x9fb8c4));
   const uFogDensity = uniform(0.0003);
@@ -112,6 +129,8 @@ export function createDayNightSky() {
     return fract(sin(q).mul(43758.5453123));
   });
 
+  // Varied star field: per-cell hash drives presence, position, SIZE, magnitude
+  // and COLOR (cool blue-white → warm), so the field reads natural, not uniform.
   const starField = Fn(([dir]) => {
     const sp = dir.mul(uStarDensity);
     const cell = floor(sp);
@@ -121,10 +140,49 @@ export function createDayNightSky() {
     const present = step(uStarThreshold, rnd.x);
     const off = hash33(cell.add(vec3(1.7, 9.2, 3.3))).sub(0.5).mul(0.7);
     const d = length(f.sub(off));
-    const bright = smoothstep(uStarSize, float(0.0), d);
-    const tw = sin(uTime.mul(uStarTwinkle).add(rnd.y.mul(6.2831)))
-      .mul(0.4).add(0.6);
-    return present.mul(bright).mul(tw).mul(uStarBrightness);
+    const size = uStarSize.mul(mix(float(0.45), float(1.7), rnd.z)); // a few bright, many faint
+    const core = smoothstep(size, float(0.0), d);
+    const mag = mix(float(0.3), float(1.0), rnd.y.mul(rnd.y));        // skew dim
+    const tw = sin(uTime.mul(uStarTwinkle).add(rnd.y.mul(6.2831))).mul(0.35).add(0.65);
+    const col = mix(vec3(0.72, 0.82, 1.0), vec3(1.0, 0.86, 0.66), rnd.z.mul(rnd.z));
+    return col.mul(present.mul(core).mul(mag).mul(tw).mul(uStarBrightness));
+  });
+
+  // Procedural shooting stars: a few stateless "slots", each cycling on its own
+  // period. A lucky epoch spawns a meteor that sweeps a SHORT arc; we light the
+  // thin line SEGMENT [tail→head] on the sphere (distance to the chord), bright
+  // at the head and fading to the tail. No buffers; gated by night at call site.
+  const shootingStars = Fn(([dir]) => {
+    const acc = vec3(0.0).toVar();
+    Loop(3, ({ i }) => {
+      const slot = float(i);
+      const period = float(5.0);
+      const tt = uTime.mul(uMeteorSpeed).div(period).add(slot.mul(0.41));
+      const epoch = floor(tt);
+      const p = fract(tt); // 0..1 within this slot's cycle
+      const h = hash33(vec3(epoch.add(slot.mul(17.3)), slot.add(3.0), 5.1));
+      const lucky = step(uMeteorRate.oneMinus(), h.x);
+      // Brief visible burst within the cycle (fade in, fade out).
+      const win = smoothstep(float(0.0), float(0.05), p).mul(smoothstep(float(0.30), float(0.12), p)).toVar();
+      // Random great circle: upward-biased anchor A + a perpendicular tangent T.
+      const A = normalize(vec3(h.x.sub(0.5), h.y.mul(0.6).add(0.4), h.z.sub(0.5))).toVar();
+      const h2 = hash33(vec3(epoch.add(11.0), slot.add(5.0), 2.2)).sub(0.5);
+      const T = normalize(h2.sub(A.mul(dot(h2, A)))).toVar();
+      // Head sweeps the arc over the burst; tail trails behind by uMeteorLength.
+      const headAng = p.mul(0.55).toVar();
+      const tailAng = headAng.sub(uMeteorLength);
+      const headDir = A.mul(cos(headAng)).add(T.mul(sin(headAng))).toVar();
+      const tailDir = A.mul(cos(tailAng)).add(T.mul(sin(tailAng))).toVar();
+      // Closest point on the chord [tail→head]; chord ≈ arc for short segments.
+      const e = headDir.sub(tailDir);
+      const u = clamp(dot(dir.sub(tailDir), e).div(dot(e, e).max(float(1e-5))), float(0.0), float(1.0));
+      const dist = length(dir.sub(tailDir.add(e.mul(u))));
+      const line = smoothstep(uMeteorWidth, float(0.0), dist).mul(u.mul(u)); // taper to tail
+      const head = smoothstep(uMeteorWidth.mul(2.5), float(0.0), length(dir.sub(headDir))); // bright tip
+      const m = lucky.mul(win).mul(line.add(head));
+      acc.addAssign(vec3(0.85, 0.92, 1.0).mul(m));
+    });
+    return acc.mul(uMeteorIntensity);
   });
 
   // ── Procedural moon surface (value-noise fbm → maria + craters) ────────────
@@ -291,11 +349,29 @@ export function createDayNightSky() {
     );
     skyCol.assign(mix(skyCol, uFogColor, mul(fogFac, uFogEnabled)));
 
+    // ── Milky Way band (night only). Gated twice so only band pixels at night
+    //    ever evaluate the FBM — day and off-band sky pay nothing. ──
+    const aboveHorizon = smoothstep(float(-0.02), float(0.12), up);
+    If(uMilkyWayEnabled.greaterThan(0.5).and(nightF.greaterThan(0.02)).and(up.greaterThan(-0.02)), () => {
+      const lat = abs(dot(dir, uGalacticPole));
+      const band = smoothstep(uMilkyWayWidth, float(0.0), lat);
+      If(band.greaterThan(0.001), () => {
+        const n = fbm3(dir.mul(uMilkyWayScale));
+        const cloud = smoothstep(float(0.45), float(0.85), n);   // bright star clouds
+        const dust = smoothstep(float(0.22), float(0.46), n);    // dark dust lanes carve in
+        const bright = band.mul(mix(float(0.3), float(1.1), cloud)).mul(mix(float(0.35), float(1.0), dust));
+        const col = mix(uMilkyWayColor1, uMilkyWayColor2, n);
+        skyCol.addAssign(col.mul(bright).mul(uMilkyWayIntensity).mul(nightF).mul(aboveHorizon));
+      });
+    });
+
     // Stars (above the horizon, night only).
-    const stars = starField(dir)
-      .mul(nightF)
-      .mul(smoothstep(-0.02, 0.1, up));
-    skyCol.addAssign(vec3(stars));
+    skyCol.addAssign(starField(dir).mul(nightF).mul(aboveHorizon));
+
+    // Shooting stars (gated to night so day pays nothing).
+    If(uMeteorEnabled.greaterThan(0.5).and(nightF.greaterThan(0.02)), () => {
+      skyCol.addAssign(shootingStars(dir).mul(nightF).mul(aboveHorizon));
+    });
 
     // Sun disc + glow (fades out below the horizon).
     const sunDot = dot(dir, uSunDir);
@@ -426,6 +502,19 @@ export function createDayNightSky() {
     uStarBrightness.value = P.starBrightness;
     uStarTwinkle.value = P.starTwinkle;
 
+    uMilkyWayEnabled.value = P.milkyWayEnabled ? 1 : 0;
+    uMilkyWayIntensity.value = P.milkyWayIntensity;
+    uMilkyWayWidth.value = P.milkyWayWidth;
+    uMilkyWayScale.value = P.milkyWayScale;
+    uMilkyWayColor1.value.set(P.milkyWayColor1);
+    uMilkyWayColor2.value.set(P.milkyWayColor2);
+    uMeteorEnabled.value = P.meteorEnabled ? 1 : 0;
+    uMeteorIntensity.value = P.meteorIntensity;
+    uMeteorRate.value = P.meteorRate;
+    uMeteorSpeed.value = P.meteorSpeed;
+    uMeteorWidth.value = P.meteorWidth;
+    uMeteorLength.value = P.meteorLength;
+
     if (frame.fog) {
       uFogEnabled.value = frame.fog.enabled ? 1 : 0;
       uFogColor.value.copy(frame.fog.color);
@@ -481,4 +570,18 @@ export const SKY_DEFAULTS = {
   starSize: 0.08,
   starBrightness: 1.0,
   starTwinkle: 3.0,
+
+  milkyWayEnabled: true,
+  milkyWayIntensity: 1.0,
+  milkyWayWidth: 0.32,
+  milkyWayScale: 4.0,
+  milkyWayColor1: "#5566a0",
+  milkyWayColor2: "#efe6cf",
+
+  meteorEnabled: false,
+  meteorIntensity: 1.0,
+  meteorRate: 0.45,
+  meteorSpeed: 1.0,
+  meteorWidth: 0.006,
+  meteorLength: 0.10,
 };
