@@ -279,7 +279,7 @@ export function createLensFlare({ camera }) {
 }
 
 export const LENS_FLARE_DEFAULTS = {
-  enabled: true,
+  enabled: false,
   intensity: 3.0,
   halationSize: 3.0,
   halationColor: "#ffdca8",

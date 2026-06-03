@@ -16,9 +16,9 @@
  */
 import * as THREE from "three/webgpu";
 import {
-  float, vec2, vec3, vec4, Fn, If, uniform,
+  float, vec2, vec3, vec4, Fn, If, Loop, Break, uniform,
   positionWorld, cameraPosition,
-  normalize, dot, max, mix, smoothstep, clamp, step, sqrt,
+  normalize, dot, max, min, mix, smoothstep, clamp, step, sqrt,
   pow, sin, floor, fract, length, abs, exp, sub, mul,
 } from "three/tsl";
 
@@ -36,6 +36,29 @@ export function createDayNightSky() {
   const uHorizonNight = uniform(new THREE.Color(0x1a2740));
   const uSunsetColor = uniform(new THREE.Color(0xff7a33));
   const uGroundColor = uniform(new THREE.Color(0x4a4a52));
+
+  // ── Atmospheric scattering (Nishita single-scattering) ───────────────────
+  // 0 = the analytic gradient above; 1 = a physically-based Rayleigh+Mie
+  // raymarch that gives the whole-sky sun glow, true horizon brightening, the
+  // belt of Venus and automatic sunset gradients. Drawn additively over the
+  // night gradient, so twilight carries itself as the sun drops.
+  const uScatterMix = uniform(1);
+  const uSunIntensity = uniform(22);   // disc-of-the-sun radiance scale
+  const uRayleigh = uniform(1.0);      // βR multiplier (sky blueness)
+  const uMie = uniform(1.0);           // βM multiplier (haze / sun aureole)
+  const uMieG = uniform(0.76);         // Mie anisotropy (aureole tightness)
+  const uAtmoAltitude = uniform(1500); // viewer height in the atmosphere (m)
+  const uHr = uniform(7994);           // Rayleigh scale height (m)
+  const uHm = uniform(1200);           // Mie scale height (m)
+  const uBetaR = uniform(new THREE.Vector3(5.5e-6, 13.0e-6, 22.4e-6));
+  const uBetaM = uniform(21e-6);
+  // Multiple-scattering approximation (no LUT): bounced light is ~isotropic and
+  // less path-extincted, so it fills the long-path horizon (bright glow) and
+  // shadowed twilight sky that single-scatter leaves dark. Gated by sun
+  // visibility so the night stays dark.
+  const uMsAmount = uniform(1.0);   // strength of the multi-scatter fill
+  const uMsExtinct = uniform(0.3);  // <1 = bounced light keeps more energy
+  const RG = 6360e3, RT = 6420e3;      // planet / atmosphere radii (m)
 
   const uSunColor = uniform(new THREE.Color(0xfff3d8));
   const uSunCos = uniform(Math.cos(THREE.MathUtils.degToRad(1.2)));
@@ -127,6 +150,95 @@ export function createDayNightSky() {
       .div(1.75),
   );
 
+  // ── Nishita single-scattering atmosphere ─────────────────────────────────
+  // Marches the view ray through the atmosphere shell; at each step a short
+  // light-march toward the sun gives the optical depth to space, and Rayleigh
+  // (molecular, blue) + Mie (aerosol, forward-peaked white) scattering are
+  // accumulated with their phase functions. Output is HDR radiance (tone-mapped
+  // into the sky RT with the rest of the scene).
+  const atmosphere = Fn(([dir, sunDir]) => {
+    const orig = vec3(0, float(RG).add(uAtmoAltitude), 0).toVar();
+    const b = dot(orig, dir).toVar();
+    const ococ = dot(orig, orig);
+    // Far intersection with the atmosphere top (origin is always inside).
+    const discA = b.mul(b).sub(ococ.sub(float(RT * RT)));
+    const tmax = b.negate().add(sqrt(discA.max(0.0))).toVar();
+    // Clamp the march to the ground if the planet is hit ahead (bright horizon).
+    const discG = b.mul(b).sub(ococ.sub(float(RG * RG)));
+    const tg = b.negate().sub(sqrt(discG.max(0.0)));
+    If(discG.greaterThan(0.0).and(tg.greaterThan(0.0)), () => {
+      tmax.assign(min(tmax, tg));
+    });
+
+    const betaR = uBetaR.mul(uRayleigh);
+    const betaM = uBetaM.mul(uMie);
+    const NS = 16, NL = 8;
+    const segLen = tmax.div(float(NS)).toVar();
+    const tCur = float(0.0).toVar();
+    const sumR = vec3(0.0).toVar();
+    const sumM = vec3(0.0).toVar();
+    const sumMS = vec3(0.0).toVar(); // isotropic multiple-scatter fill
+    const odR = float(0.0).toVar();
+    const odM = float(0.0).toVar();
+
+    Loop(NS, () => {
+      const sp = orig.add(dir.mul(tCur.add(segLen.mul(0.5))));
+      const h = length(sp).sub(float(RG));
+      const hr = exp(h.negate().div(uHr)).mul(segLen);
+      const hm = exp(h.negate().div(uHm)).mul(segLen);
+      odR.addAssign(hr);
+      odM.addAssign(hm);
+
+      // Light march toward the sun (to the atmosphere top).
+      const bl = dot(sp, sunDir);
+      const discL = bl.mul(bl).sub(dot(sp, sp).sub(float(RT * RT)));
+      const segL = bl.negate().add(sqrt(discL.max(0.0))).div(float(NL)).toVar();
+      const tCurL = float(0.0).toVar();
+      const odLR = float(0.0).toVar();
+      const odLM = float(0.0).toVar();
+      const valid = float(1.0).toVar();
+      Loop(NL, () => {
+        const spl = sp.add(sunDir.mul(tCurL.add(segL.mul(0.5))));
+        const hl = length(spl).sub(float(RG));
+        If(hl.lessThan(0.0), () => { valid.assign(0.0); Break(); });
+        odLR.addAssign(exp(hl.negate().div(uHr)).mul(segL));
+        odLM.addAssign(exp(hl.negate().div(uHm)).mul(segL));
+        tCurL.addAssign(segL);
+      });
+      // Only lit samples (light ray that didn't dive underground) contribute.
+      If(valid.greaterThan(0.5), () => {
+        const tau = betaR.mul(odR.add(odLR)).add(betaM.mul(1.1).mul(odM.add(odLM)));
+        const att = vec3(exp(tau.x.negate()), exp(tau.y.negate()), exp(tau.z.negate()));
+        sumR.addAssign(att.mul(hr));
+        sumM.addAssign(att.mul(hm));
+        // Multiple-scatter fill: extinct only by the (reduced) VIEW path — the
+        // bounced light is local, so it isn't dimmed by the long path to the
+        // sun. This is what keeps the horizon bright where single-scatter dies.
+        const tauV = betaR.mul(odR).add(betaM.mul(1.1).mul(odM));
+        const attMS = vec3(
+          exp(tauV.x.mul(uMsExtinct).negate()),
+          exp(tauV.y.mul(uMsExtinct).negate()),
+          exp(tauV.z.mul(uMsExtinct).negate()),
+        );
+        sumMS.addAssign(attMS.mul(betaR.mul(hr).add(betaM.mul(hm))));
+      });
+      tCur.addAssign(segLen);
+    });
+
+    const mu = dot(dir, sunDir);
+    const phaseR = float(3 / (16 * Math.PI)).mul(float(1.0).add(mu.mul(mu)));
+    const g = uMieG;
+    const g2 = g.mul(g);
+    const phaseM = float(3 / (8 * Math.PI))
+      .mul(float(1.0).sub(g2).mul(float(1.0).add(mu.mul(mu))))
+      .div(float(2.0).add(g2).mul(pow(float(1.0).add(g2).sub(g.mul(mu).mul(2.0)).max(0.0001), 1.5)));
+
+    const single = sumR.mul(betaR).mul(phaseR).add(sumM.mul(betaM).mul(phaseM));
+    // Isotropic phase (1/4π) for the bounced fill.
+    const multi = sumMS.mul(uMsAmount).mul(float(1 / (4 * Math.PI)));
+    return single.add(multi).mul(uSunIntensity);
+  });
+
   // ── Sky color node ───────────────────────────────────────────────────────
   const skyColorNode = Fn(() => {
     const dir = normalize(positionWorld.sub(cameraPosition)).toVar();
@@ -139,18 +251,24 @@ export function createDayNightSky() {
     const twilightF = smoothstep(-0.3, 0.0, sunEl)
       .mul(smoothstep(0.4, 0.04, sunEl));
 
-    // Vertical gradient (day + night palettes), crossfaded.
+    // Vertical gradient (day + night palettes).
     const tGrad = pow(max(up, float(0.0)), float(0.45));
-    const dayCol = mix(uHorizonDay, uZenithDay, tGrad);
+    const analyticDay = mix(uHorizonDay, uZenithDay, tGrad);
     const nightCol = mix(uHorizonNight, uZenithNight, tGrad);
-    const skyCol = mix(nightCol, dayCol, dayF).toVar();
 
-    // Warm sunset/sunrise wash, strongest near the horizon and toward the sun.
+    // ── ANALYTIC sky: crossfade day↔night + warm sunset wash (the old look) ──
+    const analyticSky = mix(nightCol, analyticDay, dayF).toVar();
     const sunAmt = max(dot(dir, uSunDir), float(0.0));
     const horizonBand = smoothstep(0.4, 0.0, abs(up));
     const sunset = twilightF.mul(horizonBand)
       .mul(mix(float(0.25), float(1.0), sunAmt));
-    skyCol.assign(mix(skyCol, uSunsetColor, clamp(sunset.mul(0.8), 0.0, 1.0)));
+    analyticSky.assign(mix(analyticSky, uSunsetColor, clamp(sunset.mul(0.8), 0.0, 1.0)));
+
+    // ── PHYSICAL sky: Nishita scattering ADDED over the dark night gradient,
+    //    so the blue overpowers it by day and twilight self-fades at night. ──
+    const physicalSky = nightCol.add(atmosphere(dir, uSunDir));
+
+    const skyCol = mix(analyticSky, physicalSky, uScatterMix).toVar();
 
     // Ground hemisphere (below the horizon line).
     const groundMix = smoothstep(0.0, -0.04, up);
@@ -257,6 +375,15 @@ export function createDayNightSky() {
     uSunsetColor.value.set(P.sunsetColor);
     uGroundColor.value.set(P.groundColor);
 
+    uScatterMix.value = P.scatter ? 1 : 0;
+    uSunIntensity.value = P.sunIntensity;
+    uRayleigh.value = P.rayleigh;
+    uMie.value = P.mie;
+    uMieG.value = P.mieG;
+    uAtmoAltitude.value = P.atmoAltitude;
+    uMsAmount.value = P.msAmount;
+    uMsExtinct.value = P.msExtinct;
+
     uSunColor.value.set(P.sunColor);
     uSunCos.value = Math.cos(THREE.MathUtils.degToRad(P.sunSizeDeg));
     uSunGlowPow.value = P.sunGlowPow;
@@ -317,6 +444,16 @@ export const SKY_DEFAULTS = {
   horizonNight: "#1a2740",
   sunsetColor: "#ff7a33",
   groundColor: "#4a4a52",
+
+  // Atmospheric scattering (Nishita). scatter:true = physical sky.
+  scatter: true,
+  sunIntensity: 22,
+  rayleigh: 1.0,
+  mie: 1.0,
+  mieG: 0.76,
+  atmoAltitude: 1500,
+  msAmount: 1.0,    // multiple-scattering fill strength (bright horizon glow)
+  msExtinct: 0.3,   // <1 = bounced light keeps more energy
 
   sunColor: "#fff3d8",
   sunSizeDeg: 1.2,
