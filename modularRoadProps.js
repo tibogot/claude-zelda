@@ -223,6 +223,26 @@ export const PROP_CATALOG = [
     },
   },
   {
+    id: "glowring",
+    label: "Glow ring",
+    collision: "none",
+    make: () => {
+      // Orange emissive gate ring — same live-tuned glow params as the Glow box.
+      const m = new THREE.Mesh(
+        new THREE.TorusGeometry(9, 1, 18, 56),
+        mat(glowPropParams.color, {
+          roughness: 0.45,
+          metalness: 0.0,
+          emissive: glowPropParams.color,
+          emissiveIntensity: glowPropParams.intensity,
+        }),
+      );
+      m.geometry.translate(0, 10, 0); // lift so the hole clears the ground
+      m.userData.isGlow = true;
+      return m;
+    },
+  },
+  {
     id: "airtunnel",
     label: "Tunnel (air)",
     collision: "solid",
@@ -314,10 +334,10 @@ export class PropManager {
     this.gizmo.setMode(mode);
   }
 
-  /** Push the shared glow params onto every placed Glow box (live tuning). */
+  /** Push the shared glow params onto every placed glow prop (box + ring). */
   applyGlowParams() {
     for (const inst of this.instances) {
-      if (inst.id !== "glowbox") continue;
+      if (inst.id !== "glowbox" && inst.id !== "glowring") continue;
       inst.root.traverse((o) => {
         if (o.isMesh && o.material) {
           o.material.color.set(glowPropParams.color);

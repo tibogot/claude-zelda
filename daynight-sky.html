@@ -130,7 +130,7 @@
         lensFlare: { ...LENS_FLARE_DEFAULTS },
         shadows: { enabled: true, normalBias: 3, bias: -0.0005 },
         ocean: {
-          enabled: true, waterY: 80,
+          enabled: true, waterY: 80, seaState: "Breezy",
           waveHeight: 1.8, choppiness: 1.5, reflectClouds: true,
           dispFadeStart: 600, dispFadeEnd: 4000,
         },
@@ -141,6 +141,18 @@
         },
         // Full ocean look/shaping set (defaults from OCEAN_DEFAULTS, driven via syncParams).
         oceanFx: { ...OCEAN_DEFAULTS },
+      };
+
+      // Sea-state presets: each sets wave height + FFT choppiness (the real
+      // whitecap driver — more horizontal pinch folds the surface, lowering the
+      // Jacobian → foam) + normal sharpness + the whitecap look together, so the
+      // ocean goes from glassy to storming with one pick. Higher whitecap
+      // threshold = MORE foam (foam triggers on less-folded crests).
+      const SEA_STATES = {
+        Calm:   { waveHeight: 0.7, normalStrength: 0.9, fftChoppiness: 0.7, wcThreshold: 0.50, wcIntensity: 0.6,  wcBrightness: 1.05, wcContrast: 1.40, wcNoiseScale: 0.32 },
+        Breezy: { waveHeight: 1.8, normalStrength: 1.3, fftChoppiness: 1.3, wcThreshold: 0.66, wcIntensity: 1.0,  wcBrightness: 1.15, wcContrast: 1.55, wcNoiseScale: 0.38 },
+        Choppy: { waveHeight: 2.7, normalStrength: 1.8, fftChoppiness: 1.9, wcThreshold: 0.78, wcIntensity: 1.25, wcBrightness: 1.25, wcContrast: 1.70, wcNoiseScale: 0.44 },
+        Stormy: { waveHeight: 3.5, normalStrength: 2.2, fftChoppiness: 2.4, wcThreshold: 0.88, wcIntensity: 1.5,  wcBrightness: 1.35, wcContrast: 1.90, wcNoiseScale: 0.52 },
       };
 
       // ── Celestial driver: time-of-day → sun/moon directions + light ────────
@@ -384,33 +396,67 @@
         scene.add(ocean.group);
         ocean.setVisible(PARAMS.ocean.enabled);
 
-        // Sky → PMREM env map for the ocean's reflections (re-baked on a throttle).
+        // Sky → PMREM env map for the ocean's reflections. The old version called
+        // `pmrem.fromScene` every 0.4s, which rendered the SKY + the full cloud
+        // raymarch into all 6 cube faces AND convolved — all in one frame, an
+        // 80ms+ hitch. We AMORTIZE instead: render ONE cube face per frame (the
+        // cloud raymarch spreads over 6 frames), convolve once the cube is done,
+        // then idle ~1.5s. This was the entire ocean perf cost (see perf trace).
         const pmrem = new THREE.PMREMGenerator(renderer);
         let _envRT = null;
-        let _envTimer = 0;
-        function bakeSkyEnv() {
-          const tmp = new THREE.Scene();
-          const skyClone = sky.mesh.clone();
-          skyClone.position.set(0, 0, 0); // bake from origin, not the camera-followed pose
-          tmp.add(skyClone);
-          // Option B: render the cloud dome into the reflection cubemap too.
+
+        // Persistent env scene: sky + cloud clones at the origin. clone() SHARES
+        // the materials/uniforms, so these auto-track the live sky/cloud every
+        // frame — no per-bake rebuild.
+        const envScene = new THREE.Scene();
+        const skyEnvClone = sky.mesh.clone();
+        skyEnvClone.position.set(0, 0, 0);
+        envScene.add(skyEnvClone);
+        const cloudEnvClone = clouds.mesh.clone();
+        cloudEnvClone.position.set(0, 0, 0);
+        cloudEnvClone.layers.set(0); // the cube cameras render layer 0
+        envScene.add(cloudEnvClone);
+
+        const cubeRT = new THREE.CubeRenderTarget(128, { type: THREE.HalfFloatType });
+        const cubeCam = new THREE.CubeCamera(0.1, 20000, cubeRT);
+        cubeCam.updateMatrixWorld(true);
+
+        function renderEnvFace(face) {
           const withClouds = PARAMS.ocean.reflectClouds && PARAMS.clouds.enabled;
-          if (withClouds) {
-            clouds.setEnvMode(true); // skip depth occlusion, cheaper march
-            const cloudClone = clouds.mesh.clone();
-            cloudClone.position.set(0, 0, 0);
-            cloudClone.layers.set(0); // PMREM cube camera renders layer 0
-            tmp.add(cloudClone);
-          }
-          // Explicit far plane: the sky dome (r≈9000) and cloud shell (~2900 up)
-          // are far beyond fromScene's default far (~100) and would be clipped.
-          const rt = pmrem.fromScene(tmp, 0.04, 0.1, 20000);
+          cloudEnvClone.visible = withClouds;
+          if (withClouds) clouds.setEnvMode(true); // skip depth occlusion, cheaper march
+          renderer.setRenderTarget(cubeRT, face);
+          renderer.render(envScene, cubeCam.children[face]);
+          renderer.setRenderTarget(null);
           if (withClouds) clouds.setEnvMode(false);
+        }
+        function convolveEnv() {
+          const rt = pmrem.fromCubemap(cubeRT.texture);
           ocean.setEnvMap(rt.texture);
           if (_envRT) _envRT.dispose();
           _envRT = rt;
         }
-        bakeSkyEnv();
+        // Initial full bake so the ocean has reflections on the first frame.
+        try {
+          for (let f = 0; f < 6; f++) renderEnvFace(f);
+          convolveEnv();
+        } catch (e) { window.__envErr = e?.stack || ("" + e); console.error("ENV BAKE FAILED:", e); }
+
+        // Amortized re-bake: one face/frame, convolve on completion, then idle.
+        const ENV_IDLE = 1.5;   // seconds between full re-bakes
+        let _envFace = -1;      // -1 = idle, 0..5 = rendering that face
+        let _envIdle = ENV_IDLE;
+        function updateEnvBake(dt) {
+          if (!PARAMS.ocean.enabled) return;
+          if (_envFace < 0) {
+            _envIdle -= dt;
+            if (_envIdle > 0) return;
+            _envFace = 0;
+          }
+          renderEnvFace(_envFace);
+          _envFace++;
+          if (_envFace >= 6) { convolveEnv(); _envFace = -1; _envIdle = ENV_IDLE; }
+        }
 
         // ── Character + follow camera ────────────────────────────────────────
         // A kinematic capsule that walks the heightfield (WASD + arrow keys,
@@ -620,9 +666,16 @@
 
         s = _section(uiBody, "Ocean");
         tg(s, PARAMS.ocean, "enabled");
+        const oceanSliders = {};
+        // Sea-state preset picker — applies a coherent wave + whitecap set.
+        _dropdown(s, PARAMS.ocean, "seaState", {
+          label: "Sea state",
+          options: { Calm: "Calm", Breezy: "Breezy", Choppy: "Choppy", Stormy: "Stormy" },
+          onChange: () => applySeaState(PARAMS.ocean.seaState),
+        });
         sl(s, PARAMS.ocean, "waterY", -200, 200, 1, "Sea level Y");
-        sl(s, PARAMS.ocean, "waveHeight", 0.2, 3.5, 0.05, "Wave height");
-        sl(s, PARAMS.ocean, "choppiness", 0.5, 3, 0.05);
+        oceanSliders.waveHeight = sl(s, PARAMS.ocean, "waveHeight", 0.2, 3.5, 0.05, "Wave height");
+        oceanSliders.choppiness = sl(s, PARAMS.ocean, "choppiness", 0.5, 3, 0.05);
         sl(s, PARAMS.ocean, "dispFadeStart", 0, 2000, 10, "Wave fade start");
         sl(s, PARAMS.ocean, "dispFadeEnd", 100, 6000, 50, "Wave fade end");
         tg(s, PARAMS.ocean, "reflectClouds", "Reflect clouds");
@@ -660,6 +713,7 @@
 
           sub = _section(s, "Waves (FFT)", false);
           tg(sub, fx, "fftEnabled", "FFT enabled");
+          oceanSliders.fftChoppiness = sl(sub, fx, "fftChoppiness", 0, 3, 0.05, "Choppiness (foam)");
           sl(sub, fx, "fftRippleAmp", 0, 2, 0.05, "Ripple amp");
           sl(sub, fx, "gerstnerBlend", 0, 1, 0.01, "Gerstner blend");
 
@@ -677,15 +731,15 @@
 
           sub = _section(s, "Whitecaps", false);
           tg(sub, fx, "whitecapEnabled", "Enabled");
-          sl(sub, fx, "whitecapIntensity", 0, 3, 0.05, "Intensity");
-          sl(sub, fx, "whitecapThreshold", 0, 1, 0.01, "Threshold");
+          oceanSliders.whitecapIntensity = sl(sub, fx, "whitecapIntensity", 0, 3, 0.05, "Intensity");
+          oceanSliders.whitecapThreshold = sl(sub, fx, "whitecapThreshold", 0, 1, 0.01, "Threshold");
           sl(sub, fx, "whitecapSoftness", 0, 1, 0.01, "Softness");
-          sl(sub, fx, "whitecapNoiseScale", 0, 2, 0.01, "Noise scale");
+          oceanSliders.whitecapNoiseScale = sl(sub, fx, "whitecapNoiseScale", 0, 2, 0.01, "Noise scale");
           sl(sub, fx, "whitecapNoiseSpeed", 0, 2, 0.01, "Noise speed");
           sl(sub, fx, "whitecapWarpStrength", 0, 2, 0.01, "Warp strength");
           sl(sub, fx, "whitecapWarpScale", 0, 1, 0.01, "Warp scale");
-          sl(sub, fx, "whitecapContrast", 0, 4, 0.05, "Contrast");
-          sl(sub, fx, "whitecapBrightness", 0, 3, 0.05, "Brightness");
+          oceanSliders.whitecapContrast = sl(sub, fx, "whitecapContrast", 0, 4, 0.05, "Contrast");
+          oceanSliders.whitecapBrightness = sl(sub, fx, "whitecapBrightness", 0, 3, 0.05, "Brightness");
           sl(sub, fx, "whitecapProcThreshold", 0, 1, 0.01, "Proc threshold");
           sl(sub, fx, "whitecapProcSoftness", 0, 1, 0.01, "Proc softness");
 
@@ -741,6 +795,23 @@
           sl(sub, fx, "underwaterSkyBoost", 0, 3, 0.05, "Sky boost");
           sl(sub, fx, "underwaterMurk", 0, 1, 0.01, "Murk");
         }
+        // Apply a sea-state preset → PARAMS (the per-frame sync pushes it to the
+        // ocean) and refresh the sliders the preset touches.
+        function applySeaState(name) {
+          const p = SEA_STATES[name];
+          if (!p) return;
+          PARAMS.ocean.waveHeight = p.waveHeight;   // → fftSwellAmp
+          PARAMS.ocean.choppiness = p.normalStrength; // → fftNormalStrength
+          const fx = PARAMS.oceanFx;
+          fx.fftChoppiness = p.fftChoppiness;       // real whitecap driver (folding)
+          fx.whitecapThreshold = p.wcThreshold;     // higher = more foam coverage
+          fx.whitecapIntensity = p.wcIntensity;
+          fx.whitecapBrightness = p.wcBrightness;
+          fx.whitecapContrast = p.wcContrast;
+          fx.whitecapNoiseScale = p.wcNoiseScale;
+          for (const h of Object.values(oceanSliders)) h?.refresh?.();
+        }
+        applySeaState(PARAMS.ocean.seaState); // seed the default preset
 
         s = _section(uiBody, "Fog");
         tg(s, PARAMS.fog, "enabled");
@@ -948,8 +1019,7 @@
             ocean.uniforms.fftNormalStrength.value = PARAMS.ocean.choppiness;
             ocean.uniforms.dispFadeStart.value = PARAMS.ocean.dispFadeStart;
             ocean.uniforms.dispFadeEnd.value = PARAMS.ocean.dispFadeEnd;
-            _envTimer -= dt;
-            if (_envTimer <= 0) { bakeSkyEnv(); _envTimer = 0.4; }
+            updateEnvBake(dt);
             ocean.update(dt, elapsed, camera, L.lightDir);
           } else {
             ocean.setVisible(false);

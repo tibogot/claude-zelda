@@ -37,14 +37,19 @@ export function formatLapTime(t) {
 }
 
 export class LapTracker {
-  /** @param {{ roadWidth?: number, fallY?: number }} [o] */
-  constructor({ roadWidth = 16, fallY = -30 } = {}) {
+  /** @param {{ roadWidth?: number, fallY?: number, targetLaps?: number }} [o] */
+  constructor({ roadWidth = 16, fallY = -30, targetLaps = 3 } = {}) {
     this.halfWidth = roadWidth / 2 + 2; // a little margin past the kerbs
     this.fallY = fallY;
+    this.targetLaps = Math.max(1, Math.round(targetLaps)); // laps to finish a race
     /** @type {{type:string,label:string,pos:THREE.Vector3,fwd:THREE.Vector3,quat:THREE.Quaternion,yaw:number}[]} */
     this.gates = [];
     this.startIndex = -1; // which gate is the lap line
     this.reset();
+  }
+
+  setTargetLaps(n) {
+    this.targetLaps = Math.max(1, Math.round(n));
   }
 
   /**
@@ -74,10 +79,12 @@ export class LapTracker {
     this.reset();
   }
 
-  /** Clear all timing state (gates are kept). */
+  /** Clear all timing state (gates are kept; targetLaps is a setting, untouched). */
   reset() {
     this.running = false;
-    this.currentTime = 0;
+    this.finished = false; // whole race done (targetLaps reached)
+    this.currentTime = 0; // current lap time
+    this.raceTime = 0; // total time across all laps since GO
     this.lastLap = NaN;
     this.bestLap = NaN;
     this.lapCount = 0;
@@ -85,8 +92,15 @@ export class LapTracker {
     this.nextIndex = this.startIndex; // gate the car must cross next
     this._prevSide = 0;
     this._hasPrev = false;
+    this._lapSplits = []; // time at each gate index this lap
+    this.bestLapSplits = null; // the best lap's per-gate times (for live deltas)
     this.message = "";
     this.messageTimer = 0;
+  }
+
+  /** Seed the best lap's per-gate split times from a persisted record. */
+  applyStoredSplits(arr) {
+    if (Array.isArray(arr) && arr.length) this.bestLapSplits = arr.slice();
   }
 
   get hasCourse() {
@@ -120,11 +134,17 @@ export class LapTracker {
   /** Human label for the gate the car should head to next. */
   get nextLabel() {
     if (!this.hasCourse) return "";
+    if (this.finished) return "RACE FINISHED";
     const g = this.gates[this.nextIndex];
     if (!g) return "";
     if (!this.running && this.nextIndex === this.startIndex) return "Cross the START line";
     if (this.nextIndex === this.startIndex) return "Back to the LINE";
     return `${g.label} ${this.passedThisLap + 1}/${this.waypointCount}`;
+  }
+
+  /** Lap number currently being driven (1-based), clamped to the target. */
+  get currentLapNumber() {
+    return this.running ? Math.min(this.lapCount + 1, this.targetLaps) : this.lapCount;
   }
 
   /**
@@ -136,8 +156,11 @@ export class LapTracker {
       this.messageTimer -= dt;
       if (this.messageTimer <= 0) this.message = "";
     }
-    if (!this.hasCourse) return null;
-    if (this.running) this.currentTime += dt;
+    if (!this.hasCourse || this.finished) return null; // race over → ignore crossings
+    if (this.running) {
+      this.currentTime += dt;
+      this.raceTime += dt;
+    }
 
     const gate = this.gates[this.nextIndex];
     // Signed distance to the gate plane along its forward normal.
@@ -161,13 +184,16 @@ export class LapTracker {
   }
 
   _cross(gate) {
-    const isLapLine = this.nextIndex === this.startIndex;
+    const idx = this.nextIndex;
+    const isLapLine = idx === this.startIndex;
     if (isLapLine) {
       if (!this.running) {
         // First time over the line → start the clock.
         this.running = true;
         this.currentTime = 0;
+        this.raceTime = 0;
         this.passedThisLap = 0;
+        this._lapSplits = new Array(this.gates.length).fill(NaN);
         this._flash("GO!");
         this._advance();
         return { kind: "start", gate, lapTime: 0 };
@@ -179,20 +205,36 @@ export class LapTracker {
       const isRecord = !Number.isFinite(prevBest) || lapTime < prevBest;
       if (isRecord) {
         this.bestLap = lapTime;
-        this._flash(`★ NEW RECORD ★  ${formatLapTime(lapTime)}`);
-      } else {
-        this._flash(`LAP ${this.lapCount + 1} — ${formatLapTime(lapTime)}`);
+        this.bestLapSplits = this._lapSplits.slice(); // splits of the new best lap
       }
       this.lapCount++;
-      this.currentTime = 0;
-      this.passedThisLap = 0;
-      this._advance();
-      return { kind: "lap", gate, lapTime, isRecord, prevBest };
+      const finished = this.lapCount >= this.targetLaps;
+      if (finished) {
+        this.finished = true;
+        this.running = false;
+        this._flash(`FINISH · ${this.targetLaps} laps · ${formatLapTime(this.raceTime)}`, 9);
+      } else if (isRecord) {
+        this._flash(`★ NEW RECORD ★  ${formatLapTime(lapTime)}`);
+      } else {
+        this._flash(`LAP ${this.lapCount} — ${formatLapTime(lapTime)}`);
+      }
+      if (!finished) {
+        this.currentTime = 0;
+        this.passedThisLap = 0;
+        this._lapSplits = new Array(this.gates.length).fill(NaN);
+        this._advance();
+      }
+      return { kind: "lap", gate, lapTime, isRecord, prevBest, finished, raceTime: this.raceTime, lapNumber: this.lapCount };
     }
-    // A mandatory waypoint.
+    // A mandatory waypoint: stamp its split + delta vs the best lap.
+    this._lapSplits[idx] = this.currentTime;
+    let splitDelta = NaN;
+    if (this.bestLapSplits && Number.isFinite(this.bestLapSplits[idx])) {
+      splitDelta = this.currentTime - this.bestLapSplits[idx];
+    }
     this.passedThisLap++;
     this._advance();
-    return { kind: "checkpoint", gate, lapTime: this.currentTime };
+    return { kind: "checkpoint", gate, lapTime: this.currentTime, splitDelta, gateIndex: idx };
   }
 
   /** Move nextIndex to the following gate, wrapping back to the lap line. */

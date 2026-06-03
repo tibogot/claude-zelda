@@ -804,8 +804,26 @@
       <div id="lap-time" style="font-size: 30px; font-weight: 700; letter-spacing: 0.04em; text-shadow: 0 2px 8px rgba(0,0,0,0.7)">--.---</div>
       <div id="lap-sub" style="font-size: 12px; opacity: 0.85; margin-top: 2px; text-shadow: 0 1px 4px rgba(0,0,0,0.7)"></div>
       <div id="lap-next" style="font-size: 12px; margin-top: 3px; color: #ffd54a; text-shadow: 0 1px 4px rgba(0,0,0,0.7)"></div>
-      <div id="lap-flash" style="font-size: 16px; font-weight: 700; margin-top: 6px; color: #7CFFB4; min-height: 20px; text-shadow: 0 2px 8px rgba(0,0,0,0.8)"></div>
+      <div id="lap-split" style="font-size: 18px; font-weight: 700; margin-top: 4px; min-height: 22px; text-shadow: 0 2px 8px rgba(0,0,0,0.8)"></div>
+      <div id="lap-flash" style="font-size: 16px; font-weight: 700; margin-top: 2px; color: #7CFFB4; min-height: 20px; text-shadow: 0 2px 8px rgba(0,0,0,0.8)"></div>
     </div>
+    <div
+      id="countdown"
+      style="
+        position: fixed;
+        top: 38%;
+        left: 50%;
+        transform: translate(-50%, -50%);
+        z-index: 18;
+        display: none;
+        font-family: var(--font-mono);
+        font-size: 120px;
+        font-weight: 800;
+        color: #fff;
+        text-shadow: 0 6px 30px rgba(0, 0, 0, 0.85);
+        pointer-events: none;
+      "
+    ></div>
     <style>
       @keyframes recordPulse {
         0% { transform: translateX(-50%) scale(1); }
@@ -846,6 +864,23 @@
         color: #8a939e;
         border-color: rgba(255, 255, 255, 0.14);
       }
+      #laps-dec,
+      #laps-inc {
+        width: 22px;
+        height: 22px;
+        font: 14px/1 var(--font-mono);
+        color: #cdd7e2;
+        background: rgba(255, 255, 255, 0.08);
+        border: 1px solid rgba(255, 255, 255, 0.18);
+        border-radius: 5px;
+        cursor: pointer;
+        pointer-events: auto;
+      }
+      #laps-dec:hover,
+      #laps-inc:hover {
+        background: rgba(255, 213, 74, 0.2);
+        color: #fff;
+      }
     </style>
     <div
       id="record-card"
@@ -870,8 +905,15 @@
       <div style="font-size: 10px; letter-spacing: 0.18em; opacity: 0.7; text-transform: uppercase">🏆 Track record</div>
       <div id="record-time" style="font-size: 24px; font-weight: 700; color: #ffd54a; margin-top: 2px">—</div>
       <div id="record-meta" style="font-size: 10px; opacity: 0.65; margin-top: 2px"></div>
+      <div id="laps-control" style="display:flex;align-items:center;justify-content:center;gap:8px;margin-top:8px;font-size:11px;pointer-events:auto;">
+        <span style="opacity:0.7;letter-spacing:0.1em;">🏁 LAPS</span>
+        <button id="laps-dec" type="button">−</button>
+        <span id="laps-count" style="min-width:16px;font-weight:700;color:#ffd54a;">3</span>
+        <button id="laps-inc" type="button">+</button>
+      </div>
       <button id="ghost-toggle" type="button">👻 Ghost: ON</button>
       <button id="record-clear" type="button">Clear record</button>
+      <div style="font-size:9px;opacity:0.55;margin-top:6px;">Enter = restart race</div>
     </div>
     <div
       id="pause-badge"
@@ -1695,7 +1737,14 @@
         const lapSubEl = document.getElementById("lap-sub");
         const lapNextEl = document.getElementById("lap-next");
         const lapFlashEl = document.getElementById("lap-flash");
+        const lapSplitEl = document.getElementById("lap-split");
+        const countdownEl = document.getElementById("countdown");
         const FALL_Y = -30; // below this the car has fallen off → auto-respawn
+        const COUNTDOWN_SECS = 3; // 3·2·1·GO before each race
+        let raceCountdown = 0; // >0 while counting down (car held)
+        let _goLinger = 0; // keeps "GO!" on screen briefly after the countdown
+        let _splitTimer = 0; // how long the split delta stays shown
+        const HELD_CONTROLS = { steerTarget: 0, throttle: 0, handbrake: true, yaw: 0 };
 
         // Move the respawn point onto the gate the car just cleared, lifted onto
         // the deck — so R (and auto-respawn on a fall) returns there facing forward.
@@ -1715,17 +1764,19 @@
             : lap.hasCourse
               ? "0.000"
               : "--.---";
+          if (lap.finished) lapTimeEl.textContent = formatLapTime(lap.raceTime);
           if (!lap.hasCourse) {
             lapSubEl.textContent = "Place Start / Checkpoint / Finish pieces to time laps";
             lapNextEl.textContent = "";
           } else {
             const best = Number.isFinite(lap.bestLap) ? formatLapTime(lap.bestLap) : "—";
-            const last = Number.isFinite(lap.lastLap) ? formatLapTime(lap.lastLap) : "—";
-            lapSubEl.textContent = `Lap ${lap.lapCount}  ·  Best ${best}  ·  Last ${last}`;
+            const lapNo = lap.finished ? lap.targetLaps : lap.currentLapNumber;
+            lapSubEl.textContent = `Lap ${lapNo}/${lap.targetLaps}  ·  Best ${best}`;
             lapNextEl.textContent = lap.nextLabel ? `▸ ${lap.nextLabel}` : "";
           }
           lapFlashEl.textContent = lap.message;
-          lapFlashEl.style.color = lap.message.includes("RECORD") ? "#ffd54a" : "#7CFFB4";
+          lapFlashEl.style.color =
+            lap.message.includes("RECORD") || lap.message.includes("FINISH") ? "#ffd54a" : "#7CFFB4";
         }
 
         // ── BEST-LAP PERSISTENCE (per-course record in localStorage) ──
@@ -1839,6 +1890,83 @@
           if (!ghostEnabled) ghostMesh.visible = false;
         });
 
+        // ── RACE: countdown + multi-lap + split-times-vs-best ──
+        const SPLITS_PREFIX = "mr_splits_v1_";
+        const LAPS_KEY = "mr_targetlaps_v1";
+        const lapsCountEl = document.getElementById("laps-count");
+        // Persisted per-course best-lap split times (for live deltas across sessions).
+        function loadStoredSplits(sig) {
+          if (!sig) return null;
+          try {
+            const j = localStorage.getItem(SPLITS_PREFIX + sig);
+            const a = j ? JSON.parse(j) : null;
+            return Array.isArray(a) ? a : null;
+          } catch (e) {
+            return null;
+          }
+        }
+        function saveStoredSplits(sig, arr) {
+          if (!sig || !Array.isArray(arr)) return;
+          try {
+            localStorage.setItem(SPLITS_PREFIX + sig, JSON.stringify(arr.map((t) => (Number.isFinite(t) ? Math.round(t * 1000) / 1000 : null))));
+          } catch (e) {
+            /* ignore */
+          }
+        }
+        // Target laps: a global setting (persisted), tweakable on the record card.
+        try {
+          const v = parseInt(localStorage.getItem(LAPS_KEY) ?? "", 10);
+          if (Number.isFinite(v)) lap.setTargetLaps(v);
+        } catch (e) {
+          /* ignore */
+        }
+        function syncLapsUi() {
+          if (lapsCountEl) lapsCountEl.textContent = String(lap.targetLaps);
+        }
+        function setTargetLaps(n) {
+          lap.setTargetLaps(Math.max(1, Math.min(20, n)));
+          try {
+            localStorage.setItem(LAPS_KEY, String(lap.targetLaps));
+          } catch (e) {
+            /* ignore */
+          }
+          syncLapsUi();
+          updateLapHud();
+        }
+        document.getElementById("laps-dec")?.addEventListener("click", () => setTargetLaps(lap.targetLaps - 1));
+        document.getElementById("laps-inc")?.addEventListener("click", () => setTargetLaps(lap.targetLaps + 1));
+        syncLapsUi();
+
+        // Show a checkpoint split delta (+slower red / −faster green) briefly.
+        function showSplit(delta) {
+          if (!Number.isFinite(delta)) {
+            lapSplitEl.textContent = "";
+            return;
+          }
+          const sign = delta >= 0 ? "+" : "−";
+          lapSplitEl.textContent = `${sign}${Math.abs(delta).toFixed(2)}`;
+          lapSplitEl.style.color = delta <= 0 ? "#7CFFB4" : "#ff6b6b";
+          _splitTimer = 2.4;
+        }
+
+        // (Re)start a race: reset timing, re-seed the saved record + ghost, place the
+        // car at the line, and begin the 3·2·1·GO countdown (car held until GO).
+        function startRace() {
+          lap.reset();
+          lap.applyStoredBest(loadStoredBest(courseKey));
+          lap.applyStoredSplits(loadStoredSplits(courseKey));
+          ghost.discard();
+          ghostMesh.visible = false;
+          spawnOnTrack();
+          vehicle.respawn();
+          raceCountdown = lap.hasCourse ? COUNTDOWN_SECS : 0; // no course → no countdown
+          _splitTimer = 0;
+          lapSplitEl.textContent = "";
+          countdownEl.style.display = "none";
+          refreshRecordCard();
+          updateLapHud();
+        }
+
         function setBuildMode(on) {
           state.buildMode = on;
           buildBtn.classList.toggle("active", on);
@@ -1877,7 +2005,7 @@
               ? "BUILD"
               : "ORBIT";
           modeHint.innerHTML = on
-            ? "WASD drive &bull; Space handbrake &bull; F flip &bull; R respawn &bull; P pause (orbit + N step) &bull; Tab orbit cam"
+            ? "WASD drive &bull; Space handbrake &bull; F flip &bull; R respawn &bull; Enter restart race &bull; P pause &bull; Tab orbit"
             : "LMB place &bull; N new chain + gizmo &bull; W move Shift+E rotate &bull; 1–0 pick &bull; R flip &bull; Backspace undo";
           builder.setGhostVisible(!on && state.buildMode);
           props.setEnabled(!on);
@@ -1896,13 +2024,9 @@
             vehicle.setColliders(collidables, []); // raycaster fallback only
             spawnOnTrack();
             lap.buildGates(builder.pieces); // re-scan game pieces for this run
-            lap.reset();
             courseKey = lap.courseSignature();
-            lap.applyStoredBest(loadStoredBest(courseKey)); // seed the saved record
             loadStoredGhost(courseKey); // seed the saved best-lap ghost
-            ghostMesh.visible = false;
-            refreshRecordCard();
-            updateLapHud();
+            startRace(); // reset timing, seed record/splits, place car, run countdown
             tireMarks.reset();
             driftSmoke.reset();
           }
@@ -1912,6 +2036,8 @@
             driftSmoke.reset();
             ghost.discard();
             ghostMesh.visible = false;
+            raceCountdown = 0;
+            countdownEl.style.display = "none";
           }
           state.orbitInDrive = false;
           state.paused = false;
@@ -2046,6 +2172,11 @@
               vehicle.respawn();
               tireMarks.reset();
               driftSmoke.reset();
+            }
+            if (e.code === "Enter") {
+              e.preventDefault();
+              startRace(); // restart the race from the countdown
+              return;
             }
             if (e.code === "KeyF") vehicle.flipUpright();
             if (e.code === "KeyP") {
@@ -2277,9 +2408,30 @@
               state.frameStep = false;
             }
             if (simDt > 0) {
+              // Race countdown: hold the car still and tick 3·2·1·GO.
+              let controls;
+              if (raceCountdown > 0) {
+                raceCountdown -= simDt;
+                controls = HELD_CONTROLS;
+                countdownEl.style.display = "";
+                if (raceCountdown > 0) {
+                  countdownEl.textContent = String(Math.ceil(raceCountdown));
+                  countdownEl.style.color = "#fff";
+                } else {
+                  countdownEl.textContent = "GO!";
+                  countdownEl.style.color = "#7CFFB4";
+                  _goLinger = 0.7;
+                }
+              } else {
+                controls = readControls();
+                if (_goLinger > 0) {
+                  _goLinger -= simDt;
+                  if (_goLinger <= 0) countdownEl.style.display = "none";
+                }
+              }
               moverProps.update(simDt);
               if (moverProps.getDeckMovers().length) rebakeDeckWithMovers();
-              vehicle.update(simDt, readControls());
+              vehicle.update(simDt, controls);
               tireMarks.update(vehicle);
               driftSmoke.updateFromVehicle(vehicle, camera, simDt, keys);
               portals.updateDrive(simDt, vehicle);
@@ -2294,24 +2446,31 @@
               const lapEv = lap.update(simDt, vehicle.body.pos, vehicle.body.vel);
               if (lapEv) {
                 setRespawnToLastGate();
-                if (lapEv.kind === "start") {
+                if (lapEv.kind === "checkpoint") {
+                  showSplit(lapEv.splitDelta); // ± vs your best lap at this gate
+                } else if (lapEv.kind === "start") {
                   ghost.beginLap(); // start recording lap 1
                 } else if (lapEv.kind === "lap") {
                   if (lapEv.isRecord) {
                     ghost.commit(); // this lap is the new ghost
                     saveStoredBest(courseKey, lapEv.lapTime);
                     saveStoredGhost(courseKey);
+                    saveStoredSplits(courseKey, lap.bestLapSplits);
                     refreshRecordCard();
                     celebrateRecord();
                   } else {
                     ghost.discard();
                   }
-                  ghost.beginLap(); // record the next lap fresh
+                  if (!lapEv.finished) ghost.beginLap(); // record the next lap fresh
                 }
               }
               // Record the live pose, then drive the phantom from the lap clock.
               if (lap.running) ghost.record(lap.currentTime, vehicle.chassisMesh.position, vehicle.chassisMesh.quaternion);
               updateGhost();
+              if (_splitTimer > 0) {
+                _splitTimer -= simDt;
+                if (_splitTimer <= 0) lapSplitEl.textContent = "";
+              }
             }
             if (state.paused) {
               controls.target.copy(vehicle.body.pos); // orbit around the frozen car
@@ -2340,6 +2499,19 @@
           // trackGPU on WebGPU; otherwise the query pool overflows + errors).
           renderer.resolveTimestampsAsync?.().catch(() => {});
           stats.update();
+
+          // Draw-call / triangle readout (last frame's render), throttled to ~4 Hz.
+          _perfT += dt;
+          if (_perfT >= 0.25) {
+            _perfT = 0;
+            const r = renderer.info?.render ?? {};
+            const calls = r.drawCalls ?? r.calls ?? 0;
+            const tris = r.triangles ?? 0;
+            const inst = builder.instancingEnabled
+              ? `inst ON (${builder._instMeshes.length})`
+              : "inst OFF";
+            perfReadout.textContent = `${calls} draws · ${(tris / 1000).toFixed(0)}k tris · ${builder.count} pcs · ${inst}`;
+          }
         });
         window.addEventListener("resize", () => {
           camera.aspect = innerWidth / innerHeight;
