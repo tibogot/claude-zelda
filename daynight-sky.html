@@ -90,6 +90,7 @@
       import { createTerrain } from "./daynight-terrain.js";
       import { createOcean } from "./daynight-ocean.js";
       import { OCEAN_DEFAULTS } from "./ocean-shader.js";
+      import { createLensFlare, LENS_FLARE_DEFAULTS } from "./daynight-lensflare.js";
       import {
         fog, densityFogFactor, uniform, mix, pow, dot, clamp, normalize,
         positionWorld, cameraPosition,
@@ -123,6 +124,7 @@
         },
         godRays: { ...GOD_RAYS_DEFAULTS, enabled: false },
         bloom: { enabled: true, strength: 0.4, radius: 0.6, threshold: 0.92 },
+        lensFlare: { ...LENS_FLARE_DEFAULTS },
         shadows: { enabled: true, normalBias: 3, bias: -0.0005 },
         ocean: {
           enabled: true, waterY: 80,
@@ -363,6 +365,10 @@
         scene.add(sky.mesh);
         const clouds = createCloudLayer({ camera });
         scene.add(clouds.mesh, clouds.sunMesh);
+
+        // Sun-anchored lens flare (own layer; drawn as an overlay after clouds).
+        const lensFlare = createLensFlare({ camera });
+        scene.add(lensFlare.group);
 
         // ── Ocean (reuses the shared, unedited ocean modules) ────────────────
         const ocean = await createOcean({
@@ -633,6 +639,18 @@
         sl(s, PARAMS.bloom, "radius", 0, 1, 0.01);
         sl(s, PARAMS.bloom, "threshold", 0, 1.5, 0.01);
 
+        s = _section(uiBody, "Lens flare", false);
+        tg(s, PARAMS.lensFlare, "enabled");
+        sl(s, PARAMS.lensFlare, "intensity", 0, 8, 0.05);
+        sl(s, PARAMS.lensFlare, "halationSize", 0, 8, 0.05, "Halation size");
+        col(s, PARAMS.lensFlare, "halationColor", "Halation color");
+        sl(s, PARAMS.lensFlare, "streakLength", 0, 3, 0.05, "Streak length");
+        sl(s, PARAMS.lensFlare, "streakOpacity", 0, 2, 0.05, "Streak opacity");
+        col(s, PARAMS.lensFlare, "streakColor", "Streak color");
+        sl(s, PARAMS.lensFlare, "ghostOpacity", 0, 4, 0.05, "Ghost opacity");
+        sl(s, PARAMS.lensFlare, "ghostSpacing", 0, 2, 0.05, "Ghost spacing");
+        sl(s, PARAMS.lensFlare, "dirtOpacity", 0, 2, 0.05, "Dirt opacity");
+
         s = _section(uiBody, "Sky colors", false);
         for (const k of ["zenithDay", "horizonDay", "zenithNight", "horizonNight", "sunsetColor", "groundColor", "sunColor", "moonColor"]) col(s, PARAMS.sky, k);
         sl(s, PARAMS.sky, "sunSizeDeg", 0.3, 6, 0.1);
@@ -794,6 +812,10 @@
             skyMesh: sky.mesh,
             occluders: [terrain.mesh],
           });
+
+          // Lens flare: additive overlay onto the canvas, anchored to the sun.
+          lensFlare.update(_sunDir, PARAMS.lensFlare);
+          lensFlare.render(renderer, scene, camera);
 
           hud.textContent =
             `time ${PARAMS.timeOfDay.toFixed(2)}h  sunUp ${L.sunUp.toFixed(2)}  ` +
