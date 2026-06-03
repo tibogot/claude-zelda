@@ -66,7 +66,7 @@ const ISLANDS = [
   { cx: 620, cz: -640, r: 5000, a: 200 },
 ];
 
-export async function createTerrain({ size = 1600, segments = 320, shape = {}, cloudShadow = null } = {}) {
+export async function createTerrain({ size = 1600, segments = 320, shape = {} } = {}) {
   const ts = { ...DEFAULT_SHAPE, ...shape };
   const perlin = new ImprovedNoise(createSeededRandom(4242));
 
@@ -198,30 +198,11 @@ export async function createTerrain({ size = 1600, segments = 320, shape = {}, c
     const uSnowEnd = uniform(268);   // world Y where snow is full
     const uCliffLow = uniform(0.12); // slope where rock starts showing
     const uCliffHigh = uniform(0.36); // slope where rock is full
-    // Cloud shadows: project each surface point up the sun ray to the cloud
-    // shell and sample the SAME density field the cloud layer marches, so the
-    // shadow tracks the actual cloud overhead (and its wind drift). Driven by
-    // the page (sun direction + a strength that fades to 0 at night).
-    const uCloudShadowSunDir = uniform(new THREE.Vector3(0, 1, 0));
-    const uCloudShadowStrength = uniform(0); // 0 = off (no cloud shadows)
     Object.assign(uniforms, {
       grassScale: uGrassScale, rockScale: uRockScale, snowScale: uSnowScale,
       dispStrength: uDispStrength, albedoMul: uAlbedoMul,
       snowStart: uSnowStart, snowEnd: uSnowEnd, cliffLow: uCliffLow, cliffHigh: uCliffHigh,
-      cloudShadowSunDir: uCloudShadowSunDir, cloudShadowStrength: uCloudShadowStrength,
     });
-
-    // Beer-Lambert transmittance from one density sample at the cloud shell.
-    const cloudShadowFactor = () => {
-      if (!cloudShadow) return float(1);
-      const { sampleDensity, uBase, uThickness } = cloudShadow;
-      const sunY = max(uCloudShadowSunDir.y, float(0.05)); // clamp grazing sun
-      const midY = add(uBase, mul(uThickness, float(0.5))); // cloud shell mid altitude
-      const tProj = sub(midY, positionWorld.y).div(sunY);
-      const sp = add(positionWorld, mul(uCloudShadowSunDir, tProj));
-      const dens = sampleDensity(sp);
-      return exp(mul(dens, uCloudShadowStrength.negate()));
-    };
 
     const layerWeights = () => {
       const yW = positionWorld.y;
@@ -256,8 +237,7 @@ export async function createTerrain({ size = 1600, segments = 320, shape = {}, c
     material = new THREE.MeshStandardNodeMaterial({ side: THREE.FrontSide });
     material.colorNode = (() => {
       const lw = layerWeights();
-      const albedo = mul(add(add(mul(gRGB(), lw.x), mul(rRGB(), lw.y)), mul(sRGB(), lw.z)), uAlbedoMul);
-      return mul(albedo, cloudShadowFactor());
+      return mul(add(add(mul(gRGB(), lw.x), mul(rRGB(), lw.y)), mul(sRGB(), lw.z)), uAlbedoMul);
     })();
     material.roughnessNode = (() => {
       const lw = layerWeights();

@@ -25,6 +25,16 @@ import {
 
 const V3 = THREE.Vector3;
 
+// Boost-pad footprint (shared by the visual + its trigger zone).
+const BOOST_W = 10; // width across the deck (m)
+const BOOST_D = 20; // length along travel (m)
+const BOOST_H = 0.12; // slab thickness (flush decal)
+
+// Scratch objects for the per-frame trigger-zone test (no per-frame allocation).
+const _fieldInv = new THREE.Matrix4();
+const _fieldLocal = new V3();
+const _fieldFwd = new V3();
+
 /* ----------------------------------------------------------------------- */
 /* Prop geometry builders                                                   */
 /* ----------------------------------------------------------------------- */
@@ -88,6 +98,44 @@ function openTubeGroup(outerR = 9, length = 30, wall = 0.65, segments = 40) {
   root.rotation.x = Math.PI / 2;
   root.position.set(0, outerR, 0); // bottom of the pipe rests on the ground
   return root;
+}
+
+/**
+ * Boost pad: a flush deck decal (dark slab + bright emissive chevrons pointing
+ * along its local −Z) that the car drives over. The acceleration itself comes
+ * from the prop's `field` trigger zone (see PropManager.applyFields), not from
+ * geometry — this is just the look. Local +Z is "back", −Z is "forward".
+ */
+function boostPadGroup() {
+  const g = new THREE.Group();
+  g.name = "BoostPad";
+  const base = new THREE.Mesh(
+    new THREE.BoxGeometry(BOOST_W, BOOST_H, BOOST_D),
+    mat(0x0d1116, { roughness: 0.5, metalness: 0.25, emissive: 0x0a1f24, emissiveIntensity: 0.5 }),
+  );
+  base.position.y = BOOST_H / 2 + 0.04; // sit flush just above the deck
+  g.add(base);
+
+  // Three forward-pointing emissive arrowheads marching toward −Z.
+  const y = BOOST_H + 0.06;
+  const hw = BOOST_W * 0.34;
+  const aLen = 3.4; // arrowhead length
+  const gap = 4.6;
+  const pos = [];
+  for (let i = 0; i < 3; i++) {
+    const zBack = 6 - i * gap; // base edge; tip is aLen further forward (−Z)
+    pos.push(0, y, zBack - aLen, hw, y, zBack, -hw, y, zBack); // tip, right, left
+  }
+  const chevGeo = new THREE.BufferGeometry();
+  chevGeo.setAttribute("position", new THREE.Float32BufferAttribute(pos, 3));
+  chevGeo.computeVertexNormals();
+  const chev = new THREE.Mesh(
+    chevGeo,
+    mat(0x18ffd0, { roughness: 0.3, emissive: 0x18ffd0, emissiveIntensity: 5, side: THREE.DoubleSide }),
+  );
+  chev.userData.isGlow = false;
+  g.add(chev);
+  return g;
 }
 
 /* ----------------------------------------------------------------------- */
@@ -165,6 +213,23 @@ export const PROP_CATALOG = [
       m.geometry.translate(0, 6, 0); // rest on the ground
       m.userData.isGlow = true;
       return m;
+    },
+  },
+  {
+    id: "boostpad",
+    label: "Boost pad",
+    collision: "none", // flush decal — you drive through it; the field does the work
+    make: () => boostPadGroup(),
+    // Trigger zone: while the car is inside this local box, accelerate it along
+    // the pad's forward (−Z). `apply` is the reusable effect hook (see applyFields).
+    field: {
+      half: [BOOST_W / 2, 3.5, BOOST_D / 2],
+      apply(vehicle, dt, fwd) {
+        const body = vehicle.body;
+        const target = 62; // ~223 km/h target speed along the pad
+        const along = body.vel.dot(fwd);
+        if (along < target) body.vel.addScaledVector(fwd, Math.min(150 * dt, target - along));
+      },
     },
   },
   {
@@ -345,6 +410,39 @@ export class PropManager {
           o.material.emissiveIntensity = glowPropParams.intensity;
         }
       });
+    }
+  }
+
+  /**
+   * Apply every placed "field" prop's effect to the car this frame (boost pads,
+   * and future launch/slow/wind zones). Reusable trigger-zone test: transform the
+   * car into each prop's local space, check its `field.half` box, and if inside
+   * call `field.apply(vehicle, dt, padForward)`. Call once per drive-physics step.
+   */
+  applyFields(vehicle, dt) {
+    if (!vehicle?.body) return;
+    for (const inst of this.instances) {
+      const f = inst.def.field;
+      if (!f) continue;
+      const root = inst.root;
+      root.updateMatrixWorld();
+      _fieldInv.copy(root.matrixWorld).invert();
+      _fieldLocal.copy(vehicle.body.pos).applyMatrix4(_fieldInv); // car in pad space
+      const [hx, hy, hz] = f.half;
+      if (
+        Math.abs(_fieldLocal.x) <= hx &&
+        Math.abs(_fieldLocal.z) <= hz &&
+        _fieldLocal.y >= -1 &&
+        _fieldLocal.y <= hy
+      ) {
+        // Pad forward = local −Z in world, flattened horizontal.
+        _fieldFwd.set(0, 0, -1).applyQuaternion(root.quaternion);
+        _fieldFwd.y = 0;
+        if (_fieldFwd.lengthSq() > 1e-6) {
+          _fieldFwd.normalize();
+          f.apply(vehicle, dt, _fieldFwd, root);
+        }
+      }
     }
   }
 

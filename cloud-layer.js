@@ -148,6 +148,21 @@ export function createCloudLayer({ camera }) {
   const uAmbientColor = uniform(new THREE.Color(0x8fb6e0));
   const uAmbientIntensity = uniform(0.5);
 
+  // ── Cloud shadows on the ground/ocean (composite-pass) ────────────────────
+  // Applied in the final composite: reconstruct each scene pixel's world pos
+  // from depth, project it up the sun ray to the cloud shell, sample the SAME
+  // density field, and darken. Covers terrain AND ocean in one pass (no edit to
+  // the shared ocean shader). uInvViewProj/uMainCamPos are the MAIN camera's
+  // (the composite quad uses an ortho cam, so the built-in matrix nodes are the
+  // wrong ones) — set each frame in render().
+  const uShadowStrength = uniform(0);   // 0 = off; max darkening under dense cloud
+  const uShadowSunDir = uniform(new THREE.Vector3(0, 1, 0));
+  const uShadowSoftness = uniform(3.0); // density that counts as a full shadow
+  const uShadowFar = uniform(6000);     // fade shadows out beyond this (skip sky/far)
+  const uInvViewProj = uniform(new THREE.Matrix4());
+  const uMainCamPos = uniform(new THREE.Vector3());
+  const _shadowPV = new THREE.Matrix4();
+
   // ── Offscreen buffers ─────────────────────────────────────────────────────
   // Full-res scene (color + depth) so the cloud march can be occluded by world
   // geometry; half-res cloud buffer for the cheap raymarch.
@@ -444,7 +459,28 @@ export function createCloudLayer({ camera }) {
     const c3 = cloudTexNode.sample(fuv.add(vec2(o.x, o.y.negate())));
     const c4 = cloudTexNode.sample(fuv.add(vec2(o.x.negate(), o.y.negate())));
     const cloud = c0.mul(0.4).add(c1.add(c2).add(c3).add(c4).mul(0.15));
-    const sceneCol = sceneColorNode.sample(fuv).rgb;
+    const sceneCol = sceneColorNode.sample(fuv).rgb.toVar();
+
+    // Cloud shadows: only when enabled (skips the density sample at night/off).
+    If(uShadowStrength.greaterThan(0.001), () => {
+      // Reconstruct world pos from scene depth (main-camera inverse VP).
+      const d = depthSampler.sample(fuv).r;
+      const clip = vec4(uv().x.mul(2.0).sub(1.0), uv().y.mul(2.0).sub(1.0), d, 1.0);
+      const wpH = uInvViewProj.mul(clip);
+      const wp = wpH.xyz.div(wpH.w);
+      // Project up the sun ray to the cloud shell mid-altitude, sample density.
+      const midY = uBase.add(uThickness.mul(0.5));
+      const sunY = max(uShadowSunDir.y, float(0.05));
+      const sp = wp.add(uShadowSunDir.mul(midY.sub(wp.y).div(sunY)));
+      const cov = smoothstep(float(0.0), uShadowSoftness, sampleDensity(sp));
+      const shadow = float(1.0).sub(cov.mul(uShadowStrength));
+      // Masks: only surfaces BELOW the deck, and NEAR the camera (excludes the
+      // sky dome and the far ocean/horizon where a projected sample is bogus).
+      const belowMask = smoothstep(midY, midY.sub(500.0), wp.y);
+      const nearMask = smoothstep(uShadowFar, uShadowFar.mul(0.6), length(wp.sub(uMainCamPos)));
+      sceneCol.mulAssign(mix(float(1.0), shadow, belowMask.mul(nearMask)));
+    });
+
     const raysCol = godraysTexNode.sample(fuv).rgb;
     const base = sceneCol.add(raysCol.mul(uGodRaysMix));
     return vec4(base.mul(cloud.a.oneMinus()).add(cloud.rgb), 1.0);
@@ -590,6 +626,12 @@ export function createCloudLayer({ camera }) {
     }
     uGodRaysMix.value = raysOk ? 1 : 0;
 
+    // Main-camera inverse view-projection for the composite's cloud-shadow
+    // world-pos reconstruction (matrixWorldInverse is current after step 1).
+    _shadowPV.multiplyMatrices(camera.projectionMatrix, camera.matrixWorldInverse);
+    uInvViewProj.value.copy(_shadowPV).invert();
+    uMainCamPos.value.copy(camera.position);
+
     // 4) scene + rays + clouds → compositeRT (bloom hook).
     postQuad.material = compositeMat;
     renderer.setRenderTarget(compositeRT);
@@ -627,14 +669,14 @@ export function createCloudLayer({ camera }) {
     /** Toggle env-bake mode (skip depth occlusion, cheaper march) for PMREM. */
     setEnvMode: (on) => { uEnvMode.value = on ? 1 : 0; },
     /**
-     * Shared nodes so other materials (the terrain/ocean) can cast cloud
-     * shadows: they march a surface point up the sun ray to the cloud shell and
-     * sample this SAME density field — so the shadow exactly matches the cloud
-     * overhead, wind-animated, for free. `sampleDensity(p)` is camera-relative
-     * via `cameraPosition`, which is valid in any material drawn by the main
-     * camera. `uBase`/`uThickness` locate the shell for the projection.
+     * Drive the composite-pass cloud shadows (terrain + ocean in one go).
+     * @param {{enabled:boolean, strength:number, sunDir:THREE.Vector3, far?:number}} s
      */
-    cloudShadow: { sampleDensity, uBase, uThickness },
+    setCloudShadow: (s) => {
+      uShadowStrength.value = s.enabled ? s.strength : 0;
+      if (s.sunDir) uShadowSunDir.value.copy(s.sunDir);
+      if (s.far !== undefined) uShadowFar.value = s.far;
+    },
     /** Drive the post bloom: { enabled, strength, radius, threshold }. */
     setBloom: (b) => {
       uBloomMix.value = b.enabled ? 1 : 0;
