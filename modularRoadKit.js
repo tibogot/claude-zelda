@@ -210,6 +210,39 @@ export function applyRoll(frames, rollFn, pp) {
   }
 }
 
+/**
+ * Snap the END frames to a piece's *analytic* tangents (exact mating).
+ *
+ * The minimal-twist transport derives tangents from finite differences, and the
+ * ONE-SIDED difference at each endpoint is the chord of the last segment — it
+ * lags the true tangent by ~half a step, so e.g. a "90°" curve's exit connector
+ * only turns ~87°. That error accumulates and stops loops from closing on their
+ * labelled angles. A piece can expose `endTangents(pp)` → {entry, exit} (local
+ * unit vectors); we overwrite just the first/last frame's tangent with those, so
+ * BOTH the end mesh rings and the connectors sit at the exact angle (seams stay
+ * perfect AND compositions add up). Call BEFORE applyRoll so banking still rolls
+ * about the corrected tangent. Geometry tessellation is otherwise unchanged, so
+ * identical params still produce identical geometry (instancing-friendly).
+ */
+export function applyEndTangents(frames, et) {
+  if (!frames.length || !et) return;
+  if (et.entry) _setFrameTangent(frames[0], et.entry);
+  if (et.exit) _setFrameTangent(frames[frames.length - 1], et.exit);
+}
+
+function _setFrameTangent(fr, t) {
+  const nt = t.clone().normalize();
+  // Re-orthonormalise with the frame's existing up as the reference (matches
+  // computeFrames' convention: right = tangent × up, up = right × tangent).
+  let right = new V3().crossVectors(nt, fr.up);
+  if (right.lengthSq() < 1e-10) right = new V3().crossVectors(nt, new V3(1, 0, 0));
+  right.normalize();
+  const up = new V3().crossVectors(right, nt).normalize();
+  fr.tangent.copy(nt);
+  fr.right.copy(right);
+  fr.up.copy(up);
+}
+
 /* ----------------------------------------------------------------------- */
 /* Sweep mesh                                                               */
 /* ----------------------------------------------------------------------- */
@@ -859,6 +892,53 @@ function browPoints(pp) {
   return pts;
 }
 
+/* ----------------------------------------------------------------------- */
+/* Analytic end tangents (exact connector angles — see applyEndTangents)    */
+/* ----------------------------------------------------------------------- */
+
+const _deg = (d) => THREE.MathUtils.degToRad(d);
+/** Flat pieces whose ends are exactly horizontal heading −Z (straight, slope,
+ *  crest, scurve, tunnel, twist, bank in/out/tilt — all level at both ends). */
+function flatEndTangents() {
+  return { entry: new V3(0, 0, -1), exit: new V3(0, 0, -1) };
+}
+function curveEndTangents(pp) {
+  const A = _deg(THREE.MathUtils.clamp(pp.curveAngle, 1, 180));
+  const dir = pp.curveDir >= 0 ? 1 : -1;
+  return { entry: new V3(0, 0, -1), exit: rotateY(new V3(0, 0, -1), -dir * A) };
+}
+function jumpEndTangents(pp) {
+  const a = _deg(THREE.MathUtils.clamp(pp.jumpAngle, 0, 80));
+  return { entry: new V3(0, 0, -1), exit: new V3(0, Math.sin(a), -Math.cos(a)) };
+}
+function diveEndTangents(pp) {
+  const a = _deg(THREE.MathUtils.clamp(pp.diveAngle, 0, 80));
+  return { entry: new V3(0, 0, -1), exit: new V3(0, -Math.sin(a), -Math.cos(a)) };
+}
+function landingEndTangents(pp) {
+  const a = _deg(THREE.MathUtils.clamp(pp.landAngle, 0, 80));
+  return { entry: new V3(0, -Math.sin(a), -Math.cos(a)), exit: new V3(0, 0, -1) };
+}
+function browEndTangents(pp) {
+  const a = _deg(THREE.MathUtils.clamp(pp.browAngle, 0, 80));
+  return { entry: new V3(0, Math.sin(a), -Math.cos(a)), exit: new V3(0, 0, -1) };
+}
+function spiralEndTangents(pp) {
+  const R = Math.max(3, pp.spiralRadius);
+  const A = _deg(THREE.MathUtils.clamp(pp.spiralAngle, 5, 1080));
+  const dir = pp.curveDir >= 0 ? 1 : -1;
+  const hs = R * A; // horizontal speed (arc length per unit t)
+  const exitH = rotateY(new V3(0, 0, -1), -dir * A).multiplyScalar(hs);
+  return {
+    entry: new V3(0, pp.spiralRise, -hs),
+    exit: new V3(exitH.x, pp.spiralRise, exitH.z),
+  };
+}
+function gapEndTangents(pp) {
+  const L = Math.max(4, pp.gapLength);
+  return { entry: new V3(0, 0, -1), exit: new V3(0, -2 * pp.gapDrop, -L) };
+}
+
 /** @type {{id:string,label:string,hint:string,swatch:string,key:string,points:(pp:any)=>THREE.Vector3[]}[]} */
 export const PIECE_CATALOG = [
   {
@@ -1060,6 +1140,37 @@ export const PIECE_CATALOG = [
 ];
 
 export const PIECE_BY_ID = new Map(PIECE_CATALOG.map((p) => [p.id, p]));
+
+// Attach analytic end tangents so each piece's connectors hit their exact angle
+// (see applyEndTangents). Loops are intentionally omitted — they use fixFrames
+// and keep the transported end frames. Keeping this as a side-table avoids
+// touching every catalog entry.
+const _END_TANGENTS = {
+  straight: flatEndTangents,
+  tunnel: flatEndTangents,
+  twist: flatEndTangents,
+  banktilt: flatEndTangents,
+  bankin: flatEndTangents,
+  bankout: flatEndTangents,
+  slope: flatEndTangents,
+  crest: flatEndTangents,
+  scurve: flatEndTangents,
+  start: flatEndTangents,
+  checkpoint: flatEndTangents,
+  finish: flatEndTangents,
+  curve: curveEndTangents,
+  banked: curveEndTangents,
+  jump: jumpEndTangents,
+  dive: diveEndTangents,
+  landing: landingEndTangents,
+  brow: browEndTangents,
+  spiral: spiralEndTangents,
+  gap: gapEndTangents,
+};
+for (const def of PIECE_CATALOG) {
+  const fn = _END_TANGENTS[def.id];
+  if (fn) def.endTangents = fn;
+}
 
 /* ----------------------------------------------------------------------- */
 /* Game-piece decor (checkered lines, arches, arrows)                       */
@@ -1285,6 +1396,9 @@ export function buildPiece(pieceId, currentConnector, pp = pieceParams, rp = roa
 
   const points = def.points(pp);
   const frames = computeFrames(points, _up);
+  // Snap end frames to exact analytic tangents (before roll, so banking rolls
+  // about the corrected tangent) so connectors hit their labelled angle exactly.
+  if (def.endTangents) applyEndTangents(frames, def.endTangents(pp));
   if (def.roll) applyRoll(frames, def.roll, pp);
   // Optional explicit frame fix-up AFTER transport: lets a piece override the
   // up-vector directly (e.g. the loop sets up = toward the ring axis so the feet

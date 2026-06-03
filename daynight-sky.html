@@ -126,6 +126,7 @@
         godRays: { ...GOD_RAYS_DEFAULTS, enabled: false },
         bloom: { enabled: false, strength: 0.4, radius: 0.6, threshold: 0.92 },
         cloudShadows: { enabled: true, strength: 0.5 },
+        character: { mode: false, speed: 80, height: 6, radius: 1.2 },
         lensFlare: { ...LENS_FLARE_DEFAULTS },
         shadows: { enabled: true, normalBias: 3, bias: -0.0005 },
         ocean: {
@@ -411,6 +412,122 @@
         }
         bakeSkyEnv();
 
+        // ── Character + follow camera ────────────────────────────────────────
+        // A kinematic capsule that walks the heightfield (WASD + arrow keys,
+        // Shift to sprint). The follow camera REUSES OrbitControls: each frame
+        // we glue the orbit target to the capsule and translate the camera by
+        // the capsule's delta, so mouse-orbit and wheel-zoom still work — you
+        // just orbit around the walking character instead of the world origin.
+        const charMat = new THREE.MeshStandardNodeMaterial({
+          color: 0xff5a3c, roughness: 0.55, metalness: 0.0,
+        });
+        let charMesh = null;
+        function buildCharacter() {
+          if (charMesh) { scene.remove(charMesh); charMesh.geometry.dispose(); }
+          const r = PARAMS.character.radius, h = PARAMS.character.height;
+          const geo = new THREE.CapsuleGeometry(r, Math.max(0.1, h - 2 * r), 8, 16);
+          charMesh = new THREE.Mesh(geo, charMat);
+          charMesh.castShadow = true;
+          charMesh.visible = PARAMS.character.mode;
+          scene.add(charMesh);
+        }
+        buildCharacter();
+
+        const charPos = new THREE.Vector3(0, 0, 0);
+        const _prevChar = new THREE.Vector3();
+        function groundAt(x, z) {
+          return Math.max(terrain.getHeight(x, z), PARAMS.ocean.waterY);
+        }
+        function placeCharacter(x, z) {
+          charPos.set(x, groundAt(x, z) + PARAMS.character.height * 0.5, z);
+          charMesh.position.copy(charPos);
+          _prevChar.copy(charPos);
+        }
+        placeCharacter(0, 0);
+
+        // Keyboard state (ignored while typing in the UI).
+        const keys = {};
+        const MOVE_CODES = new Set([
+          "KeyW", "KeyA", "KeyS", "KeyD",
+          "ArrowUp", "ArrowDown", "ArrowLeft", "ArrowRight",
+        ]);
+        addEventListener("keydown", (e) => {
+          const t = document.activeElement;
+          if (t && (t.tagName === "INPUT" || t.tagName === "TEXTAREA")) return;
+          keys[e.code] = true;
+          if (PARAMS.character.mode && (MOVE_CODES.has(e.code) || e.code.startsWith("Shift")))
+            e.preventDefault();
+        });
+        addEventListener("keyup", (e) => { keys[e.code] = false; });
+
+        // Saved orbit pose so toggling back restores the free-fly view.
+        const _savedCam = new THREE.Vector3();
+        const _savedTarget = new THREE.Vector3();
+        let _wasCharMode = false;
+        const HALF = 1600 / 2 - 4; // keep the capsule on the terrain tile
+        const _fwd = new THREE.Vector3(), _right = new THREE.Vector3();
+        const _mv = new THREE.Vector3(), _up = new THREE.Vector3(0, 1, 0);
+
+        function updateCamera(dt) {
+          const mode = PARAMS.character.mode;
+          // ── Mode transitions ──
+          if (mode && !_wasCharMode) {
+            _savedCam.copy(camera.position);
+            _savedTarget.copy(controls.target);
+            charMesh.visible = true;
+            controls.enablePan = false;
+            controls.minDistance = 3;
+            controls.maxDistance = 120;
+            const h = PARAMS.character.height;
+            camera.position.set(charPos.x, charPos.y + h * 1.2, charPos.z + h * 3.5);
+            controls.target.set(charPos.x, charPos.y + h * 0.3, charPos.z);
+            _prevChar.copy(charPos);
+            controls.update();
+          }
+          if (!mode && _wasCharMode) {
+            charMesh.visible = false;
+            controls.enablePan = true;
+            controls.minDistance = 0;
+            controls.maxDistance = 6000;
+            camera.position.copy(_savedCam);
+            controls.target.copy(_savedTarget);
+            controls.update();
+          }
+          _wasCharMode = mode;
+
+          if (!mode) { controls.update(); return; }
+
+          // ── Walk: camera-relative horizontal movement ──
+          camera.getWorldDirection(_fwd); _fwd.y = 0;
+          if (_fwd.lengthSq() < 1e-6) _fwd.set(0, 0, -1);
+          _fwd.normalize();
+          _right.crossVectors(_fwd, _up).normalize();
+          _mv.set(0, 0, 0);
+          if (keys.KeyW || keys.ArrowUp) _mv.add(_fwd);
+          if (keys.KeyS || keys.ArrowDown) _mv.sub(_fwd);
+          if (keys.KeyD || keys.ArrowRight) _mv.add(_right);
+          if (keys.KeyA || keys.ArrowLeft) _mv.sub(_right);
+          if (_mv.lengthSq() > 0) {
+            _mv.normalize();
+            const sprint = (keys.ShiftLeft || keys.ShiftRight) ? 2.6 : 1;
+            const d = PARAMS.character.speed * sprint * dt;
+            charPos.x = Math.max(-HALF, Math.min(HALF, charPos.x + _mv.x * d));
+            charPos.z = Math.max(-HALF, Math.min(HALF, charPos.z + _mv.z * d));
+            charMesh.rotation.y = Math.atan2(_mv.x, _mv.z);
+          }
+          // Stick to the ground (or water surface at the shore).
+          charPos.y = groundAt(charPos.x, charPos.z) + PARAMS.character.height * 0.5;
+          charMesh.position.copy(charPos);
+
+          // Follow: translate camera by the capsule's delta, glue target to it.
+          camera.position.x += charPos.x - _prevChar.x;
+          camera.position.y += charPos.y - _prevChar.y;
+          camera.position.z += charPos.z - _prevChar.z;
+          controls.target.set(charPos.x, charPos.y + PARAMS.character.height * 0.3, charPos.z);
+          _prevChar.copy(charPos);
+          controls.update();
+        }
+
         // ── GUI (custom panel — Tweakpane removed) ───────────────────────────
         const panel = document.createElement("div");
         panel.id = "ui-panel";
@@ -469,6 +586,12 @@
         tg(s, PARAMS, "autoAdvance");
         sl(s, PARAMS, "daySpeed", 0.05, 4, 0.05);
         sl(s, PARAMS, "exposure", 0.2, 2.5, 0.01);
+
+        s = _section(uiBody, "Camera / character");
+        _toggle(s, PARAMS.character, "mode", { label: "Character cam (WASD/arrows)" });
+        sl(s, PARAMS.character, "speed", 10, 300, 5, "Walk speed");
+        _slider(s, PARAMS.character, "height", { label: "Capsule height", min: 2, max: 30, step: 0.5, onChange: () => { buildCharacter(); placeCharacter(charPos.x, charPos.z); } });
+        _slider(s, PARAMS.character, "radius", { label: "Capsule radius", min: 0.4, max: 6, step: 0.1, onChange: () => { buildCharacter(); placeCharacter(charPos.x, charPos.z); } });
 
         s = _section(uiBody, "Sun / moon energy");
         sl(s, PARAMS.env, "sunIntensity", 0, 6, 0.1);
@@ -734,7 +857,7 @@
           timer.update();
           const dt = Math.min(timer.getDelta(), 0.05);
           elapsed += dt;
-          controls.update();
+          updateCamera(dt);
 
           if (PARAMS.autoAdvance) {
             PARAMS.timeOfDay = (PARAMS.timeOfDay + PARAMS.daySpeed * dt) % 24;
