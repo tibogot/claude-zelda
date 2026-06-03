@@ -89,6 +89,7 @@
       import { createCloudLayer, CLOUD_DEFAULTS, GOD_RAYS_DEFAULTS } from "./cloud-layer.js";
       import { createTerrain } from "./daynight-terrain.js";
       import { createOcean } from "./daynight-ocean.js";
+      import { OCEAN_DEFAULTS } from "./ocean-shader.js";
       import {
         fog, densityFogFactor, uniform, mix, pow, dot, clamp, normalize,
         positionWorld, cameraPosition,
@@ -98,6 +99,8 @@
         const t = THREE.MathUtils.clamp((x - e0) / (e1 - e0), 0, 1);
         return t * t * (3 - 2 * t);
       };
+      // Curated subset of the ocean shader's params (driven via ocean.syncParams).
+      const _pickOcean = (ks) => Object.fromEntries(ks.map((k) => [k, OCEAN_DEFAULTS[k]]));
 
       // ── PARAMS ───────────────────────────────────────────────────────────
       const PARAMS = {
@@ -121,6 +124,7 @@
           tintPow: 3,
         },
         godRays: { ...GOD_RAYS_DEFAULTS, enabled: false },
+        bloom: { enabled: true, strength: 0.4, radius: 0.6, threshold: 0.92 },
         shadows: { enabled: true, normalBias: 3, bias: -0.0005 },
         ocean: {
           enabled: true, waterY: 80,
@@ -132,6 +136,18 @@
           dispStrength: 0, albedoMul: 0.94,
           snowStart: 158, snowEnd: 268, cliffLow: 0.12, cliffHigh: 0.36,
         },
+        // Deeper ocean look/shaping params (defaults pulled from OCEAN_DEFAULTS).
+        oceanFx: _pickOcean([
+          "shoreColor", "midColor", "deepColor", "highlightColor",
+          "depthAbsorb", "depthRampShoreMid", "depthRampMidDeep", "openOceanDepth",
+          "fftRippleAmp", "gerstnerBlend", "surfNormalStrength",
+          "whitecapEnabled", "whitecapIntensity", "whitecapThreshold", "whitecapSoftness",
+          "envReflectEnabled", "envReflectIntensity", "envRoughnessCalm", "envRoughnessRipple",
+          "fresnelExp", "fresnelSky", "fresnelMax",
+          "glintColor", "glintIntensity", "glintPower",
+          "sssEnabled", "sssIntensity", "sssColor",
+          "horizonFadeEnabled", "horizonColor", "horizonFadeStart", "horizonFadeEnd",
+        ]),
       };
 
       // ── Celestial driver: time-of-day → sun/moon directions + light ────────
@@ -484,6 +500,54 @@
         sl(s, PARAMS.ocean, "dispFadeStart", 0, 2000, 10, "Wave fade start");
         sl(s, PARAMS.ocean, "dispFadeEnd", 100, 6000, 50, "Wave fade end");
         tg(s, PARAMS.ocean, "reflectClouds", "Reflect clouds");
+        {
+          const fx = PARAMS.oceanFx;
+          let sub = _section(s, "Color", false);
+          col(sub, fx, "shoreColor", "Shore");
+          col(sub, fx, "midColor", "Mid");
+          col(sub, fx, "deepColor", "Deep");
+          col(sub, fx, "highlightColor", "Highlight");
+          sl(sub, fx, "depthAbsorb", 0.02, 0.5, 0.01, "Depth absorb");
+          sl(sub, fx, "depthRampShoreMid", 0, 1, 0.01, "Ramp shore→mid");
+          sl(sub, fx, "depthRampMidDeep", 0, 1, 0.01, "Ramp mid→deep");
+          sl(sub, fx, "openOceanDepth", 0, 200, 1, "Open depth");
+
+          sub = _section(s, "Waves+", false);
+          sl(sub, fx, "fftRippleAmp", 0, 2, 0.05, "Ripple amp");
+          sl(sub, fx, "gerstnerBlend", 0, 1, 0.01, "Gerstner blend");
+          sl(sub, fx, "surfNormalStrength", 0, 1, 0.01, "Surf normal");
+
+          sub = _section(s, "Whitecaps", false);
+          tg(sub, fx, "whitecapEnabled", "Enabled");
+          sl(sub, fx, "whitecapIntensity", 0, 3, 0.05, "Intensity");
+          sl(sub, fx, "whitecapThreshold", 0, 1, 0.01, "Threshold");
+          sl(sub, fx, "whitecapSoftness", 0, 1, 0.01, "Softness");
+
+          sub = _section(s, "Reflection", false);
+          tg(sub, fx, "envReflectEnabled", "Enabled");
+          sl(sub, fx, "envReflectIntensity", 0, 3, 0.05, "Intensity");
+          sl(sub, fx, "envRoughnessCalm", 0, 0.5, 0.01, "Rough calm");
+          sl(sub, fx, "envRoughnessRipple", 0, 1, 0.01, "Rough ripple");
+          sl(sub, fx, "fresnelExp", 0.5, 8, 0.1, "Fresnel exp");
+          sl(sub, fx, "fresnelSky", 0, 1, 0.01, "Fresnel sky");
+          sl(sub, fx, "fresnelMax", 0, 1, 0.01, "Fresnel max");
+
+          sub = _section(s, "Sun glint", false);
+          col(sub, fx, "glintColor", "Color");
+          sl(sub, fx, "glintIntensity", 0, 3, 0.05, "Intensity");
+          sl(sub, fx, "glintPower", 8, 600, 1, "Power");
+
+          sub = _section(s, "SSS (crest glow)", false);
+          tg(sub, fx, "sssEnabled", "Enabled");
+          sl(sub, fx, "sssIntensity", 0, 2, 0.05, "Intensity");
+          col(sub, fx, "sssColor", "Color");
+
+          sub = _section(s, "Horizon fade", false);
+          tg(sub, fx, "horizonFadeEnabled", "Enabled");
+          col(sub, fx, "horizonColor", "Color");
+          sl(sub, fx, "horizonFadeStart", 0, 10000, 50, "Start");
+          sl(sub, fx, "horizonFadeEnd", 100, 20000, 100, "End");
+        }
 
         s = _section(uiBody, "Fog");
         tg(s, PARAMS.fog, "enabled");
@@ -507,6 +571,12 @@
         sl(s, PARAMS.godRays, "sunDiscRadius", 80, 650, 5);
         col(s, PARAMS.godRays, "sunTint", "Sun tint");
         tg(s, PARAMS.godRays, "matchLightColor", "Tint = light color");
+
+        s = _section(uiBody, "Bloom");
+        tg(s, PARAMS.bloom, "enabled");
+        sl(s, PARAMS.bloom, "strength", 0, 2, 0.01);
+        sl(s, PARAMS.bloom, "radius", 0, 1, 0.01);
+        sl(s, PARAMS.bloom, "threshold", 0, 1.5, 0.01);
 
         s = _section(uiBody, "Sky colors", false);
         for (const k of ["zenithDay", "horizonDay", "zenithNight", "horizonNight", "sunsetColor", "groundColor", "sunColor", "moonColor"]) col(s, PARAMS.sky, k);
@@ -626,6 +696,7 @@
 
           sky.update(PARAMS.sky, frame);
           clouds.update(PARAMS.clouds, frame);
+          clouds.setBloom(PARAMS.bloom);
 
           // Terrain texture/material controls.
           const tU = terrain.uniforms;
@@ -648,8 +719,8 @@
             ocean.setWaterY(PARAMS.ocean.waterY);
             // Only the large-tile swell scales with the slider; the small ripple
             // tile (48u) stays fixed or it repeats as visible squares when amplified.
+            ocean.syncParams(PARAMS.oceanFx);
             ocean.uniforms.fftSwellAmp.value = PARAMS.ocean.waveHeight;
-            ocean.uniforms.fftRippleAmp.value = 0.55;
             ocean.uniforms.fftNormalStrength.value = PARAMS.ocean.choppiness;
             ocean.uniforms.dispFadeStart.value = PARAMS.ocean.dispFadeStart;
             ocean.uniforms.dispFadeEnd.value = PARAMS.ocean.dispFadeEnd;

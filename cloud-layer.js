@@ -26,6 +26,7 @@ import {
 } from "three/tsl";
 import { ImprovedNoise } from "three/addons/math/ImprovedNoise.js";
 import { createGodRaysPass } from "./god-rays-pass.js";
+import { bloom } from "three/addons/tsl/display/BloomNode.js";
 
 const CLOUD_LAYER = 18;
 const MAX_OCC_STEPS = 16;
@@ -455,9 +456,16 @@ export function createCloudLayer({ camera }) {
   compositeMat.depthTest = false;
   compositeMat.depthWrite = false;
 
+  // Bloom on the final composited frame (the "bloom hook"). Additive glow from
+  // bright pixels (sun, glint, bright cloud edges) — toggled via uBloomMix.
+  const uBloomMix = uniform(0);
+  // Bloom must read the composite Y-flipped (RTs are flipped vs the canvas), or
+  // its glow ends up mirrored vs the present pass below.
+  const bloomInput = texture(compositeRT.texture, vec2(uv().x, uv().y.oneMinus()));
+  const bloomNode = bloom(bloomInput, 0.45, 0.6, 0.85);
   const presentColor = Fn(() => {
     const fuv = vec2(uv().x, uv().y.oneMinus());
-    return vec4(compositeTexNode.sample(fuv).rgb, 1);
+    return vec4(compositeTexNode.sample(fuv).rgb.add(bloomNode.rgb.mul(uBloomMix)), 1);
   });
   const presentMat = new THREE.MeshBasicNodeMaterial();
   presentMat.colorNode = presentColor();
@@ -618,6 +626,13 @@ export function createCloudLayer({ camera }) {
     compositeRT,
     /** Toggle env-bake mode (skip depth occlusion, cheaper march) for PMREM. */
     setEnvMode: (on) => { uEnvMode.value = on ? 1 : 0; },
+    /** Drive the post bloom: { enabled, strength, radius, threshold }. */
+    setBloom: (b) => {
+      uBloomMix.value = b.enabled ? 1 : 0;
+      bloomNode.strength.value = b.strength;
+      bloomNode.radius.value = b.radius;
+      bloomNode.threshold.value = b.threshold;
+    },
     dispose,
   };
 }

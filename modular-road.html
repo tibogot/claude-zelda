@@ -785,6 +785,26 @@
       "
     ></div>
     <div
+      id="lap-hud"
+      style="
+        position: fixed;
+        top: 14px;
+        left: 50%;
+        transform: translateX(-50%);
+        z-index: 15;
+        display: none;
+        text-align: center;
+        font-family: var(--font-mono);
+        pointer-events: none;
+        color: #eaf2ff;
+      "
+    >
+      <div id="lap-time" style="font-size: 30px; font-weight: 700; letter-spacing: 0.04em; text-shadow: 0 2px 8px rgba(0,0,0,0.7)">--.---</div>
+      <div id="lap-sub" style="font-size: 12px; opacity: 0.85; margin-top: 2px; text-shadow: 0 1px 4px rgba(0,0,0,0.7)"></div>
+      <div id="lap-next" style="font-size: 12px; margin-top: 3px; color: #ffd54a; text-shadow: 0 1px 4px rgba(0,0,0,0.7)"></div>
+      <div id="lap-flash" style="font-size: 16px; font-weight: 700; margin-top: 6px; color: #7CFFB4; min-height: 20px; text-shadow: 0 2px 8px rgba(0,0,0,0.8)"></div>
+    </div>
+    <div
       id="pause-badge"
       style="
         position: fixed;
@@ -939,6 +959,7 @@
         PIECE_CATALOG,
       } from "./modularRoadKit.js";
       import { bakeRoadThumbnails } from "./modularRoadThumbnails.js";
+      import { LapTracker, formatLapTime } from "./modularRoadLap.js";
       import {
         Vehicle,
         TIRE,
@@ -1584,6 +1605,45 @@
         const modeHint = document.getElementById("mode-hint");
         const pauseBadge = document.getElementById("pause-badge");
 
+        // ── LAP TIMING (start / checkpoints / finish gates → timed laps) ──
+        const lap = new LapTracker({ roadWidth: roadParams.width });
+        const lapHud = document.getElementById("lap-hud");
+        const lapTimeEl = document.getElementById("lap-time");
+        const lapSubEl = document.getElementById("lap-sub");
+        const lapNextEl = document.getElementById("lap-next");
+        const lapFlashEl = document.getElementById("lap-flash");
+        const FALL_Y = -30; // below this the car has fallen off → auto-respawn
+
+        // Move the respawn point onto the gate the car just cleared, lifted onto
+        // the deck — so R (and auto-respawn on a fall) returns there facing forward.
+        const _spawnTmp = new THREE.Vector3();
+        function setRespawnToLastGate() {
+          const t = lap.respawnTransform();
+          if (t) {
+            _spawnTmp.copy(t.pos);
+            _spawnTmp.y += TIRE.restLength + 0.4;
+            vehicle.setSpawn(_spawnTmp, t.quat);
+          }
+        }
+
+        function updateLapHud() {
+          lapTimeEl.textContent = lap.running
+            ? formatLapTime(lap.currentTime)
+            : lap.hasCourse
+              ? "0.000"
+              : "--.---";
+          if (!lap.hasCourse) {
+            lapSubEl.textContent = "Place Start / Checkpoint / Finish pieces to time laps";
+            lapNextEl.textContent = "";
+          } else {
+            const best = Number.isFinite(lap.bestLap) ? formatLapTime(lap.bestLap) : "—";
+            const last = Number.isFinite(lap.lastLap) ? formatLapTime(lap.lastLap) : "—";
+            lapSubEl.textContent = `Lap ${lap.lapCount}  ·  Best ${best}  ·  Last ${last}`;
+            lapNextEl.textContent = lap.nextLabel ? `▸ ${lap.nextLabel}` : "";
+          }
+          lapFlashEl.textContent = lap.message;
+        }
+
         function setBuildMode(on) {
           state.buildMode = on;
           buildBtn.classList.toggle("active", on);
@@ -1614,6 +1674,7 @@
           driveBtn.classList.toggle("palette-btn-primary", on);
           driveBtn.textContent = on ? "Stop driving (T)" : "Test drive (T)";
           driveHud.style.display = on ? "" : "none";
+          lapHud.style.display = on ? "" : "none";
           camModeEl.textContent = on
             ? "DRIVE"
             : state.buildMode
@@ -1638,6 +1699,9 @@
             collidables.push(floor);
             vehicle.setColliders(collidables, []); // raycaster fallback only
             spawnOnTrack();
+            lap.buildGates(builder.pieces); // re-scan game pieces for this run
+            lap.reset();
+            updateLapHud();
             tireMarks.reset();
             driftSmoke.reset();
           }
@@ -2010,6 +2074,16 @@
               tireMarks.update(vehicle);
               driftSmoke.updateFromVehicle(vehicle, camera, simDt, keys);
               portals.updateDrive(simDt, vehicle);
+              // Fell off the track → snap back to the last cleared gate (or start).
+              if (vehicle.body.pos.y < FALL_Y) {
+                vehicle.respawn();
+                tireMarks.reset();
+                driftSmoke.reset();
+              }
+              // Lap timing: a returned event means a gate was crossed → park the
+              // respawn point there so R / the next fall return to it.
+              const lapEv = lap.update(simDt, vehicle.body.pos, vehicle.body.vel);
+              if (lapEv) setRespawnToLastGate();
             }
             if (state.paused) {
               controls.target.copy(vehicle.body.pos); // orbit around the frozen car
@@ -2018,6 +2092,7 @@
               updateChaseCamera(dt);
             }
             driveHud.innerHTML = `${vehicle.speedKmh.toFixed(0)} km/h · ${vehicle.groundedCount}/4 grip`;
+            updateLapHud();
           } else {
             controls.update();
           }
