@@ -92,6 +92,9 @@ export const pieceParams = {
   browAngle: 30, // entry up-pitch (deg)
   // Tunnel shell:
   tunnelHeight: 7, // interior clearance from deck to crown (m)
+  // Quarter-pipe (concave ramp curving up a vertical-plane arc to a wall):
+  qpRadius: 16, // arc radius (m) — also the wall height at 90°
+  qpAngle: 90, // arc sweep (deg): 90 = up to vertical, less = a launch kicker
   onChange: null,
 };
 
@@ -801,6 +804,25 @@ function gameLinePoints(pp) {
   return pts;
 }
 
+/**
+ * Quarter-pipe: the centreline is a circular arc in the vertical (Y/−Z) plane,
+ * curving from flat (heading −Z) up to `qpAngle` (90° = straight up a wall). Pos
+ * φ = (0, R(1−cosφ), −R sinφ). The deck stays on the concave (rideable) face for
+ * free — minimal-twist transport rotates the up-vector from +Y to the wall
+ * normal — so no fixFrames needed. Rises to R, never dips below y = 0.
+ */
+function quarterPipePoints(pp) {
+  const R = Math.max(4, pp.qpRadius ?? 16);
+  const A = THREE.MathUtils.degToRad(THREE.MathUtils.clamp(pp.qpAngle ?? 90, 10, 100));
+  const n = Math.max(8, Math.ceil((R * A) / roadParams.segLen));
+  const pts = [];
+  for (let i = 0; i <= n; i++) {
+    const phi = A * (i / n);
+    pts.push(new V3(0, R * (1 - Math.cos(phi)), -R * Math.sin(phi)));
+  }
+  return pts;
+}
+
 function twistPoints(pp) {
   const L = Math.max(2, pp.twistLength);
   const n = Math.max(12, Math.ceil(L / roadParams.segLen));
@@ -938,6 +960,11 @@ function gapEndTangents(pp) {
   const L = Math.max(4, pp.gapLength);
   return { entry: new V3(0, 0, -1), exit: new V3(0, -2 * pp.gapDrop, -L) };
 }
+// Quarter-pipe: entry flat (−Z), exit pitched up by the arc sweep (vertical at 90°).
+function quarterPipeEndTangents(pp) {
+  const A = THREE.MathUtils.degToRad(THREE.MathUtils.clamp(pp.qpAngle ?? 90, 10, 100));
+  return { entry: new V3(0, 0, -1), exit: new V3(0, Math.sin(A), -Math.cos(A)) };
+}
 // Climbing helix ramp: a horizontal turn of 2π·turns with the climb eased flat at
 // both ends, so the end tangents are horizontal (entry −Z, exit rotated by the
 // full turn). fixFrames runs after this and only re-levels up/right.
@@ -1068,6 +1095,14 @@ export const PIECE_CATALOG = [
     game: "finish",
   },
   {
+    id: "quarterpipe",
+    label: "Quarter-pipe",
+    hint: "Concave ramp curving up to a vertical wall",
+    swatch: "#16a0c0",
+    key: "",
+    points: quarterPipePoints,
+  },
+  {
     id: "loop",
     label: "Loop (full)",
     hint: "Full 360° vertical ring",
@@ -1175,6 +1210,7 @@ const _END_TANGENTS = {
   spiral: spiralEndTangents,
   gap: gapEndTangents,
   loop_spiral: loopSpiralEndTangents,
+  quarterpipe: quarterPipeEndTangents,
   // loop / loop_half intentionally omitted — already exact via loopFixFrames.
 };
 for (const def of PIECE_CATALOG) {

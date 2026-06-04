@@ -798,6 +798,7 @@ const PIECE_TO_CATEGORY = {
   loop: "loop",
   loop_half: "loop",
   loop_spiral: "loop",
+  quarterpipe: "loop",
   start: "game",
   checkpoint: "game",
   finish: "game",
@@ -994,6 +995,13 @@ export const CATEGORY_PRESETS = {
       preview: `<svg viewBox="0 0 80 80"><line x1="8" y1="66" x2="72" y2="66" stroke="#c0392b" stroke-width="1.5"/><path d="M10 66 Q40 66 68 16" ${_RS}/></svg>`,
     },
     {
+      id: "ramp_mega",
+      label: "Mega ramp",
+      base: "jump",
+      params: { jumpLength: 56, jumpAngle: 44 },
+      preview: `<svg viewBox="0 0 80 80"><line x1="6" y1="70" x2="74" y2="70" stroke="#c0392b" stroke-width="1.5"/><path d="M8 70 Q44 70 70 8" stroke="#e8eaed" stroke-width="3" fill="none" stroke-linecap="round"/></svg>`,
+    },
+    {
       id: "dive_10",
       label: "Dive 10",
       base: "dive",
@@ -1020,6 +1028,13 @@ export const CATEGORY_PRESETS = {
       base: "dive",
       params: { diveLength: 44, diveAngle: 36 },
       preview: `<svg viewBox="0 0 80 80"><line x1="8" y1="14" x2="72" y2="14" stroke="#c0392b" stroke-width="1.5"/><path d="M10 14 Q40 14 68 64" ${_RS}/></svg>`,
+    },
+    {
+      id: "drop_vert",
+      label: "Vert drop",
+      base: "dive",
+      params: { diveLength: 30, diveAngle: 78 },
+      preview: `<svg viewBox="0 0 80 80"><line x1="8" y1="12" x2="72" y2="12" stroke="#c0392b" stroke-width="1.5"/><path d="M14 12 Q40 12 44 70" stroke="#e8eaed" stroke-width="3" fill="none" stroke-linecap="round"/></svg>`,
     },
     {
       id: "land_10",
@@ -1233,6 +1248,20 @@ export const CATEGORY_PRESETS = {
       base: "loop_spiral",
       params: { loopSpiralRadius: 12, loopSpiralTurns: 1, loopSpiralRise: 32, curveDir: -1 },
       preview: `<svg viewBox="0 0 80 80"><line x1="70" y1="62" x2="54" y2="62" stroke="#c0392b" stroke-width="1.5"/><path d="M54 62 Q60 46 56 32 Q48 16 34 12 Q24 22 28 36 Q34 50 46 56" ${_RS}/></svg>`,
+    },
+    {
+      id: "quarterpipe_full",
+      label: "Quarter-pipe",
+      base: "quarterpipe",
+      params: { qpRadius: 16, qpAngle: 90 },
+      preview: `<svg viewBox="0 0 80 80"><line x1="6" y1="66" x2="74" y2="66" stroke="#c0392b" stroke-width="1.2"/><path d="M14 66 Q52 66 56 16" stroke="#e8eaed" stroke-width="3" fill="none" stroke-linecap="round"/></svg>`,
+    },
+    {
+      id: "quarterpipe_kick",
+      label: "Wall kicker",
+      base: "quarterpipe",
+      params: { qpRadius: 13, qpAngle: 72 },
+      preview: `<svg viewBox="0 0 80 80"><line x1="6" y1="66" x2="74" y2="66" stroke="#c0392b" stroke-width="1.2"/><path d="M14 66 Q48 66 62 26" stroke="#e8eaed" stroke-width="3" fill="none" stroke-linecap="round"/></svg>`,
     },
   ],
 };
