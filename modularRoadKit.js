@@ -823,6 +823,24 @@ function quarterPipePoints(pp) {
   return pts;
 }
 
+/**
+ * Down quarter-pipe: the vertical mirror of quarterPipePoints — curves from flat
+ * DOWN to a vertical wall face (drive down a wall / off a ledge into a pit). Pos
+ * φ = (0, −R(1−cosφ), −R sinφ). Descends to −R (place it elevated or into a pit,
+ * like a dive). Deck stays on the rideable face via transport (no fixFrames).
+ */
+function quarterPipeDownPoints(pp) {
+  const R = Math.max(4, pp.qpRadius ?? 16);
+  const A = THREE.MathUtils.degToRad(THREE.MathUtils.clamp(pp.qpAngle ?? 90, 10, 100));
+  const n = Math.max(8, Math.ceil((R * A) / roadParams.segLen));
+  const pts = [];
+  for (let i = 0; i <= n; i++) {
+    const phi = A * (i / n);
+    pts.push(new V3(0, -R * (1 - Math.cos(phi)), -R * Math.sin(phi)));
+  }
+  return pts;
+}
+
 function twistPoints(pp) {
   const L = Math.max(2, pp.twistLength);
   const n = Math.max(12, Math.ceil(L / roadParams.segLen));
@@ -965,6 +983,11 @@ function quarterPipeEndTangents(pp) {
   const A = THREE.MathUtils.degToRad(THREE.MathUtils.clamp(pp.qpAngle ?? 90, 10, 100));
   return { entry: new V3(0, 0, -1), exit: new V3(0, Math.sin(A), -Math.cos(A)) };
 }
+// Down quarter-pipe: entry flat, exit pitched DOWN by the arc sweep.
+function quarterPipeDownEndTangents(pp) {
+  const A = THREE.MathUtils.degToRad(THREE.MathUtils.clamp(pp.qpAngle ?? 90, 10, 100));
+  return { entry: new V3(0, 0, -1), exit: new V3(0, -Math.sin(A), -Math.cos(A)) };
+}
 // Climbing helix ramp: a horizontal turn of 2π·turns with the climb eased flat at
 // both ends, so the end tangents are horizontal (entry −Z, exit rotated by the
 // full turn). fixFrames runs after this and only re-levels up/right.
@@ -1103,6 +1126,14 @@ export const PIECE_CATALOG = [
     points: quarterPipePoints,
   },
   {
+    id: "quarterpipe_down",
+    label: "Quarter-pipe down",
+    hint: "Curves from flat down a vertical wall (descends)",
+    swatch: "#1287a8",
+    key: "",
+    points: quarterPipeDownPoints,
+  },
+  {
     id: "loop",
     label: "Loop (full)",
     hint: "Full 360° vertical ring",
@@ -1211,6 +1242,7 @@ const _END_TANGENTS = {
   gap: gapEndTangents,
   loop_spiral: loopSpiralEndTangents,
   quarterpipe: quarterPipeEndTangents,
+  quarterpipe_down: quarterPipeDownEndTangents,
   // loop / loop_half intentionally omitted — already exact via loopFixFrames.
 };
 for (const def of PIECE_CATALOG) {

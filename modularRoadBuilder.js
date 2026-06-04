@@ -799,6 +799,7 @@ const PIECE_TO_CATEGORY = {
   loop_half: "loop",
   loop_spiral: "loop",
   quarterpipe: "loop",
+  quarterpipe_down: "loop",
   start: "game",
   checkpoint: "game",
   finish: "game",
@@ -1262,6 +1263,13 @@ export const CATEGORY_PRESETS = {
       base: "quarterpipe",
       params: { qpRadius: 13, qpAngle: 72 },
       preview: `<svg viewBox="0 0 80 80"><line x1="6" y1="66" x2="74" y2="66" stroke="#c0392b" stroke-width="1.2"/><path d="M14 66 Q48 66 62 26" stroke="#e8eaed" stroke-width="3" fill="none" stroke-linecap="round"/></svg>`,
+    },
+    {
+      id: "quarterpipe_down",
+      label: "Quarter-pipe down",
+      base: "quarterpipe_down",
+      params: { qpRadius: 16, qpAngle: 90 },
+      preview: `<svg viewBox="0 0 80 80"><line x1="6" y1="14" x2="74" y2="14" stroke="#c0392b" stroke-width="1.2"/><path d="M14 14 Q52 14 56 64" stroke="#e8eaed" stroke-width="3" fill="none" stroke-linecap="round"/></svg>`,
     },
   ],
 };
