@@ -1275,6 +1275,7 @@
           paused: false,
           frameStep: false,
           slowmo: false,
+          racingUi: false, // lap timer / record card / countdown — OFF by default
         };
         function syncOrbitButtons() {
           const build = state.mode === "build" && state.buildMode;
@@ -1984,12 +1985,27 @@
           ghostMesh.visible = false;
           spawnOnTrack();
           vehicle.respawn();
-          raceCountdown = lap.hasCourse ? COUNTDOWN_SECS : 0; // no course → no countdown
+          raceCountdown = lap.hasCourse && state.racingUi ? COUNTDOWN_SECS : 0;
           _splitTimer = 0;
           lapSplitEl.textContent = "";
           countdownEl.style.display = "none";
           refreshRecordCard();
           updateLapHud();
+        }
+
+        // Show/hide ALL the lap/record/timing UI (off by default). When turned on
+        // mid-drive it kicks off a fresh timed race with the countdown.
+        function setRacingUi(on) {
+          state.racingUi = on;
+          const driving = state.mode === "drive";
+          lapHud.style.display = on && driving ? "" : "none";
+          recordCard.style.display = on && driving ? "" : "none";
+          if (!on) {
+            countdownEl.style.display = "none";
+            ghostMesh.visible = false;
+          } else if (driving) {
+            startRace();
+          }
         }
 
         function setBuildMode(on) {
@@ -2022,8 +2038,8 @@
           driveBtn.classList.toggle("palette-btn-primary", on);
           driveBtn.textContent = on ? "Stop driving (T)" : "Test drive (T)";
           driveHud.style.display = on ? "" : "none";
-          lapHud.style.display = on ? "" : "none";
-          recordCard.style.display = on ? "" : "none";
+          lapHud.style.display = on && state.racingUi ? "" : "none";
+          recordCard.style.display = on && state.racingUi ? "" : "none";
           camModeEl.textContent = on
             ? "DRIVE"
             : state.buildMode
@@ -2420,6 +2436,8 @@
           syncFog,
           setBloomEnabled,
           applyBloomParams,
+          state,
+          setRacingUi,
           goToTrack: () => {
             spawnOnTrack();
             vehicle.respawn();
@@ -2476,35 +2494,38 @@
                 tireMarks.reset();
                 driftSmoke.reset();
               }
-              // Lap timing: a returned event means a gate was crossed → park the
-              // respawn point there so R / the next fall return to it.
-              const lapEv = lap.update(simDt, vehicle.body.pos, vehicle.body.vel);
-              if (lapEv) {
-                setRespawnToLastGate();
-                if (lapEv.kind === "checkpoint") {
-                  showSplit(lapEv.splitDelta); // ± vs your best lap at this gate
-                } else if (lapEv.kind === "start") {
-                  ghost.beginLap(); // start recording lap 1
-                } else if (lapEv.kind === "lap") {
-                  if (lapEv.isRecord) {
-                    ghost.commit(); // this lap is the new ghost
-                    saveStoredBest(courseKey, lapEv.lapTime);
-                    saveStoredGhost(courseKey);
-                    saveStoredSplits(courseKey, lap.bestLapSplits);
-                    refreshRecordCard();
-                    celebrateRecord();
-                  } else {
-                    ghost.discard();
+              // Lap timing + ghost — only while the racing UI is enabled.
+              if (state.racingUi) {
+                const lapEv = lap.update(simDt, vehicle.body.pos, vehicle.body.vel);
+                if (lapEv) {
+                  setRespawnToLastGate();
+                  if (lapEv.kind === "checkpoint") {
+                    showSplit(lapEv.splitDelta); // ± vs your best lap at this gate
+                  } else if (lapEv.kind === "start") {
+                    ghost.beginLap(); // start recording lap 1
+                  } else if (lapEv.kind === "lap") {
+                    if (lapEv.isRecord) {
+                      ghost.commit(); // this lap is the new ghost
+                      saveStoredBest(courseKey, lapEv.lapTime);
+                      saveStoredGhost(courseKey);
+                      saveStoredSplits(courseKey, lap.bestLapSplits);
+                      refreshRecordCard();
+                      celebrateRecord();
+                    } else {
+                      ghost.discard();
+                    }
+                    if (!lapEv.finished) ghost.beginLap(); // record the next lap fresh
                   }
-                  if (!lapEv.finished) ghost.beginLap(); // record the next lap fresh
                 }
-              }
-              // Record the live pose, then drive the phantom from the lap clock.
-              if (lap.running) ghost.record(lap.currentTime, vehicle.chassisMesh.position, vehicle.chassisMesh.quaternion);
-              updateGhost();
-              if (_splitTimer > 0) {
-                _splitTimer -= simDt;
-                if (_splitTimer <= 0) lapSplitEl.textContent = "";
+                // Record the live pose, then drive the phantom from the lap clock.
+                if (lap.running) ghost.record(lap.currentTime, vehicle.chassisMesh.position, vehicle.chassisMesh.quaternion);
+                updateGhost();
+                if (_splitTimer > 0) {
+                  _splitTimer -= simDt;
+                  if (_splitTimer <= 0) lapSplitEl.textContent = "";
+                }
+              } else {
+                ghostMesh.visible = false;
               }
             }
             if (state.paused) {
@@ -2514,7 +2535,7 @@
               updateChaseCamera(dt);
             }
             driveHud.innerHTML = `${vehicle.speedKmh.toFixed(0)} km/h · ${vehicle.groundedCount}/4 grip`;
-            updateLapHud();
+            if (state.racingUi) updateLapHud();
           } else {
             controls.update();
           }
@@ -2746,6 +2767,8 @@
         syncFog,
         setBloomEnabled,
         applyBloomParams,
+        state,
+        setRacingUi,
         goToTrack,
       }) {
         const body = document.getElementById("inspector-body");
@@ -2823,6 +2846,10 @@
         // ── Vehicle (VVV physics — tune the test car) ──
         {
           const sec = _section(body, "Vehicle (test drive)", true);
+          _toggle(sec, state, "racingUi", {
+            label: "Lap / record HUD",
+            onChange: (v) => setRacingUi(v),
+          });
           _slider(sec, TIRE, "accelForce", {
             label: "Accel (N)",
             min: 500,
