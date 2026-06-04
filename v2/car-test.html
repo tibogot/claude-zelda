@@ -1,0 +1,210 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Modular-road car — v2 terrain validation</title>
+    <script type="importmap">
+      {
+        "imports": {
+          "three": "https://cdn.jsdelivr.net/npm/three@0.184.0/build/three.webgpu.js",
+          "three/webgpu": "https://cdn.jsdelivr.net/npm/three@0.184.0/build/three.webgpu.js",
+          "three/tsl": "https://cdn.jsdelivr.net/npm/three@0.184.0/build/three.tsl.js",
+          "three-mesh-bvh": "https://cdn.jsdelivr.net/npm/three-mesh-bvh@0.9.9/build/index.module.js"
+        }
+      }
+    </script>
+    <style>
+      * { margin: 0; padding: 0; box-sizing: border-box; }
+      html, body { width: 100%; height: 100%; overflow: hidden; background: #11151c; }
+      #hud {
+        position: fixed; left: 12px; top: 12px; z-index: 10;
+        font: 13px/1.5 ui-monospace, Menlo, Consolas, monospace;
+        color: #cfe8ff; background: rgba(10, 16, 24, 0.6);
+        padding: 10px 12px; border-radius: 8px; pointer-events: none;
+        white-space: pre;
+      }
+      #hud b { color: #7fd1ff; }
+    </style>
+  </head>
+  <body>
+    <div id="hud">loading…</div>
+    <script type="module">
+      import * as THREE from "three";
+      import { Vehicle } from "./play/modularRoadVehicle.js";
+      import { createVehicleGround } from "./play/modularRoadGround.js";
+
+      // ── Analytic terrain: gentle rolling hills, flatter near the spawn ──────
+      function getTerrainHeight(x, z) {
+        const r = Math.hypot(x, z);
+        const flatten = THREE.MathUtils.clamp((r - 14) / 22, 0, 1); // small calm pad to spawn on
+        // Big, smooth rolling hills — long wavelengths keep slopes climbable
+        // (~15-20°) while making terrain-follow obvious. Layered octaves add
+        // variety without sharp lips.
+        const h =
+          7.0 * Math.sin(x * 0.018) * Math.cos(z * 0.020) +
+          3.5 * Math.sin(x * 0.045 + z * 0.030) +
+          1.5 * Math.cos(z * 0.06 - x * 0.04);
+        // A smooth launch ramp ~40m north of spawn (Gaussian ridge → jump).
+        const ramp = 6.5 * Math.exp(-(((z - 42) / 10) ** 2) - ((x / 16) ** 2));
+        return h * flatten + ramp;
+      }
+      window.__terr = getTerrainHeight; // diagnostics
+
+      const scene = new THREE.Scene();
+      scene.background = new THREE.Color(0x8fb7e8);
+      scene.fog = new THREE.Fog(0x8fb7e8, 120, 360);
+
+      const camera = new THREE.PerspectiveCamera(
+        62, window.innerWidth / window.innerHeight, 0.1, 1200,
+      );
+      camera.position.set(0, 12, -16);
+
+      const renderer = new THREE.WebGPURenderer({ antialias: true });
+      renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+      renderer.setSize(window.innerWidth, window.innerHeight);
+      renderer.shadowMap.enabled = true;
+      document.body.appendChild(renderer.domElement);
+
+      // ── Lights ──────────────────────────────────────────────────────────────
+      scene.add(new THREE.HemisphereLight(0xbcd6ff, 0x4a5240, 1.0));
+      const sun = new THREE.DirectionalLight(0xffffff, 2.4);
+      sun.position.set(60, 90, 40);
+      sun.castShadow = true;
+      sun.shadow.mapSize.set(2048, 2048);
+      sun.shadow.camera.left = -120; sun.shadow.camera.right = 120;
+      sun.shadow.camera.top = 120; sun.shadow.camera.bottom = -120;
+      sun.shadow.camera.far = 400;
+      scene.add(sun);
+
+      // ── Visual terrain mesh (same sampler as the physics ground) ────────────
+      const SIZE = 400, SEG = 240;
+      const terrainGeo = new THREE.PlaneGeometry(SIZE, SIZE, SEG, SEG);
+      terrainGeo.rotateX(-Math.PI / 2);
+      {
+        const pos = terrainGeo.attributes.position;
+        for (let i = 0; i < pos.count; i++) {
+          pos.setY(i, getTerrainHeight(pos.getX(i), pos.getZ(i)));
+        }
+        pos.needsUpdate = true;
+        terrainGeo.computeVertexNormals();
+      }
+      const terrain = new THREE.Mesh(
+        terrainGeo,
+        new THREE.MeshStandardMaterial({ color: 0x6f8f5a, roughness: 0.95, metalness: 0.0 }),
+      );
+      terrain.receiveShadow = true;
+      scene.add(terrain);
+
+      // grid overlay so motion/scale is readable
+      const grid = new THREE.GridHelper(SIZE, 80, 0x223018, 0x33401f);
+      grid.position.y = 0.02;
+      grid.material.transparent = true;
+      grid.material.opacity = 0.25;
+      scene.add(grid);
+
+      // ── Vehicle + ground adapter (the things under test) ────────────────────
+      const vehicle = new Vehicle({ scene });
+      vehicle.enabled = true;
+      vehicle.group.visible = true;
+      // v2 terrain dips below world y=0, so point the chassis safety-floor at the
+      // heightfield instead of the hardcoded y=0 (which would pin the car).
+      vehicle.getFloorY = getTerrainHeight;
+
+      const groundRig = createVehicleGround({ getTerrainHeight });
+      vehicle.setBvh(groundRig.ground, groundRig.solids);
+      window.__veh = vehicle; // diagnostics handle
+      window.__ground = groundRig; // diagnostics handle
+
+      function spawnCar() {
+        const sx = 0, sz = 0;
+        const sy = getTerrainHeight(sx, sz) + 2.2;
+        vehicle.setSpawn(new THREE.Vector3(sx, sy, sz), new THREE.Quaternion());
+        vehicle.respawn();
+      }
+      spawnCar();
+
+      // ── Input (identical mapping to modular-road readControls) ──────────────
+      const keys = {};
+      addEventListener("keydown", (e) => {
+        keys[e.code] = true;
+        if (e.code === "KeyR") spawnCar();
+        if (["ArrowUp","ArrowDown","ArrowLeft","ArrowRight","Space"].includes(e.code)) e.preventDefault();
+      });
+      addEventListener("keyup", (e) => { keys[e.code] = false; });
+
+      function readControls() {
+        const left = keys.KeyA || keys.ArrowLeft ? 1 : 0;
+        const right = keys.KeyD || keys.ArrowRight ? 1 : 0;
+        const fwd = keys.KeyW || keys.ArrowUp ? 1 : 0;
+        const back = keys.KeyS || keys.ArrowDown ? 1 : 0;
+        const spinR = keys.KeyE ? 1 : 0;
+        const spinL = keys.KeyQ ? 1 : 0;
+        return {
+          steerTarget: left - right,
+          throttle: fwd - back,
+          handbrake: !!keys.Space,
+          yaw: spinR - spinL,
+        };
+      }
+
+      // ── Chase camera ────────────────────────────────────────────────────────
+      const _fwd = new THREE.Vector3();
+      const _camTarget = new THREE.Vector3();
+      const _camPos = new THREE.Vector3();
+      const _desired = new THREE.Vector3();
+      function updateCamera(dt) {
+        const p = vehicle.body.pos;
+        _fwd.set(0, 0, 1).applyQuaternion(vehicle.body.quat);
+        _fwd.y = 0;
+        if (_fwd.lengthSq() < 1e-6) _fwd.set(0, 0, 1);
+        _fwd.normalize();
+        _desired.set(
+          p.x - _fwd.x * 9,
+          p.y + 4.2,
+          p.z - _fwd.z * 9,
+        );
+        const groundCam = getTerrainHeight(_desired.x, _desired.z) + 1.5;
+        if (_desired.y < groundCam) _desired.y = groundCam;
+        const k = 1 - Math.exp(-6 * dt);
+        _camPos.copy(camera.position).lerp(_desired, k);
+        camera.position.copy(_camPos);
+        _camTarget.set(p.x, p.y + 1.0, p.z);
+        camera.lookAt(_camTarget);
+      }
+
+      const hud = document.getElementById("hud");
+      const clock = new THREE.Clock();
+
+      await renderer.init();
+
+      renderer.setAnimationLoop(() => {
+        const dt = Math.min(clock.getDelta(), 1 / 30);
+        const controls = readControls();
+        vehicle.update(dt, controls);
+        updateCamera(dt);
+
+        const p = vehicle.body.pos;
+        const v = vehicle.body.vel;
+        const grounded = vehicle.groundedCount ?? "?";
+        const nan = [p.x, p.y, p.z, v.x, v.y, v.z].some((n) => !isFinite(n));
+        hud.textContent =
+          `WASD/arrows: drive   Space: handbrake   Q/E: air-yaw   R: reset\n` +
+          `speed:  ${vehicle.speedKmh.toFixed(1)} km/h\n` +
+          `grounded wheels: ${grounded}/4\n` +
+          `pos: ${p.x.toFixed(1)}, ${p.y.toFixed(1)}, ${p.z.toFixed(1)}\n` +
+          `vel: ${v.x.toFixed(2)}, ${v.y.toFixed(2)}, ${v.z.toFixed(2)}\n` +
+          `terrainY here: ${getTerrainHeight(p.x, p.z).toFixed(2)}` +
+          (nan ? `\n*** NaN in body state ***` : ``);
+
+        renderer.render(scene, camera);
+      });
+
+      addEventListener("resize", () => {
+        camera.aspect = window.innerWidth / window.innerHeight;
+        camera.updateProjectionMatrix();
+        renderer.setSize(window.innerWidth, window.innerHeight);
+      });
+    </script>
+  </body>
+</html>

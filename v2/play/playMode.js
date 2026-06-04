@@ -38,6 +38,8 @@ import {
   DEFAULT_VVV_WALL,
   VVV_GRAVITY,
 } from "./vvvCarPhysics.js";
+import { Vehicle as ModularVehicle } from "./modularRoadVehicle.js";
+import { createVehicleGround } from "./modularRoadGround.js";
 
 // ============================================================
 // === VVV CAR scratch (module-scope; reused across frames to avoid GC).
@@ -829,7 +831,7 @@ function clearBullets(pool) {
   }
 }
 
-const MODE_ORDER = ["capsule", "char", "fly", "car", "lotus", "vvv", "rts"];
+const MODE_ORDER = ["capsule", "char", "fly", "car", "lotus", "vvv", "rts", "stunt"];
 const MODE_META = {
   capsule: { label: "Capsule", icon: "◉", digit: "1" },
   char:    { label: "Character", icon: "🧝", digit: "2" },
@@ -838,6 +840,7 @@ const MODE_META = {
   lotus:   { label: "Lotus", icon: "🏎", digit: "5" },
   vvv:     { label: "VVV (rigid)", icon: "🚗", digit: "6" },
   rts:     { label: "Director", icon: "🎬", digit: "7" },
+  stunt:   { label: "Stunt", icon: "🏁", digit: "8" },
 };
 
 export class PlayMode {
@@ -1162,6 +1165,19 @@ export class PlayMode {
     this._vvvHubBase = null;
     this._setupVvvCar();
     this._loadVvvCarVisuals();
+
+    // === Stunt car (byte-faithful modular-road Vehicle + v2 ground adapter) ===
+    // Self-contained: owns its chassis/wheel meshes and runs its own physics
+    // step. The ground adapter feeds it v2's analytic terrain + cliffBvh (and a
+    // road BVH later) through the duck-typed groundBvh interface it expects.
+    this._stuntVehicle = new ModularVehicle({ scene: this.scene });
+    this._stuntVehicle.getFloorY = (x, z) => this.getTerrainHeight(x, z);
+    this._stuntGround = createVehicleGround({
+      getTerrainHeight: (x, z) => this.getTerrainHeight(x, z),
+      cliffBvh: this.cliffBvh,
+    });
+    this._stuntVehicle.enabled = false;
+    this._stuntVehicle.group.visible = false;
 
     this._modePill = null;
     this._modePillIcon = null;
@@ -1631,7 +1647,7 @@ export class PlayMode {
 
   _applyCameraFov() {
     let fov;
-    if (this.moveMode === "vvv") fov = this.vvvCam.fov;
+    if (this.moveMode === "vvv" || this.moveMode === "stunt") fov = this.vvvCam.fov;
     else if (this.moveMode === "lotus") fov = this.lotusCam.fov;
     else fov = this.cameraTuning[this.moveMode]?.fov ?? 60;
     if (this.camera.fov !== fov) {
@@ -1686,7 +1702,8 @@ export class PlayMode {
         folder.add(this.carSettings, "cameraChaseSpeed", 0.5, 12, 0.1).name("Chase speed").onChange(onAny);
         folder.add(this.carSettings, "cameraDriftLag", 0, 5, 0.1).name("Drift lag").onChange(onAny);
       }
-    } else if (mode === "vvv") {
+    } else if (mode === "vvv" || mode === "stunt") {
+      // Stunt shares the VVV chase-camera tuning object.
       const vc = this.vvvCam;
       folder.add(vc, "fov", 40, 110, 1).name("FOV").onChange(onAny);
       folder.add(vc, "distance", 2, 16, 0.1).name("Distance").onChange(onAny);
@@ -3132,6 +3149,45 @@ export class PlayMode {
     this._vvvCamPosSmooth = null;
   }
 
+  /** Stunt car: drive the byte-faithful modular-road Vehicle from v2 input +
+   *  the terrain/cliff ground adapter, then sync the generic car state the
+   *  shared chase camera / HUD read (playerPos, carHeading, carVx/Vz). */
+  _updateStuntCar(dtSec) {
+    const v = this._stuntVehicle;
+    if (!v) return;
+    const keys = this.keysHeld || {};
+    const left = keys.KeyA || keys.ArrowLeft ? 1 : 0;
+    const right = keys.KeyD || keys.ArrowRight ? 1 : 0;
+    const fwd = keys.KeyW || keys.ArrowUp ? 1 : 0;
+    const back = keys.KeyS || keys.ArrowDown ? 1 : 0;
+    const spinR = keys.KeyE ? 1 : 0;
+    const spinL = keys.KeyQ ? 1 : 0;
+    const controls = {
+      steerTarget: left - right,
+      throttle: fwd - back,
+      handbrake: !!keys.Space,
+      yaw: spinR - spinL,
+    };
+    // cliffBvh may bake/rebake after construction — keep the adapter current.
+    this._stuntGround.setCliffBvh(this.cliffBvh);
+    v.setBvh(this._stuntGround.ground, this._stuntGround.solids);
+    v.update(dtSec, controls);
+
+    const b = v.body;
+    this.playerPos.x = b.pos.x;
+    this.playerPos.y = b.pos.y;
+    this.playerPos.z = b.pos.z;
+    this.carVx = b.vel.x;
+    this.carVz = b.vel.z;
+    // Heading from chassis forward on XZ (stable under pitch/roll), matching the
+    // VVV convention so the shared chase camera reads it correctly.
+    _vvvFwdW.set(0, 0, 1).applyQuaternion(b.quat);
+    let heading = Math.atan2(_vvvFwdW.x, _vvvFwdW.z) - Math.PI;
+    while (heading > Math.PI) heading -= 2 * Math.PI;
+    while (heading < -Math.PI) heading += 2 * Math.PI;
+    this.carHeading = heading;
+  }
+
   async _initLotusCamGui() {
     try {
       const { GUI } =
@@ -4052,10 +4108,14 @@ export class PlayMode {
     return this.moveMode === "fly" && this.planeLoaded;
   }
   get carMode() {
-    return this.moveMode === "car" || this.moveMode === "lotus" || this.moveMode === "vvv";
+    return this.moveMode === "car" || this.moveMode === "lotus" || this.moveMode === "vvv" || this.moveMode === "stunt";
   }
   get vvvDriving() {
     return this.moveMode === "vvv";
+  }
+  /** Rigid-body cars (own physics, kinematic car paths gated off): vvv + stunt. */
+  get rigidDriving() {
+    return this.moveMode === "vvv" || this.moveMode === "stunt";
   }
 
   _clearTrails() {
@@ -4489,9 +4549,9 @@ export class PlayMode {
         mx = -Math.sin(this.flyHeading) * sg;
         mz = -Math.cos(this.flyHeading) * sg;
       }
-    } else if (this.carMode && !this.vvvDriving) {
-      // VVV bypasses the kinematic Bruno/Lotus input block — its physics
-      // reads keys directly inside _updateVvvCar and drives the body via forces.
+    } else if (this.carMode && !this.rigidDriving) {
+      // Rigid cars (VVV/Stunt) bypass the kinematic Bruno/Lotus input block —
+      // their physics reads keys directly and drives the body via forces.
       const forward = keys.KeyW || keys.ArrowUp;
       const backward = keys.KeyS || keys.ArrowDown;
       const leftKey = keys.KeyA || keys.ArrowLeft;
@@ -4836,14 +4896,16 @@ export class PlayMode {
     const mlen = Math.hypot(mx, mz);
     const carDriving = this.carMode;
     const vvvDriving = this.vvvDriving;
+    const rigidDriving = this.rigidDriving;
 
-    // VVV (rigid-body) car: runs its own physics + syncs playerPos / carHeading
-    // BEFORE the kinematic carDriving paths below execute. The two carPhysics
-    // call sites further down gate themselves with `!vvvDriving` so they no-op
-    // in this mode. Camera / HUD downstream read playerPos+carHeading and
-    // therefore work transparently.
+    // Rigid-body cars (VVV + Stunt) run their own physics + sync playerPos /
+    // carHeading BEFORE the kinematic carDriving paths below execute. Those
+    // paths gate themselves with `!rigidDriving` so they no-op here. Camera /
+    // HUD downstream read playerPos+carHeading and work transparently.
     if (vvvDriving) {
       this._updateVvvCar(dtSec);
+    } else if (this.moveMode === "stunt") {
+      this._updateStuntCar(dtSec);
     }
 
     const moveSpeed = flying
@@ -4874,7 +4936,7 @@ export class PlayMode {
       }
 
       if (this.cliffBvh?.baked && !flying) {
-        if (carDriving && !vvvDriving) {
+        if (carDriving && !rigidDriving) {
           const _vehSf =
             this.moveMode === "lotus"
               ? this.lotusRoot?.scale.x || 1
@@ -5212,9 +5274,9 @@ export class PlayMode {
         while (dYaw < -PI) dYaw += 2 * PI;
         this.charYaw += dYaw * (1 - Math.exp(-14 * dtSec));
       }
-    } else if (carDriving && !vvvDriving) {
-      // VVV bypasses this block entirely — its physics already ran in
-      // _updateVvvCar above and synced playerPos / carHeading.
+    } else if (carDriving && !rigidDriving) {
+      // Rigid cars (VVV/Stunt) bypass this block entirely — their physics
+      // already ran above and synced playerPos / carHeading.
       this.flyHeight = 0;
       const _isLotus = this.moveMode === "lotus";
       const _sf = _isLotus
@@ -5811,6 +5873,12 @@ export class PlayMode {
     // orientation are handled in _syncVvvVisuals (lotusrealsize2 chassis + wheels).
     this._syncVvvVisuals(dtSec);
 
+    // Stunt car owns its meshes and positions them inside vehicle.update();
+    // here we only toggle visibility with the active mode.
+    if (this._stuntVehicle) {
+      this._stuntVehicle.group.visible = this.moveMode === "stunt";
+    }
+
     // Drift marks & smoke (shared by both car modes)
     if (anyCarRendered) {
       const speed = Math.sqrt(
@@ -6069,7 +6137,8 @@ export class PlayMode {
     // Camera
     const charLookY = this.playerPos.y + CHAR_HEIGHT * 0.75;
     const isLotusMode = this.moveMode === "lotus";
-    const isVvvMode = this.moveMode === "vvv";
+    // Stunt reuses the VVV chase camera (both sync playerPos/carHeading/carVx/Vz).
+    const isVvvMode = this.moveMode === "vvv" || this.moveMode === "stunt";
     const _lc = isVvvMode ? this.vvvCam : isLotusMode ? this.lotusCam : null;
     const _carLookYOff = _lc ? _lc.lookAtY : 1.2;
     const carLookY = carDriving
@@ -6331,7 +6400,8 @@ export class PlayMode {
       case "char": return this.charYaw;
       case "fly": return this.flyHeading;
       case "car":
-      case "lotus": return this.carHeading;
+      case "lotus":
+      case "stunt": return this.carHeading;
       case "rts": return this.rtsYaw;
       case "capsule":
       default: return this.capsule ? this.capsule.rotation.y : 0;
@@ -6444,6 +6514,29 @@ export class PlayMode {
       this.playerPos.y = this._vvvBody.pos.y;
       this.playerPos.z = this._vvvBody.pos.z;
       this._lotusCamDistSmooth = 0;
+      this.driftMarks.reset();
+      this.driftSmoke.reset();
+    } else if (target === "stunt") {
+      this.moveMode = "stunt";
+      this.carHeading = yaw;
+      this.carCamYaw = yaw;
+      this.carVx = 0;
+      this.carVz = 0;
+      this.carDrifting = false;
+      this.carDriftAngle = 0;
+      const sv = this._stuntVehicle;
+      const gy = this.getWorldHeight(this.playerPos.x, this.playerPos.z);
+      const spawnY = gy + 1.0; // a little above terrain so the suspension settles
+      const sq = new THREE.Quaternion().setFromAxisAngle(_vvvAxisY_world, yaw + Math.PI);
+      sv.setSpawn(new THREE.Vector3(this.playerPos.x, spawnY, this.playerPos.z), sq);
+      sv.respawn();
+      sv.enabled = true;
+      sv.group.visible = true;
+      this.playerPos.y = spawnY;
+      // Reuse the VVV chase-camera smoothing state (shared camera path).
+      this._vvvCamFocusYSmooth = null;
+      this._vvvCamPosSmooth = null;
+      this._vvvCamDistSmooth = 0;
       this.driftMarks.reset();
       this.driftSmoke.reset();
     } else if (target === "rts") {
