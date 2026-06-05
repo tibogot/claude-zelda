@@ -412,16 +412,17 @@
       <div id="ui-scroll"></div>
     </div>
     <div id="title">
-      Pine — 7×7 cards (forest budget) · v2 export in Save / Load
+      Pine — top whorl at trunk tip · 7×7 cards
     </div>
     <div id="hint">
-      Author pines for v2 Tree Paint: save JSON includes arborist-style fields +
-      pine block. Export trunk GLB for trunkFile. Branches off for forests.
+      Top ring is always on the trunk tip; lower rings spread from base Y (height
+      curve). v2 export in Save / Load.
     </div>
     <script type="module">
       import * as THREE from "three";
       import { mergeGeometries } from "three/addons/utils/BufferGeometryUtils.js";
       import { GLTFExporter } from "three/addons/exporters/GLTFExporter.js";
+      import { CSMShadowNode } from "three/addons/csm/CSMShadowNode.js";
       import {
         Fn,
         float,
@@ -464,6 +465,8 @@
       } from "three/tsl";
       import { OrbitControls } from "three/addons/controls/OrbitControls.js";
       const DEG = Math.PI / 180;
+      /** rebuildTrunk floor — slider can go lower; was 0.02 and looked too thick at the tip. */
+      const TRUNK_RADIUS_MIN = 0.003;
 
       const _checkSvg =
         '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12"></polyline></svg>';
@@ -1038,11 +1041,53 @@
         return THREE.MathUtils.lerp(b, top, t);
       }
 
+      /** Top whorl (level = levels−1) uses trunk tip; lower whorls lerp from baseY. */
+      function pineRingTrunkT(level, levels, f, tr) {
+        const n = Math.max(1, levels);
+        if (n <= 1) return 1;
+        const tLin = level / (n - 1);
+        const yBase = f.baseY + (f.offsetY ?? 0);
+        const tBottom = THREE.MathUtils.clamp(trunkHeightT(yBase, tr), 0, 1);
+        const hPow = Math.max(0.05, f.heightPower ?? 1);
+        return THREE.MathUtils.lerp(
+          tBottom,
+          1,
+          Math.pow(tLin, hPow),
+        );
+      }
+
       function migrateFoliageParams(f) {
         if (f.pitchCurveEnabled == null) f.pitchCurveEnabled = true;
         if (f.pitchBottomDeg == null) f.pitchBottomDeg = -8;
-        if (f.pitchTopDeg == null) f.pitchTopDeg = 12;
+        if (f.pitchTopDeg == null) f.pitchTopDeg = -8;
         if (f.pitchCurvePower == null) f.pitchCurvePower = 1;
+        if (f.heightPower == null) f.heightPower = 1;
+        if (f.tipRingSlide == null) f.tipRingSlide = -0.06;
+        delete f.apexEnabled;
+        delete f.apexCount;
+        delete f.apexYOffset;
+        delete f.apexScaleMul;
+        delete f.apexPitchDeg;
+        delete f.apexSpreadDeg;
+        delete f.apexPivotAlongRadius;
+      }
+
+      function migrateLod2CheapParams(p) {
+        const d = {
+          colorVarMul: 0.35,
+          aoStrengthMul: 1.35,
+          pivotAoMul: 1.2,
+          veinMul: 0.4,
+          sssMul: 0.2,
+          rimMul: 0.15,
+        };
+        if (!p.lod2Cheap) {
+          p.lod2Cheap = { ...d };
+          return;
+        }
+        for (const [k, v] of Object.entries(d)) {
+          if (p.lod2Cheap[k] == null) p.lod2Cheap[k] = v;
+        }
       }
 
       /** Stable 0…1 hash for ring / card randomization (seed changes → reshuffle). */
@@ -1127,7 +1172,12 @@
             levels: 7,
             perRing: 7,
             baseY: 1.68,
+            /** Legacy spacing (m); kept in presets — placement uses heightPower + tip lock. */
             stepY: 0.47,
+            /** Whorl spacing along trunk: 1 = even; >1 bunches rings toward tip. Top whorl always at tip. */
+            heightPower: 1,
+            /** Slide top whorl along trunk (m); negative = slightly below tip. */
+            tipRingSlide: -0.06,
             scaleBottom: 0.94,
             scaleTop: 0.32,
             scalePower: 1.15,
@@ -1145,7 +1195,7 @@
             /** Extra pitch (°) added to card tilt at bottom / top whorl; lerped by height. */
             pitchCurveEnabled: true,
             pitchBottomDeg: -8,
-            pitchTopDeg: 12,
+            pitchTopDeg: -8,
             /** 1 = linear by level; >1 shifts pitch change toward the crown tip. */
             pitchCurvePower: 1,
             /** Per-leaf variation (same seed as ring/card random; reshuffle rerolls all) */
@@ -1159,7 +1209,7 @@
           trunk: {
             height: 5,
             radiusBottom: 0.14,
-            radiusTop: 0.02,
+            radiusTop: 0.01,
             yOffset: 0,
             /** Mid-trunk lateral bow (m); base/tip stay on axis. sin(π·t) + optional S term. */
             curveBend: 0.12,
@@ -1240,6 +1290,13 @@
             shadowFocus: 11,
             shadowMapSize: 4096,
             castFoliageShadows: true,
+            receiveFoliageShadows: true,
+            /** Match v2 open-world sun shadows when enabled (CSMShadowNode). */
+            csmEnabled: false,
+            csmCascades: 2,
+            csmMaxFar: 300,
+            csmLightMargin: 100,
+            csmMapSize: 2048,
           },
           branches: {
             enabled: false,
@@ -1307,6 +1364,15 @@
           lodPreview: false,
           lodDist1: 80,
           lodDist2: 200,
+          /** LOD2 = same cards as LOD1; cheaper shading (matches forest bench). */
+          lod2Cheap: {
+            colorVarMul: 0.35,
+            aoStrengthMul: 1.35,
+            pivotAoMul: 1.2,
+            veinMul: 0.4,
+            sssMul: 0.2,
+            rimMul: 0.15,
+          },
           trunkTris: 0,
           totalLeaves: 0,
           totalLeafTris: 0,
@@ -1339,6 +1405,7 @@
         let galleryImgs = [];
         let lodMesh1 = null;
         let lodMesh2 = null;
+        let foliageMeshCapacity = 0;
         let lodTrunk0Clone = null;
         let lodTrunk1Clone = null;
         let lodTrunk2Clone = null;
@@ -1423,17 +1490,91 @@
         }
         applySunShadowSettings();
 
-        function applyCastShadowFlags() {
-          const leafShadow = params.scene.castFoliageShadows !== false;
+        let csm = null;
+        try {
+          if (renderer.shadowMap) {
+            const sc = params.scene;
+            csm = new CSMShadowNode(sun, {
+              cascades: Math.round(sc.csmCascades ?? 2),
+              maxFar: sc.csmMaxFar ?? 300,
+              mode: "practical",
+              lightMargin: sc.csmLightMargin ?? 100,
+            });
+            const csmMap = THREE.MathUtils.clamp(
+              Math.round(sc.csmMapSize ?? 2048),
+              512,
+              4096,
+            );
+            sun.shadow.mapSize.set(csmMap, csmMap);
+            if (csm.lights?.length > 2) {
+              csm.lights[2].shadow.mapSize.set(
+                Math.min(1024, csmMap),
+                Math.min(1024, csmMap),
+              );
+            }
+            if (sc.csmEnabled) setSunShadowNode(csm);
+          }
+        } catch (err) {
+          console.warn(
+            "[pine-editor32] CSMShadowNode failed; using single shadow frustum.",
+            err,
+          );
+          csm = null;
+        }
+
+        /** WebGPU: never assign shadowNode = null (TSL emits invalid WGSL). Clear the property instead. */
+        function setSunShadowNode(node) {
+          if (!sun.shadow) return;
+          if (node != null) sun.shadow.shadowNode = node;
+          else delete sun.shadow.shadowNode;
+        }
+
+        function applyCsmSettings() {
+          const sc = params.scene;
+          if (!sun.shadow) return;
+          if (csm) {
+            csm.cascades = Math.max(1, Math.round(sc.csmCascades ?? 2));
+            csm.maxFar = sc.csmMaxFar ?? 300;
+            csm.lightMargin = sc.csmLightMargin ?? 100;
+            const csmMap = THREE.MathUtils.clamp(
+              Math.round(sc.csmMapSize ?? 2048),
+              512,
+              4096,
+            );
+            sun.shadow.mapSize.set(csmMap, csmMap);
+            setSunShadowNode(sc.csmEnabled ? csm : null);
+          }
+          if (!sc.csmEnabled) applySunShadowSettings();
+        }
+
+        function applyShadowFlags() {
+          const sc = params.scene;
+          const leafCast = sc.castFoliageShadows !== false;
+          const leafRecv = sc.receiveFoliageShadows === true;
           trunkMesh.castShadow = true;
-          if (foliageObject) foliageObject.castShadow = leafShadow;
-          if (lodMesh1) lodMesh1.castShadow = leafShadow;
-          if (lodMesh2) lodMesh2.castShadow = leafShadow;
+          trunkMesh.receiveShadow = true;
+          if (foliageObject) {
+            foliageObject.castShadow = leafCast;
+            foliageObject.receiveShadow = leafRecv;
+          }
+          if (lodMesh1) {
+            lodMesh1.castShadow = leafCast;
+            lodMesh1.receiveShadow = false;
+          }
+          if (lodMesh2) {
+            lodMesh2.castShadow = false;
+            lodMesh2.receiveShadow = false;
+          }
           if (branchesObject) {
-            branchesObject.castShadow = leafShadow && params.branches.enabled;
+            branchesObject.castShadow =
+              leafCast && params.branches.enabled;
+            branchesObject.receiveShadow = leafRecv;
           }
           for (const c of [lodTrunk0Clone, lodTrunk1Clone, lodTrunk2Clone]) {
-            if (c) c.castShadow = true;
+            if (c) {
+              c.castShadow = true;
+              c.receiveShadow = true;
+            }
           }
         }
         scene.add(sun);
@@ -1525,6 +1666,42 @@
           windStr: uniform(params.wind.strength),
           windMicro: uniform(params.wind.micro),
           windDir: uniform(params.wind.directionDeg * DEG),
+        };
+
+        const c2 = params.lod2Cheap;
+        const leafU2 = {
+          bottomColor: uniform(new THREE.Color(params.material.bottomColor)),
+          topColor: uniform(new THREE.Color(params.material.topColor)),
+          colorVar: uniform(params.material.colorVar * c2.colorVarMul),
+          normalBias: uniform(params.material.normalBias),
+          leafWarp: uniform(params.material.leafWarp),
+          radialUp: uniform(params.material.radialUp),
+          veinStrength: uniform(params.material.veinStrength * c2.veinMul),
+          pivotAo: uniform(
+            Math.min(0.55, params.material.pivotAo * c2.pivotAoMul),
+          ),
+          aoStrength: uniform(
+            Math.min(0.75, params.material.aoStrength * c2.aoStrengthMul),
+          ),
+          aoRadius: uniform(params.material.aoRadius),
+          canopyCenter: uniform(new THREE.Vector3(0, 4, 0)),
+          alphaCutoff: uniform(params.material.alphaTest),
+          maskInAlpha: uniform(params.material.maskMode === "alpha" ? 1 : 0),
+          useMaskTex: uniform(0),
+          useImageColor: uniform(0),
+          sssColor: uniform(new THREE.Color(params.material.sssColor)),
+          sssStrength: uniform(params.material.sssStrength * c2.sssMul),
+          sssPower: uniform(params.material.sssPower),
+          rimColor: uniform(new THREE.Color(params.material.rimColor)),
+          rimStrength: uniform(params.material.rimStrength * c2.rimMul),
+          rimPower: uniform(params.material.rimPower),
+          sunDir: uniform(new THREE.Vector3(5, 12, 4).normalize()),
+          time: uniform(0),
+          windEnabled: uniform(0),
+          windSpeed: uniform(0),
+          windStr: uniform(0),
+          windMicro: uniform(0),
+          windDir: uniform(0),
         };
 
         const leafMapNode = texture(checker);
@@ -1638,18 +1815,20 @@
             col,
             mix(float(1), sub(float(1), leafU.veinStrength), vein),
           );
-          const hookAo = mix(
-            float(1),
-            sub(float(1), leafU.pivotAo),
-            smoothstep(float(0), float(0.38), u.y),
-          );
-          col = mul(col, hookAo);
+          const texRgb = leafMapNode.sample(leafMaskUv()).rgb;
+          col = mix(col, texRgb, leafU.useImageColor);
           const h = hash(instanceIndex);
           const varMul = add(
             mul(h, mul(leafU.colorVar, float(2))),
             sub(float(1), leafU.colorVar),
           );
           col = mul(col, varMul);
+          const hookAo = mix(
+            float(1),
+            sub(float(1), leafU.pivotAo),
+            smoothstep(float(0), float(0.38), u.y),
+          );
+          col = mul(col, hookAo);
           const distC = length(sub(positionWorld, leafU.canopyCenter));
           const aoInner = mix(
             sub(float(1), leafU.aoStrength),
@@ -1674,10 +1853,71 @@
           );
           const rim = mul(pow(rimDot, leafU.rimPower), leafU.rimStrength);
           col = add(col, mul(leafU.rimColor, rim));
-          col = mix(
+          return clamp(col, float(0), float(2));
+        })();
+
+        const leafTrunkRadialLod2 = normalize(
+          vec3(leafInstancePivotW.x, leafU2.radialUp, leafInstancePivotW.z),
+        );
+
+        const leafColorNodeLod2 = Fn(() => {
+          const u = uv();
+          let col = mix(leafU2.bottomColor, leafU2.topColor, u.y);
+          const vein = sin(mul(u.x, float(3.14159)))
+            .mul(float(0.5))
+            .add(float(0.5));
+          col = mul(
             col,
-            leafMapNode.sample(leafMaskUv()).rgb,
-            leafU.useImageColor,
+            mix(float(1), sub(float(1), leafU2.veinStrength), vein),
+          );
+          const texRgb = leafMapNode.sample(leafMaskUv()).rgb;
+          col = mix(col, texRgb, leafU2.useImageColor);
+          const h = hash(instanceIndex);
+          col = mul(
+            col,
+            add(mul(h, mul(leafU2.colorVar, float(2))), sub(float(1), leafU2.colorVar)),
+          );
+          const hookAo = mix(
+            float(1),
+            sub(float(1), leafU2.pivotAo),
+            smoothstep(float(0), float(0.38), u.y),
+          );
+          col = mul(col, hookAo);
+          const distC = length(sub(positionWorld, leafU2.canopyCenter));
+          col = mul(
+            col,
+            mix(
+              sub(float(1), leafU2.aoStrength),
+              float(1),
+              clamp(
+                div(distC, max(leafU2.aoRadius, float(0.001))),
+                float(0),
+                float(1),
+              ),
+            ),
+          );
+          const viewDir = normalize(sub(cameraPosition, positionWorld));
+          const backDot = max(
+            dot(negate(leafU2.sunDir), leafTrunkRadialLod2),
+            float(0),
+          );
+          col = add(
+            col,
+            mul(
+              leafU2.sssColor,
+              mul(pow(backDot, leafU2.sssPower), leafU2.sssStrength),
+            ),
+          );
+          const rimDot = sub(
+            float(1),
+            max(dot(leafTrunkRadialLod2, viewDir), float(0)),
+          );
+          col = add(
+            col,
+            mul(
+              leafU2.rimColor,
+              mul(pow(rimDot, leafU2.rimPower), leafU2.rimStrength),
+            ),
           );
           return clamp(col, float(0), float(2));
         })();
@@ -1707,6 +1947,21 @@
           a.lessThan(leafU.alphaCutoff).discard();
           return vec4(0, 0, 0, 1);
         })();
+
+        const matLod2 = new THREE.MeshStandardNodeMaterial({
+          side: THREE.DoubleSide,
+          roughness: params.material.roughness,
+          metalness: params.material.metalness,
+          alphaTest: 0,
+          depthWrite: true,
+          transparent: false,
+          forceSinglePass: true,
+        });
+        matLod2.colorNode = leafColorNodeLod2;
+        matLod2.normalNode = leafNormalNode;
+        matLod2.positionNode = positionLocal;
+        matLod2.envMapIntensity = 0;
+        matLod2.castShadowNode = mat.castShadowNode;
 
         let geo = null;
         let branchGeo = null;
@@ -1919,14 +2174,15 @@
             params.material.aoRadius = b.aoRadius;
           } else {
             const f = params.foliage;
-            const levels = Math.max(1, Math.round(f.levels));
-            leafU.yMin.value = f.baseY + f.offsetY;
-            leafU.yMax.value =
-              f.baseY +
-              f.offsetY +
-              Math.max(0.05, (levels - 1) * f.stepY) +
-              0.35;
-            leafU.canopyCenter.value.set(0, (leafU.yMin.value + leafU.yMax.value) * 0.5, 0);
+            const tr = params.trunk;
+            leafU.yMin.value = f.baseY + (f.offsetY ?? 0);
+            trunkCenterAtT(1, tr, _trunkP1);
+            leafU.yMax.value = _trunkP1.y + 0.35;
+            leafU.canopyCenter.value.set(
+              0,
+              (leafU.yMin.value + leafU.yMax.value) * 0.5,
+              0,
+            );
             leafU.aoRadius.value = params.material.aoRadius;
           }
           syncTrunkBounds();
@@ -1977,6 +2233,51 @@
           syncLeafBounds();
         }
 
+        function syncLod2Uniforms() {
+          const m = params.material;
+          const c = params.lod2Cheap;
+          leafU2.bottomColor.value.copy(leafU.bottomColor.value);
+          leafU2.topColor.value.copy(leafU.topColor.value);
+          leafU2.colorVar.value = m.colorVar * c.colorVarMul;
+          leafU2.normalBias.value = m.normalBias;
+          leafU2.leafWarp.value = m.leafWarp;
+          leafU2.radialUp.value = m.radialUp;
+          leafU2.veinStrength.value = m.veinStrength * c.veinMul;
+          leafU2.pivotAo.value = Math.min(0.55, m.pivotAo * c.pivotAoMul);
+          leafU2.aoStrength.value = Math.min(
+            0.75,
+            m.aoStrength * c.aoStrengthMul,
+          );
+          leafU2.aoRadius.value = leafU.aoRadius.value;
+          leafU2.canopyCenter.value.copy(leafU.canopyCenter.value);
+          leafU2.sssColor.value.copy(leafU.sssColor.value);
+          leafU2.sssStrength.value = m.sssStrength * c.sssMul;
+          leafU2.sssPower.value = m.sssPower;
+          leafU2.rimColor.value.copy(leafU.rimColor.value);
+          leafU2.rimStrength.value = m.rimStrength * c.rimMul;
+          leafU2.rimPower.value = m.rimPower;
+          leafU2.alphaCutoff.value = m.alphaTest;
+          leafU2.maskInAlpha.value = leafU.maskInAlpha.value;
+          leafU2.useMaskTex.value = leafU.useMaskTex.value;
+          leafU2.useImageColor.value = leafU.useImageColor.value;
+          leafU2.sunDir.value.copy(leafU.sunDir.value);
+          leafU2.windEnabled.value = 0;
+          matLod2.roughness = m.roughness;
+          matLod2.metalness = m.metalness;
+          matLod2.wireframe = params.debug.wireframe;
+          if (leafU.useMaskTex.value > 0.5) {
+            matLod2.opacityNode = leafMaskAlphaNode;
+            matLod2.transparent = false;
+            matLod2.alphaTest = m.alphaTest;
+            matLod2.depthWrite = m.depthWrite;
+          } else {
+            matLod2.opacityNode = null;
+            matLod2.alphaTest = 0;
+            matLod2.depthWrite = true;
+          }
+          matLod2.needsUpdate = true;
+        }
+
         function syncWindUniforms() {
           const w = params.wind;
           leafU.windEnabled.value = w.enabled !== false ? 1 : 0;
@@ -2024,6 +2325,7 @@
           leafU.useImageColor.value =
             m.colorSource === "texture" && hasMask ? 1 : 0;
           syncWindUniforms();
+          syncLod2Uniforms();
           mat.needsUpdate = true;
         }
 
@@ -2256,14 +2558,19 @@
           );
         }
 
+        function pineCardShouldKeep(level, k, levels, perRing, logical, options) {
+          const keepFraction = options.keepFraction ?? 1;
+          if (keepFraction >= 1) return true;
+          const step = Math.max(1, Math.round(1 / keepFraction));
+          return logical % step === 0;
+        }
+
         /** Visit each LOD0 card placement (same rules as fillPineInstances). */
         function forEachPineCardPlacement(options, visit) {
           const f = params.foliage;
           const tr = params.trunk;
           const levels = Math.max(1, Math.round(f.levels));
           const perRing = Math.max(1, Math.round(f.perRing));
-          const keepFraction = options.keepFraction ?? 1;
-          const step = Math.max(1, Math.round(1 / keepFraction));
           const xOffset = options.xOffset ?? 0;
           const scaleMul = options.scaleMul ?? 1;
           const pow = Math.max(0.05, f.scalePower);
@@ -2271,15 +2578,14 @@
             Number.isFinite(f.globalScale) && f.globalScale > 0
               ? f.globalScale
               : 1;
-
           let logical = 0;
           let count = 0;
+
           for (let level = 0; level < levels; level++) {
-            const tLin = levels <= 1 ? 0 : level / (levels - 1);
+            const tLin = levels <= 1 ? 1 : level / (levels - 1);
             const u = Math.pow(tLin, pow);
             const sRing = (f.scaleBottom * (1 - u) + f.scaleTop * u) * gScale;
-            const yRing = f.baseY + level * f.stepY + f.offsetY;
-            const trunkT = trunkHeightT(yRing, tr);
+            const trunkT = pineRingTrunkT(level, levels, f, tr);
             const R = Math.max(
               0.001,
               trunkRadiusAtT(trunkT, tr) - f.radialInset,
@@ -2296,7 +2602,9 @@
               f.ringRandomDeg,
             );
             for (let k = 0; k < perRing; k++) {
-              if (logical % step === 0) {
+              if (
+                pineCardShouldKeep(level, k, levels, perRing, logical, options)
+              ) {
                 const cardRand = foliageRandomSignedDeg(
                   level,
                   k + 1,
@@ -2331,6 +2639,13 @@
                   f.leafScaleRandom,
                 );
                 trunkCenterAtT(trunkT, tr, _dummy.position);
+                if (level === levels - 1) {
+                  const slide = f.tipRingSlide ?? 0;
+                  if (Math.abs(slide) > 1e-6) {
+                    trunkTangentAtT(trunkT, tr, _trunkTan);
+                    _dummy.position.addScaledVector(_trunkTan, slide);
+                  }
+                }
                 trunkOutwardAtT(trunkT, theta, tr, _trunkOut);
                 _dummy.position.addScaledVector(_trunkOut, along * R);
                 _dummy.position.x += f.offsetX + xOffset;
@@ -2349,6 +2664,7 @@
               logical++;
             }
           }
+
           return count;
         }
 
@@ -2551,18 +2867,21 @@
             return;
           }
           const offsets = [-LOD_SPACING, 0, LOD_SPACING];
-          const n0 = params.totalLeaves;
-          const n1 = params.lod1Leaves;
-          const n2 = params.lod2Leaves;
+          const n0 =
+            foliageObject?.isInstancedMesh && params.foliage.layout === "pine"
+              ? foliageObject.count
+              : params.totalLeaves;
+          const n1 = lodMesh1?.count ?? params.lod1Leaves;
+          const n2 = lodMesh2?.count ?? params.lod2Leaves;
           const titles = [
             "LOD 0 — Full Detail",
             "LOD 1 — Half Density",
-            "LOD 2 — Quarter Density",
+            "LOD 2 — Far (same shape)",
           ];
           const subs = [
-            `${n0} leaves · < ${params.lodDist1}m · full trunk`,
-            `${n1} leaves · 1.4× size · ${params.lodDist1}–${params.lodDist2}m`,
-            `${n2} leaves · 2× size · ${params.lodDist2}m+`,
+            `${n0} leaves · < ${params.lodDist1}m · receive shadow`,
+            `${n1} leaves · 1.4× · ${params.lodDist1}–${params.lodDist2}m · cast`,
+            `${n2} leaves · same as LOD1 · cheap shader · ${params.lodDist2}m+`,
           ];
           offsets.forEach((xOff, i) => {
             lodGroundLabels[i].mesh.position.set(xOff, 0.02, LOD_LABEL_Z);
@@ -2590,19 +2909,20 @@
           });
           scene.add(lodMesh1);
 
-          lodMesh2 = new THREE.InstancedMesh(geo, mat, cap);
+          lodMesh2 = new THREE.InstancedMesh(geo, matLod2, cap);
           lodMesh2.frustumCulled = false;
-          lodMesh2.castShadow = true;
+          lodMesh2.castShadow = false;
           lodMesh2.receiveShadow = false;
           fillPineInstances(lodMesh2, {
-            keepFraction: 0.25,
+            keepFraction: 0.5,
             xOffset: LOD_SPACING,
-            scaleMul: 2,
+            scaleMul: 1.414,
           });
           scene.add(lodMesh2);
 
           cloneTrunksForLod();
           updateLodTrunkVisibility();
+          updateStats();
           updateLodLabels();
         }
 
@@ -2622,7 +2942,7 @@
             setLodGroundLabelsVisible(false);
           }
           syncFoliageVisibility();
-          applyCastShadowFlags();
+          applyShadowFlags();
           updateStats();
         }
 
@@ -2875,7 +3195,7 @@
             leafCounts: {
               lod0: countPineLeaves(1),
               lod1: countPineLeaves(0.5),
-              lod2: countPineLeaves(0.25),
+              lod2: countPineLeaves(0.5),
             },
             bounds: bounds
               ? {
@@ -3049,6 +3369,7 @@
           migrateBranchParams(params.branches);
           migrateTrunkParams(params.trunk);
           migrateFoliageParams(params.foliage);
+          migrateLod2CheapParams(params);
           if (data.presetName) params.presetName = data.presetName;
           presetNameInput?.refresh();
           trunkFileInput?.refresh?.();
@@ -3121,9 +3442,7 @@
         function ensureFoliageObject() {
           const f = params.foliage;
           const pine = f.layout === "pine";
-          const levels = Math.max(1, Math.round(f.levels));
-          const perRing = Math.max(1, Math.round(f.perRing));
-          const needCount = pine ? levels * perRing : 1;
+          const needCount = pine ? pineInstanceCapacity() : 1;
 
           const needNewType =
             !foliageObject ||
@@ -3131,11 +3450,12 @@
             (!pine && foliageObject.isInstancedMesh) ||
             (pine &&
               foliageObject.isInstancedMesh &&
-              foliageObject.count !== needCount);
+              foliageMeshCapacity !== needCount);
 
           if (needNewType) {
             disposeFoliageObject();
             if (pine) {
+              foliageMeshCapacity = needCount;
               foliageObject = new THREE.InstancedMesh(geo, mat, needCount);
               foliageObject.frustumCulled = false;
               foliageObject.renderOrder = 1;
@@ -3159,7 +3479,7 @@
             else applySingleTransform();
           }
           syncFoliageVisibility();
-          applyCastShadowFlags();
+          applyShadowFlags();
           updatePivotHelper();
         }
 
@@ -3173,8 +3493,8 @@
 
           if (straight) {
             const H = Math.max(0.15, t.height);
-            const r0 = Math.max(0.02, t.radiusBottom);
-            const r1 = Math.max(0.02, t.radiusTop);
+            const r0 = Math.max(TRUNK_RADIUS_MIN, t.radiusBottom);
+            const r1 = Math.max(TRUNK_RADIUS_MIN, t.radiusTop);
             trunkGeo = new THREE.CylinderGeometry(r1, r0, H, radialSegs);
             trunkMesh.position.set(0, t.yOffset + H * 0.5, 0);
           } else {
@@ -3183,8 +3503,8 @@
               const t1 = (i + 1) / segs;
               trunkCenterAtT(t0, t, _trunkP0);
               trunkCenterAtT(t1, t, _trunkP2);
-              const r0 = Math.max(0.02, trunkRadiusAtT(t0, t));
-              const r1 = Math.max(0.02, trunkRadiusAtT(t1, t));
+              const r0 = Math.max(TRUNK_RADIUS_MIN, trunkRadiusAtT(t0, t));
+              const r1 = Math.max(TRUNK_RADIUS_MIN, trunkRadiusAtT(t1, t));
               _v3.subVectors(_trunkP2, _trunkP0);
               const len = _v3.length();
               if (len < 1e-5) continue;
@@ -3205,8 +3525,8 @@
             if (parts.length === 0) {
               const H = Math.max(0.15, t.height);
               trunkGeo = new THREE.CylinderGeometry(
-                Math.max(0.02, t.radiusTop),
-                Math.max(0.02, t.radiusBottom),
+                Math.max(TRUNK_RADIUS_MIN, t.radiusTop),
+                Math.max(TRUNK_RADIUS_MIN, t.radiusBottom),
                 H,
                 radialSegs,
               );
@@ -3290,8 +3610,8 @@
           hemi.intensity = sc.ambientInt;
           sun.intensity = sc.sunIntensity;
           sun.position.set(sc.sunX, sc.sunY, sc.sunZ);
-          applySunShadowSettings();
-          applyCastShadowFlags();
+          applyCsmSettings();
+          applyShadowFlags();
           ground.visible = sc.showGround;
           scene.fog = sc.showFog ? new THREE.FogExp2(sc.bgColor, 0.018) : null;
           syncLeafUniforms();
@@ -3316,6 +3636,7 @@
 
         migrateExportParams();
         migrateFoliageParams(params.foliage);
+        migrateLod2CheapParams(params);
         let statTrunkTris = null;
         let statLeaves0 = null;
         let statLeafTris0 = null;
@@ -3417,9 +3738,9 @@
         });
         _slider(sTrunk, t, "radiusTop", {
           label: "radius top",
-          min: 0.02,
+          min: 0.003,
           max: 1.5,
-          step: 0.01,
+          step: 0.001,
           onChange: onTrunkShape,
         });
         _slider(sTrunk, t, "yOffset", {
@@ -3594,13 +3915,26 @@
           step: 0.02,
           onChange: onFoliage,
         });
-        _slider(sFol, f, "stepY", {
-          label: "ΔY / level",
-          min: 0.05,
+        _info(
+          sFol,
+          "whorl height",
+          () => "Top ring locked to trunk tip. Lower rings from base Y along the trunk.",
+        );
+        _slider(sFol, f, "heightPower", {
+          label: "height curve",
+          min: 0.2,
           max: 4,
-          step: 0.02,
-          onChange: onFoliage,
+          step: 0.05,
+          onChange: onFoliageMatrices,
         });
+        _slider(sFol, f, "tipRingSlide", {
+          label: "top whorl slide",
+          min: -0.8,
+          max: 0.4,
+          step: 0.01,
+          onChange: onFoliageMatrices,
+        });
+        _info(sFol, "top slide", () => "Along trunk (m). Negative = nudge top ring below tip.");
         _slider(sFol, f, "scaleBottom", {
           label: "scale bottom",
           min: 0.05,
@@ -4429,11 +4763,55 @@
           label: "foliage casts shadow",
           onChange: onScene,
         });
+        _toggle(sSc, sc, "receiveFoliageShadows", {
+          label: "foliage receives shadow",
+          onChange: onScene,
+        });
         _info(
           sSc,
           "shadow-hint",
           () =>
-            "Blurry ground shadows: huge shadow frustum + dozens of leaf cards. Tighten focus, raise map size, or disable foliage shadow.",
+            "Receive: leaf-on-leaf + trunk on cards. Turn cast on too. Compare vs Material AO sliders.",
+        );
+
+        const sCsm = _section(uiRoot, "Shadows (CSM, v2-style)", false);
+        _toggle(sCsm, sc, "csmEnabled", {
+          label: "CSM enabled",
+          onChange: onScene,
+        });
+        _slider(sCsm, sc, "csmCascades", {
+          label: "cascades",
+          min: 1,
+          max: 4,
+          step: 1,
+          onChange: onScene,
+        });
+        _slider(sCsm, sc, "csmMaxFar", {
+          label: "max far (m)",
+          min: 20,
+          max: 300,
+          step: 5,
+          onChange: onScene,
+        });
+        _slider(sCsm, sc, "csmLightMargin", {
+          label: "light margin",
+          min: 0,
+          max: 120,
+          step: 5,
+          onChange: onScene,
+        });
+        _slider(sCsm, sc, "csmMapSize", {
+          label: "CSM map size",
+          min: 512,
+          max: 4096,
+          step: 512,
+          onChange: onScene,
+        });
+        _info(
+          sCsm,
+          "csm-hint",
+          () =>
+            "Off = tight ortho frustum (good for one tree). On = same CSM path as v2 editor/game.",
         );
 
         const sWind = _section(uiRoot, "Wind", true);
@@ -4513,6 +4891,39 @@
         statLod2Leaves = _info(sLod, "LOD2 leaves", () =>
           String(params.lod2Leaves),
         );
+        _separator(sLod);
+        const sLod2 = sLod;
+        _slider(sLod2, params.lod2Cheap, "aoStrengthMul", {
+          label: "LOD2 AO boost",
+          min: 1,
+          max: 2,
+          step: 0.05,
+          onChange: () => {
+            syncLod2Uniforms();
+            matLod2.needsUpdate = true;
+          },
+        });
+        _slider(sLod2, params.lod2Cheap, "colorVarMul", {
+          label: "LOD2 color var",
+          min: 0.1,
+          max: 1,
+          step: 0.05,
+          onChange: () => syncLod2Uniforms(),
+        });
+        _slider(sLod2, params.lod2Cheap, "sssMul", {
+          label: "LOD2 SSS",
+          min: 0,
+          max: 1,
+          step: 0.05,
+          onChange: () => syncLod2Uniforms(),
+        });
+        _slider(sLod2, params.lod2Cheap, "rimMul", {
+          label: "LOD2 rim",
+          min: 0,
+          max: 1,
+          step: 0.05,
+          onChange: () => syncLod2Uniforms(),
+        });
 
         const sStats = _section(uiRoot, "Stats", true);
         statTrunkTris = _info(sStats, "Trunk tris", () =>
@@ -4553,7 +4964,7 @@
         statV2Leaves = _info(sV2, "leaf counts L0/L1/L2", () => {
           const l0 = countPineLeaves(1);
           const l1 = countPineLeaves(0.5);
-          const l2 = countPineLeaves(0.25);
+          const l2 = countPineLeaves(0.5);
           return `${l0} / ${l1} / ${l2}`;
         });
         _button(sV2, {
@@ -4619,7 +5030,9 @@
         function tick() {
           requestAnimationFrame(tick);
           if (params.wind.enabled !== false) {
-            leafU.time.value = (performance.now() - windClock0) * 0.001;
+            const tw = (performance.now() - windClock0) * 0.001;
+            leafU.time.value = tw;
+            leafU2.time.value = tw;
           }
           controls.update();
           renderer.render(scene, camera);

@@ -1,0 +1,483 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Pine forest bench (card LOD)</title>
+    <style>
+      * {
+        margin: 0;
+        padding: 0;
+        box-sizing: border-box;
+      }
+      body {
+        overflow: hidden;
+        background: #000;
+        font-family: "Segoe UI", system-ui, sans-serif;
+        color: #ccc;
+      }
+      canvas {
+        display: block;
+        width: 100vw;
+        height: 100vh;
+      }
+      #info {
+        position: fixed;
+        bottom: 16px;
+        left: 16px;
+        z-index: 10;
+        font: 12px/1.55 "SF Mono", "Fira Code", Consolas, monospace;
+        color: #b0d890;
+        background: rgba(0, 0, 0, 0.55);
+        padding: 8px 12px;
+        border-radius: 6px;
+        pointer-events: none;
+        user-select: none;
+        backdrop-filter: blur(4px);
+        max-width: min(520px, 92vw);
+      }
+      #info span {
+        color: #e0f0c0;
+        font-weight: 600;
+      }
+      #title {
+        position: fixed;
+        top: 14px;
+        left: 50%;
+        transform: translateX(-50%);
+        z-index: 15;
+        pointer-events: none;
+        font-size: 12px;
+        font-weight: 600;
+        letter-spacing: 0.22em;
+        text-transform: uppercase;
+        padding: 8px 16px;
+        background: rgba(0, 0, 0, 0.45);
+        border-radius: 6px;
+        border: 1px solid rgba(255, 255, 255, 0.08);
+      }
+      #inspector {
+        position: fixed;
+        top: 0;
+        right: 0;
+        width: 280px;
+        height: 100vh;
+        background: #2a2a2a;
+        border-left: 1px solid #3c3c3c;
+        z-index: 20;
+        display: flex;
+        flex-direction: column;
+        font-size: 12px;
+      }
+      #inspector-header {
+        padding: 10px 12px;
+        background: #222;
+        border-bottom: 1px solid #3c3c3c;
+        font-weight: 600;
+        letter-spacing: 0.05em;
+        text-transform: uppercase;
+        color: #888;
+      }
+      #inspector-body {
+        flex: 1;
+        overflow-y: auto;
+        padding: 10px 12px 20px;
+      }
+      .bench-row {
+        display: flex;
+        justify-content: space-between;
+        align-items: center;
+        gap: 8px;
+        margin-bottom: 8px;
+      }
+      .bench-row label {
+        color: #aaa;
+        flex: 1;
+      }
+      .bench-row input[type="range"] {
+        width: 120px;
+      }
+      .bench-row input[type="number"] {
+        width: 52px;
+        background: #1e1e1e;
+        border: 1px solid #444;
+        color: #ccc;
+        border-radius: 3px;
+        padding: 2px 4px;
+      }
+      .bench-hint {
+        color: #777;
+        font-size: 11px;
+        line-height: 1.45;
+        margin: 12px 0 8px;
+        padding-top: 8px;
+        border-top: 1px solid #3c3c3c;
+      }
+      .bench-stat {
+        font-family: "SF Mono", Consolas, monospace;
+        color: #9ad;
+        font-size: 11px;
+        margin-bottom: 4px;
+      }
+    </style>
+    <script type="importmap">
+      {
+        "imports": {
+          "three": "https://cdn.jsdelivr.net/npm/three@0.183.1/build/three.webgpu.js",
+          "three/webgpu": "https://cdn.jsdelivr.net/npm/three@0.183.1/build/three.webgpu.js",
+          "three/tsl": "https://cdn.jsdelivr.net/npm/three@0.183.1/build/three.tsl.js",
+          "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.183.1/examples/jsm/",
+          "stats-gl": "https://cdn.jsdelivr.net/npm/stats-gl/dist/main.js"
+        }
+      }
+    </script>
+  </head>
+  <body>
+    <div id="title">Pine card forest · LOD0 receive shadow only</div>
+    <div id="info">loading…</div>
+    <div id="inspector">
+      <div id="inspector-header">Forest bench</div>
+      <div id="inspector-body"></div>
+    </div>
+    <script type="module">
+      import * as THREE from "three";
+      import Stats from "stats-gl";
+      import { OrbitControls } from "three/addons/controls/OrbitControls.js";
+      import { CSMShadowNode } from "three/addons/csm/CSMShadowNode.js";
+      import {
+        PineForestBench,
+        DEFAULT_PINE_PARAMS,
+      } from "./pine-forest-bench-core.js";
+      import { PineForestWalker } from "./pine-forest-walker.js";
+
+      const CFG = {
+        forest: {
+          halfExtent: 140,
+          spacing: 8,
+          /** Match v2 world.chunkSize — fewer, larger chunks. */
+          chunkSize: 100,
+          jitter: 2,
+          scaleMin: 0.88,
+          scaleMax: 1.12,
+        },
+        lod: {
+          lod0Distance: 80,
+          lod1Distance: 200,
+          fadeOutDistance: 600,
+          lodHysteresis: 12,
+        },
+        shadow: {
+          lod0Receive: true,
+          castFoliage: true,
+        },
+      };
+
+      function setSunShadowNode(shadow, node) {
+        if (node != null) shadow.shadowNode = node;
+        else delete shadow.shadowNode;
+      }
+
+      const infoEl = document.getElementById("info");
+      const inspectorBody = document.getElementById("inspector-body");
+
+      function addSlider(label, obj, key, min, max, step, onChange) {
+        const row = document.createElement("div");
+        row.className = "bench-row";
+        const lab = document.createElement("label");
+        lab.textContent = label;
+        const range = document.createElement("input");
+        range.type = "range";
+        range.min = min;
+        range.max = max;
+        range.step = step;
+        range.value = obj[key];
+        const num = document.createElement("input");
+        num.type = "number";
+        num.min = min;
+        num.max = max;
+        num.step = step;
+        num.value = obj[key];
+        const sync = () => {
+          const v = parseFloat(range.value);
+          obj[key] = v;
+          num.value = v;
+          onChange?.();
+        };
+        range.addEventListener("input", sync);
+        num.addEventListener("change", () => {
+          range.value = num.value;
+          sync();
+        });
+        row.append(lab, range, num);
+        inspectorBody.appendChild(row);
+      }
+
+      function addToggle(label, get, set, onChange) {
+        const row = document.createElement("div");
+        row.className = "bench-row";
+        const lab = document.createElement("label");
+        lab.textContent = label;
+        const chk = document.createElement("input");
+        chk.type = "checkbox";
+        chk.checked = get();
+        chk.addEventListener("change", () => {
+          set(chk.checked);
+          onChange?.();
+        });
+        row.append(lab, chk);
+        inspectorBody.appendChild(row);
+        return chk;
+      }
+
+      async function init() {
+        const params = structuredClone(DEFAULT_PINE_PARAMS);
+        // Mask from Frame 56.png; albedo from TSL (same as pine-editor32 default).
+        params.material.colorSource = "tsl";
+
+        const renderer = new THREE.WebGPURenderer({ antialias: true });
+        const stats = new Stats({ trackGPU: true });
+        await stats.init(renderer);
+        await renderer.init();
+        renderer.setSize(innerWidth, innerHeight);
+        renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
+        renderer.shadowMap.enabled = true;
+        renderer.shadowMap.type = THREE.PCFSoftShadowMap;
+        renderer.shadowMap.transmitted = true;
+        document.body.appendChild(renderer.domElement);
+        document.body.appendChild(stats.dom);
+
+        const backend =
+          renderer.backend?.constructor?.name?.includes("WebGPU")
+            ? "WebGPU"
+            : "WebGL fallback";
+
+        const scene = new THREE.Scene();
+        scene.background = new THREE.Color("#87ceeb");
+        scene.fog = new THREE.FogExp2("#87ceeb", 0.0018);
+
+        const camera = new THREE.PerspectiveCamera(
+          55,
+          innerWidth / innerHeight,
+          0.5,
+          2500,
+        );
+        camera.position.set(40, 18, 55);
+
+        const controls = new OrbitControls(camera, renderer.domElement);
+        controls.target.set(0, 4, 0);
+        controls.enableDamping = true;
+        controls.maxPolarAngle = Math.PI * 0.48;
+        controls.update();
+
+        const hemi = new THREE.HemisphereLight("#b8dfff", "#3d6b20", 0.55);
+        scene.add(hemi);
+
+        const sun = new THREE.DirectionalLight("#fff8e8", 2.1);
+        sun.position.set(80, 120, 40);
+        sun.castShadow = true;
+        const sunTarget = new THREE.Object3D();
+        sunTarget.position.set(0, 0, 0);
+        scene.add(sunTarget);
+        sun.target = sunTarget;
+        sun.shadow.mapSize.set(2048, 2048);
+        sun.shadow.camera.near = 1;
+        sun.shadow.camera.far = 400;
+        const sh = 180;
+        sun.shadow.camera.left = -sh;
+        sun.shadow.camera.right = sh;
+        sun.shadow.camera.top = sh;
+        sun.shadow.camera.bottom = -sh;
+        sun.shadow.bias = -0.0003;
+        sun.shadow.normalBias = 0.02;
+        scene.add(sun);
+
+        let csm = null;
+        try {
+          csm = new CSMShadowNode(sun, {
+            cascades: 2,
+            maxFar: 300,
+            mode: "practical",
+            lightMargin: 100,
+          });
+          setSunShadowNode(sun.shadow, csm);
+        } catch (e) {
+          console.warn("CSM init failed", e);
+        }
+
+        const ground = new THREE.Mesh(
+          new THREE.PlaneGeometry(1200, 1200),
+          new THREE.MeshStandardMaterial({ color: "#4a7c2a", roughness: 0.95 }),
+        );
+        ground.rotation.x = -Math.PI / 2;
+        ground.receiveShadow = true;
+        scene.add(ground);
+
+        const getGroundY = () => 0;
+
+        const walker = new PineForestWalker({
+          scene,
+          camera,
+          domElement: renderer.domElement,
+          getGroundY,
+        });
+        walker.seedFromOrbitTarget(0, 12, 0);
+
+        infoEl.textContent = "Building forest…";
+
+        const forest = new PineForestBench(scene, params, CFG);
+        await forest.init("textures/pine-leaves/Frame 56.png");
+
+        function applyReceiveFlags() {
+          forest.cfg = CFG;
+          forest.applyShadowFlags();
+        }
+
+        let forestRebuildTimer = 0;
+        function scheduleForestRebuild() {
+          clearTimeout(forestRebuildTimer);
+          forestRebuildTimer = setTimeout(() => {
+            infoEl.textContent = "Rebuilding forest…";
+            forest.cfg = CFG;
+            const t0 = performance.now();
+            forest.rebuildForest();
+            applyReceiveFlags();
+            const n = forest.stats.treeCount;
+            const ms = Math.round(performance.now() - t0);
+            infoEl.textContent = `${n} trees · ${forest.stats.chunkCount} chunks · list rebuilt in ${ms}ms (meshes lazy)`;
+          }, 250);
+        }
+
+        const statLines = [];
+        for (const key of [
+          "renderMode",
+          "treeCount",
+          "visibleTrees",
+          "drawCalls",
+          "chunkCount",
+          "visibleChunks",
+          "lod0Leaves",
+          "lod1Leaves",
+          "lod2Leaves",
+          "trunkInstances",
+        ]) {
+          const el = document.createElement("div");
+          el.className = "bench-stat";
+          el.dataset.key = key;
+          inspectorBody.appendChild(el);
+          statLines.push(el);
+        }
+
+        const hint = document.createElement("div");
+        hint.className = "bench-hint";
+        hint.textContent =
+          "LOD0 full · LOD1 half · LOD2 = LOD1 shape, cheap shader. Walk: Tab · WASD · click+mouse.";
+        inspectorBody.appendChild(hint);
+
+        let walkMode = false;
+        function setCameraMode(walk) {
+          walkMode = walk;
+          walker.setMode(walk ? "walk" : "orbit", controls);
+          if (walk) {
+            walker.seedFromOrbitTarget(
+              controls.target.x,
+              controls.target.z,
+              Math.atan2(
+                controls.target.x - camera.position.x,
+                controls.target.z - camera.position.z,
+              ) + Math.PI,
+            );
+          }
+        }
+        const walkModeChk = addToggle(
+          "Capsule walk mode",
+          () => walkMode,
+          (v) => setCameraMode(v),
+        );
+        addSlider("Walk speed", walker, "moveSpeed", 4, 28, 1);
+        addSlider("Follow cam dist", walker, "camFollowDist", 3, 14, 0.5);
+
+        window.addEventListener("keydown", (e) => {
+          if (e.target.matches("input")) return;
+          if (e.code === "Tab") {
+            e.preventDefault();
+            setCameraMode(!walkMode);
+            walkModeChk.checked = walkMode;
+          }
+        });
+
+        addSlider("Forest half (m)", CFG.forest, "halfExtent", 40, 220, 10, scheduleForestRebuild);
+        addSlider("Tree spacing (m)", CFG.forest, "spacing", 5, 14, 1, scheduleForestRebuild);
+        addSlider("LOD0 dist (m)", CFG.lod, "lod0Distance", 20, 160, 5);
+        addSlider("LOD1 dist (m)", CFG.lod, "lod1Distance", 80, 320, 10);
+        addSlider("Fade out (m)", CFG.lod, "fadeOutDistance", 200, 700, 25);
+        addToggle(
+          "LOD0 foliage receive shadow",
+          () => CFG.shadow.lod0Receive,
+          (v) => {
+            CFG.shadow.lod0Receive = v;
+          },
+          applyReceiveFlags,
+        );
+        addToggle(
+          "Foliage cast shadow",
+          () => CFG.shadow.castFoliage,
+          (v) => {
+            CFG.shadow.castFoliage = v;
+          },
+          applyReceiveFlags,
+        );
+        const timer = new THREE.Timer();
+        timer.connect(document);
+
+        renderer.setAnimationLoop(() => {
+          timer.update();
+          const dt = timer.getDelta();
+          const t = timer.getElapsed();
+          forest.updateTime(t);
+          walker.update(dt);
+          forest.update(camera, CFG.lod);
+          if (!walkMode) controls.update();
+
+          if (csm?.mainFrustum) {
+            csm.mainFrustum.camera = camera;
+            csm.updateFrustums();
+          }
+
+          renderer.render(scene, camera);
+          renderer.resolveTimestampsAsync(THREE.TimestampQuery.RENDER);
+          stats.update();
+
+          const s = forest.stats;
+          const perTree = forest.leavesPerLod;
+          infoEl.innerHTML = [
+            `<span>${backend}</span>`,
+            `<span>${s.renderMode}</span> · <span>${s.drawCalls}</span> draws`,
+            `${s.visibleTrees}/${s.treeCount} trees`,
+            `leaves LOD0 <span>${s.lod0Leaves}</span> (${perTree[0]}/tree)`,
+            `LOD1 <span>${s.lod1Leaves}</span> · LOD2 <span>${s.lod2Leaves}</span>`,
+            walkMode
+              ? `walk <span>WASD</span> · Shift sprint · click+mouse`
+              : `orbit <span>RMB</span> · Tab walk`,
+          ].join(" · ");
+
+          for (const el of statLines) {
+            const k = el.dataset.key;
+            el.textContent = `${k}: ${s[k]}`;
+          }
+        });
+
+        window.addEventListener("resize", () => {
+          camera.aspect = innerWidth / innerHeight;
+          camera.updateProjectionMatrix();
+          renderer.setSize(innerWidth, innerHeight);
+          if (csm?.mainFrustum) csm.updateFrustums();
+        });
+      }
+
+      init().catch((err) => {
+        console.error(err);
+        infoEl.textContent = String(err);
+      });
+    </script>
+  </body>
+</html>
