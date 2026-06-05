@@ -1,6 +1,6 @@
 /**
  * Chunked card-pine forest (pine-editor32 placement + 3 LOD tiers).
- * LOD0 foliage receiveShadow only; LOD1/2 + AO fake; trunks always receive.
+ * LOD0 foliage receiveShadow only; LOD1 = same shader, no receive; LOD2 = cheap shader.
  */
 import * as THREE from "three";
 import {
@@ -39,6 +39,7 @@ import {
   modelWorldMatrixInverse,
   instanceIndex,
   rotateUV,
+  fract,
 } from "three/tsl";
 import { mergeGeometries } from "three/addons/utils/BufferGeometryUtils.js";
 
@@ -102,7 +103,7 @@ export const DEFAULT_PINE_PARAMS = {
     topColor: "#6aab38",
     colorVar: 0.14,
     normalBias: 0.28,
-    leafWarp: 0.12,
+    leafWarp: 0,
     radialUp: 0.35,
     veinStrength: 0.1,
     pivotAo: 0.35,
@@ -112,37 +113,84 @@ export const DEFAULT_PINE_PARAMS = {
     sssStrength: 0.38,
     sssPower: 2.2,
     rimColor: "#d8f0b0",
-    rimStrength: 0.14,
+    rimStrength: 0,
     rimPower: 2.4,
   },
   wind: { enabled: true, speed: 1.1, strength: 0.14, micro: 0.04, directionDeg: 25 },
-  /** LOD1: no receive shadow — card UV gradient (trunk→tip) mimics cone interior shadow. */
-  lod1Match: {
-    aoStrengthMul: 1.15,
-    pivotAoMul: 1.22,
-    colorVarMul: 0.88,
-    sssMul: 0.75,
-    rimMul: 0.9,
-    brightnessMul: 0.96,
-    /** Dark at hook (u.y=0), bright at tip — mimics shadowed cone core. */
-    cardShadowStr: 0.92,
-    cardShadowFloor: 0.06,
-    cardShadowReach: 0.84,
-    cardShadowPower: 1.35,
-    sunDarkenStr: 0.12,
-    sunDarkenPower: 1.6,
-  },
+  /** LOD2: cheaper shader (fake card shadow + reduced SSS/rim). */
   lod2Cheap: {
     colorVarMul: 0.35,
     aoStrengthMul: 1.35,
     pivotAoMul: 1.2,
     sssMul: 0.2,
     rimMul: 0.15,
-    sunDarkenMul: 0.35,
-    cardShadowMul: 0.88,
-    cardShadowFloorMul: 1.1,
+    sunDarkenStr: 0.04,
+    sunDarkenPower: 1.6,
+    brightnessMul: 0.92,
+    cardShadowStr: 0.81,
+    cardShadowFloor: 0.066,
+    cardShadowReach: 0.84,
+    cardShadowPower: 1.35,
   },
 };
+
+/** Per-tree variation — zeros/defaults = identical to pre-diversity bench behavior. */
+export const DEFAULT_FOREST_DIVERSITY = {
+  /** Overall tree size; jitter 0.12 → scale range 0.88–1.12 at treeScale 1. */
+  treeScale: 1,
+  treeScaleJitter: 0.12,
+  scaleYJitter: 0,
+  scaleXZJitter: 0,
+  tintStrength: 0,
+  brightnessJitter: 0,
+  colorVarTreeBias: 0,
+  windMulJitter: 0,
+  leanMaxDeg: 0,
+  placementSeed: 0,
+};
+
+function makeForestRng(seed) {
+  if (!seed) return () => Math.random();
+  let s = seed >>> 0;
+  return () => {
+    s += 0x6d2b79f5;
+    let t = s;
+    t = Math.imul(t ^ (t >>> 15), t | 1);
+    t ^= t + Math.imul(t ^ (t >>> 7), t | 61);
+    return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+  };
+}
+
+function sampleTreeTraits(rng, scaleMin, scaleMax, div) {
+  const rotY = rng() * Math.PI * 2;
+  const scale = scaleMin + rng() * Math.max(0.01, scaleMax - scaleMin);
+  const sy = 1 + (rng() * 2 - 1) * (div.scaleYJitter ?? 0);
+  const sxz = 1 + (rng() * 2 - 1) * (div.scaleXZJitter ?? 0);
+  const leanMax = (div.leanMaxDeg ?? 0) * DEG;
+  const leanX = (rng() * 2 - 1) * leanMax;
+  const leanZ = (rng() * 2 - 1) * leanMax;
+  const treeSeed = rng();
+  const windMul = 1 + (rng() * 2 - 1) * (div.windMulJitter ?? 0);
+  const ts = div.tintStrength ?? 0;
+  const tintR = 1 + (rng() * 2 - 1) * ts;
+  const tintG = 1 + (rng() * 2 - 1) * ts;
+  const tintB = 1 + (rng() * 2 - 1) * ts;
+  const brightMul = 1 + (rng() * 2 - 1) * (div.brightnessJitter ?? 0);
+  return {
+    rotY,
+    scale,
+    scaleY: sy,
+    scaleXZ: sxz,
+    leanX,
+    leanZ,
+    treeSeed,
+    windMul,
+    tintR,
+    tintG,
+    tintB,
+    brightMul,
+  };
+}
 
 const _v3 = new THREE.Vector3();
 const _yAxis = new THREE.Vector3(0, 1, 0);
@@ -166,7 +214,35 @@ const _tmpCenter = new THREE.Vector3();
 const _tmpTreeCenter = new THREE.Vector3();
 const _pos = new THREE.Vector3();
 const _quat = new THREE.Quaternion();
+const _euler = new THREE.Euler();
 const _scl = new THREE.Vector3();
+
+function _composeTreeMatrix(t, outMat) {
+  _pos.set(t.x, t.y ?? 0, t.z);
+  const leanX = t.leanX ?? 0;
+  const leanZ = t.leanZ ?? 0;
+  const rotY = t.rotY ?? 0;
+  const sy = t.scaleY ?? 1;
+  const sxz = t.scaleXZ ?? 1;
+  const sc = t.scale ?? 1;
+  if (leanX !== 0 || leanZ !== 0) {
+    _euler.set(leanX, rotY, leanZ, "YXZ");
+    _quat.setFromEuler(_euler);
+  } else {
+    _quat.setFromAxisAngle(_yAxis, rotY);
+  }
+  _scl.set(sc * sxz, sc * sy, sc * sxz);
+  outMat.compose(_pos, _quat, _scl);
+}
+
+export function applyDiversityToFoliageUniforms(uniforms, diversity = {}) {
+  const d = { ...DEFAULT_FOREST_DIVERSITY, ...diversity };
+  if (!uniforms) return;
+  uniforms.treeTintStr.value = d.tintStrength;
+  uniforms.treeBrightStr.value = d.brightnessJitter;
+  uniforms.treeColorBias.value = d.colorVarTreeBias;
+  uniforms.windTreeJitter.value = d.windMulJitter;
+}
 const _hideMat = new THREE.Matrix4().makeScale(0, 0, 0);
 
 function snapshotFoliageSource(im, count) {
@@ -181,6 +257,8 @@ function snapshotFoliageSource(im, count) {
       geo.getAttribute("aTreeCenter").array.subarray(0, count * 3),
     ),
     leafScale: new Float32Array(geo.getAttribute("aLeafScale").array.subarray(0, count)),
+    treeSeed: new Float32Array(geo.getAttribute("aTreeSeed").array.subarray(0, count)),
+    treeWind: new Float32Array(geo.getAttribute("aTreeWind").array.subarray(0, count)),
   };
 }
 
@@ -190,12 +268,16 @@ function copyFoliageTreeBlock(src, dstLeaf, srcLeaf, leafCount, matArr, geo) {
   const lc = geo.getAttribute("aLeafCenter").array;
   const tc = geo.getAttribute("aTreeCenter").array;
   const sc = geo.getAttribute("aLeafScale").array;
+  const ts = geo.getAttribute("aTreeSeed").array;
+  const tw = geo.getAttribute("aTreeWind").array;
   const n2 = leafCount * 2;
   const n3 = leafCount * 3;
   rand.set(src.rand.subarray(srcLeaf * 2, srcLeaf * 2 + n2), dstLeaf * 2);
   lc.set(src.leafCenter.subarray(srcLeaf * 3, srcLeaf * 3 + n3), dstLeaf * 3);
   tc.set(src.treeCenter.subarray(srcLeaf * 3, srcLeaf * 3 + n3), dstLeaf * 3);
   sc.set(src.leafScale.subarray(srcLeaf, srcLeaf + leafCount), dstLeaf);
+  ts.set(src.treeSeed.subarray(srcLeaf, srcLeaf + leafCount), dstLeaf);
+  tw.set(src.treeWind.subarray(srcLeaf, srcLeaf + leafCount), dstLeaf);
 }
 
 function hideFoliageTreeBlock(im, leafStart, leafCount) {
@@ -646,63 +728,33 @@ export async function loadPineLeafTexture(url) {
 
 export function createPineFoliageMaterial(params, leafTex, opts = {}) {
   const cheap = opts.cheap === true;
-  const lod1 = opts.lod1 === true;
-  const tier = cheap ? 2 : lod1 ? 1 : 0;
+  const tier = cheap ? 2 : 0;
   const m = params.material;
   const w = params.wind;
-  const l1 = { ...DEFAULT_PINE_PARAMS.lod1Match, ...(params.lod1Match ?? {}) };
   const l2 = { ...DEFAULT_PINE_PARAMS.lod2Cheap, ...(params.lod2Cheap ?? {}) };
   const aTreeCenter = attribute("aTreeCenter", "vec3");
+  const aTreeSeed = attribute("aTreeSeed", "float");
+  const aTreeWind = attribute("aTreeWind", "float");
   const treeCenterW = modelWorldMatrix.mul(vec4(aTreeCenter, 1)).xyz;
 
-  const colorVar =
-    tier === 2
-      ? m.colorVar * l2.colorVarMul
-      : tier === 1
-        ? m.colorVar * l1.colorVarMul
-        : m.colorVar;
+  const colorVar = tier === 2 ? m.colorVar * l2.colorVarMul : m.colorVar;
   const pivotAo =
     tier === 2
       ? Math.min(0.55, m.pivotAo * l2.pivotAoMul)
-      : tier === 1
-        ? Math.min(0.55, m.pivotAo * l1.pivotAoMul)
-        : m.pivotAo;
+      : m.pivotAo;
   const aoStrength =
     tier === 2
       ? Math.min(0.75, m.aoStrength * l2.aoStrengthMul)
-      : tier === 1
-        ? Math.min(0.75, m.aoStrength * l1.aoStrengthMul)
-        : m.aoStrength;
-  const sssStrength =
-    tier === 2
-      ? m.sssStrength * l2.sssMul
-      : tier === 1
-        ? m.sssStrength * l1.sssMul
-        : m.sssStrength;
-  const rimStrength =
-    tier === 2
-      ? m.rimStrength * l2.rimMul
-      : tier === 1
-        ? m.rimStrength * l1.rimMul
-        : m.rimStrength;
-  const sunDarkenStr =
-    tier === 2 ? l1.sunDarkenStr * (l2.sunDarkenMul ?? 0.35) : tier === 1 ? l1.sunDarkenStr : 0;
-  const sunDarkenPower = tier >= 1 ? l1.sunDarkenPower : 1;
-  const brightnessMul = tier === 2 ? l1.brightnessMul * 0.96 : tier === 1 ? l1.brightnessMul : 1;
-  const cardShadowStr =
-    tier === 2
-      ? l1.cardShadowStr * (l2.cardShadowMul ?? 0.88)
-      : tier === 1
-        ? l1.cardShadowStr
-        : 0;
-  const cardShadowReach = tier >= 1 ? l1.cardShadowReach : 1;
-  const cardShadowPower = tier >= 1 ? l1.cardShadowPower : 1;
-  const cardShadowFloor =
-    tier === 2
-      ? l1.cardShadowFloor * (l2.cardShadowFloorMul ?? 1.1)
-      : tier === 1
-        ? l1.cardShadowFloor
-        : 1;
+      : m.aoStrength;
+  const sssStrength = tier === 2 ? m.sssStrength * l2.sssMul : m.sssStrength;
+  const rimStrength = tier === 2 ? m.rimStrength * l2.rimMul : m.rimStrength;
+  const sunDarkenStr = tier === 2 ? l2.sunDarkenStr : 0;
+  const sunDarkenPower = tier === 2 ? l2.sunDarkenPower : 1;
+  const brightnessMul = tier === 2 ? l2.brightnessMul : 1;
+  const cardShadowStr = tier === 2 ? l2.cardShadowStr : 0;
+  const cardShadowReach = tier === 2 ? l2.cardShadowReach : 1;
+  const cardShadowPower = tier === 2 ? l2.cardShadowPower : 1;
+  const cardShadowFloor = tier === 2 ? l2.cardShadowFloor : 1;
 
   const leafU = {
     bottomColor: uniform(new THREE.Color(m.bottomColor)),
@@ -739,6 +791,10 @@ export function createPineFoliageMaterial(params, leafTex, opts = {}) {
     windStr: uniform(w.strength),
     windMicro: uniform(w.micro),
     windDir: uniform(w.directionDeg * DEG),
+    treeTintStr: uniform(0),
+    treeBrightStr: uniform(0),
+    treeColorBias: uniform(0),
+    windTreeJitter: uniform(0),
   };
 
   const mapTex = leafTex ?? makeCheckerTexture();
@@ -778,7 +834,8 @@ export function createPineFoliageMaterial(params, leafTex, opts = {}) {
       mul(instanceIndex.toFloat(), float(1.31)),
     );
     const tip = mul(max(positionLocal.y, float(0)), max(positionLocal.y, float(0)));
-    const sway = mul(sin(phase), leafU.windStr, tip);
+    const windScale = mix(float(1), aTreeWind, leafU.windTreeJitter);
+    const sway = mul(sin(phase), leafU.windStr, tip, windScale);
     const wo = vec3(mul(cos(leafU.windDir), sway), float(0), mul(sin(leafU.windDir), sway));
     const wl = modelWorldMatrixInverse.mul(vec4(wo.x, wo.y, wo.z, float(0))).xyz;
     return add(positionLocal, mul(wl, leafU.windEnabled));
@@ -786,16 +843,30 @@ export function createPineFoliageMaterial(params, leafTex, opts = {}) {
 
   const leafColorNode = Fn(() => {
     const u = uv();
-    /** After rotateGeometryUV(1): pivot on trunk ≈ u.y=1, tip/outward ≈ u.y=0. */
-    const shadeV = tier >= 1 ? sub(float(1), u.y) : u.y;
+    /** LOD2 only: pivot on trunk ≈ u.y=1, tip/outward ≈ u.y=0. */
+    const shadeV = tier === 2 ? sub(float(1), u.y) : u.y;
     let col = mix(leafU.bottomColor, leafU.topColor, u.y);
     const texRgb = leafMapNode.sample(leafMaskUv).rgb;
     col = mix(col, texRgb, leafU.useImageColor);
-    const h = hash(instanceIndex);
+    const h = mix(hash(instanceIndex), aTreeSeed, leafU.treeColorBias);
     col = mul(
       col,
       add(mul(h, mul(leafU.colorVar, float(2))), sub(float(1), leafU.colorVar)),
     );
+    const sr = fract(mul(aTreeSeed, float(1.13)));
+    const sg = fract(mul(aTreeSeed, float(1.71)));
+    const sb = fract(mul(aTreeSeed, float(2.17)));
+    const tintVec = vec3(
+      add(float(1), mul(sub(sr, float(0.5)), mul(float(2), leafU.treeTintStr))),
+      add(float(1), mul(sub(sg, float(0.5)), mul(float(2), leafU.treeTintStr))),
+      add(float(1), mul(sub(sb, float(0.5)), mul(float(2), leafU.treeTintStr))),
+    );
+    col = mul(col, tintVec);
+    const brightMul = add(
+      float(1),
+      mul(sub(aTreeSeed, float(0.5)), mul(float(2), leafU.treeBrightStr)),
+    );
+    col = mul(col, brightMul);
     const hookAo = mix(
       float(1),
       sub(float(1), leafU.pivotAo),
@@ -920,6 +991,77 @@ export class PineForestBench {
     };
     this.foliageUniforms = null;
     this.leavesPerLod = [0, 0, 0];
+    this._enabled = true;
+  }
+
+  setEnabled(on) {
+    this._enabled = on !== false;
+    if (!this._enabled) this._hideAllChunkMeshes();
+  }
+
+  syncSunDirection(dir) {
+    const d = dir;
+    for (const u of [
+      this.foliageUniforms,
+      this.foliageUniformsLod1,
+      this.foliageUniformsLod2,
+    ]) {
+      if (u?.sunDir) u.sunDir.value.copy(d);
+    }
+  }
+
+  _getDiversity() {
+    return {
+      ...DEFAULT_FOREST_DIVERSITY,
+      ...(this.cfg.forest?.diversity ?? {}),
+    };
+  }
+
+  syncDiversityUniforms() {
+    const d = this._getDiversity();
+    for (const u of [
+      this.foliageUniforms,
+      this.foliageUniformsLod1,
+      this.foliageUniformsLod2,
+    ]) {
+      applyDiversityToFoliageUniforms(u, d);
+    }
+  }
+
+  syncLod2Uniforms() {
+    const m = this.params.material;
+    const l2 = { ...DEFAULT_PINE_PARAMS.lod2Cheap, ...(this.params.lod2Cheap ?? {}) };
+    const u2 = this.foliageUniformsLod2;
+    if (!u2) return;
+
+    u2.colorVar.value = m.colorVar * l2.colorVarMul;
+    u2.pivotAo.value = Math.min(0.55, m.pivotAo * l2.pivotAoMul);
+    u2.aoStrength.value = Math.min(0.75, m.aoStrength * l2.aoStrengthMul);
+    u2.sssStrength.value = m.sssStrength * l2.sssMul;
+    u2.rimStrength.value = m.rimStrength * l2.rimMul;
+    u2.sunDarkenStr.value = l2.sunDarkenStr;
+    u2.sunDarkenPower.value = l2.sunDarkenPower;
+    u2.brightnessMul.value = l2.brightnessMul;
+    u2.cardShadowStr.value = l2.cardShadowStr;
+    u2.cardShadowFloor.value = l2.cardShadowFloor;
+    u2.cardShadowReach.value = l2.cardShadowReach;
+    u2.cardShadowPower.value = l2.cardShadowPower;
+  }
+
+  _hideAllChunkMeshes() {
+    for (const entry of this._chunkMeshes.values()) {
+      if (entry.trunk) entry.trunk.visible = false;
+      if (entry.lod0) entry.lod0.visible = false;
+      if (entry.lod1) entry.lod1.visible = false;
+      if (entry.lod2) entry.lod2.visible = false;
+    }
+    this.stats.visibleTrees = 0;
+    this.stats.visibleChunks = 0;
+    this.stats.lod0Leaves = 0;
+    this.stats.lod1Leaves = 0;
+    this.stats.lod2Leaves = 0;
+    this.stats.trunkInstances = 0;
+    this.stats.drawCalls = 0;
   }
 
   async init(leafTextureUrl) {
@@ -945,9 +1087,8 @@ export class PineForestBench {
     this.foliageMat = foliage.material;
     this.foliageUniforms = foliage.uniforms;
 
-    const foliageLod1 = createPineFoliageMaterial(p, leafTex, { lod1: true });
-    this.foliageMatLod1 = foliageLod1.material;
-    this.foliageUniformsLod1 = foliageLod1.uniforms;
+    this.foliageMatLod1 = this.foliageMat;
+    this.foliageUniformsLod1 = this.foliageUniforms;
 
     const foliageLod2 = createPineFoliageMaterial(p, leafTex, { cheap: true });
     this.foliageMatLod2 = foliageLod2.material;
@@ -956,21 +1097,12 @@ export class PineForestBench {
     this.preset = buildPinePreset(p, this.foliageGeo);
     p._aoRadius = this.preset.bounds.aoRadius;
     this.foliageUniforms.aoRadius.value = this.preset.bounds.aoRadius;
-    this.foliageUniformsLod1.aoRadius.value = this.preset.bounds.aoRadius;
     this.foliageUniformsLod2.aoRadius.value = this.preset.bounds.aoRadius;
     applyFoliageMaterialTexture(
       this.foliageMat,
       this.foliageUniforms,
       foliage.leafMapNode,
       foliage.leafMaskAlphaNode,
-      p,
-      leafTex,
-    );
-    applyFoliageMaterialTexture(
-      this.foliageMatLod1,
-      this.foliageUniformsLod1,
-      foliageLod1.leafMapNode,
-      foliageLod1.leafMaskAlphaNode,
       p,
       leafTex,
     );
@@ -983,6 +1115,7 @@ export class PineForestBench {
       leafTex,
     );
     this.leavesPerLod = this.preset.lods.map((l) => l.count);
+    this.syncDiversityUniforms();
 
     this.trunkGeo = buildTrunkGeometry(p.trunk);
     this.trunkMat = new THREE.MeshStandardMaterial({
@@ -998,8 +1131,40 @@ export class PineForestBench {
     return `${cx},${cz}`;
   }
 
+  _isExcluded(x, z, circles) {
+    if (!circles?.length) return false;
+    for (const c of circles) {
+      const dx = x - c.x;
+      const dz = z - c.z;
+      const r = c.r ?? 0;
+      if (dx * dx + dz * dz < r * r) return true;
+    }
+    return false;
+  }
+
+  _resolveTreeScaleRange() {
+    const div = this._getDiversity();
+    const f = this.cfg.forest ?? {};
+    const ts = div.treeScale ?? f.treeScale ?? 1;
+    const tj = div.treeScaleJitter ?? f.treeScaleJitter ?? 0.12;
+    if (f.scaleMin != null && f.scaleMax != null && div.treeScale == null && div.treeScaleJitter == null) {
+      return { min: f.scaleMin, max: f.scaleMax };
+    }
+    return { min: ts * (1 - tj), max: ts * (1 + tj) };
+  }
+
   _populateTreeChunks() {
-    const { halfExtent, spacing, jitter, scaleMin, scaleMax } = this.cfg.forest;
+    const {
+      halfExtent,
+      spacing,
+      jitter,
+      getTreeY,
+      excludeCircles,
+      density = 1,
+    } = this.cfg.forest;
+    const div = this._getDiversity();
+    const { min: scaleMin, max: scaleMax } = this._resolveTreeScaleRange();
+    const rng = makeForestRng(div.placementSeed);
     const cs = this.cfg.forest.chunkSize;
     const half = Math.floor(halfExtent / spacing);
     this.treeChunks.clear();
@@ -1007,18 +1172,25 @@ export class PineForestBench {
 
     for (let iz = -half; iz <= half; iz++) {
       for (let ix = -half; ix <= half; ix++) {
-        const x = ix * spacing + (Math.random() - 0.5) * jitter * 2;
-        const z = iz * spacing + (Math.random() - 0.5) * jitter * 2;
-        const rotY = Math.random() * Math.PI * 2;
-        const scale =
-          scaleMin + Math.random() * Math.max(0.01, scaleMax - scaleMin);
+        const x = ix * spacing + (rng() - 0.5) * jitter * 2;
+        const z = iz * spacing + (rng() - 0.5) * jitter * 2;
+        if (this._isExcluded(x, z, excludeCircles)) continue;
+        if (density < 1 && rng() > density) continue;
+        const traits = sampleTreeTraits(rng, scaleMin, scaleMax, div);
+        const y = getTreeY ? getTreeY(x, z) : 0;
         const cx = Math.floor(x / cs);
         const cz = Math.floor(z / cs);
         const key = this._chunkKey(cx, cz);
         if (!this.treeChunks.has(key)) {
           this.treeChunks.set(key, { cx, cz, trees: [] });
         }
-        this.treeChunks.get(key).trees.push({ x, z, rotY, scale, foliageTier: -1 });
+        this.treeChunks.get(key).trees.push({
+          x,
+          z,
+          y,
+          foliageTier: -1,
+          ...traits,
+        });
         treeCount++;
       }
     }
@@ -1044,6 +1216,8 @@ export class PineForestBench {
     const centerData = new Float32Array(cappedTotal * 3);
     const treeCenterData = new Float32Array(cappedTotal * 3);
     const scaleData = new Float32Array(cappedTotal);
+    const treeSeedData = new Float32Array(cappedTotal);
+    const treeWindData = new Float32Array(cappedTotal);
     const localMats = lodData.matrices;
     const leavesPerTree = lodData.count;
 
@@ -1071,10 +1245,7 @@ export class PineForestBench {
       if (idx + leavesPerTree > cappedTotal) break;
       treeStarts[ti] = idx;
       foliageTreeCount = ti + 1;
-      _pos.set(t.x, 0, t.z);
-      _quat.setFromAxisAngle(_yAxis, t.rotY);
-      _scl.setScalar(t.scale);
-      _treeMat.compose(_pos, _quat, _scl);
+      _composeTreeMatrix(t, _treeMat);
 
       _tmpTreeCenter.copy(canopyLocal).applyMatrix4(_treeMat);
       const tcx = _tmpTreeCenter.x;
@@ -1095,6 +1266,8 @@ export class PineForestBench {
         treeCenterData[idx * 3] = tcx;
         treeCenterData[idx * 3 + 1] = tcy;
         treeCenterData[idx * 3 + 2] = tcz;
+        treeSeedData[idx] = t.treeSeed ?? 0.5;
+        treeWindData[idx] = t.windMul ?? 1;
       }
     }
 
@@ -1104,6 +1277,8 @@ export class PineForestBench {
     geo.setAttribute("aLeafCenter", new THREE.InstancedBufferAttribute(centerData.slice(0, idx * 3), 3));
     geo.setAttribute("aTreeCenter", new THREE.InstancedBufferAttribute(treeCenterData.slice(0, idx * 3), 3));
     geo.setAttribute("aLeafScale", new THREE.InstancedBufferAttribute(scaleData.slice(0, idx), 1));
+    geo.setAttribute("aTreeSeed", new THREE.InstancedBufferAttribute(treeSeedData.slice(0, idx), 1));
+    geo.setAttribute("aTreeWind", new THREE.InstancedBufferAttribute(treeWindData.slice(0, idx), 1));
     return {
       mesh: im,
       treeStarts,
@@ -1117,16 +1292,34 @@ export class PineForestBench {
     const im = new THREE.InstancedMesh(this.trunkGeo, this.trunkMat, trees.length);
     im.castShadow = true;
     im.receiveShadow = true;
+    const div = this._getDiversity();
+    const useTrunkTint =
+      (div.tintStrength ?? 0) > 0 || (div.brightnessJitter ?? 0) > 0;
+    if (useTrunkTint) {
+      im.instanceColor = new THREE.InstancedBufferAttribute(
+        new Float32Array(trees.length * 3),
+        3,
+      );
+      this.trunkMat.vertexColors = true;
+    }
     for (let i = 0; i < trees.length; i++) {
       const t = trees[i];
-      _pos.set(t.x, 0, t.z);
-      _quat.setFromAxisAngle(_yAxis, t.rotY);
-      _scl.setScalar(t.scale);
-      _treeMat.compose(_pos, _quat, _scl);
+      _composeTreeMatrix(t, _treeMat);
       im.setMatrixAt(i, _treeMat);
+      if (useTrunkTint) {
+        im.setColorAt(
+          i,
+          new THREE.Color(
+            (t.tintR ?? 1) * (t.brightMul ?? 1),
+            (t.tintG ?? 1) * (t.brightMul ?? 1),
+            (t.tintB ?? 1) * (t.brightMul ?? 1),
+          ),
+        );
+      }
     }
     im.count = trees.length;
     im.instanceMatrix.needsUpdate = true;
+    if (useTrunkTint) im.instanceColor.needsUpdate = true;
     return im;
   }
 
@@ -1301,6 +1494,10 @@ export class PineForestBench {
 
   /** Frustum + lazy chunks; per-tree 3D distance LOD in fixed instance slots. */
   update(camera, lodCfg) {
+    if (!this._enabled) {
+      this._hideAllChunkMeshes();
+      return;
+    }
     this._projScreen.multiplyMatrices(
       camera.projectionMatrix,
       camera.matrixWorldInverse,
@@ -1389,7 +1586,6 @@ export class PineForestBench {
 
   updateTime(t) {
     if (this.foliageUniforms) this.foliageUniforms.time.value = t;
-    if (this.foliageUniformsLod1) this.foliageUniformsLod1.time.value = t;
     if (this.foliageUniformsLod2) this.foliageUniformsLod2.time.value = t;
   }
 
@@ -1424,7 +1620,6 @@ export class PineForestBench {
     this.trunkMat = null;
     this.foliageMat?.dispose();
     this.foliageMat = null;
-    this.foliageMatLod1?.dispose();
     this.foliageMatLod1 = null;
     this.foliageUniformsLod1 = null;
     this.foliageMatLod2?.dispose();

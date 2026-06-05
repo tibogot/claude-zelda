@@ -1262,6 +1262,10 @@
         RTS_TERRAIN_DEFAULTS,
         syncRtsTerrainUniforms,
       } from "./rts-terrain.js";
+      import {
+        PineForestBench,
+        DEFAULT_PINE_PARAMS,
+      } from "./pine-forest-bench-core.js";
 
       const DIFFICULTY_PRESETS = {
         easy: {
@@ -1449,10 +1453,28 @@
           meshScale: 10000,
         },
         csm: {
-          cascades: 2,
+          cascades: 1,
           maxFar: 900,
           lightMargin: 120,
           mapSize: 2048,
+        },
+        /** Card-pine forest (pine-forest-bench-core) — terrain-aligned, chunked LOD. */
+        forest: {
+          enabled: true,
+          halfExtent: 280,
+          spacing: 10,
+          jitter: 2.8,
+          density: 0.9,
+          treeScale: 1.45,
+          treeScaleJitter: 0.12,
+          excludeBasePad: 42,
+          excludeRockPad: 5,
+          lod0Distance: 68,
+          lod1Distance: 170,
+          fadeOutDistance: 500,
+          lodHysteresis: 12,
+          lod0ReceiveShadow: true,
+          castFoliageShadow: true,
         },
       };
 
@@ -1505,6 +1527,7 @@
         renderer.toneMappingExposure = PARAMS.light.exposure;
         renderer.shadowMap.enabled = true;
         renderer.shadowMap.type = THREE.PCFSoftShadowMap;
+        renderer.shadowMap.transmitted = true;
         document.body.appendChild(renderer.domElement);
         document.body.appendChild(stats.dom);
 
@@ -1653,6 +1676,11 @@
           console.warn("[rts] CSMShadowNode init failed.", err);
         }
 
+        // Pine forest (declared early — updateSun references pineForest).
+        let pineForest = null;
+        let forestCfg = null;
+        let forestRebuildTimer = 0;
+
         // ── SKY (SkyMesh physical sky + PMREM IBL) ──
         const sky = new SkyMesh();
         if (sky.material) sky.material.fog = false;
@@ -1708,6 +1736,7 @@
           renderer.toneMappingExposure = L.exposure;
           scene.environmentIntensity = L.envIntensity;
           applySkyUniforms();
+          pineForest?.syncSunDirection(sunDir);
         }
 
         updateSun();
@@ -1790,6 +1819,7 @@
             buildNavGrid();
             buildGridDebug();
             if (full) spawnArmies();
+            scheduleForestRebuild();
           } finally {
             rebuildTerrainInFlight = false;
           }
@@ -1812,6 +1842,88 @@
           }
         }
         syncTerrainUniforms();
+
+        // ── PINE FOREST (card LOD, lazy chunks) ───────────────────────────
+        const pineParams = structuredClone(DEFAULT_PINE_PARAMS);
+        pineParams.material.colorSource = "tsl";
+
+        function buildForestExcludeCircles() {
+          const F = PARAMS.forest;
+          const d = PARAMS.bases.distance;
+          const pad = PARAMS.bases.flattenRadius + F.excludeBasePad;
+          const circles = [
+            { x: 0, z: d, r: pad },
+            { x: 0, z: -d, r: pad },
+          ];
+          for (const o of OBSTACLES) {
+            circles.push({ x: o.x, z: o.z, r: o.r + F.excludeRockPad });
+          }
+          return circles;
+        }
+
+        function syncForestCfg() {
+          const F = PARAMS.forest;
+          const ts = F.treeScale ?? 1;
+          const tj = F.treeScaleJitter ?? 0.1;
+          forestCfg = {
+            forest: {
+              halfExtent: F.halfExtent,
+              spacing: F.spacing,
+              chunkSize: 100,
+              jitter: F.jitter,
+              scaleMin: ts * (1 - tj),
+              scaleMax: ts * (1 + tj),
+              density: F.density,
+              getTreeY: (x, z) => terrainHeight(x, z),
+              excludeCircles: buildForestExcludeCircles(),
+            },
+            lod: {
+              lod0Distance: F.lod0Distance,
+              lod1Distance: F.lod1Distance,
+              fadeOutDistance: F.fadeOutDistance,
+              lodHysteresis: F.lodHysteresis,
+            },
+            shadow: {
+              lod0Receive: F.lod0ReceiveShadow,
+              castFoliage: F.castFoliageShadow,
+            },
+          };
+        }
+
+        function updateForestHud() {
+          const el = document.getElementById("forest-stat");
+          if (!el || !pineForest) return;
+          const s = pineForest.stats;
+          el.textContent = pineForest._enabled
+            ? `${s.treeCount} placed · ${s.visibleTrees} visible · ${s.drawCalls} draws`
+            : "disabled";
+        }
+
+        function scheduleForestRebuild() {
+          clearTimeout(forestRebuildTimer);
+          forestRebuildTimer = setTimeout(() => {
+            if (!pineForest) return;
+            syncForestCfg();
+            pineForest.cfg = forestCfg;
+            pineForest.rebuildForest();
+            pineForest.applyShadowFlags();
+            pineForest.setEnabled(PARAMS.forest.enabled);
+            updateForestHud();
+          }, 280);
+        }
+
+        async function initPineForest() {
+          syncForestCfg();
+          if (pineForest) {
+            pineForest.dispose();
+            pineForest = null;
+          }
+          pineForest = new PineForestBench(scene, pineParams, forestCfg);
+          await pineForest.init("textures/pine-leaves/Frame 56.png");
+          pineForest.syncSunDirection(sunDir);
+          pineForest.setEnabled(PARAMS.forest.enabled);
+          updateForestHud();
+        }
 
         // ── OBSTACLES + NAVIGATION GRID ───────────────────────────────────
         // Rocks in the mid-field force units to route around them. Each rock's
@@ -1853,6 +1965,8 @@
             OBSTACLES.push({ ...d, mesh });
           }
         }
+
+        await initPineForest();
 
         // ── TEAM BASES (opposite map edges) ───────────────────────────────
         // Visual command centers + spawn anchors. Footprints block nav so
@@ -5057,14 +5171,26 @@
 
         // ── FRAME LOOP ──
         let lastT = performance.now() / 1000;
+        let forestAnimT = 0;
         renderer.setAnimationLoop(() => {
           const now = performance.now() / 1000;
           const dt = Math.min(now - lastT, 0.05);
           lastT = now;
+          forestAnimT += dt;
 
           panCamera(dt);
           edgeScroll(dt);
           controls.update();
+          if (pineForest && PARAMS.forest.enabled) {
+            pineForest.updateTime(forestAnimT);
+            pineForest.update(camera, forestCfg.lod);
+          } else if (pineForest) {
+            pineForest.setEnabled(false);
+          }
+          if (csm?.mainFrustum) {
+            csm.mainFrustum.camera = camera;
+            csm.updateFrustums();
+          }
           updateFog();
           updateAI(dt);
           updateRequisition(dt);
@@ -5115,6 +5241,24 @@
             buildFogGrid();
             revealStartingFog();
             updateFog();
+          },
+          forest: {
+            scheduleRebuild: scheduleForestRebuild,
+            syncCfg: () => {
+              syncForestCfg();
+              if (pineForest) pineForest.cfg = forestCfg;
+            },
+            updateHud: updateForestHud,
+            applyEnabled: () => {
+              pineForest?.setEnabled(PARAMS.forest.enabled);
+              updateForestHud();
+            },
+            applyShadows: () => {
+              if (!pineForest) return;
+              syncForestCfg();
+              pineForest.cfg = forestCfg;
+              pineForest.applyShadowFlags();
+            },
           },
         });
       }
@@ -5301,6 +5445,7 @@
         buildNavGrid,
         buildGridDebug,
         refreshFog,
+        forest,
       }) {
         const body = document.getElementById("inspector-body");
 
@@ -5859,6 +6004,105 @@
             onChange: () => {
               rebuildSkyEnv();
             },
+          });
+        }
+
+        // ── Pine forest (card LOD) ──
+        if (forest) {
+          const sec = _section(body, "Pine Forest", true);
+          const F = PARAMS.forest;
+          const onForest = () => forest.scheduleRebuild();
+          const onForestLod = () => forest.syncCfg?.();
+          const stat = document.createElement("div");
+          stat.className = "prop-row";
+          stat.style.fontSize = "11px";
+          stat.style.color = "var(--text-dim)";
+          stat.style.marginBottom = "6px";
+          stat.innerHTML =
+            '<span class="prop-label">Trees</span><div class="prop-value" id="forest-stat">…</div>';
+          sec.appendChild(stat);
+          forest.updateHud?.();
+
+          _toggle(sec, F, "enabled", {
+            label: "Enabled",
+            onChange: () => forest.applyEnabled?.(),
+          });
+          _slider(sec, F, "halfExtent", {
+            label: "Forest radius (m)",
+            min: 80,
+            max: 340,
+            step: 10,
+            onChange: onForest,
+          });
+          _slider(sec, F, "spacing", {
+            label: "Tree spacing (m)",
+            min: 6,
+            max: 16,
+            step: 0.5,
+            onChange: onForest,
+          });
+          _slider(sec, F, "density", {
+            label: "Tree density",
+            min: 0.25,
+            max: 1,
+            step: 0.05,
+            onChange: onForest,
+          });
+          _slider(sec, F, "jitter", {
+            label: "Placement jitter",
+            min: 0,
+            max: 5,
+            step: 0.2,
+            onChange: onForest,
+          });
+          _slider(sec, F, "treeScale", {
+            label: "Tree scale",
+            min: 0.6,
+            max: 2.5,
+            step: 0.05,
+            onChange: onForest,
+          });
+          _slider(sec, F, "treeScaleJitter", {
+            label: "Scale variation",
+            min: 0,
+            max: 0.35,
+            step: 0.02,
+            onChange: onForest,
+          });
+          _separator(sec);
+          _slider(sec, F, "lod0Distance", {
+            label: "LOD0 distance",
+            min: 30,
+            max: 140,
+            step: 5,
+            onChange: onForestLod,
+          });
+          _slider(sec, F, "lod1Distance", {
+            label: "LOD1 distance",
+            min: 80,
+            max: 280,
+            step: 5,
+            onChange: onForestLod,
+          });
+          _slider(sec, F, "fadeOutDistance", {
+            label: "Fade out distance",
+            min: 200,
+            max: 700,
+            step: 20,
+            onChange: onForestLod,
+          });
+          _separator(sec);
+          _toggle(sec, F, "lod0ReceiveShadow", {
+            label: "LOD0 receive shadow",
+            onChange: () => forest.applyShadows?.(),
+          });
+          _toggle(sec, F, "castFoliageShadow", {
+            label: "Foliage cast shadow",
+            onChange: () => forest.applyShadows?.(),
+          });
+          _button(sec, {
+            title: "Rebuild forest placement",
+            onClick: () => forest.scheduleRebuild(),
           });
         }
 

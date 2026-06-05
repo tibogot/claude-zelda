@@ -8,6 +8,7 @@
 import * as THREE from "three/webgpu";
 import {
   float,
+  int,
   vec2,
   vec3,
   uniform,
@@ -274,24 +275,33 @@ export async function createRtsTerrain(
   }
   geo.computeVertexNormals();
 
-  const triRGB = (tex, sc) => () => {
-    const w = pow(abs(normalWorld), vec3(3, 3, 3));
-    const ws = max(add(add(w.x, w.y), w.z), float(1e-4));
-    const tw = w.div(ws);
-    const ax = texture(tex, mul(vec2(positionWorld.y, positionWorld.z), sc)).rgb;
-    const ay = texture(tex, mul(positionWorld.xz, sc)).rgb;
-    const az = texture(tex, mul(positionWorld.xy, sc)).rgb;
-    return add(add(mul(ax, tw.x), mul(ay, tw.y)), mul(az, tw.z));
-  };
-  const triR = (tex, sc) => () => {
-    const w = pow(abs(normalWorld), vec3(3, 3, 3));
-    const ws = max(add(add(w.x, w.y), w.z), float(1e-4));
-    const tw = w.div(ws);
-    const ax = texture(tex, mul(vec2(positionWorld.y, positionWorld.z), sc)).x;
-    const ay = texture(tex, mul(positionWorld.xz, sc)).x;
-    const az = texture(tex, mul(positionWorld.xy, sc)).x;
-    return add(add(mul(ax, tw.x), mul(ay, tw.y)), mul(az, tw.z));
-  };
+  /** Pack loaded 2D maps into one DataArrayTexture (v2 paint-style binding budget). */
+  const ARRAY_RES = 1024;
+  function buildLayerArray(maps, srgb) {
+    const count = maps.length;
+    const stride = ARRAY_RES * ARRAY_RES * 4;
+    const data = new Uint8Array(stride * count);
+    const canvas = document.createElement("canvas");
+    canvas.width = canvas.height = ARRAY_RES;
+    const ctx = canvas.getContext("2d", { willReadFrequently: true });
+    for (let i = 0; i < count; i++) {
+      const img = maps[i]?.image;
+      if (!img) continue;
+      ctx.clearRect(0, 0, ARRAY_RES, ARRAY_RES);
+      ctx.drawImage(img, 0, 0, ARRAY_RES, ARRAY_RES);
+      data.set(ctx.getImageData(0, 0, ARRAY_RES, ARRAY_RES).data, i * stride);
+    }
+    const tex = new THREE.DataArrayTexture(data, ARRAY_RES, ARRAY_RES, count);
+    tex.format = THREE.RGBAFormat;
+    tex.type = THREE.UnsignedByteType;
+    tex.wrapS = tex.wrapT = THREE.RepeatWrapping;
+    tex.minFilter = THREE.LinearMipMapLinearFilter;
+    tex.magFilter = THREE.LinearFilter;
+    tex.colorSpace = srgb ? THREE.SRGBColorSpace : THREE.LinearSRGBColorSpace;
+    tex.generateMipmaps = true;
+    tex.needsUpdate = true;
+    return tex;
+  }
 
   const baseUrl = import.meta.url;
   const loader = new THREE.TextureLoader();
@@ -336,7 +346,34 @@ export async function createRtsTerrain(
     const grass = await set("Grass005", "Grass005_1K-JPG", false);
     const rock = await set("Rock028", "Rock028_2K-JPG", true);
     const snow = await set("Snow010A", "Snow010A_1K-JPG", true);
-    for (const m of [grass, rock, snow]) allTextures.push(...Object.values(m));
+    const layers = [grass, rock, snow];
+    for (const m of layers) allTextures.push(...Object.values(m));
+
+    const colorArray = buildLayerArray(
+      layers.map((l) => l.color),
+      true,
+    );
+    const normalArray = buildLayerArray(
+      layers.map((l) => l.normal),
+      false,
+    );
+    const roughArray = buildLayerArray(
+      layers.map((l) => l.roughness),
+      false,
+    );
+    const aoArray = buildLayerArray(
+      layers.map((l) => l.ao),
+      false,
+    );
+    const dispArray = buildLayerArray(
+      [null, rock.displacement, snow.displacement],
+      false,
+    );
+    allTextures.push(colorArray, normalArray, roughArray, aoArray, dispArray);
+
+    const L_GRASS = int(0);
+    const L_ROCK = int(1);
+    const L_SNOW = int(2);
 
     const uGrassScale = uniform(surf.grassScale);
     const uRockScale = uniform(surf.rockScale);
@@ -417,17 +454,23 @@ export async function createRtsTerrain(
       return vec3(wGrass, wRock2, wSnow).div(max(wSum, float(0.001)));
     };
 
-    const gRGB = triRGB(grass.color, uGrassScale);
-    const rRGB = triRGB(rock.color, uRockScale);
-    const sRGB = triRGB(snow.color, uSnowScale);
-    const gR = triR(grass.roughness, uGrassScale);
-    const rR = triR(rock.roughness, uRockScale);
-    const sR = triR(snow.roughness, uSnowScale);
-    const gAo = triR(grass.ao, uGrassScale);
-    const rAo = triR(rock.ao, uRockScale);
-    const sAo = triR(snow.ao, uSnowScale);
+    const layerRGB = (arr, layer, sc) =>
+      texture(arr, mul(positionWorld.xz, sc)).depth(layer).rgb;
+    const layerR = (arr, layer, sc) =>
+      texture(arr, mul(positionWorld.xz, sc)).depth(layer).r;
+
+    const gRGB = () => layerRGB(colorArray, L_GRASS, uGrassScale);
+    const rRGB = () => layerRGB(colorArray, L_ROCK, uRockScale);
+    const sRGB = () => layerRGB(colorArray, L_SNOW, uSnowScale);
+    const gR = () => layerR(roughArray, L_GRASS, uGrassScale);
+    const rR = () => layerR(roughArray, L_ROCK, uRockScale);
+    const sR = () => layerR(roughArray, L_SNOW, uSnowScale);
+    const gAo = () => layerR(aoArray, L_GRASS, uGrassScale);
+    const rAo = () => layerR(aoArray, L_ROCK, uRockScale);
+    const sAo = () => layerR(aoArray, L_SNOW, uSnowScale);
 
     material = new THREE.MeshStandardNodeMaterial({ side: THREE.FrontSide });
+    material.envMapIntensity = 0;
     material.colorNode = (() => {
       const lw = layerWeights();
       return mul(
@@ -454,23 +497,23 @@ export async function createRtsTerrain(
     material.normalNode = (() => {
       const lw = layerWeights();
       const nG = normalMap(
-        texture(grass.normal, mul(positionWorld.xz, uGrassScale)),
+        texture(normalArray, mul(positionWorld.xz, uGrassScale)).depth(L_GRASS),
         vec2(uNormalGrass, uNormalGrass),
       );
       const nR = normalMap(
-        texture(rock.normal, mul(positionWorld.xz, uRockScale)),
+        texture(normalArray, mul(positionWorld.xz, uRockScale)).depth(L_ROCK),
         vec2(uNormalRock, uNormalRock),
       );
       const nS = normalMap(
-        texture(snow.normal, mul(positionWorld.xz, uSnowScale)),
+        texture(normalArray, mul(positionWorld.xz, uSnowScale)).depth(L_SNOW),
         vec2(uNormalSnow, uNormalSnow),
       );
       return normalize(add(add(mul(nG, lw.x), mul(nR, lw.y)), mul(nS, lw.z)));
     })();
     material.positionNode = (() => {
       const tu = mul(uv(), uDispUvScale);
-      const dR = texture(rock.displacement, tu).x;
-      const dS = texture(snow.displacement, tu).x;
+      const dR = texture(dispArray, tu).depth(L_ROCK).x;
+      const dS = texture(dispArray, tu).depth(L_SNOW).x;
       const h = positionGeometry.y;
       const slopeD = sub(float(1), abs(normalGeometry.y));
       const wCliffD = pow(smoothstep(uCliffLow, uCliffHigh, slopeD), uCliffPow);
@@ -491,7 +534,6 @@ export async function createRtsTerrain(
       );
     })();
     material.metalnessNode = uMetalness;
-    material.envMapIntensity = surf.envIntensity;
     material.color = new THREE.Color(0xffffff);
   } catch (err) {
     console.warn("[rts-terrain] PBR textures failed to load — matte fallback.", err);
