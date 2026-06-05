@@ -99,6 +99,7 @@ import { FullRoadSystem } from "../tools/fullRoad/fullRoadSystem.js";
 import { RoadPlanarReflection } from "../core/road/roadReflection.js";
 import { RiverSystem } from "../tools/river/riverSystem.js";
 import { SplineSystem } from "../tools/spline/splineSystem.js";
+import { SplineRoadSystem } from "../tools/splineRoad/splineRoadSystem.js";
 import { CliffStore } from "../core/cliffs/cliffStore.js";
 import { CliffInstancer } from "../core/cliffs/cliffInstancer.js";
 import { CliffSystem } from "../tools/cliffs/cliffSystem.js";
@@ -628,6 +629,7 @@ export async function startV2App(opts = {}) {
   }
 
   const tileTerrainMaterial = createSharedTileMaterial();
+  applyGroundTileFromToolState();
   const sharedGroundBundle = createGroundTslBundle(toolState.groundTsl);
   let proceduralTerrainBundle = null;
   let imageTexTerrainBundle = null;
@@ -842,6 +844,21 @@ export async function startV2App(opts = {}) {
     borderMountains.setMaterial(mat);
     syncSoloLayer();
     syncHeightBlend();
+  }
+
+  /** Push toolState.groundTile into the default tile-grid material's live
+   *  uniforms (scale, gradient, colors). Colors are stored sRGB and converted
+   *  to linear in place. No-op visually until the editor sliders change them. */
+  function applyGroundTileFromToolState() {
+    const u = tileTerrainMaterial._tileUniforms;
+    if (!u) return;
+    const g = toolState.groundTile;
+    u.textureScale.value = g.textureScale;
+    u.gradientIntensity.value = g.gradientIntensity;
+    u.gradientBias.value = g.gradientBias;
+    u.tileColor.value.set(g.tileColor).convertSRGBToLinear();
+    u.gridColor.value.set(g.gridColor).convertSRGBToLinear();
+    u.gridLineColor.value.set(g.gridLineColor).convertSRGBToLinear();
   }
 
   function markHeightTexDirty() {
@@ -1078,6 +1095,12 @@ export async function startV2App(opts = {}) {
     getRoadSegments: () => roadSystem.getSegmentsSnapshot(),
     onVolumesChange: () => rebuildInteriorVolumes(),
   });
+  // Spline Road — dedicated, isolated solid-road mode (separate from spline).
+  const splineRoadSystem = new SplineRoadSystem({
+    scene,
+    toolState,
+    getWorldHeight: (x, z) => terrainStore.getWorldHeight(x, z),
+  });
   function rebuildInteriorVolumes() {
     interiorRegistry.rebuild(splineSystem, caveStore, toolState.interior);
     syncInteriorUniforms();
@@ -1149,6 +1172,7 @@ export async function startV2App(opts = {}) {
     "decals",
     "fullRoad",
     "smartRoad",
+    "splineRoad",
   ]);
 
   // Single point of truth for shared gizmo settings (space + rotation snap).
@@ -1167,6 +1191,7 @@ export async function startV2App(opts = {}) {
   applyGizmoSettings();
   fullRoadSystem.setTransformControls(transformControls);
   smartRoadSystem.setTransformControls(transformControls);
+  splineRoadSystem.setGizmo(transformControls);
   const activeGraphRoadSystem = () =>
     toolState.mode === "smartRoad" ? smartRoadSystem : fullRoadSystem;
   const activeGraphRoadParams = () =>
@@ -1181,6 +1206,9 @@ export async function startV2App(opts = {}) {
     if (toolState.mode === "decals" && decalSystem.selectedIndex >= 0) {
       const dd = decalSystem.decals[decalSystem.selectedIndex];
       if (dd && !dd.soloMesh) decalSystem.handleTransformChange();
+    }
+    if (toolState.mode === "splineRoad" && splineRoadSystem.selectedIdx >= 0) {
+      splineRoadSystem.syncFromGizmo();
     }
     if (
       toolState.mode === "fullRoad" &&
@@ -1435,6 +1463,10 @@ export async function startV2App(opts = {}) {
     audioSystem,
     excludeFromReflection: (obj) => roadReflection.excludeFromReflection(obj),
     onSpawnChanged: () => _playSpawnChanged?.(),
+    // Spline Road meshes baked into the stunt car's drive-surface BVH.
+    getStuntRoadMeshes: () => splineRoadSystem.getColliderMeshes(),
+    // Side barriers baked into the stunt car's chassis-collision solids BVH.
+    getStuntRoadSolidMeshes: () => splineRoadSystem.getSolidMeshes(),
   });
 
   const dialogueRunner = new DialogueRunner({
@@ -1494,6 +1526,9 @@ export async function startV2App(opts = {}) {
     if (toolState.mode === "snow" && toolState.snow.enabled) {
       snowSystem.syncFromState(toolState.snow);
     }
+    if (toolState.mode !== "splineRoad") {
+      splineRoadSystem.detachGizmo(transformControls);
+    }
     if (toolState.mode !== "cliffs") {
       deactivateCliffSelection();
     }
@@ -1552,6 +1587,8 @@ export async function startV2App(opts = {}) {
     splineSystem.handleGroup.visible =
       toolState.mode === "spline" && toolState.spline.showHandles;
     if (toolState.mode !== "spline") splineSystem.clearPreview();
+    if (toolState.mode !== "splineRoad") splineRoadSystem.dragging = false;
+    splineRoadSystem.syncVisibility();
     if (toolState.mode === "ambientfx") {
       ambientFxStore.setRingsVisible(toolState.ambientFx.showRings);
       leafFxStore.setRingsVisible(toolState.ambientFx.showRings);
@@ -3118,6 +3155,9 @@ export async function startV2App(opts = {}) {
         if (project.settings?.splinePath)
           splineSystem.importData(project.settings.splinePath);
         else splineSystem.importData({ points: [] });
+        // Spline Road: points/params were restored into toolState by applySettings;
+        // rebuild the road mesh from them.
+        splineRoadSystem.loadFromToolState();
         rebuildInteriorVolumes();
         // Restore cliff instances (types must be re-imported by user)
         if (project.settings?.cliffInstances) {
@@ -4174,6 +4214,18 @@ export async function startV2App(opts = {}) {
       }
       return;
     }
+    if (toolState.mode === "splineRoad" && event.button === 0) {
+      // LEFT-click = ADD a point (clicking a gizmo handle is the gizmo's job).
+      if (transformControls.axis) return;
+      event.preventDefault();
+      const hit = pickTerrain(event);
+      if (hit) {
+        splineRoadSystem.addPoint(hit.point);
+        splineRoadSystem.attachGizmo(transformControls);
+        ui?.pane.refresh();
+      }
+      return;
+    }
     if (event.button !== 0 || !isBrushMode()) return;
     const hit = pickTerrain(event);
     if (toolState.mode === "sculpt" && toolState.sculptMode === "ramp") {
@@ -4289,6 +4341,15 @@ export async function startV2App(opts = {}) {
       if (hit) splineSystem.moveSelected(hit.point);
       return;
     }
+    if (
+      toolState.mode === "splineRoad" &&
+      splineRoadSystem.dragging &&
+      splineRoadSystem.selectedIdx >= 0
+    ) {
+      const hit = pickTerrain(event);
+      if (hit) splineRoadSystem.moveSelected(hit.point);
+      return;
+    }
     const hit = pickTerrain(event);
     updateBrushPreviewFromPick(hit);
     if (!pointerDown || !isBrushMode() || !hit) return;
@@ -4389,6 +4450,16 @@ export async function startV2App(opts = {}) {
       } else {
         deactivatePropSelection();
       }
+    } else if (toolState.mode === "splineRoad") {
+      // RIGHT-click selects a road point (makes its road active). A click doesn't
+      // pan, so this never adds a point by accident; right-DRAG still pans.
+      event.preventDefault();
+      updatePointer(event);
+      raycaster.setFromCamera(pointerNdc, camera);
+      if (splineRoadSystem.selectFromRaycaster(raycaster)) {
+        splineRoadSystem.attachGizmo(transformControls);
+        ui?.pane.refresh();
+      }
     }
   });
 
@@ -4423,6 +4494,10 @@ export async function startV2App(opts = {}) {
     }
     if (splineSystem.dragging) {
       splineSystem.dragging = false;
+      controls.enabled = true;
+    }
+    if (splineRoadSystem.dragging) {
+      splineRoadSystem.dragging = false;
       controls.enabled = true;
     }
     if (!pointerDown) return;
@@ -4470,6 +4545,7 @@ export async function startV2App(opts = {}) {
     if (toolState.mode === "smartRoad") return smartRoadSystem;
     if (toolState.mode === "river") return riverSystem;
     if (toolState.mode === "spline") return splineSystem;
+    if (toolState.mode === "splineRoad") return splineRoadSystem;
     if (toolState.mode === "cliffs") return cliffSystem;
     if (toolState.mode === "props") return propSystem;
     if (toolState.mode === "water") return waterSystem;
@@ -4534,6 +4610,10 @@ export async function startV2App(opts = {}) {
       event.preventDefault();
       riverSystem.deleteSelected();
       ui?.pane.refresh();
+    } else if (event.code === "Delete" && toolState.mode === "splineRoad") {
+      event.preventDefault();
+      splineRoadSystem.deleteSelected();
+      ui?.pane.refresh();
     } else if (event.code === "Delete" && toolState.mode === "spline") {
       event.preventDefault();
       splineSystem.deleteSelected();
@@ -4571,6 +4651,7 @@ export async function startV2App(opts = {}) {
       toolState.mode !== "waterfall" &&
       toolState.mode !== "actors" &&
       toolState.mode !== "decals" &&
+      toolState.mode !== "splineRoad" &&
       toolState.mode !== "play"
     ) {
       event.preventDefault();
@@ -4678,6 +4759,16 @@ export async function startV2App(opts = {}) {
         toolState.actors.transformMode = "scale";
         transformControls.setMode("scale");
         ui?.pane.refresh();
+      }
+    } else if (toolState.mode === "splineRoad" && !ctrl) {
+      // W = Move the point, E = Tilt (bank) the deck — same gizmo shortcuts as
+      // the other gizmo modes. setGizmoMode re-attaches with the right setup.
+      if (event.code === "KeyW") {
+        event.preventDefault();
+        splineRoadSystem.setGizmoMode("translate");
+      } else if (event.code === "KeyE") {
+        event.preventDefault();
+        splineRoadSystem.setGizmoMode("rotate");
       }
     } else if (toolState.mode === "cliffs" && !ctrl) {
       if (event.code === "KeyW") {
@@ -5146,12 +5237,14 @@ export async function startV2App(opts = {}) {
     toolState,
     ui,
     perf,
+    playMode,
     waterStore,
     roadSystem,
     fullRoadSystem,
     smartRoadSystem,
     riverSystem,
     splineSystem,
+    splineRoadSystem,
     propStore,
     decalSystem,
     waterfallSystem,
@@ -5938,6 +6031,9 @@ export async function startV2App(opts = {}) {
     },
     terrainSurfaceChanged() {
       _terrainSurfaceChanged();
+    },
+    applyGroundTile() {
+      applyGroundTileFromToolState();
     },
     tslTerrainSync() {
       _tslTerrainSync();

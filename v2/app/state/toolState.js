@@ -26,6 +26,17 @@ export function createToolState() {
     },
     /** `tile` = grid material; `tsl` = procedural TSL; `image` = tiled image-slot material. */
     terrainSurface: "tile",
+    /** Default tile-grid ground appearance (the `tile` surface). Defaults match
+     *  the previously-hardcoded createSharedTileMaterial() values so existing
+     *  scenes are unchanged; the editor exposes these as live controls. */
+    groundTile: {
+      textureScale: 400,
+      gradientIntensity: 0.5,
+      gradientBias: 0.0,
+      tileColor: "#e6e3e3",
+      gridColor: "#444444",
+      gridLineColor: "#111111",
+    },
     /** Texture-library slot ids picked by the surface modes that use slots. */
     textureSlots: {
       cliffSlotId: "cliff_rock",
@@ -1185,6 +1196,31 @@ export function createToolState() {
       foamWidth: 0.18,
       opacity: 0.88,
       flowSpeed: 0.15,
+    },
+    /** Spline Road — a dedicated solid "depth road" mode (separate from spline).
+     *  Points + sweep params; serializes the road with the project. */
+    splineRoad: {
+      width: 9,
+      thickness: 1.0,
+      bank: 0.6,
+      bankSmooth: 0.12,
+      segmentsPerPoint: 28,
+      tension: 0.5,
+      deckLift: 0.4,
+      closed: false,
+      showHandles: true,
+      selectedPointY: 0,
+      selectedPointRoll: 0,
+      deckColor: "#2c3138",
+      sideColor: "#6f757c",
+      kerbColor: "#d23b3b",
+      barrierEnabled: true,
+      barrierHeight: 0.7,
+      barrierDepth: 0.3,
+      barrierColor: "#9aa3ad",
+      points: [], // legacy single-road (migrated into roadsData on load)
+      rolls: [],
+      roadsData: [], // [{ points:[{x,y,z}], rolls:[num] }] — multiple road segments
     },
     spline: {
       objectType: "trees",

@@ -309,6 +309,126 @@
         opacity: 0.35;
         cursor: default;
       }
+      .cc-build-grid {
+        display: grid;
+        grid-template-columns: 1fr 1fr;
+        gap: 4px;
+        margin-top: 4px;
+      }
+      .cc-build-btn {
+        display: flex;
+        flex-direction: column;
+        align-items: center;
+        gap: 2px;
+        padding: 5px 4px;
+        border: 1px solid rgba(120, 200, 140, 0.35);
+        border-radius: 4px;
+        background: rgba(60, 120, 80, 0.15);
+        color: #b8e8c8;
+        font:
+          700 9px/1 "SF Mono",
+          monospace;
+        cursor: pointer;
+      }
+      .cc-build-btn:hover:not(:disabled) {
+        background: rgba(73, 224, 255, 0.14);
+        border-color: rgba(73, 224, 255, 0.45);
+      }
+      .cc-build-btn:disabled {
+        opacity: 0.35;
+        cursor: default;
+      }
+      .cc-build-btn .cc-build-cost {
+        font-size: 8px;
+        color: #ffe08a;
+        font-weight: 600;
+      }
+      body.placement-mode {
+        cursor: crosshair !important;
+      }
+      body.placement-mode #command-card {
+        outline: 1px solid rgba(255, 200, 80, 0.45);
+      }
+      #struct-panel {
+        position: fixed;
+        left: 12px;
+        bottom: 240px;
+        z-index: 14;
+        width: 218px;
+        border: 1px solid rgba(120, 200, 140, 0.4);
+        border-radius: 8px;
+        background: rgba(8, 14, 12, 0.92);
+        backdrop-filter: blur(8px);
+        box-shadow: 0 8px 28px rgba(0, 0, 0, 0.45);
+        user-select: none;
+        opacity: 0;
+        pointer-events: none;
+        transform: translateX(-8px);
+        transition:
+          opacity 0.15s,
+          transform 0.15s;
+      }
+      #struct-panel.open {
+        opacity: 1;
+        pointer-events: auto;
+        transform: translateX(0);
+      }
+      #struct-panel .struct-header {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        padding: 8px 10px 6px;
+        border-bottom: 1px solid rgba(255, 255, 255, 0.1);
+        font:
+          700 10px/1 "SF Mono",
+          monospace;
+        letter-spacing: 0.1em;
+        text-transform: uppercase;
+        color: #9ecfb0;
+      }
+      #struct-panel #struct-close {
+        border: none;
+        background: transparent;
+        color: #8aa898;
+        font-size: 16px;
+        cursor: pointer;
+        padding: 0 2px;
+      }
+      #struct-panel .struct-sub {
+        padding: 4px 10px 6px;
+        font:
+          10px/1.3 "SF Mono",
+          monospace;
+        color: #7a9484;
+      }
+      #struct-buttons {
+        padding: 4px 8px 8px;
+        display: flex;
+        flex-direction: column;
+        gap: 4px;
+      }
+      #struct-queue-list {
+        list-style: none;
+        padding: 4px 8px 8px;
+        display: flex;
+        flex-direction: column;
+        gap: 3px;
+        max-height: 72px;
+        overflow-y: auto;
+      }
+      #struct-queue-list li {
+        padding: 3px 6px;
+        border-radius: 4px;
+        background: rgba(0, 0, 0, 0.25);
+        font:
+          10px/1.2 "SF Mono",
+          monospace;
+        color: #b0c8b4;
+      }
+      #command-card .cc-icon.bulldozer {
+        color: #ffe08a;
+        border-color: rgba(255, 200, 80, 0.4);
+      }
       body.inspector-hidden #command-card {
         right: 14px;
       }
@@ -441,6 +561,9 @@
       }
       .req-btn.artillery .req-icon {
         color: #ffb890;
+      }
+      .req-btn.bulldozer .req-icon {
+        color: #ffe08a;
       }
       .req-btn .req-label {
         flex: 1;
@@ -1189,7 +1312,7 @@
       <span id="backend">loading…</span> &bull; LMB <span>select</span> &bull;
       RMB <span>move</span> / <span>attack HQ</span> &bull; [A] <span>attack-move</span> &bull;
       [H] <span>siege</span> &bull; [Q]/arrows <span>pan</span> &bull; [B] <span>base</span> &bull;
-      [R] <span>restart</span> &bull; Shift+#
+      [R] <span>restart</span> &bull; Bulldozer <span>build</span> &bull; Shift+#
       group / # recall &bull; [C] camera: <span id="cammode">ORBIT</span> &bull;
       <span id="selcount">0</span>/<span id="unitcount">0</span> selected
     </div>
@@ -1206,9 +1329,22 @@
         <button type="button" class="cc-action-btn" id="cc-attack-base" title="Attack enemy HQ [H]">
           Attack HQ
         </button>
+        <div class="cc-build-grid" id="cc-build-actions" style="display: none"></div>
       </div>
     </div>
     <div id="toast"></div>
+    <div id="struct-panel">
+      <div class="struct-header">
+        <span id="struct-title">Building</span>
+        <button id="struct-close" title="Close">×</button>
+      </div>
+      <div class="struct-sub" id="struct-sub"></div>
+      <div id="struct-buttons"></div>
+      <div class="req-queue" id="struct-queue-wrap" style="display: none">
+        <div class="req-queue-title">Production queue</div>
+        <ul id="struct-queue-list"></ul>
+      </div>
+    </div>
     <div id="req-panel">
       <div class="req-header">
         <span>Requisition</span>
@@ -1252,6 +1388,11 @@
         exponentialHeightFogFactor,
         densityFogFactor,
       } from "three/tsl";
+      import {
+        createRtsFogOfWarTexture,
+        updateRtsFogOfWarTexture,
+        createRtsFogOfWarNodes,
+      } from "./rts-fog-of-war.js";
       import Stats from "stats-gl";
       import { OrbitControls } from "three/addons/controls/OrbitControls.js";
       import { SkyMesh } from "three/addons/objects/SkyMesh.js";
@@ -1266,6 +1407,14 @@
         PineForestBench,
         DEFAULT_PINE_PARAMS,
       } from "./pine-forest-bench-core.js";
+      import {
+        buildWindmillMesh,
+        preloadWindmillModel,
+        updateWindmillRotors,
+        disposeWindmillGroup,
+        isWindmillModelReady,
+        WINDMILL_DEFAULTS,
+      } from "./objects/windmill.js";
 
       const DIFFICULTY_PRESETS = {
         easy: {
@@ -1274,10 +1423,11 @@
           enemyIncome: 5,
           enemyStartSupply: 45,
           enemyBuyInterval: 4.5,
-          probeDepth: 48,
-          probeHoldRadius: 28,
-          scoutProbeSpread: 22,
+          probeDepth: 96,
+          probeHoldRadius: 56,
+          scoutProbeSpread: 44,
           repathInterval: 0.85,
+          capSquadSize: 2,
         },
         normal: {
           label: "Normal",
@@ -1285,10 +1435,11 @@
           enemyIncome: 7,
           enemyStartSupply: 80,
           enemyBuyInterval: 3,
-          probeDepth: 72,
-          probeHoldRadius: 40,
-          scoutProbeSpread: 36,
+          probeDepth: 144,
+          probeHoldRadius: 80,
+          scoutProbeSpread: 72,
           repathInterval: 0.6,
+          capSquadSize: 3,
         },
         hard: {
           label: "Hard",
@@ -1296,10 +1447,11 @@
           enemyIncome: 10,
           enemyStartSupply: 120,
           enemyBuyInterval: 2.2,
-          probeDepth: 98,
-          probeHoldRadius: 52,
-          scoutProbeSpread: 44,
+          probeDepth: 196,
+          probeHoldRadius: 104,
+          scoutProbeSpread: 88,
           repathInterval: 0.45,
+          capSquadSize: 5,
         },
       };
 
@@ -1318,21 +1470,33 @@
           panSpeed: 1.0,
           edgeSpeed: 1.0, // edge-scroll speed (RTS mode)
           edgeSize: 26, // px from a screen edge that triggers scrolling
+          // Iso RTS pose — locked in RTS mode (orbit mode [C] to tune, then Capture).
+          polarDeg: 40, // pitch from top-down (°)
+          azimuthDeg: 75, // yaw around map center (°)
+          distance: 280, // zoom distance from target
+          targetY: 0,
+          minDistance: 120,
+          maxDistance: 1300,
+          minPolarDeg: 25, // orbit-mode pitch limits only
+          maxPolarDeg: 86,
+          damping: 0.08,
+          lockAngle: true, // RTS: freeze pitch + yaw; pan/zoom only
+          zoomInRts: true,
         },
-        ground: { size: RTS_MAP_SIZE, segments: 288 },
+        ground: { size: RTS_MAP_SIZE, segments: 576 },
         // PBR terrain — heightfield + surface (see rts-terrain.js).
         terrain: { ...RTS_TERRAIN_DEFAULTS },
-        // Army composition (per side; both sides mirror it). Per-unit stats
+        // Army composition (per side; player also gets bulldozer). Per-unit stats
         // (speed/range/damage/hp/sight) live in UNIT_TYPES, not here.
-        army: { scout: 3, tank: 4, artillery: 2 },
+        army: { scout: 3, tank: 4, artillery: 2, bulldozer: 1 },
         difficulty: "normal",
         enemies: true, // spawn an opposing mirror army
         // Team bases — opposite ends of the map; armies spawn in front of them.
         bases: {
-          distance: 264, // |Z| from map center (~73% of half-extent)
-          spawnOffset: 54, // units spawn toward center from base (3× lab default)
+          distance: 528, // |Z| from map center (~73% of half-extent)
+          spawnOffset: 108, // units spawn toward center from base
           footprint: 10, // nav-block radius around the structure
-          flattenRadius: 34, // smooth terrain pad around each HQ
+          flattenRadius: 68, // smooth terrain pad around each HQ
           hp: 1200, // command center health — destroy to win
           turret: {
             range: 38,
@@ -1349,7 +1513,7 @@
           buildTime: 5, // seconds before unit appears at base front
           maxQueue: 8,
           refundMin: 0.25, // minimum refund fraction when cancelling
-          cost: { scout: 25, tank: 60, artillery: 90 },
+          cost: { scout: 25, tank: 60, artillery: 90, bulldozer: 50 },
           shiftQueueBatch: 5,
           upgrades: {
             repair: { cost: 35, heal: 200 },
@@ -1364,7 +1528,7 @@
             buildTime: 6,
             maxQueue: 6,
             buyInterval: 3,
-            cost: { scout: 25, tank: 60, artillery: 90 },
+            cost: { scout: 25, tank: 60, artillery: 90, bulldozer: 50 },
             // AI build weights (higher = more likely when affordable).
             weights: { scout: 1, tank: 2, artillery: 1 },
           },
@@ -1386,21 +1550,94 @@
         // Enemy AI.
         ai: {
           enabled: true,
+          objectives: true, // contest supply nodes after commit
           repathInterval: 0.6, // seconds between AI re-decisions
-          probeHoldRadius: 40, // non-scouts stay near HQ until intel
-          probeDepth: 72, // how far scouts push toward the player
-          scoutProbeSpread: 36, // lateral jitter for scout lanes
+          probeHoldRadius: 80, // non-scouts stay near HQ until intel
+          probeDepth: 144, // how far scouts push toward the player
+          scoutProbeSpread: 72, // lateral jitter for scout lanes
+        },
+        // Player-placed structures (bulldozer builds these).
+        buildings: {
+          minSpacing: 10, // min gap between structure centers
+          buildRange: 5, // bulldozer must be this close to construct
+          maxQueue: 6, // production queue per barracks / war factory
+          types: {
+            barracks: {
+              label: "Barracks",
+              icon: "BK",
+              cost: 120,
+              buildTime: 16,
+              footprint: 7,
+              hp: 480,
+              produces: ["scout"],
+              prodTime: 4,
+              unitCost: { scout: 25 },
+              healRadius: 16,
+              healRate: 14,
+            },
+            warFactory: {
+              label: "War Factory",
+              icon: "WF",
+              cost: 200,
+              buildTime: 22,
+              footprint: 8,
+              hp: 560,
+              produces: ["tank", "artillery"],
+              prodTime: 6,
+              unitCost: { tank: 60, artillery: 90 },
+            },
+            turret: {
+              label: "Gun Turret",
+              icon: "TU",
+              cost: 85,
+              buildTime: 10,
+              footprint: 4.5,
+              hp: 300,
+              range: 34,
+              damage: 12,
+              fireRate: 1.05,
+              turnRate: 4.5,
+            },
+          },
+        },
+        // Wind turbines around each HQ — GLB from template-unreal-objects (energy income).
+        windmills: {
+          enabled: true,
+          modelPath: WINDMILL_DEFAULTS.modelPath,
+          count: 6,
+          ringRadius: 34,
+          behindOffset: 30,
+          arcSpread: 1.4,
+          scale: 0.72,
+          rotorSpeedDeg: 48,
+          rotorAxis: "z",
+          incomePerMill: 2,
+        },
+        // Strategic supply nodes — capture for bonus income.
+        nodes: {
+          enabled: true,
+          radius: 20,
+          captureTime: 5,
+          incomeBonus: 3, // supply/sec per held node
+          decayRate: 0.55, // capture progress lost per sec when contested
+          positions: [
+            { id: "center", x: 0, z: 0 },
+            { id: "west", x: -170, z: 190 },
+            { id: "east", x: 170, z: -190 },
+            { id: "north", x: -120, z: -320 },
+            { id: "south", x: 140, z: 320 },
+          ],
         },
         // Distance + height atmospheric fog (TSL fogNode — not fog of war).
         atmosphere: {
           height: {
-            enabled: true,
+            enabled: false,
             color: "#a8c4e0",
             density: 0.022,
             height: 42,
           },
           distance: {
-            enabled: true,
+            enabled: false,
             color: "#c8dce8",
             density: 0.0018,
           },
@@ -1421,9 +1658,10 @@
         // Navigation grid + pathfinding.
         nav: {
           cellSize: 3, // world units per grid cell
-          areaSize: 700, // square nav area centered on origin (≈ map size)
+          areaSize: 1400, // square nav area centered on origin (≈ map size)
           clearance: 1.8, // obstacle padding so units route around, not into
-          maxSlope: 0.32, // block cells steeper than this (1 − normal.y)
+          maxSlope: 0.28, // block standing on slopes steeper than this (1 − normal.y)
+          maxStepGrade: 0.42, // max height rise per meter along a path edge
           showGrid: false, // debug: paint blocked cells (rocks + cliffs)
         },
         // Same defaults as v2/editor (config.js light block).
@@ -1454,20 +1692,20 @@
         },
         csm: {
           cascades: 1,
-          maxFar: 900,
+          maxFar: 1600,
           lightMargin: 120,
           mapSize: 2048,
         },
         /** Card-pine forest (pine-forest-bench-core) — terrain-aligned, chunked LOD. */
         forest: {
-          enabled: true,
-          halfExtent: 280,
+          enabled: false,
+          halfExtent: 560,
           spacing: 10,
           jitter: 2.8,
           density: 0.9,
           treeScale: 1.45,
           treeScaleJitter: 0.12,
-          excludeBasePad: 42,
+          excludeBasePad: 84,
           excludeRockPad: 5,
           lod0Distance: 68,
           lod1Distance: 170,
@@ -1517,7 +1755,7 @@
       async function init() {
         const renderer = new THREE.WebGPURenderer({ antialias: true });
 
-        const stats = new Stats({ trackGPU: true });
+        const stats = new Stats({ trackGPU: false });
         await stats.init(renderer);
 
         await renderer.init();
@@ -1628,23 +1866,74 @@
           0.5,
           8000,
         );
-        camera.position.set(200, 220, 240);
-
         // RTS camera: OrbitControls, but LEFT/RIGHT mouse are freed for unit
         // selection + orders. Rotate is moved to the middle button; wheel
         // zooms; WASD/Arrows pan the focus point across the map.
         const controls = new OrbitControls(camera, renderer.domElement);
-        controls.target.set(0, 0, 0);
+        controls.target.set(0, PARAMS.camera.targetY, 0);
         controls.enableDamping = true;
-        controls.dampingFactor = 0.08;
-        controls.maxPolarAngle = Math.PI * 0.48;
-        controls.minDistance = 40;
-        controls.maxDistance = 780;
         controls.mouseButtons = {
           LEFT: null,
           MIDDLE: THREE.MOUSE.ROTATE,
           RIGHT: null,
         };
+        const _camOffset = new THREE.Vector3();
+        const _camSph = new THREE.Spherical();
+        const cam = { mode: "rts" };
+
+        function readCameraPose() {
+          _camOffset.subVectors(camera.position, controls.target);
+          _camSph.setFromVector3(_camOffset);
+          return {
+            distance: _camSph.radius,
+            polarDeg: THREE.MathUtils.radToDeg(_camSph.phi),
+            azimuthDeg: THREE.MathUtils.radToDeg(_camSph.theta),
+            targetY: controls.target.y,
+          };
+        }
+
+        function syncCameraFromParams() {
+          const C = PARAMS.camera;
+          controls.target.y = C.targetY;
+          _camOffset.setFromSphericalCoords(
+            C.distance,
+            THREE.MathUtils.degToRad(C.polarDeg),
+            THREE.MathUtils.degToRad(C.azimuthDeg),
+          );
+          camera.position.copy(controls.target).add(_camOffset);
+          controls.update();
+        }
+
+        function captureCameraToParams() {
+          const pose = readCameraPose();
+          const C = PARAMS.camera;
+          C.distance = Math.round(pose.distance * 10) / 10;
+          C.polarDeg = Math.round(pose.polarDeg * 10) / 10;
+          C.azimuthDeg = Math.round(pose.azimuthDeg * 10) / 10;
+          C.targetY = Math.round(pose.targetY * 100) / 100;
+        }
+
+        function applyCamModeConstraints() {
+          const C = PARAMS.camera;
+          controls.dampingFactor = C.damping;
+          controls.minDistance = C.minDistance;
+          controls.maxDistance = C.maxDistance;
+          if (cam.mode === "rts" && C.lockAngle) {
+            controls.enableRotate = false;
+            controls.enableZoom = C.zoomInRts;
+            const polar = THREE.MathUtils.degToRad(C.polarDeg);
+            const azimuth = THREE.MathUtils.degToRad(C.azimuthDeg);
+            controls.minPolarAngle = controls.maxPolarAngle = polar;
+            controls.minAzimuthAngle = controls.maxAzimuthAngle = azimuth;
+          } else {
+            controls.enableRotate = true;
+            controls.enableZoom = true;
+            controls.minPolarAngle = THREE.MathUtils.degToRad(C.minPolarDeg);
+            controls.maxPolarAngle = THREE.MathUtils.degToRad(C.maxPolarDeg);
+            controls.minAzimuthAngle = -Infinity;
+            controls.maxAzimuthAngle = Infinity;
+          }
+        }
 
         // ── LIGHTS ──
         const sunDir = new THREE.Vector3();
@@ -1655,9 +1944,9 @@
         sun.castShadow = true;
         sun.shadow.mapSize.set(PARAMS.csm.mapSize, PARAMS.csm.mapSize);
         sun.shadow.camera.near = 1;
-        sun.shadow.camera.far = 900;
-        sun.shadow.camera.left = sun.shadow.camera.bottom = -900;
-        sun.shadow.camera.right = sun.shadow.camera.top = 900;
+        sun.shadow.camera.far = 1600;
+        sun.shadow.camera.left = sun.shadow.camera.bottom = -1600;
+        sun.shadow.camera.right = sun.shadow.camera.top = 1600;
         const shadowTarget = new THREE.Object3D();
         scene.add(shadowTarget);
         sun.target = shadowTarget;
@@ -1763,7 +2052,14 @@
         const _fogFactor = clamp(_hFactor.add(_dFactor), 0, 1);
         const _fogW = _hFactor.add(_dFactor).add(0.0001);
         const _fogColor = mix(uHFogColor, uDFogColor, _dFactor.div(_fogW));
-        scene.fogNode = tslFog(_fogColor, _fogFactor);
+        const fowTexData = createRtsFogOfWarTexture();
+        const fowNodes = createRtsFogOfWarNodes(
+          fowTexData.tex,
+          PARAMS.nav.areaSize,
+          _fogColor,
+          _fogFactor,
+        );
+        scene.fogNode = tslFog(fowNodes.fogColor, fowNodes.combinedFactor);
         function syncAtmosphereFog() {
           uHFogEnabled.value = A.height.enabled ? 1 : 0;
           uHFogColor.value.set(A.height.color).convertSRGBToLinear();
@@ -1773,7 +2069,11 @@
           uDFogColor.value.set(A.distance.color).convertSRGBToLinear();
           uDFogDensity.value = A.distance.density;
         }
+        function syncFoWEnabled() {
+          fowNodes.uFoWEnabled.value = PARAMS.fog.enabled ? 1 : 0;
+        }
         syncAtmosphereFog();
+        syncFoWEnabled();
 
         // Flatten pads at HQ spawn zones (baked into terrain mesh).
         function syncFlattenPads() {
@@ -1786,7 +2086,7 @@
         }
         syncFlattenPads();
 
-        // ── GROUND (PBR grass / rock / snow via rts-terrain.js) ──
+        // ── GROUND (FBM hills + ramps, grass + cliff via rts-terrain.js) ──
         let rebuildTerrainInFlight = false;
         async function rebuildTerrain(full = true) {
           if (rebuildTerrainInFlight) return;
@@ -1931,16 +2231,18 @@
         const OBSTACLES = [];
         {
           const defs = [
-            { x: -90, z: 0, r: 8 },
-            { x: 90, z: -18, r: 7 },
-            { x: 0, z: 45, r: 9 },
-            { x: -36, z: -54, r: 6 },
-            { x: 54, z: 42, r: 6 },
-            { x: -126, z: 48, r: 7 },
-            { x: 126, z: 36, r: 8 },
-            { x: 30, z: -48, r: 5 },
-            { x: -70, z: 90, r: 6 },
-            { x: 80, z: -100, r: 7 },
+            { x: -180, z: 0, r: 8 },
+            { x: 180, z: -36, r: 7 },
+            { x: 0, z: 90, r: 9 },
+            { x: -72, z: -108, r: 6 },
+            { x: 108, z: 84, r: 6 },
+            { x: -252, z: 96, r: 7 },
+            { x: 252, z: 72, r: 8 },
+            { x: 60, z: -96, r: 5 },
+            { x: -140, z: 180, r: 6 },
+            { x: 160, z: -200, r: 7 },
+            { x: -320, z: -120, r: 8 },
+            { x: 280, z: 240, r: 7 },
           ];
           const rockMat = new THREE.MeshStandardMaterial({
             color: 0x6f6a63,
@@ -2228,6 +2530,592 @@
             attachBaseTurrets(BASE_DEFS[def.faction]);
           }
           registerBasePickables();
+          scheduleWindmillRebuild();
+        }
+
+        // ── BASE WINDMILLS (energy — GLB from objects/windmill.js) ─────────
+        const windmillsGroup = new THREE.Group();
+        windmillsGroup.name = "BaseWindmills";
+        scene.add(windmillsGroup);
+
+        function clearBaseWindmills() {
+          while (windmillsGroup.children.length) {
+            const c = windmillsGroup.children[0];
+            windmillsGroup.remove(c);
+            disposeWindmillGroup(c);
+          }
+        }
+
+        function windmillPointsForBase(faction) {
+          const W = PARAMS.windmills;
+          if (!W.enabled) return [];
+          const b = BASE_DEFS[faction];
+          if (!b || b.dead) return [];
+          const towardCenter = b.z > 0 ? -1 : 1;
+          const back = -towardCenter;
+          const count = Math.max(1, Math.round(W.count));
+          const points = [];
+          for (let i = 0; i < count; i++) {
+            const t = count === 1 ? 0 : i / (count - 1) - 0.5;
+            const angle = t * W.arcSpread;
+            const x = b.x + Math.sin(angle) * W.ringRadius;
+            const z =
+              b.z +
+              back * (W.behindOffset + Math.cos(angle) * W.ringRadius * 0.28);
+            points.push({ x, z });
+          }
+          return points;
+        }
+
+        function buildBaseWindmills() {
+          clearBaseWindmills();
+          const W = PARAMS.windmills;
+          if (!W.enabled || !isWindmillModelReady()) return;
+          for (const faction of ["player", "enemy"]) {
+            const points = windmillPointsForBase(faction);
+            if (!points.length) continue;
+            const g = buildWindmillMesh({
+              points,
+              params: {
+                scale: W.scale,
+                rotorSpeedDeg: W.rotorSpeedDeg,
+                rotorAxis: W.rotorAxis,
+                facePath: false,
+              },
+              getWorldHeight: terrainHeight,
+            });
+            if (!g) continue;
+            g.userData.faction = faction;
+            windmillsGroup.add(g);
+          }
+        }
+
+        let windmillRebuildPending = false;
+        function scheduleWindmillRebuild() {
+          windmillRebuildPending = true;
+          preloadWindmillModel(PARAMS.windmills.modelPath)
+            .then(() => {
+              if (!windmillRebuildPending) return;
+              windmillRebuildPending = false;
+              buildBaseWindmills();
+            })
+            .catch((err) => console.warn("RTS windmill GLB load failed:", err));
+        }
+
+        preloadWindmillModel(PARAMS.windmills.modelPath)
+          .then(() => buildBaseWindmills())
+          .catch((err) => console.warn("RTS windmill GLB preload:", err));
+
+        function playerWindmillIncome() {
+          const W = PARAMS.windmills;
+          const base = BASE_DEFS.player;
+          if (!W.enabled || !base || base.dead || game.over) return 0;
+          return Math.max(0, Math.round(W.count)) * W.incomePerMill;
+        }
+
+        function formatIncomeRate(rate, nodeBonus, windBonus) {
+          const parts = [];
+          if (nodeBonus > 0) parts.push(`+${nodeBonus} nodes`);
+          if (windBonus > 0) parts.push(`+${windBonus} energy`);
+          return parts.length ? `+${rate} / sec (${parts.join(" · ")})` : `+${rate} / sec`;
+        }
+
+        // ── PLAYER STRUCTURES (bulldozer-built) ─────────────────────────────
+        const STRUCTURES = [];
+        const STRUCTURE_FOOTPRINTS = [];
+        const structurePickBodies = [];
+        const structuresGroup = new THREE.Group();
+        structuresGroup.name = "Structures";
+        scene.add(structuresGroup);
+        let structureIdSeq = 1;
+        let activeStructure = null;
+        let placementMode = null; // { buildingType } | null
+        const placementGhost = new THREE.Group();
+        placementGhost.visible = false;
+        scene.add(placementGhost);
+
+        function buildingDef(type) {
+          return PARAMS.buildings.types[type];
+        }
+
+        function buildBarracksMesh(faction) {
+          const { accent, trim } = baseTurretColors(faction);
+          const g = new THREE.Group();
+          const padMat = new THREE.MeshStandardMaterial({
+            color: 0x5a5a52,
+            roughness: 0.9,
+            metalness: 0.05,
+          });
+          const wallMat = new THREE.MeshStandardMaterial({
+            color: accent,
+            roughness: 0.78,
+            metalness: 0.12,
+          });
+          const trimMat = new THREE.MeshStandardMaterial({
+            color: trim,
+            roughness: 0.7,
+            metalness: 0.15,
+          });
+          const add = (mesh, x, y, z) => {
+            mesh.position.set(x, y, z);
+            mesh.castShadow = true;
+            mesh.receiveShadow = true;
+            g.add(mesh);
+          };
+          add(new THREE.Mesh(new THREE.BoxGeometry(8, 0.35, 6), padMat), 0, 0.18, 0);
+          add(new THREE.Mesh(new THREE.BoxGeometry(6.5, 2.4, 4.5), wallMat), 0, 1.45, -0.4);
+          add(new THREE.Mesh(new THREE.BoxGeometry(6.8, 0.3, 4.8), trimMat), 0, 2.72, -0.4);
+          add(new THREE.Mesh(new THREE.BoxGeometry(2.2, 1.6, 2.0), wallMat), 2.2, 1.1, 1.6);
+          add(new THREE.Mesh(new THREE.CylinderGeometry(0.08, 0.08, 3.2, 6), trimMat), 3.0, 2.8, 1.6);
+          return g;
+        }
+
+        function buildWarFactoryMesh(faction) {
+          const { accent, trim } = baseTurretColors(faction);
+          const g = new THREE.Group();
+          const padMat = new THREE.MeshStandardMaterial({
+            color: 0x555550,
+            roughness: 0.92,
+            metalness: 0.06,
+          });
+          const wallMat = new THREE.MeshStandardMaterial({
+            color: accent,
+            roughness: 0.8,
+            metalness: 0.14,
+          });
+          const trimMat = new THREE.MeshStandardMaterial({
+            color: trim,
+            roughness: 0.72,
+            metalness: 0.16,
+          });
+          const add = (mesh, x, y, z) => {
+            mesh.position.set(x, y, z);
+            mesh.castShadow = true;
+            mesh.receiveShadow = true;
+            g.add(mesh);
+          };
+          add(new THREE.Mesh(new THREE.BoxGeometry(10, 0.4, 8), padMat), 0, 0.2, 0);
+          add(new THREE.Mesh(new THREE.BoxGeometry(8.5, 3.2, 6.5), wallMat), 0, 1.8, 0);
+          add(new THREE.Mesh(new THREE.BoxGeometry(8.8, 0.35, 6.8), trimMat), 0, 3.48, 0);
+          add(new THREE.Mesh(new THREE.BoxGeometry(2.4, 2.8, 2.4), wallMat), -3.2, 1.6, 2.8);
+          add(new THREE.Mesh(new THREE.CylinderGeometry(0.35, 0.45, 2.2, 8), trimMat), 3.6, 2.5, -2.2);
+          return g;
+        }
+
+        function buildStructureMesh(faction, buildingType) {
+          if (buildingType === "barracks") {
+            return { group: buildBarracksMesh(faction), turretHead: null };
+          }
+          if (buildingType === "warFactory") {
+            return { group: buildWarFactoryMesh(faction), turretHead: null };
+          }
+          const { accent, trim } = baseTurretColors(faction);
+          const tg = buildTurretMesh(accent, trim);
+          return { group: tg, turretHead: tg.userData.head };
+        }
+
+        function registerStructurePickables() {
+          structurePickBodies.length = 0;
+          for (const s of STRUCTURES) {
+            if (s.dead || !s.group) continue;
+            s.group.traverse((o) => {
+              if (o.isMesh) {
+                o.userData.structure = s;
+                structurePickBodies.push(o);
+              }
+            });
+          }
+        }
+
+        function syncStructureFootprints() {
+          STRUCTURE_FOOTPRINTS.length = 0;
+          for (const s of STRUCTURES) {
+            if (s.dead) continue;
+            const B = buildingDef(s.buildingType);
+            STRUCTURE_FOOTPRINTS.push({
+              x: s.x,
+              z: s.z,
+              r: B?.footprint ?? 6,
+            });
+          }
+        }
+
+        function canPlaceBuilding(x, z, buildingType) {
+          const B = buildingDef(buildingType);
+          if (!B) return false;
+          const half = PARAMS.ground.size * 0.5 - B.footprint - 4;
+          if (Math.abs(x) > half || Math.abs(z) > half) return false;
+          if (!canStandAt(x, z)) return false;
+          const minGap = PARAMS.buildings.minSpacing + B.footprint;
+          for (const s of STRUCTURES) {
+            if (s.dead) continue;
+            const dx = x - s.x;
+            const dz = z - s.z;
+            const otherR =
+              (buildingDef(s.buildingType)?.footprint ?? 6) + B.footprint;
+            if (dx * dx + dz * dz < otherR * otherR) return false;
+          }
+          for (const b of BASE_FOOTPRINTS) {
+            const dx = x - b.x;
+            const dz = z - b.z;
+            if (dx * dx + dz * dz < (b.r + B.footprint + 4) ** 2) return false;
+          }
+          for (const o of OBSTACLES) {
+            const dx = x - o.x;
+            const dz = z - o.z;
+            if (dx * dx + dz * dz < (o.r + B.footprint + 2) ** 2) return false;
+          }
+          const c = worldToCell(x, z);
+          if (!inBounds(c.c, c.r) || isBlockedCell(c.c, c.r)) return false;
+          return true;
+        }
+
+        function clearPlacementGhost() {
+          while (placementGhost.children.length) {
+            const c = placementGhost.children[0];
+            placementGhost.remove(c);
+            c.traverse((o) => {
+              if (o.isMesh) {
+                o.geometry?.dispose?.();
+                o.material?.dispose?.();
+              }
+            });
+          }
+        }
+
+        function updatePlacementGhost(x, z) {
+          if (!placementMode) {
+            placementGhost.visible = false;
+            return;
+          }
+          const ok = canPlaceBuilding(x, z, placementMode.buildingType);
+          clearPlacementGhost();
+          const B = buildingDef(placementMode.buildingType);
+          const { group } = buildStructureMesh("player", placementMode.buildingType);
+          group.traverse((o) => {
+            if (o.isMesh) {
+              o.material = o.material.clone();
+              o.material.transparent = true;
+              o.material.opacity = ok ? 0.55 : 0.35;
+              if (!ok) o.material.color = new THREE.Color(0xff4444);
+            }
+          });
+          placementGhost.add(group);
+          const y = terrainHeight(x, z);
+          placementGhost.position.set(x, y, z);
+          placementGhost.visible = true;
+          document.body.classList.toggle("placement-mode", true);
+        }
+
+        function cancelPlacementMode() {
+          placementMode = null;
+          placementGhost.visible = false;
+          clearPlacementGhost();
+          document.body.classList.remove("placement-mode");
+        }
+
+        function startPlacementMode(buildingType) {
+          if (game.over) return;
+          const B = buildingDef(buildingType);
+          if (!B) return;
+          if (requisition.supply < B.cost) {
+            showToast(`Need ${B.cost} supply`);
+            return;
+          }
+          placementMode = { buildingType };
+          closeReqPanel();
+          closeStructPanel();
+          showToast(`Place ${B.label} — click ground · Esc cancel`);
+        }
+
+        function createStructure(faction, buildingType, x, z) {
+          const B = buildingDef(buildingType);
+          const { group, turretHead } = buildStructureMesh(faction, buildingType);
+          const y = terrainHeight(x, z);
+          group.position.set(x, y, z);
+          structuresGroup.add(group);
+          const s = {
+            id: structureIdSeq++,
+            kind: "structure",
+            buildingType,
+            faction,
+            x,
+            z,
+            pos: new THREE.Vector3(x, y, z),
+            group,
+            bar: makeHealthBar(faction, 3.6),
+            hp: B.hp,
+            maxHp: B.hp,
+            dead: false,
+            queue: [],
+            spawnSlot: 0,
+            turretHead,
+            turretCooldown: 0,
+          };
+          STRUCTURES.push(s);
+          syncStructureFootprints();
+          buildNavGrid();
+          buildGridDebug();
+          registerStructurePickables();
+          return s;
+        }
+
+        function killStructure(s) {
+          if (!s || s.dead) return;
+          s.dead = true;
+          s.hp = 0;
+          structuresGroup.remove(s.group);
+          s.group.traverse((o) => {
+            if (o.isMesh) {
+              o.geometry?.dispose?.();
+              o.material?.dispose?.();
+            }
+          });
+          if (s.bar) {
+            barsGroup.remove(s.bar);
+            s.bar = null;
+          }
+          if (activeStructure === s) closeStructPanel();
+          syncStructureFootprints();
+          buildNavGrid();
+          buildGridDebug();
+          registerStructurePickables();
+          spawnImpact(s.x, s.pos.y + 2, s.z, {
+            impactSize: 2.2,
+            impactLife: 0.5,
+            impactColor: 0xff6622,
+          });
+        }
+
+        function clearStructures() {
+          for (const s of STRUCTURES) {
+            if (!s.dead) {
+              structuresGroup.remove(s.group);
+              if (s.bar) barsGroup.remove(s.bar);
+            }
+          }
+          STRUCTURES.length = 0;
+          STRUCTURE_FOOTPRINTS.length = 0;
+          structurePickBodies.length = 0;
+          activeStructure = null;
+          cancelPlacementMode();
+          closeStructPanel();
+        }
+
+        function structureSpawnPos(s) {
+          const slot = s.spawnSlot % 5;
+          s.spawnSlot++;
+          const lateral = (slot - 2) * 5.5;
+          const toward = s.z > 0 ? -1 : 1;
+          return {
+            x: s.x + lateral,
+            z: s.z + toward * (buildingDef(s.buildingType).footprint + 4),
+          };
+        }
+
+        function deliverStructureProduction(s, job) {
+          const pos = structureSpawnPos(s);
+          spawnUnit(pos.x, pos.z, s.faction, job.type, s.z > 0 ? Math.PI : 0);
+          if (s.faction === "player") {
+            showToast(`${UNIT_TYPES[job.type].label} ready`);
+            sfx.play("spawn");
+          }
+        }
+
+        function orderFromStructure(s, type, batch = 1) {
+          if (!s || s.dead || s.faction !== "player" || game.over) return;
+          const B = buildingDef(s.buildingType);
+          if (!B?.produces?.includes(type)) return;
+          const cost = B.unitCost[type] ?? PARAMS.requisition.cost[type] ?? 0;
+          const R = PARAMS.requisition;
+          let queued = 0;
+          for (let i = 0; i < batch; i++) {
+            if (s.queue.length >= PARAMS.buildings.maxQueue) break;
+            if (requisition.supply < cost) break;
+            requisition.supply -= cost;
+            s.queue.push({ type, timeLeft: B.prodTime });
+            queued++;
+          }
+          if (queued) {
+            sfx.play("queue");
+            refreshStructUI();
+            updateSupplyHud();
+          }
+        }
+
+        function updateStructureProduction(dt) {
+          for (const s of STRUCTURES) {
+            if (s.dead || !s.queue?.length) continue;
+            const B = buildingDef(s.buildingType);
+            if (!B?.produces) continue;
+            const job = s.queue[0];
+            job.timeLeft -= dt;
+            if (job.timeLeft <= 0) {
+              s.queue.shift();
+              deliverStructureProduction(s, job);
+            }
+          }
+          if (activeStructure && !activeStructure.dead) refreshStructUI();
+        }
+
+        function updateBarracksHeal(dt) {
+          for (const s of STRUCTURES) {
+            if (s.dead || s.buildingType !== "barracks") continue;
+            const B = buildingDef("barracks");
+            const r2 = B.healRadius * B.healRadius;
+            for (const u of units) {
+              if (u.dead || u.faction !== s.faction) continue;
+              const dx = u.pos.x - s.x;
+              const dz = u.pos.z - s.z;
+              if (dx * dx + dz * dz > r2) continue;
+              if (u.hp >= u.maxHp) continue;
+              u.hp = Math.min(u.maxHp, u.hp + B.healRate * dt);
+            }
+          }
+        }
+
+        function turretStatsForStructure(s) {
+          const T0 = buildingDef("turret");
+          return {
+            range: T0.range,
+            damage: T0.damage,
+            fireRate: T0.fireRate,
+            turnRate: T0.turnRate,
+          };
+        }
+
+        function updateStructureTurrets(dt) {
+          if (game.over) return;
+          for (const s of STRUCTURES) {
+            if (s.dead || s.buildingType !== "turret" || !s.turretHead) continue;
+            const T = turretStatsForStructure(s);
+            const rangeSq = T.range * T.range;
+            s.turretCooldown -= dt;
+            _turretFrom.set(s.x, s.pos.y + 1.05, s.z);
+            let best = null;
+            let bestD = rangeSq;
+            for (const u of units) {
+              if (u.dead || u.faction === s.faction) continue;
+              if (!canFactionSee(s.faction, u.pos.x, u.pos.z)) continue;
+              const dx = u.pos.x - s.x;
+              const dz = u.pos.z - s.z;
+              const d2 = dx * dx + dz * dz;
+              if (d2 <= bestD) {
+                bestD = d2;
+                best = u;
+              }
+            }
+            if (!best) continue;
+            _turretTo.set(best.pos.x, best.pos.y + 1.05, best.pos.z);
+            _turretLocal.set(_turretTo.x - s.x, 0, _turretTo.z - s.z);
+            const targetYaw = Math.atan2(_turretLocal.x, _turretLocal.z);
+            let diff = targetYaw - s.turretHead.rotation.y;
+            while (diff > Math.PI) diff -= 2 * Math.PI;
+            while (diff < -Math.PI) diff += 2 * Math.PI;
+            const maxTurn = T.turnRate * dt;
+            s.turretHead.rotation.y +=
+              Math.sign(diff) * Math.min(Math.abs(diff), maxTurn);
+            if (Math.abs(diff) > 0.28 || s.turretCooldown > 0) continue;
+            s.turretCooldown = 1 / T.fireRate;
+            spawnTracer(_turretFrom, _turretTo, TURRET_SHOT);
+            applyDamage(
+              best,
+              T.damage,
+              TURRET_SHOT,
+              best.pos.x,
+              best.pos.y + 1,
+              best.pos.z,
+            );
+            sfx.play("turret");
+          }
+        }
+
+        function updateStructures(dt) {
+          for (const s of STRUCTURES) {
+            if (s.dead || !s.bar) continue;
+            s.pos.y = terrainHeight(s.x, s.z);
+            s.group.position.y = s.pos.y;
+            const show =
+              s === activeStructure || s.hp < s.maxHp;
+            s.bar.visible = show;
+            if (show) {
+              s.bar.position.set(s.x, s.pos.y + 4.8, s.z);
+              s.bar.lookAt(camera.position);
+              const w = s.bar.userData.barW ?? 3.6;
+              s.bar.userData.fill.scale.x = Math.max(
+                0.0001,
+                w * Math.max(0, s.hp / s.maxHp),
+              );
+            }
+          }
+        }
+
+        function issueBuild(buildingType, x, z) {
+          const B = buildingDef(buildingType);
+          if (!B || !canPlaceBuilding(x, z, buildingType)) {
+            showToast("Cannot build here");
+            return;
+          }
+          const bulldozers = units.filter(
+            (u) =>
+              u.selected &&
+              !u.dead &&
+              u.faction === "player" &&
+              u.type === "bulldozer" &&
+              !u.buildJob,
+          );
+          if (!bulldozers.length) {
+            showToast("Select a free bulldozer");
+            return;
+          }
+          if (requisition.supply < B.cost) {
+            showToast(`Need ${B.cost} supply`);
+            return;
+          }
+          requisition.supply -= B.cost;
+          updateSupplyHud();
+          cancelPlacementMode();
+          const job = {
+            buildingType,
+            x,
+            z,
+            progress: 0,
+            totalTime: B.buildTime,
+          };
+          const u = bulldozers[0];
+          u.buildJob = job;
+          u.path = astar(u.pos.x, u.pos.z, x, z);
+          u.attackMove = false;
+          u.attackBase = false;
+          showToast(`${B.label} construction started`);
+          sfx.play("queue");
+        }
+
+        function updateBulldozerBuild(dt) {
+          const range = PARAMS.buildings.buildRange;
+          for (const u of units) {
+            if (u.dead || u.type !== "bulldozer" || !u.buildJob) continue;
+            const job = u.buildJob;
+            const dx = job.x - u.pos.x;
+            const dz = job.z - u.pos.z;
+            const dist = Math.hypot(dx, dz);
+            if (dist > range) {
+              if (!u.path) {
+                u.path = astar(u.pos.x, u.pos.z, job.x, job.z);
+              }
+              continue;
+            }
+            u.path = null;
+            u.wantHeading = Math.atan2(dx, dz);
+            job.progress += dt;
+            if (job.progress >= job.totalTime) {
+              createStructure("player", job.buildingType, job.x, job.z);
+              u.buildJob = null;
+              refreshBuildButtons();
+              showToast(`${buildingDef(job.buildingType).label} complete`);
+              sfx.play("spawn");
+            }
+          }
         }
 
         // Uniform grid. grid[r*cols+c] = 1 (blocked) | 0 (walkable).
@@ -2275,6 +3163,17 @@
                   }
                 }
               }
+              if (!blocked) {
+                for (const b of STRUCTURE_FOOTPRINTS) {
+                  const dx = wx - b.x;
+                  const dz = wz - b.z;
+                  const rr = b.r + clr;
+                  if (dx * dx + dz * dz < rr * rr) {
+                    blocked = 1;
+                    break;
+                  }
+                }
+              }
               // Cliff faces — units cannot walk steep rock slopes.
               if (!blocked && terrainSlope(wx, wz) > maxSlope) blocked = 1;
               nav.grid[r * nav.cols + c] = blocked;
@@ -2293,28 +3192,9 @@
           visible: null,
           enemyVisible: null,
         };
-        const enemyBrain = { phase: "probe" }; // probe → commit after enemy intel
-        const FOG_TEX_RES = 160;
-        const fogCanvas = document.createElement("canvas");
-        fogCanvas.width = fogCanvas.height = FOG_TEX_RES;
-        const fogCtx = fogCanvas.getContext("2d");
-        const fogTex = new THREE.CanvasTexture(fogCanvas);
-        fogTex.minFilter = THREE.LinearFilter;
-        fogTex.magFilter = THREE.LinearFilter;
-        const fogPlane = new THREE.Mesh(
-          new THREE.PlaneGeometry(PARAMS.ground.size, PARAMS.ground.size),
-          new THREE.MeshBasicMaterial({
-            map: fogTex,
-            transparent: true,
-            depthWrite: false,
-            depthTest: false,
-          }),
-        );
-        fogPlane.rotation.x = -Math.PI / 2;
-        fogPlane.position.y = 96;
-        fogPlane.renderOrder = 20;
-        fogPlane.frustumCulled = false;
-        scene.add(fogPlane);
+        // knownPlayer = enemy has spotted you (fog vision). Until assault is allowed,
+        // AI contests supply nodes in squads instead of feeding scouts down the middle.
+        const enemyBrain = { knownPlayer: false };
 
         function buildFogGrid() {
           const cs = PARAMS.fog.cellSize;
@@ -2398,7 +3278,7 @@
           fog.explored.fill(0);
           fog.visible.fill(0);
           fog.enemyVisible.fill(0);
-          enemyBrain.phase = "probe";
+          enemyBrain.knownPlayer = false;
           const pb = BASE_DEFS.player;
           const eb = BASE_DEFS.enemy;
           const F = PARAMS.fog;
@@ -2427,44 +3307,24 @@
 
         function updateFogTexture() {
           const F = PARAMS.fog;
-          const img = fogCtx.createImageData(FOG_TEX_RES, FOG_TEX_RES);
-          const data = img.data;
-          const half = PARAMS.ground.size * 0.5;
-          for (let py = 0; py < FOG_TEX_RES; py++) {
-            const wz = (py / FOG_TEX_RES) * PARAMS.ground.size - half;
-            for (let px = 0; px < FOG_TEX_RES; px++) {
-              const wx = (px / FOG_TEX_RES) * PARAMS.ground.size - half;
-              const { c, r } = worldToFogCell(wx, wz);
-              let a = 0;
-              let rgb = 0;
-              if (c >= 0 && r >= 0 && c < fog.cols && r < fog.rows) {
-                const i = fogIdx(c, r);
-                if (fog.visible[i]) {
-                  a = 0;
-                } else if (fog.explored[i]) {
-                  a = Math.round(F.shroudAlpha * 255);
-                  rgb = 18;
-                } else {
-                  a = Math.round(F.fogAlpha * 255);
-                  rgb = 0;
-                }
-              } else {
-                a = Math.round(F.fogAlpha * 255);
-              }
-              const p = (py * FOG_TEX_RES + px) * 4;
-              data[p] = rgb;
-              data[p + 1] = rgb;
-              data[p + 2] = rgb + 6;
-              data[p + 3] = a;
-            }
-          }
-          fogCtx.putImageData(img, 0, 0);
-          fogTex.needsUpdate = true;
+          updateRtsFogOfWarTexture(
+            fowTexData.ctx,
+            fowTexData.tex,
+            fowTexData.minimapCtx,
+            {
+            fog,
+            mapSize: PARAMS.nav.areaSize,
+            shroudAlpha: F.shroudAlpha,
+            fogAlpha: F.fogAlpha,
+            worldToFogCell,
+            fogIdx,
+            },
+          );
         }
 
         function updateFogEntityVisibility() {
+          syncFoWEnabled();
           if (!PARAMS.fog.enabled) {
-            fogPlane.visible = false;
             for (const u of units) {
               if (!u.dead) {
                 u.group.visible = true;
@@ -2480,7 +3340,6 @@
             }
             return;
           }
-          fogPlane.visible = true;
           for (const u of units) {
             if (u.dead) continue;
             if (u.faction === "player") {
@@ -2507,21 +3366,38 @@
           }
         }
 
+        function enemyHasContact() {
+          return enemyBrain.knownPlayer || !PARAMS.fog.enabled;
+        }
+
+        function enemyNodesHeld() {
+          return CAPTURE_NODES.filter((n) => n.owner === "enemy").length;
+        }
+
+        /** Push player HQ only after map control or confirmed contact. */
+        function shouldAssaultHQ() {
+          if (!PARAMS.ai.objectives) return enemyHasContact();
+          if (enemyNodesHeld() >= 2) return true;
+          if (enemyHasContact() && enemyNodesHeld() >= 1) return true;
+          if (enemyHasContact() && !PARAMS.nodes.enabled) return true;
+          return false;
+        }
+
         function updateEnemyIntel() {
           if (!PARAMS.fog.enabled) {
-            enemyBrain.phase = "commit";
+            enemyBrain.knownPlayer = true;
             return;
           }
-          if (enemyBrain.phase === "commit") return;
+          if (enemyBrain.knownPlayer) return;
           const pb = BASE_DEFS.player;
           if (pb && !pb.dead && visibleToEnemy(pb.x, pb.z)) {
-            enemyBrain.phase = "commit";
+            enemyBrain.knownPlayer = true;
             return;
           }
           for (const u of units) {
             if (u.dead || u.faction !== "player") continue;
             if (visibleToEnemy(u.pos.x, u.pos.z)) {
-              enemyBrain.phase = "commit";
+              enemyBrain.knownPlayer = true;
               return;
             }
           }
@@ -2530,7 +3406,7 @@
         function updateFog() {
           if (!fog.explored) buildFogGrid();
           if (!PARAMS.fog.enabled) {
-            updateFogEntityVisibility();
+            syncFoWEnabled();
             return;
           }
           fog.visible.fill(0);
@@ -2579,6 +3455,33 @@
           x: nav.minX + (c + 0.5) * nav.cell,
           z: nav.minZ + (r + 0.5) * nav.cell,
         });
+
+        function walkGrade(x1, z1, x2, z2) {
+          const dist = Math.hypot(x2 - x1, z2 - z1);
+          if (dist < 1e-4) return 0;
+          return Math.abs(terrainHeight(x2, z2) - terrainHeight(x1, z1)) / dist;
+        }
+
+        function canStandAt(x, z) {
+          return terrainSlope(x, z) <= PARAMS.nav.maxSlope;
+        }
+
+        function canTraverseEdge(c1, r1, c2, r2) {
+          const a = cellCenter(c1, r1);
+          const b = cellCenter(c2, r2);
+          if (walkGrade(a.x, a.z, b.x, b.z) > PARAMS.nav.maxStepGrade) {
+            return false;
+          }
+          return canStandAt(b.x, b.z);
+        }
+
+        function canMoveTo(fromX, fromZ, toX, toZ) {
+          if (!canStandAt(toX, toZ)) return false;
+          if (walkGrade(fromX, fromZ, toX, toZ) > PARAMS.nav.maxStepGrade) {
+            return false;
+          }
+          return true;
+        }
         // Spiral out to the closest walkable cell (for goals dropped on a rock).
         function nearestFree(c, r) {
           if (!isBlockedCell(c, r)) return { c, r };
@@ -2601,6 +3504,8 @@
           let dy = Math.abs(r1 - r0);
           let x = c0;
           let y = r0;
+          let px = c0;
+          let py = r0;
           let n = 1 + dx + dy;
           const xi = c1 > c0 ? 1 : -1;
           const yi = r1 > r0 ? 1 : -1;
@@ -2609,6 +3514,11 @@
           dy *= 2;
           for (; n > 0; n--) {
             if (isBlockedCell(x, y)) return false;
+            if (x !== px || y !== py) {
+              if (!canTraverseEdge(px, py, x, y)) return false;
+              px = x;
+              py = y;
+            }
             if (err > 0) {
               x += xi;
               err -= dy;
@@ -2708,6 +3618,7 @@
               const nc = cc + dc;
               const nr = cr + dr;
               if (isBlockedCell(nc, nr)) continue;
+              if (!canTraverseEdge(cc, cr, nc, nr)) continue;
               // No corner-cutting through a blocked orthogonal neighbor.
               if (dc !== 0 && dr !== 0) {
                 if (isBlockedCell(cc + dc, cr) || isBlockedCell(cc, cr + dr))
@@ -2762,6 +3673,263 @@
         }
         buildBases();
         buildNavGrid();
+
+        // ── CAPTURE POINTS (supply nodes) ─────────────────────────────────
+        const NODE_COLORS = {
+          neutral: 0x8a8a80,
+          player: 0x4a9e6a,
+          enemy: 0xc04838,
+        };
+        const CAPTURE_NODES = [];
+        const nodesGroup = new THREE.Group();
+        nodesGroup.name = "CaptureNodes";
+        scene.add(nodesGroup);
+        const _nodeNormal = new THREE.Vector3();
+        const _nodeUp = new THREE.Vector3(0, 1, 0);
+        const _tmpColA = new THREE.Color();
+        const _tmpColB = new THREE.Color();
+
+        function makeNodeSurfaceMaterial(color, opacity) {
+          return new THREE.MeshBasicMaterial({
+            color,
+            transparent: true,
+            opacity,
+            depthWrite: false,
+            depthTest: true,
+            polygonOffset: true,
+            polygonOffsetFactor: -2,
+            polygonOffsetUnits: -4,
+            side: THREE.DoubleSide,
+          });
+        }
+
+        function nodeColorForOwner(owner) {
+          return NODE_COLORS[owner] ?? NODE_COLORS.neutral;
+        }
+
+        function placeNodeGroup(group, x, z) {
+          const y = terrainHeight(x, z);
+          group.position.set(x, y + PARAMS.rings.offset, z);
+          terrainNormal(x, z, _nodeNormal);
+          group.quaternion.setFromUnitVectors(_nodeUp, _nodeNormal);
+        }
+
+        function createCaptureNodeVisual(node) {
+          const R = PARAMS.nodes.radius;
+          const inner = R * 0.72;
+          const group = new THREE.Group();
+
+          const padGeo = new THREE.CircleGeometry(inner, 48);
+          padGeo.rotateX(-Math.PI / 2);
+          const pad = new THREE.Mesh(
+            padGeo,
+            makeNodeSurfaceMaterial(NODE_COLORS.neutral, 0.58),
+          );
+          pad.renderOrder = 2;
+
+          const rimGeo = new THREE.RingGeometry(inner * 0.94, R, 48);
+          rimGeo.rotateX(-Math.PI / 2);
+          const rim = new THREE.Mesh(
+            rimGeo,
+            makeNodeSurfaceMaterial(0xd8dde8, 0.42),
+          );
+          rim.renderOrder = 3;
+
+          const progGeo = new THREE.RingGeometry(inner * 0.55, inner * 0.9, 48);
+          progGeo.rotateX(-Math.PI / 2);
+          const prog = new THREE.Mesh(
+            progGeo,
+            makeNodeSurfaceMaterial(NODE_COLORS.player, 0.75),
+          );
+          prog.visible = false;
+          prog.renderOrder = 4;
+
+          const beacon = new THREE.Mesh(
+            new THREE.CylinderGeometry(0.75, 1.0, 2.6, 8),
+            new THREE.MeshStandardMaterial({
+              color: NODE_COLORS.neutral,
+              roughness: 0.82,
+              metalness: 0.06,
+            }),
+          );
+          beacon.position.y = 1.35;
+          beacon.castShadow = true;
+          beacon.receiveShadow = true;
+
+          group.add(pad, rim, prog, beacon);
+          placeNodeGroup(group, node.x, node.z);
+          nodesGroup.add(group);
+          return { group, pad, rim, prog, beacon };
+        }
+
+        function buildCaptureNodes() {
+          while (nodesGroup.children.length) {
+            const c = nodesGroup.children[0];
+            nodesGroup.remove(c);
+            c.traverse((o) => {
+              if (o.isMesh) {
+                o.geometry?.dispose?.();
+                o.material?.dispose?.();
+              }
+            });
+          }
+          CAPTURE_NODES.length = 0;
+          if (!PARAMS.nodes.enabled) return;
+          for (const spec of PARAMS.nodes.positions) {
+            const node = {
+              id: spec.id,
+              x: spec.x,
+              z: spec.z,
+              radius: PARAMS.nodes.radius,
+              owner: "neutral",
+              captureProgress: 0,
+              capturingFaction: null,
+            };
+            const vis = createCaptureNodeVisual(node);
+            Object.assign(node, vis);
+            CAPTURE_NODES.push(node);
+            updateNodeVisual(node);
+          }
+        }
+
+        function updateNodeVisual(node) {
+          const c = nodeColorForOwner(node.owner);
+          node.pad.material.color.setHex(c);
+          node.beacon.material.color.setHex(c);
+          if (node.captureProgress <= 0.001) {
+            node.prog.visible = false;
+          }
+        }
+
+        function resetCaptureNodes() {
+          for (const node of CAPTURE_NODES) {
+            node.owner = "neutral";
+            node.captureProgress = 0;
+            node.capturingFaction = null;
+            updateNodeVisual(node);
+          }
+        }
+
+        function factionNodeIncome(faction) {
+          if (!PARAMS.nodes.enabled) return 0;
+          let n = 0;
+          for (const node of CAPTURE_NODES) {
+            if (node.owner === faction) n++;
+          }
+          return n * PARAMS.nodes.incomeBonus;
+        }
+
+        function countUnitsInNode(node, faction, pad = 1) {
+          const r2 = node.radius * node.radius * pad * pad;
+          let n = 0;
+          for (const u of units) {
+            if (u.dead || u.faction !== faction) continue;
+            const dx = u.pos.x - node.x;
+            const dz = u.pos.z - node.z;
+            if (dx * dx + dz * dz <= r2) n++;
+          }
+          return n;
+        }
+
+        function updateCaptureNodes(dt) {
+          if (!PARAMS.nodes.enabled || game.over) return;
+          const N = PARAMS.nodes;
+          for (const node of CAPTURE_NODES) {
+            const pc = countUnitsInNode(node, "player");
+            const ec = countUnitsInNode(node, "enemy");
+            const contested = pc > 0 && ec > 0;
+            let toward = null;
+            let push = 0;
+
+            if (!contested) {
+              if (pc > 0 && node.owner !== "player") {
+                toward = "player";
+                push = pc;
+              } else if (ec > 0 && node.owner !== "enemy") {
+                toward = "enemy";
+                push = ec;
+              }
+            }
+
+            if (contested) {
+              node.captureProgress = Math.max(
+                0,
+                node.captureProgress - N.decayRate * dt,
+              );
+              if (node.captureProgress <= 0) node.capturingFaction = null;
+            } else if (push > 0) {
+              const rate =
+                (Math.min(push, 3) / 3) * (dt / Math.max(0.5, N.captureTime));
+              if (
+                !node.capturingFaction ||
+                node.capturingFaction === toward ||
+                node.captureProgress <= 0
+              ) {
+                node.capturingFaction = toward;
+                node.captureProgress += rate;
+              } else {
+                node.captureProgress -= rate * 1.35;
+                if (node.captureProgress <= 0) {
+                  node.captureProgress = 0;
+                  node.capturingFaction = toward;
+                }
+              }
+
+              if (node.captureProgress >= 1) {
+                const prev = node.owner;
+                node.owner = toward;
+                node.captureProgress = 0;
+                node.capturingFaction = null;
+                updateNodeVisual(node);
+                if (prev !== toward) {
+                  if (toward === "player") {
+                    sfx.play("ready");
+                    showToast(
+                      `Supply node captured (+${N.incomeBonus}/s)`,
+                    );
+                  } else if (toward === "enemy") {
+                    showToast("Enemy captured a supply node");
+                  }
+                }
+              }
+            }
+
+            if (node.captureProgress > 0 && node.capturingFaction) {
+              const from = nodeColorForOwner(node.owner);
+              const to = nodeColorForOwner(node.capturingFaction);
+              _tmpColA.setHex(from);
+              _tmpColB.setHex(to);
+              node.pad.material.color.copy(_tmpColA).lerp(_tmpColB, node.captureProgress);
+              node.beacon.material.color.copy(_tmpColA).lerp(_tmpColB, node.captureProgress);
+              node.prog.visible = true;
+              node.prog.material.color.setHex(to);
+              node.prog.material.opacity =
+                0.35 + node.captureProgress * 0.55;
+            } else {
+              updateNodeVisual(node);
+            }
+          }
+        }
+
+        function nodeContestedByPlayer(node) {
+          return countUnitsInNode(node, "player", 1.15) > 0;
+        }
+
+        function scoreNodeForEnemy(node) {
+          let score = 0;
+          if (node.owner === "player") score += 92;
+          else if (node.owner === "neutral") score += 58;
+          else if (node.owner === "enemy" && nodeContestedByPlayer(node)) {
+            score += 78;
+          }
+          const home = BASE_DEFS.enemy;
+          if (home) {
+            score -= Math.hypot(node.x - home.x, node.z - home.z) * 0.055;
+          }
+          return score;
+        }
+
+        buildCaptureNodes();
 
         // Debug overlay: red quads over blocked cells.
         const gridQuadGeo = new THREE.PlaneGeometry(1, 1);
@@ -2883,6 +4051,15 @@
               muzzleUp: 1.2,
             },
           },
+          bulldozer: {
+            label: "Bulldozer",
+            hp: 90, speed: 10, range: 0, damage: 0, fireRate: 0, sight: 40,
+            vision: 40,
+            ringScale: 1.1,
+            icon: "BZ",
+            role: "builder",
+            shot: null,
+          },
           artillery: {
             label: "Artillery",
             hp: 80, speed: 9, range: 46, damage: 34, fireRate: 0.5, sight: 60,
@@ -2942,6 +4119,32 @@
             );
             gun.rotation.x = Math.PI / 2;
             add(gun, 0.28, 1.05, 0.55);
+          } else if (type === "bulldozer") {
+            const body = new THREE.Mesh(
+              new THREE.BoxGeometry(2.4, 1.0, 3.2),
+              hullMat,
+            );
+            add(body, 0, 0.75, 0);
+            const cab = new THREE.Mesh(
+              new THREE.BoxGeometry(1.4, 0.9, 1.2),
+              hullMat,
+            );
+            add(cab, 0, 1.55, -0.3);
+            const bladeMat = new THREE.MeshStandardMaterial({
+              color: 0xc8b878,
+              roughness: 0.7,
+              metalness: 0.25,
+            });
+            const blade = new THREE.Mesh(
+              new THREE.BoxGeometry(2.8, 0.55, 0.35),
+              bladeMat,
+            );
+            add(blade, 0, 0.45, 1.75);
+            const track = new THREE.Mesh(
+              new THREE.BoxGeometry(2.6, 0.35, 3.4),
+              barrelMat,
+            );
+            add(track, 0, 0.2, 0);
           } else if (type === "artillery") {
             // Howitzer: wide low hex base + a long barrel angled UP. Reads as
             // heavy siege at a glance.
@@ -3119,6 +4322,7 @@
             vision: T.vision ?? T.sight,
             cooldown: 0, // seconds until next shot
             attackTarget: null,
+            buildJob: null,
             dead: false,
           };
           // Every mesh of the unit is a pick target (shapes differ per type).
@@ -3140,7 +4344,11 @@
           const armyScale =
             faction === "enemy" ? diff.enemyArmyScale : 1;
           const roster = [];
-          for (const t of ["scout", "tank", "artillery"]) {
+          const rosterTypes =
+            faction === "player"
+              ? ["scout", "tank", "artillery", "bulldozer"]
+              : ["scout", "tank", "artillery"];
+          for (const t of rosterTypes) {
             const n = Math.max(
               0,
               Math.round((PARAMS.army[t] | 0) * armyScale),
@@ -3238,6 +4446,7 @@
           }
           registerBasePickables();
           updateBaseHud();
+          scheduleWindmillRebuild();
         }
 
         function resetMatch(full = true) {
@@ -3255,6 +4464,7 @@
             }
           }
           resetRequisition();
+          clearStructures();
           for (const u of units) {
             unitsGroup.remove(u.group);
             barsGroup.remove(u.bar);
@@ -3267,9 +4477,11 @@
           spawnSide("player");
           if (PARAMS.enemies) spawnSide("enemy");
           revealStartingFog();
+          resetCaptureNodes();
           updateCountUI();
           refreshGroupBar();
           updateDifficultyHud();
+          updateSupplyHud();
         }
 
         function killBase(b) {
@@ -3285,6 +4497,8 @@
             enemyRequisition.queue.length = 0;
           }
           updateBaseHud();
+          buildBaseWindmills();
+          updateSupplyHud();
           spawnImpact(b.x, b.pos.y + 2, b.z, {
             impactSize: 3.6,
             impactLife: 0.75,
@@ -3345,9 +4559,20 @@
                   best = u;
                 }
               }
+              for (const s of STRUCTURES) {
+                if (s.dead || s.faction === b.faction) continue;
+                if (!canFactionSee(b.faction, s.x, s.z)) continue;
+                const dx = s.x - _turretFrom.x;
+                const dz = s.z - _turretFrom.z;
+                const d2 = dx * dx + dz * dz;
+                if (d2 <= bestD) {
+                  bestD = d2;
+                  best = s;
+                }
+              }
               if (!best) continue;
               _turretTo.set(best.pos.x, best.pos.y + 1.05, best.pos.z);
-              _turretLocal.copy(_turretTo);
+              _turretLocal.set(best.pos.x, b.pos.y, best.pos.z);
               b.group.worldToLocal(_turretLocal);
               const targetYaw = Math.atan2(_turretLocal.x, _turretLocal.z);
               let diff = targetYaw - tur.head.rotation.y;
@@ -3408,7 +4633,136 @@
         const ccFooterEl = document.getElementById("cc-footer");
         const ccActionsEl = document.getElementById("cc-actions");
         const ccAttackBaseBtn = document.getElementById("cc-attack-base");
-        const TYPE_ORDER = ["scout", "tank", "artillery"];
+        const TYPE_ORDER = ["scout", "tank", "artillery", "bulldozer"];
+        const BUILD_TYPES = ["barracks", "warFactory", "turret"];
+        const ccBuildActionsEl = document.getElementById("cc-build-actions");
+        const structPanelEl = document.getElementById("struct-panel");
+        const structTitleEl = document.getElementById("struct-title");
+        const structSubEl = document.getElementById("struct-sub");
+        const structButtonsEl = document.getElementById("struct-buttons");
+        const structQueueWrapEl = document.getElementById("struct-queue-wrap");
+        const structQueueListEl = document.getElementById("struct-queue-list");
+        document.getElementById("struct-close").addEventListener("click", () =>
+          closeStructPanel(),
+        );
+
+        function closeStructPanel() {
+          activeStructure = null;
+          structPanelEl.classList.remove("open");
+        }
+
+        function openStructPanel(s) {
+          if (!s || s.dead || s.faction !== "player" || game.over) return;
+          activeStructure = s;
+          closeReqPanel();
+          cancelPlacementMode();
+          structPanelEl.classList.add("open");
+          refreshStructUI();
+        }
+
+        function refreshStructUI() {
+          const s = activeStructure;
+          if (!s || s.dead) {
+            closeStructPanel();
+            return;
+          }
+          const B = buildingDef(s.buildingType);
+          structTitleEl.textContent = B?.label ?? "Building";
+          if (s.buildingType === "barracks") {
+            structSubEl.textContent = `Heals allies within ${B.healRadius}m`;
+          } else if (s.buildingType === "turret") {
+            structSubEl.textContent = `Range ${B.range} · Dmg ${B.damage}`;
+          } else {
+            structSubEl.textContent = `${Math.ceil(s.hp)}/${s.maxHp} HP`;
+          }
+          structButtonsEl.innerHTML = "";
+          if (B?.produces) {
+            structQueueWrapEl.style.display = "block";
+            for (const type of B.produces) {
+              const T = UNIT_TYPES[type];
+              const cost = B.unitCost[type] ?? 0;
+              const btn = document.createElement("button");
+              btn.type = "button";
+              btn.className = `req-btn ${type}`;
+              btn.innerHTML =
+                `<span class="req-icon">${T.icon}</span>` +
+                `<span class="req-label">${T.label}</span>` +
+                `<span class="req-cost">${cost}</span>`;
+              const afford = requisition.supply >= cost;
+              const queueOk = s.queue.length < PARAMS.buildings.maxQueue;
+              btn.disabled = !afford || !queueOk;
+              btn.addEventListener("click", (e) => {
+                const batch = e.shiftKey
+                  ? PARAMS.requisition.shiftQueueBatch
+                  : 1;
+                orderFromStructure(s, type, batch);
+              });
+              structButtonsEl.appendChild(btn);
+            }
+            structQueueListEl.innerHTML = "";
+            if (!s.queue.length) {
+              const li = document.createElement("li");
+              li.textContent = "Queue empty";
+              structQueueListEl.appendChild(li);
+            } else {
+              s.queue.forEach((job, idx) => {
+                const T = UNIT_TYPES[job.type];
+                const li = document.createElement("li");
+                const pct = 1 - job.timeLeft / B.prodTime;
+                li.textContent = `${idx === 0 ? "▶ " : ""}${T?.label ?? job.type} · ${job.timeLeft.toFixed(1)}s`;
+                structQueueListEl.appendChild(li);
+              });
+            }
+          } else {
+            structQueueWrapEl.style.display = "none";
+          }
+        }
+
+        function ensureBuildButtons() {
+          if (ccBuildActionsEl.querySelectorAll(".cc-build-btn").length >= BUILD_TYPES.length) {
+            return;
+          }
+          ccBuildActionsEl.innerHTML = "";
+          for (const btype of BUILD_TYPES) {
+            const B = buildingDef(btype);
+            const btn = document.createElement("button");
+            btn.type = "button";
+            btn.className = "cc-build-btn";
+            btn.dataset.btype = btype;
+            btn.innerHTML =
+              `<span>${B.icon}</span>` +
+              `<span>${B.label}</span>` +
+              `<span class="cc-build-cost">${B.cost}</span>`;
+            btn.addEventListener("click", () => startPlacementMode(btype));
+            ccBuildActionsEl.appendChild(btn);
+          }
+        }
+        ensureBuildButtons();
+
+        function refreshBuildButtons() {
+          const bulldozers = units.filter(
+            (u) =>
+              u.selected &&
+              !u.dead &&
+              u.faction === "player" &&
+              u.type === "bulldozer",
+          );
+          const hasBulldozer = bulldozers.length > 0;
+          ccBuildActionsEl.style.display = hasBulldozer ? "grid" : "none";
+          if (!hasBulldozer) return;
+          ensureBuildButtons();
+          const freeBuilders = bulldozers.filter((u) => !u.buildJob);
+          for (const btn of ccBuildActionsEl.querySelectorAll(".cc-build-btn")) {
+            const B = buildingDef(btn.dataset.btype);
+            const afford = requisition.supply >= B.cost;
+            btn.disabled = !afford || freeBuilders.length === 0;
+            btn.title = !freeBuilders.length
+              ? "Bulldozer is busy building"
+              : !afford
+                ? `Need ${B.cost} supply`
+                : B.label;
+          }
+        }
 
         function updateCommandCard() {
           const sel = units.filter((u) => u.selected && !u.dead && u.faction === "player");
@@ -3418,10 +4772,12 @@
           const canSiege = total > 0 && enemyBase && !enemyBase.dead && !game.over;
           ccActionsEl.style.display = total ? "block" : "none";
           ccAttackBaseBtn.disabled = !canSiege;
+          refreshBuildButtons();
           if (!total) {
             commandCardEl.classList.remove("visible");
             ccRowsEl.innerHTML = "";
             ccFooterEl.textContent = "";
+            ccBuildActionsEl.style.display = "none";
             return;
           }
           commandCardEl.classList.add("visible");
@@ -3461,8 +4817,16 @@
               u.type === "scout" && PARAMS.fog.enabled
                 ? ` · vis ${unitVisionRadius(u)}`
                 : "";
-            ccFooterEl.textContent =
-              `${Math.ceil(u.hp)}/${u.maxHp} HP · rng ${u.range} · dmg ${u.damage}${visNote}`;
+            if (u.type === "bulldozer") {
+              ccFooterEl.textContent = u.buildJob
+                ? `Building ${buildingDef(u.buildJob.buildingType).label}…`
+                : "Select structure below · click ground to place";
+            } else if (u.range > 0) {
+              ccFooterEl.textContent =
+                `${Math.ceil(u.hp)}/${u.maxHp} HP · rng ${u.range} · dmg ${u.damage}${visNote}`;
+            } else {
+              ccFooterEl.textContent = `${Math.ceil(u.hp)}/${u.maxHp} HP${visNote}`;
+            }
           } else {
             ccFooterEl.textContent = `${hpPct}% combined HP · ${counts[dominant]} ${UNIT_TYPES[dominant].label}${counts[dominant] !== 1 ? "s" : ""} lead`;
           }
@@ -3499,6 +4863,17 @@
           return null;
         }
 
+        function pickPlayerStructure(cx, cy) {
+          if (!structurePickBodies.length) return null;
+          raycaster.setFromCamera(screenToNDC(cx, cy), camera);
+          const hits = raycaster.intersectObjects(structurePickBodies, false);
+          for (const h of hits) {
+            const s = h.object.userData.structure;
+            if (s?.faction === "player" && !s.dead) return s;
+          }
+          return null;
+        }
+
         function pickEnemyBase(cx, cy) {
           if (!basePickBodies.length) return null;
           raycaster.setFromCamera(screenToNDC(cx, cy), camera);
@@ -3520,7 +4895,7 @@
         const shValEl = document.getElementById("sh-val");
         const shRateEl = document.getElementById("sh-rate");
         const reqUpgradeButtonsEl = document.getElementById("req-upgrade-buttons");
-        const REQ_TYPES = ["scout", "tank", "artillery"];
+        const REQ_TYPES = ["scout", "tank", "artillery", "bulldozer"];
         let queueDragFrom = null;
         const requisition = {
           supply: 0,
@@ -3577,13 +4952,25 @@
           updateSupplyHud();
         }
 
-        function updateSupplyHud() {
+        function playerIncomeRate() {
           const R = PARAMS.requisition;
           const base = BASE_DEFS.player;
+          if (!base || base.dead || game.over) return 0;
+          return (
+            R.income + factionNodeIncome("player") + playerWindmillIncome()
+          );
+        }
+
+        function updateSupplyHud() {
+          const base = BASE_DEFS.player;
           const baseOk = base && !base.dead && !game.over;
+          const rate = playerIncomeRate();
+          const nodeBonus = factionNodeIncome("player");
+          const windBonus = playerWindmillIncome();
           shValEl.textContent = String(Math.floor(requisition.supply));
+          refreshBuildButtons();
           shRateEl.textContent = baseOk
-            ? `+${R.income} / sec`
+            ? formatIncomeRate(rate, nodeBonus, windBonus)
             : "Income halted";
           supplyHudEl.classList.toggle("halted", !baseOk);
         }
@@ -3672,8 +5059,11 @@
           const base = BASE_DEFS.player;
           const baseOk = base && !base.dead && !game.over;
           reqPointsEl.textContent = String(Math.floor(requisition.supply));
+          const nodeBonus = factionNodeIncome("player");
+          const windBonus = playerWindmillIncome();
+          const rate = playerIncomeRate();
           reqRateEl.textContent = baseOk
-            ? `+${R.income} / sec`
+            ? formatIncomeRate(rate, nodeBonus, windBonus)
             : "Income halted";
 
           for (const btn of reqButtonsEl.querySelectorAll(".req-btn")) {
@@ -3909,8 +5299,18 @@
         }
 
         function enemyReqChooseType() {
-          if (enemyBrain.phase === "probe" && Math.random() < 0.7) return "scout";
           const E = PARAMS.requisition.enemy;
+          const supply = enemyRequisition.supply;
+          const held = enemyNodesHeld();
+          const playerHeld = CAPTURE_NODES.filter((n) => n.owner === "player").length;
+
+          if (!shouldAssaultHQ()) {
+            if (supply < 50) return Math.random() < 0.75 ? "tank" : "scout";
+            if (held < 1) return Math.random() < 0.55 ? "tank" : "scout";
+            return Math.random() < 0.45 ? "tank" : "scout";
+          }
+          if (playerHeld >= 1 && Math.random() < 0.35) return "scout";
+          if (supply > 120 && Math.random() < 0.3) return "artillery";
           const choices = [];
           for (const type of REQ_TYPES) {
             const w = E.weights[type] ?? 1;
@@ -3939,13 +5339,15 @@
           if (playerBase && !playerBase.dead && !game.over) {
             requisition.supply = Math.min(
               R.maxSupply,
-              requisition.supply + R.income * dt,
+              requisition.supply + playerIncomeRate() * dt,
             );
           }
           if (enemyBase && !enemyBase.dead && !game.over) {
+            const enemyRate =
+              diff.enemyIncome + factionNodeIncome("enemy");
             enemyRequisition.supply = Math.min(
               R.enemy.maxSupply,
-              enemyRequisition.supply + diff.enemyIncome * dt,
+              enemyRequisition.supply + enemyRate * dt,
             );
             enemyRequisition.buyTimer -= dt;
             if (enemyRequisition.buyTimer <= 0) {
@@ -3998,11 +5400,27 @@
         updateDifficultyHud();
 
         function clickSelect(cx, cy, additive) {
-          if (!additive && pickPlayerBase(cx, cy)) {
-            openReqPanel();
+          if (placementMode) {
+            const g = pickGround(cx, cy);
+            if (g) issueBuild(placementMode.buildingType, g.x, g.z);
             return;
           }
+          if (!additive && pickPlayerBase(cx, cy)) {
+            openReqPanel();
+            closeStructPanel();
+            return;
+          }
+          if (!additive) {
+            const st = pickPlayerStructure(cx, cy);
+            if (st) {
+              clearSelection();
+              openStructPanel(st);
+              updateCountUI();
+              return;
+            }
+          }
           closeReqPanel();
+          closeStructPanel();
           raycaster.setFromCamera(screenToNDC(cx, cy), camera);
           const hits = raycaster.intersectObjects(tankBodies, false);
           if (!additive) clearSelection();
@@ -4057,6 +5475,7 @@
             u.path = astar(u.pos.x, u.pos.z, center.x + ox, center.z + oz);
             u.attackMove = attackMove;
             u.attackBase = false;
+            u.buildJob = null;
           });
         }
 
@@ -4143,6 +5562,10 @@
             else clickSelect(e.clientX, e.clientY, e.shiftKey);
           } else if (e.button === 2) {
             // Right-click cancels a pending attack-move; otherwise move / siege.
+            if (placementMode) {
+              cancelPlacementMode();
+              return;
+            }
             if (attackMovePending) {
               attackMovePending = false;
               dom.style.cursor = "default";
@@ -4271,7 +5694,7 @@
           if (PARAMS.fog.enabled) {
             c.save();
             c.globalAlpha = 0.88;
-            c.drawImage(fogCanvas, 0, 0, MINI, MINI);
+            c.drawImage(fowTexData.minimapCanvas, 0, 0, MINI, MINI);
             c.restore();
           }
           // Obstacles (only where explored).
@@ -4288,6 +5711,41 @@
             c.beginPath();
             c.arc(worldToMiniX(o.x), worldToMiniY(o.z), r, 0, 7);
             c.fill();
+          }
+          // Supply nodes.
+          if (PARAMS.nodes.enabled) {
+            for (const node of CAPTURE_NODES) {
+              const nx = worldToMiniX(node.x);
+              const ny = worldToMiniY(node.z);
+              const col =
+                node.owner === "player"
+                  ? "#4a9e6a"
+                  : node.owner === "enemy"
+                    ? "#c04838"
+                    : "#8a8a80";
+              c.fillStyle = col;
+              c.beginPath();
+              c.arc(nx, ny, 4.5, 0, 7);
+              c.fill();
+              c.strokeStyle = "rgba(255,255,255,0.45)";
+              c.lineWidth = 1;
+              c.stroke();
+            }
+          }
+          // Player structures.
+          for (const s of STRUCTURES) {
+            if (s.dead || s.faction !== "player") continue;
+            if (PARAMS.fog.enabled && !visibleToPlayer(s.x, s.z)) continue;
+            const sx = worldToMiniX(s.x);
+            const sy = worldToMiniY(s.z);
+            const col =
+              s.buildingType === "turret"
+                ? "#88aacc"
+                : s.buildingType === "warFactory"
+                  ? "#c8a860"
+                  : "#6a9e7a";
+            c.fillStyle = col;
+            c.fillRect(sx - 2.5, sy - 2.5, 5, 5);
           }
           // Team bases.
           for (const faction of ["player", "enemy"]) {
@@ -4388,7 +5846,11 @@
           if (e.code === "Escape") {
             attackMovePending = false;
             dom.style.cursor = "default";
-            closeReqPanel();
+            if (placementMode) cancelPlacementMode();
+            else {
+              closeReqPanel();
+              closeStructPanel();
+            }
             return;
           }
           if (e.code === "KeyH" && !e.ctrlKey && !e.metaKey) {
@@ -4446,6 +5908,21 @@
         const HOVER_PICK_MIN_MS = 16;
         let lastHoverMs = 0;
         function updateHover(cx, cy) {
+          if (placementMode) {
+            const g = pickGround(cx, cy);
+            if (g) {
+              updatePlacementGhost(g.x, g.z);
+              hoverRing.material.color.set(0xffcc44);
+              placeRing(hoverRing, g.x, g.z);
+              hoverRing.visible = true;
+            } else {
+              placementGhost.visible = false;
+              hoverRing.visible = false;
+            }
+            dom.style.cursor = "crosshair";
+            return;
+          }
+          placementGhost.visible = false;
           raycaster.setFromCamera(screenToNDC(cx, cy), camera);
           const eHit = raycaster
             .intersectObjects(tankBodies, false)
@@ -4510,12 +5987,15 @@
         // ── CAMERA MODES ──────────────────────────────────────────────────
         // "rts": fixed angle, edge-scroll + WASD pan, no free rotation (the
         // classic C&C feel). "orbit": MMB-drag to rotate freely for inspection.
-        const cam = { mode: "orbit" };
         const cammodeEl = document.getElementById("cammode");
         function setCamMode(m) {
           cam.mode = m;
-          controls.enableRotate = m === "orbit";
           cammodeEl.textContent = m === "orbit" ? "ORBIT" : "RTS";
+          if (m === "rts") {
+            PARAMS.camera.distance = readCameraPose().distance;
+            syncCameraFromParams();
+          }
+          applyCamModeConstraints();
         }
         window.addEventListener("keydown", (e) => {
           if (e.code === "KeyC" && !e.ctrlKey && !e.metaKey) {
@@ -4689,7 +6169,11 @@
           const S = UNIT_TYPES[shooter.type].shot;
           const from = muzzlePos(shooter, new THREE.Vector3());
           const toY =
-            target.kind === "base" ? target.pos.y + 3.0 : target.pos.y + 1.0;
+            target.kind === "base"
+              ? target.pos.y + 3.0
+              : target.kind === "structure"
+                ? target.pos.y + 2.5
+                : target.pos.y + 1.0;
           const to = new THREE.Vector3(target.pos.x, toY, target.pos.z);
           const mesh = new THREE.Mesh(
             shellGeo,
@@ -4720,9 +6204,11 @@
           if (target.dead) return;
           target.hp -= damage;
           spawnImpact(x, y, z, impactProfile);
-          if (target.kind !== "base") sfx.play("impact");
+          if (target.kind === "structure") sfx.play("base_hit");
+          else if (target.kind !== "base") sfx.play("impact");
           if (target.hp <= 0) {
             if (target.kind === "base") killBase(target);
+            else if (target.kind === "structure") killStructure(target);
             else killUnit(target);
           } else if (target.kind === "base") {
             sfx.play("base_hit");
@@ -4835,18 +6321,34 @@
               best = b;
             }
           }
+          for (const s of STRUCTURES) {
+            if (s.dead || s.faction === u.faction) continue;
+            if (!canFactionSee(u.faction, s.x, s.z)) continue;
+            const dx = s.x - u.pos.x;
+            const dz = s.z - u.pos.z;
+            const d2 = dx * dx + dz * dz;
+            if (d2 <= bestD) {
+              bestD = d2;
+              best = s;
+            }
+          }
           return best;
         }
 
         function fire(shooter, target) {
           const profile = UNIT_TYPES[shooter.type].shot;
+          if (!profile) return;
           if (shooter.type === "scout") sfx.play("mg");
           else if (shooter.type === "tank") sfx.play("tank");
           else if (shooter.type === "artillery") sfx.play("artillery");
           spawnMuzzleFlash(shooter);
           muzzlePos(shooter, _from);
           const aimY =
-            target.kind === "base" ? target.pos.y + 3.2 : target.pos.y + 1.1;
+            target.kind === "base"
+              ? target.pos.y + 3.2
+              : target.kind === "structure"
+                ? target.pos.y + 2.8
+                : target.pos.y + 1.1;
           _to.set(target.pos.x, aimY, target.pos.z);
 
           if (profile.mode === "ballistic") {
@@ -4879,81 +6381,186 @@
         }
 
         // ── ENEMY AI ──────────────────────────────────────────────────────
-        // Probe phase: scouts push forward; heavies hold at HQ until a scout
-        // spots the player (fog intel → commit). Commit = full assault logic.
         let aiTimer = 0;
+
+        function enemyUnits() {
+          return units.filter((u) => !u.dead && u.faction === "enemy");
+        }
+
+        function rankedNodesForEnemy() {
+          return CAPTURE_NODES.map((node) => ({
+            node,
+            score: scoreNodeForEnemy(node),
+          })).sort((a, b) => b.score - a.score);
+        }
+
+        function screenPointForNode(node, lane) {
+          const home = BASE_DEFS.enemy;
+          const hz = home ? home.z + 110 : node.z - 140;
+          const spread = PARAMS.ai.scoutProbeSpread * 0.55;
+          if (node.id === "west") return { x: node.x - spread * 0.35, z: hz };
+          if (node.id === "east") return { x: node.x + spread * 0.35, z: hz };
+          const side = lane % 2 === 0 ? -1 : 1;
+          return { x: side * spread, z: hz };
+        }
+
+        function replanEnemyAI() {
+          const diff = getDifficulty();
+          const pool = enemyUnits();
+          const home = BASE_DEFS.enemy;
+          const playerBase = BASE_DEFS.player;
+          const capLimit = diff.capSquadSize ?? 3;
+          const ranked = rankedNodesForEnemy();
+
+          const heavies = pool.filter((u) => u.type !== "scout");
+          const scouts = pool.filter((u) => u.type === "scout");
+          let capBudget = capLimit;
+
+          for (const u of pool) {
+            u.aiOrder = null;
+            u.path = null;
+          }
+
+          if (PARAMS.ai.objectives && PARAMS.nodes.enabled && capBudget > 0) {
+            for (const { node } of ranked) {
+              if (capBudget <= 0) break;
+              if (node.owner === "enemy" && !nodeContestedByPlayer(node)) {
+                continue;
+              }
+              const squad = [];
+              while (squad.length < capBudget && heavies.length) {
+                squad.push(heavies.shift());
+              }
+              while (squad.length < Math.min(2, capBudget) && scouts.length) {
+                squad.push(scouts.shift());
+              }
+              if (!squad.length) break;
+
+              squad.forEach((u, i) => {
+                const ang = (i / Math.max(1, squad.length)) * Math.PI * 2;
+                const ring = 7 + (i % 2) * 3;
+                u.aiOrder = {
+                  type: "capture",
+                  x: node.x + Math.cos(ang) * ring,
+                  z: node.z + Math.sin(ang) * ring,
+                };
+              });
+              capBudget -= squad.length;
+              break;
+            }
+          }
+
+          scouts.forEach((u, i) => {
+            if (u.aiOrder) return;
+            if (!CAPTURE_NODES.length) {
+              if (home) {
+                u.aiOrder = {
+                  type: "hold",
+                  x: home.x + (i - 1) * 16,
+                  z: home.z + Math.sign(home.z) * 36,
+                };
+              }
+              return;
+            }
+            const targetNode =
+              ranked[i % ranked.length]?.node ?? CAPTURE_NODES[0];
+            const pt = screenPointForNode(targetNode, i);
+            u.aiOrder = { type: "screen", x: pt.x, z: pt.z };
+          });
+
+          for (const u of heavies) {
+            if (u.aiOrder) continue;
+            if (shouldAssaultHQ() && playerBase && !playerBase.dead) {
+              u.aiOrder = { type: "siege", x: playerBase.x, z: playerBase.z };
+            } else if (ranked[0]) {
+              const n = ranked[0].node;
+              u.aiOrder = {
+                type: "hold",
+                x: n.x,
+                z: n.z + (home ? Math.sign(home.z) * 28 : 28),
+              };
+            } else if (home) {
+              u.aiOrder = {
+                type: "hold",
+                x: home.x,
+                z: home.z + Math.sign(home.z) * diff.probeHoldRadius * 0.45,
+              };
+            }
+          }
+
+          for (const u of pool) {
+            if (u.aiOrder) continue;
+            if (shouldAssaultHQ() && playerBase && !playerBase.dead) {
+              u.aiOrder = { type: "siege", x: playerBase.x, z: playerBase.z };
+            } else if (home) {
+              u.aiOrder = {
+                type: "hold",
+                x: home.x + ((units.indexOf(u) % 3) - 1) * 14,
+                z: home.z + Math.sign(home.z) * 32,
+              };
+            }
+          }
+        }
+
+        function pathGoalMismatch(u, gx, gz, tol = 14) {
+          if (!u.path?.length) return true;
+          const last = u.path[u.path.length - 1];
+          const dx = last.x - gx;
+          const dz = last.z - gz;
+          return dx * dx + dz * dz > tol * tol;
+        }
+
+        function targetXZ(t) {
+          return { x: t.pos?.x ?? t.x, z: t.pos?.z ?? t.z };
+        }
+
+        function applyEnemyOrder(u) {
+          const foe = nearestEnemyInRange(u, u.sight * u.sight);
+          if (foe) {
+            const { x: tx, z: tz } = targetXZ(foe);
+            const dx = tx - u.pos.x;
+            const dz = tz - u.pos.z;
+            if (dx * dx + dz * dz <= u.range * u.range) {
+              u.path = null;
+            } else if (
+              (u.pathRefresh ?? 0) <= 0 ||
+              pathGoalMismatch(u, tx, tz, 20)
+            ) {
+              u.path = astar(u.pos.x, u.pos.z, tx, tz);
+              u.pathRefresh = 0.35 + Math.random() * 0.25;
+            }
+            return;
+          }
+
+          const order = u.aiOrder;
+          if (!order) {
+            u.path = null;
+            return;
+          }
+
+          const dx = u.pos.x - order.x;
+          const dz = u.pos.z - order.z;
+          const stopR = order.type === "siege" ? 55 : 11;
+          if (dx * dx + dz * dz > stopR * stopR) {
+            if (pathGoalMismatch(u, order.x, order.z)) {
+              u.path = astar(u.pos.x, u.pos.z, order.x, order.z);
+            }
+          } else {
+            u.path = null;
+          }
+        }
+
         function updateAI(dt) {
           if (!PARAMS.ai.enabled || game.over) return;
           aiTimer -= dt;
-          if (aiTimer > 0) return;
-          const diff = getDifficulty();
-          aiTimer = diff.repathInterval;
-          const commit = enemyBrain.phase === "commit";
-          const playerBase = BASE_DEFS.player;
-          const enemyHome = BASE_DEFS.enemy;
-
-          for (const u of units) {
-            if (u.dead || u.faction !== "enemy") continue;
-            const isScout = u.type === "scout";
-
-            // ── PROBE: scouts advance, heavies hold ──
-            if (!commit) {
-              if (!isScout) {
-                if (enemyHome && !enemyHome.dead) {
-                  const dx = u.pos.x - enemyHome.x;
-                  const dz = u.pos.z - enemyHome.z;
-                  const holdR = diff.probeHoldRadius;
-                  if (dx * dx + dz * dz > holdR * holdR) {
-                    u.path = astar(u.pos.x, u.pos.z, enemyHome.x, enemyHome.z);
-                  } else {
-                    u.path = null;
-                  }
-                }
-                continue;
-              }
-              if (playerBase && !playerBase.dead) {
-                const toward = playerBase.z > 0 ? -1 : 1;
-                const probeZ =
-                  playerBase.z + toward * diff.probeDepth;
-                const spread = diff.scoutProbeSpread;
-                const lane =
-                  (units.indexOf(u) % 5) - 2;
-                const gx = playerBase.x + lane * (spread * 0.45);
-                if (!u.path || u.path.length === 0) {
-                  u.path = astar(u.pos.x, u.pos.z, gx, probeZ);
-                }
-              }
-              continue;
-            }
-
-            // ── COMMIT: engage targets in sight, else march on player base ──
-            const foe = nearestEnemyInRange(u, u.sight * u.sight);
-            if (!foe) {
-              if (playerBase && !playerBase.dead) {
-                const dx = u.pos.x - playerBase.x;
-                const dz = u.pos.z - playerBase.z;
-                if (dx * dx + dz * dz > 55 * 55) {
-                  u.path = astar(
-                    u.pos.x,
-                    u.pos.z,
-                    playerBase.x,
-                    playerBase.z,
-                  );
-                } else {
-                  u.path = null;
-                }
-              } else {
-                u.path = null;
-              }
-              continue;
-            }
-            const dx = foe.pos.x - u.pos.x;
-            const dz = foe.pos.z - u.pos.z;
-            if (dx * dx + dz * dz <= u.range * u.range) {
-              u.path = null;
-            } else {
-              u.path = astar(u.pos.x, u.pos.z, foe.pos.x, foe.pos.z);
-            }
+          if (aiTimer <= 0) {
+            const diff = getDifficulty();
+            aiTimer = diff.repathInterval;
+            replanEnemyAI();
+          }
+          for (const u of enemyUnits()) {
+            u.pathRefresh = (u.pathRefresh ?? 0) - dt;
+            applyEnemyOrder(u);
           }
         }
 
@@ -4977,7 +6584,7 @@
             if (u.dead) continue;
             if (u.cooldown > 0) u.cooldown -= dt;
             u.hold = false;
-            if (!R.combat) {
+            if (!R.combat || u.range <= 0) {
               u.attackTarget = null;
               continue;
             }
@@ -5033,8 +6640,14 @@
               if (u.path.length === 0) u.path = null;
             } else {
               const step = Math.min(u.speed * dt, d);
-              u.pos.x += (dx / d) * step;
-              u.pos.z += (dz / d) * step;
+              const nx = u.pos.x + (dx / d) * step;
+              const nz = u.pos.z + (dz / d) * step;
+              if (!canMoveTo(u.pos.x, u.pos.z, nx, nz)) {
+                u.path = null;
+                continue;
+              }
+              u.pos.x = nx;
+              u.pos.z = nz;
               u.wantHeading = Math.atan2(dx, dz);
             }
           }
@@ -5083,10 +6696,22 @@
                 const push = (min - d) * 0.5;
                 const nx = (dx / d) * push;
                 const nz = (dz / d) * push;
-                a.pos.x += nx;
-                a.pos.z += nz;
-                b.pos.x -= nx;
-                b.pos.z -= nz;
+                const ax = a.pos.x;
+                const az = a.pos.z;
+                const bx = b.pos.x;
+                const bz = b.pos.z;
+                const anx = ax + nx;
+                const anz = az + nz;
+                const bnx = bx - nx;
+                const bnz = bz - nz;
+                if (canMoveTo(ax, az, anx, anz)) {
+                  a.pos.x = anx;
+                  a.pos.z = anz;
+                }
+                if (canMoveTo(bx, bz, bnx, bnz)) {
+                  b.pos.x = bnx;
+                  b.pos.z = bnz;
+                }
               }
             }
           }
@@ -5108,8 +6733,12 @@
                   d = 1;
                 }
                 const k = (minD - d) / d;
-                u.pos.x += dx * k;
-                u.pos.z += dz * k;
+                const ox = u.pos.x + dx * k;
+                const oz = u.pos.z + dz * k;
+                if (canMoveTo(u.pos.x, u.pos.z, ox, oz)) {
+                  u.pos.x = ox;
+                  u.pos.z = oz;
+                }
               }
             }
           }
@@ -5117,6 +6746,14 @@
           // Phase 3 — heading, grounding, orientation, selection ring, bars.
           for (const u of units) {
             if (u.dead) continue;
+            if (!canStandAt(u.pos.x, u.pos.z)) {
+              const cell = worldToCell(u.pos.x, u.pos.z);
+              const free = nearestFree(cell.c, cell.r);
+              const ctr = cellCenter(free.c, free.r);
+              u.pos.x = ctr.x;
+              u.pos.z = ctr.z;
+              u.path = null;
+            }
             // Smoothly turn current heading toward desired.
             let dh = u.wantHeading - u.heading;
             dh = Math.atan2(Math.sin(dh), Math.cos(dh)); // wrap to [-pi,pi]
@@ -5166,12 +6803,14 @@
         }
 
         spawnArmies();
-        setCamMode("orbit");
+        syncCameraFromParams();
+        setCamMode("rts");
         updateFog();
 
         // ── FRAME LOOP ──
         let lastT = performance.now() / 1000;
         let forestAnimT = 0;
+        let minimapFrame = 0;
         renderer.setAnimationLoop(() => {
           const now = performance.now() / 1000;
           const dt = Math.min(now - lastT, 0.05);
@@ -5192,15 +6831,24 @@
             csm.updateFrustums();
           }
           updateFog();
+          updateCaptureNodes(dt);
           updateAI(dt);
           updateRequisition(dt);
+          updateBulldozerBuild(dt);
+          updateStructureProduction(dt);
+          updateBarracksHeal(dt);
           updateBaseTurrets(dt);
+          updateStructureTurrets(dt);
+          updateStructures(dt);
+          if (PARAMS.windmills.enabled && windmillsGroup.children.length) {
+            updateWindmillRotors(windmillsGroup, PARAMS.windmills, dt);
+          }
           updateUnits(dt);
           updateTracers(dt);
           updateMuzzles(dt);
           updateImpacts(dt);
           updateProjectiles(dt);
-          drawMinimap();
+          if ((minimapFrame++ & 3) === 0) drawMinimap();
 
           if (pingLife > 0) {
             pingLife -= dt;
@@ -5211,7 +6859,6 @@
           }
 
           renderer.render(scene, camera);
-          renderer.resolveTimestampsAsync(THREE.TimestampQuery.RENDER);
           stats.update();
         });
 
@@ -5235,8 +6882,14 @@
           attachBaseBars,
           setCamMode,
           getCamMode: () => cam.mode,
+          readCameraPose,
+          syncCameraFromParams,
+          captureCameraToParams,
+          applyCamModeConstraints,
           buildNavGrid,
           buildGridDebug,
+          buildCaptureNodes,
+          resetCaptureNodes,
           refreshFog: () => {
             buildFogGrid();
             revealStartingFog();
@@ -5442,8 +7095,14 @@
         attachBaseBars,
         setCamMode,
         getCamMode,
+        readCameraPose,
+        syncCameraFromParams,
+        captureCameraToParams,
+        applyCamModeConstraints,
         buildNavGrid,
         buildGridDebug,
+        buildCaptureNodes,
+        resetCaptureNodes,
         refreshFog,
         forest,
       }) {
@@ -5592,7 +7251,7 @@
           _slider(sec, PARAMS.bases, "distance", {
             label: "Edge distance",
             min: 120,
-            max: 330,
+            max: 660,
             step: 4,
             onChange: () => rebuildTerrain(false),
           });
@@ -5626,6 +7285,66 @@
           });
         }
 
+        // ── Windmills (GLB turbines — base energy income) ──
+        {
+          const sec = _section(body, "Windmills", true);
+          const hint = document.createElement("div");
+          hint.style.cssText =
+            "font-size:10px;color:var(--text-dim);line-height:1.35;margin-bottom:8px;";
+          hint.textContent =
+            "Same GLB as template-unreal-objects. Arc behind each HQ; player turbines add supply/sec.";
+          sec.appendChild(hint);
+          const onWind = () => scheduleWindmillRebuild();
+          _toggle(sec, PARAMS.windmills, "enabled", {
+            label: "Enabled",
+            onChange: onWind,
+          });
+          _slider(sec, PARAMS.windmills, "count", {
+            label: "Per base",
+            min: 1,
+            max: 12,
+            step: 1,
+            onChange: onWind,
+          });
+          _slider(sec, PARAMS.windmills, "incomePerMill", {
+            label: "Energy / turbine",
+            min: 0,
+            max: 8,
+            step: 0.5,
+            onChange: () => {
+              updateSupplyHud();
+              refreshReqUI();
+            },
+          });
+          _slider(sec, PARAMS.windmills, "ringRadius", {
+            label: "Arc radius",
+            min: 16,
+            max: 60,
+            step: 1,
+            onChange: onWind,
+          });
+          _slider(sec, PARAMS.windmills, "behindOffset", {
+            label: "Behind HQ",
+            min: 12,
+            max: 50,
+            step: 1,
+            onChange: onWind,
+          });
+          _slider(sec, PARAMS.windmills, "scale", {
+            label: "Scale",
+            min: 0.2,
+            max: 2,
+            step: 0.05,
+            onChange: onWind,
+          });
+          _slider(sec, PARAMS.windmills, "rotorSpeedDeg", {
+            label: "Rotor °/s",
+            min: 0,
+            max: 120,
+            step: 1,
+          });
+        }
+
         // ── Army (composition, mirrored to both sides) ──
         {
           const sec = _section(body, "Army", true);
@@ -5645,6 +7364,12 @@
             label: "Artillery",
             min: 0,
             max: 30,
+            step: 1,
+          });
+          _slider(sec, PARAMS.army, "bulldozer", {
+            label: "Bulldozers (player)",
+            min: 0,
+            max: 6,
             step: 1,
           });
           _toggle(sec, PARAMS, "enemies", { label: "Spawn enemies" });
@@ -5682,10 +7407,58 @@
           _toggle(sec, PARAMS.rts, "combat", { label: "Combat" });
         }
 
+        // ── Supply nodes ──
+        {
+          const sec = _section(body, "Supply Nodes", true);
+          _toggle(sec, PARAMS.nodes, "enabled", {
+            label: "Enabled",
+            onChange: () => buildCaptureNodes(),
+          });
+          _slider(sec, PARAMS.nodes, "radius", {
+            label: "Capture radius",
+            min: 12,
+            max: 36,
+            step: 1,
+            onChange: () => buildCaptureNodes(),
+          });
+          _slider(sec, PARAMS.nodes, "captureTime", {
+            label: "Capture time (s)",
+            min: 2,
+            max: 12,
+            step: 0.5,
+          });
+          _slider(sec, PARAMS.nodes, "incomeBonus", {
+            label: "Income bonus / node",
+            min: 1,
+            max: 10,
+            step: 0.5,
+            onChange: () => updateSupplyHud(),
+          });
+          _slider(sec, PARAMS.nodes, "decayRate", {
+            label: "Contest decay",
+            min: 0.1,
+            max: 2,
+            step: 0.05,
+          });
+          _button(sec, {
+            title: "Reset node ownership",
+            onClick: () => resetCaptureNodes(),
+          });
+        }
+
         // ── Enemy AI ──
         {
           const sec = _section(body, "Enemy AI", false);
+          const aiHint = document.createElement("div");
+          aiHint.style.cssText =
+            "font-size:10px;color:var(--text-dim);line-height:1.35;margin-bottom:8px;";
+          aiHint.textContent =
+            "Opening: squads capture nodes, scouts screen the flanks (not the center). HQ assault unlocks after holding nodes or spotting you (fog contact).";
+          sec.appendChild(aiHint);
           _toggle(sec, PARAMS.ai, "enabled", { label: "Enabled" });
+          _toggle(sec, PARAMS.ai, "objectives", {
+            label: "Contest supply nodes",
+          });
           _slider(sec, PARAMS.ai, "repathInterval", {
             label: "Repath (s)",
             min: 0.1,
@@ -5787,11 +7560,31 @@
             max: 90,
             step: 2,
           });
+          _slider(sec, PARAMS.fog, "shroudAlpha", {
+            label: "Shroud strength",
+            min: 0.3,
+            max: 1,
+            step: 0.02,
+            onChange: () => updateFog(),
+          });
+          _slider(sec, PARAMS.fog, "fogAlpha", {
+            label: "Unexplored strength",
+            min: 0.5,
+            max: 1,
+            step: 0.02,
+            onChange: () => updateFog(),
+          });
         }
 
         // ── Navigation ──
         {
           const sec = _section(body, "Navigation", false);
+          const navHint = document.createElement("div");
+          navHint.style.cssText =
+            "font-size:10px;color:var(--text-dim);line-height:1.35;margin-bottom:8px;";
+          navHint.textContent =
+            "Stand slope blocks cliff cells. Ramp grade blocks path edges and each movement step — match Terrain → Ramp max grade (~0.4).";
+          sec.appendChild(navHint);
           _toggle(sec, PARAMS.nav, "showGrid", {
             label: "Show grid",
             onChange: () => buildGridDebug(),
@@ -5817,7 +7610,7 @@
             },
           });
           _slider(sec, PARAMS.nav, "maxSlope", {
-            label: "Max walk slope",
+            label: "Max stand slope",
             min: 0.12,
             max: 0.55,
             step: 0.01,
@@ -5825,6 +7618,13 @@
               buildNavGrid();
               buildGridDebug();
             },
+          });
+          _slider(sec, PARAMS.nav, "maxStepGrade", {
+            label: "Max ramp grade",
+            min: 0.15,
+            max: 0.75,
+            step: 0.01,
+            onChange: () => buildGridDebug(),
           });
           _separator(sec);
           _slider(sec, PARAMS.rings, "offset", {
@@ -5837,7 +7637,30 @@
 
         // ── Camera ──
         {
-          const sec = _section(body, "Camera", false);
+          const sec = _section(body, "Camera", true);
+          const hint = document.createElement("div");
+          hint.style.cssText =
+            "font-size:10px;color:var(--text-dim);line-height:1.35;margin-bottom:8px;";
+          hint.textContent =
+            "RTS mode locks pitch + yaw (pan/zoom only). Press [C] or use Orbit mode to freely look around, then Capture current view.";
+          sec.appendChild(hint);
+
+          const poseStat = document.createElement("div");
+          poseStat.className = "prop-row";
+          poseStat.style.cssText =
+            "font-size:11px;color:var(--text-dim);margin-bottom:6px;";
+          poseStat.innerHTML =
+            '<span class="prop-label">Live</span><div class="prop-value" id="cam-pose-stat">…</div>';
+          sec.appendChild(poseStat);
+          const refreshCamPoseStat = () => {
+            const p = readCameraPose();
+            const el = document.getElementById("cam-pose-stat");
+            if (!el) return;
+            el.textContent = `dist ${p.distance.toFixed(0)} · pitch ${p.polarDeg.toFixed(1)}° · yaw ${p.azimuthDeg.toFixed(1)}° · tgtY ${p.targetY.toFixed(1)}`;
+          };
+          refreshCamPoseStat();
+          setInterval(refreshCamPoseStat, 250);
+
           const modeBtn = _button(sec, {
             title: getCamMode() === "orbit" ? "Mode: Orbit" : "Mode: RTS",
             onClick: () => {
@@ -5846,6 +7669,84 @@
                 getCamMode() === "orbit" ? "Mode: Orbit" : "Mode: RTS";
             },
           });
+          _toggle(sec, PARAMS.camera, "lockAngle", {
+            label: "Lock angle in RTS",
+            onChange: () => applyCamModeConstraints(),
+          });
+          _toggle(sec, PARAMS.camera, "zoomInRts", {
+            label: "Zoom in RTS",
+            onChange: () => applyCamModeConstraints(),
+          });
+          _separator(sec);
+          _button(sec, {
+            title: "Capture current view → params",
+            onClick: () => {
+              captureCameraToParams();
+              refreshCamPoseStat();
+            },
+          });
+          _button(sec, {
+            title: "Apply params → camera",
+            onClick: () => {
+              syncCameraFromParams();
+              applyCamModeConstraints();
+              refreshCamPoseStat();
+            },
+          });
+          _separator(sec);
+          _slider(sec, PARAMS.camera, "polarDeg", {
+            label: "Pitch (polar °)",
+            min: 35,
+            max: 80,
+            step: 0.5,
+            onChange: () => {
+              if (getCamMode() === "rts") syncCameraFromParams();
+              applyCamModeConstraints();
+            },
+          });
+          _slider(sec, PARAMS.camera, "azimuthDeg", {
+            label: "Yaw (azimuth °)",
+            min: -180,
+            max: 180,
+            step: 0.5,
+            onChange: () => {
+              if (getCamMode() === "rts") syncCameraFromParams();
+              applyCamModeConstraints();
+            },
+          });
+          _slider(sec, PARAMS.camera, "distance", {
+            label: "Distance",
+            min: 60,
+            max: 1400,
+            step: 5,
+            onChange: () => {
+              if (getCamMode() === "rts") syncCameraFromParams();
+            },
+          });
+          _slider(sec, PARAMS.camera, "targetY", {
+            label: "Target height",
+            min: -20,
+            max: 80,
+            step: 1,
+            onChange: () => {
+              if (getCamMode() === "rts") syncCameraFromParams();
+            },
+          });
+          _slider(sec, PARAMS.camera, "minDistance", {
+            label: "Min zoom",
+            min: 20,
+            max: 400,
+            step: 5,
+            onChange: () => applyCamModeConstraints(),
+          });
+          _slider(sec, PARAMS.camera, "maxDistance", {
+            label: "Max zoom",
+            min: 200,
+            max: 1200,
+            step: 10,
+            onChange: () => applyCamModeConstraints(),
+          });
+          _separator(sec);
           _slider(sec, PARAMS.camera, "fov", {
             label: "FOV",
             min: 30,
@@ -5856,6 +7757,32 @@
               camera.updateProjectionMatrix();
             },
           });
+          _slider(sec, PARAMS.camera, "damping", {
+            label: "Damping",
+            min: 0.02,
+            max: 0.2,
+            step: 0.01,
+            onChange: () => applyCamModeConstraints(),
+          });
+          _slider(sec, PARAMS.camera, "minPolarDeg", {
+            label: "Orbit min pitch",
+            min: 10,
+            max: 80,
+            step: 1,
+            onChange: () => {
+              if (getCamMode() === "orbit") applyCamModeConstraints();
+            },
+          });
+          _slider(sec, PARAMS.camera, "maxPolarDeg", {
+            label: "Orbit max pitch",
+            min: 40,
+            max: 90,
+            step: 1,
+            onChange: () => {
+              if (getCamMode() === "orbit") applyCamModeConstraints();
+            },
+          });
+          _separator(sec);
           _slider(sec, PARAMS.camera, "panSpeed", {
             label: "Pan speed",
             min: 0.2,
@@ -6127,15 +8054,15 @@
 
           _slider(sec, PARAMS.terrain, "heightScale", {
             label: "Height scale",
-            min: 10,
-            max: 140,
+            min: 16,
+            max: 90,
             step: 1,
             onChange: onShape,
           });
           _slider(sec, PARAMS.terrain, "flatness", {
             label: "Flatness",
             min: 1.5,
-            max: 6,
+            max: 5,
             step: 0.1,
             onChange: onShape,
           });
@@ -6156,28 +8083,28 @@
           _slider(sec, PARAMS.terrain, "ridgeBoost", {
             label: "Ridge boost",
             min: 0,
-            max: 0.08,
+            max: 0.06,
             step: 0.002,
             onChange: onShape,
           });
-          _slider(sec, PARAMS.terrain, "peakBias", {
-            label: "Peak bias",
-            min: 0,
-            max: 0.3,
-            step: 0.01,
-            onChange: onShape,
-          });
           _slider(sec, PARAMS.terrain, "mountainReliefMul", {
-            label: "Peak strength",
+            label: "Hill strength",
             min: 0,
-            max: 0.8,
+            max: 0.5,
             step: 0.02,
             onChange: onShape,
           });
-          _slider(sec, PARAMS.terrain, "heroRidgeAmp", {
-            label: "Hero ridge",
+          _slider(sec, PARAMS.terrain, "rampMaxGrade", {
+            label: "Ramp max grade",
+            min: 0.2,
+            max: 0.7,
+            step: 0.02,
+            onChange: onShape,
+          });
+          _slider(sec, PARAMS.terrain, "slopeClampPasses", {
+            label: "Ramp smooth passes",
             min: 0,
-            max: 80,
+            max: 20,
             step: 1,
             onChange: onShape,
           });
@@ -6197,18 +8124,11 @@
             step: 0.001,
             onChange: onSurf,
           });
-          _slider(sec, PARAMS.terrain, "rockScale", {
-            label: "Rock UV",
-            min: 0.0005,
+          _slider(sec, PARAMS.terrain, "cliffScale", {
+            label: "Cliff UV",
+            min: 0.001,
             max: 0.02,
             step: 0.0005,
-            onChange: onSurf,
-          });
-          _slider(sec, PARAMS.terrain, "snowScale", {
-            label: "Snow UV",
-            min: 0.002,
-            max: 0.06,
-            step: 0.001,
             onChange: onSurf,
           });
           _slider(sec, PARAMS.terrain, "grassJitter", {
@@ -6220,60 +8140,25 @@
           });
           _separator(sec);
 
-          _slider(sec, PARAMS.terrain, "snowStart", {
-            label: "Snow line",
-            min: 0,
-            max: 120,
-            step: 1,
-            onChange: onSurf,
-          });
-          _slider(sec, PARAMS.terrain, "snowEnd", {
-            label: "Snow full",
-            min: 0,
-            max: 140,
-            step: 1,
-            onChange: onSurf,
-          });
           _slider(sec, PARAMS.terrain, "cliffLow", {
-            label: "Rock slope ↓",
+            label: "Cliff slope ↓",
             min: 0,
             max: 1,
             step: 0.01,
             onChange: onSurf,
           });
           _slider(sec, PARAMS.terrain, "cliffHigh", {
-            label: "Rock slope ↑",
+            label: "Cliff slope ↑",
             min: 0,
             max: 1,
             step: 0.01,
             onChange: onSurf,
           });
           _slider(sec, PARAMS.terrain, "cliffPow", {
-            label: "Cliff sharpness",
+            label: "Cliff blend",
             min: 0.2,
             max: 2,
             step: 0.05,
-            onChange: onSurf,
-          });
-          _slider(sec, PARAMS.terrain, "rockHeightStart", {
-            label: "Rock height ↓",
-            min: 0,
-            max: 100,
-            step: 1,
-            onChange: onSurf,
-          });
-          _slider(sec, PARAMS.terrain, "rockHeightEnd", {
-            label: "Rock height ↑",
-            min: 0,
-            max: 120,
-            step: 1,
-            onChange: onSurf,
-          });
-          _slider(sec, PARAMS.terrain, "rockHeightAmt", {
-            label: "Rock height mix",
-            min: 0,
-            max: 0.5,
-            step: 0.01,
             onChange: onSurf,
           });
           _separator(sec);
@@ -6285,25 +8170,11 @@
             step: 0.1,
             onChange: onSurf,
           });
-          _slider(sec, PARAMS.terrain, "dispRockMul", {
-            label: "Disp rock ×",
+          _slider(sec, PARAMS.terrain, "dispCliffMul", {
+            label: "Disp cliff ×",
             min: 0,
             max: 2,
             step: 0.05,
-            onChange: onSurf,
-          });
-          _slider(sec, PARAMS.terrain, "dispSnowMul", {
-            label: "Disp snow ×",
-            min: 0,
-            max: 2,
-            step: 0.05,
-            onChange: onSurf,
-          });
-          _slider(sec, PARAMS.terrain, "dispSnowMin", {
-            label: "Disp snow from",
-            min: 0,
-            max: 120,
-            step: 1,
             onChange: onSurf,
           });
           _slider(sec, PARAMS.terrain, "dispUvScale", {
@@ -6322,15 +8193,8 @@
             step: 0.05,
             onChange: onSurf,
           });
-          _slider(sec, PARAMS.terrain, "normalRock", {
-            label: "Normal rock",
-            min: 0.2,
-            max: 3,
-            step: 0.05,
-            onChange: onSurf,
-          });
-          _slider(sec, PARAMS.terrain, "normalSnow", {
-            label: "Normal snow",
+          _slider(sec, PARAMS.terrain, "normalCliff", {
+            label: "Normal cliff",
             min: 0.2,
             max: 3,
             step: 0.05,

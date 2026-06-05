@@ -1618,6 +1618,7 @@
               <option value="smartRoad">Smart Road</option>
               <option value="river">River (V)</option>
               <option value="spline">Spline (K)</option>
+              <option value="splineRoad">Spline Road</option>
               <option value="cliffs">Cliffs (O)</option>
               <option value="props">Props (I)</option>
               <option value="water">Water (W)</option>
@@ -1674,6 +1675,16 @@
 
     <script type="module">
       import { startV2App } from "./app/main.js";
+      // Stunt-car tuning objects (module singletons the Vehicle reads live) —
+      // bound directly by the custom Stunt panel in buildPlayPanel().
+      import {
+        TIRE as STUNT_TIRE,
+        CHASSIS as STUNT_CHASSIS,
+        AERO as STUNT_AERO,
+        DRIVETRAIN as STUNT_DRIVETRAIN,
+        DECK as STUNT_DECK,
+        SOLID as STUNT_SOLID,
+      } from "./play/modularRoadVehicle.js";
       import {
         GROUND_PRESETS,
         applyGroundPresetToParams,
@@ -2377,6 +2388,9 @@
         const splinePanel = document.getElementById("spline-panel");
         if (splinePanel)
           splinePanel.style.display = mode === "spline" ? "" : "none";
+        const splineRoadPanel = document.getElementById("splineroad-panel");
+        if (splineRoadPanel)
+          splineRoadPanel.style.display = mode === "splineRoad" ? "" : "none";
         const grassPanel = document.getElementById("grass-panel");
         if (grassPanel)
           grassPanel.style.display = mode === "grass" ? "" : "none";
@@ -2977,6 +2991,37 @@
 
         const groundSlotHost = document.createElement("div");
         taBody.appendChild(groundSlotHost);
+
+        // Tile-grid ground controls (the default `tile` surface) — live-updates
+        // the shared material uniforms. Defaults match the prior hardcoded look.
+        const tileBody = _section(taBody, "Tile grid (default ground)", false);
+        const gt = ts.groundTile;
+        const applyTile = () => app.applyGroundTile();
+        _slider(tileBody, gt, "textureScale", {
+          label: "Texture scale",
+          min: 50,
+          max: 3000,
+          step: 10,
+          onChange: applyTile,
+          hint: "Higher = smaller tiles (modular-road uses ~1500; v2 default 400).",
+        });
+        _slider(tileBody, gt, "gradientIntensity", {
+          label: "Variation intensity",
+          min: 0,
+          max: 1,
+          step: 0.01,
+          onChange: applyTile,
+        });
+        _slider(tileBody, gt, "gradientBias", {
+          label: "Variation bias",
+          min: -1,
+          max: 1,
+          step: 0.01,
+          onChange: applyTile,
+        });
+        _color(tileBody, gt, "tileColor", { label: "Tile color", onChange: applyTile });
+        _color(tileBody, gt, "gridColor", { label: "Grid color", onChange: applyTile });
+        _color(tileBody, gt, "gridLineColor", { label: "Grid line color", onChange: applyTile });
 
         const tslBlend = _section(panel, "TSL — slope meadow blend", false);
         _slider(tslBlend, ts.tslGroundUi, "meadowMix", {
@@ -5597,10 +5642,156 @@
           hint: "Re-creates Howler sprites with the loop region values above.",
         });
 
+        // --- Stunt Camera (modular-road follow cam) ---
+        // Binds to playMode._stuntCam; the camera reads it live each frame.
+        const stCam = app.playMode?._stuntCam;
+        if (stCam) {
+          const camSec = _section(panel, "Stunt Camera", false);
+          const applyFov = () => app.playMode?._applyCameraFov?.();
+          _slider(camSec, stCam, "fov", { label: "FOV", min: 40, max: 110, step: 1, onChange: applyFov });
+          _slider(camSec, stCam, "dist", { label: "Trail distance", min: 2, max: 16, step: 0.1 });
+          _slider(camSec, stCam, "height", { label: "Height", min: 0.5, max: 8, step: 0.1 });
+          _slider(camSec, stCam, "lookAhead", { label: "Look ahead", min: 0, max: 12, step: 0.1 });
+          _slider(camSec, stCam, "lookUp", { label: "Look up", min: 0, max: 4, step: 0.1 });
+          _slider(camSec, stCam, "minSpeed", { label: "Travel-trail min spd", min: 0, max: 10, step: 0.1, hint: "Below this speed the camera trails the car's facing instead of its velocity." });
+          _slider(camSec, stCam, "maxLookPitch", { label: "Max look pitch", min: 0.1, max: 1.4, step: 0.01 });
+          _slider(camSec, stCam, "headingLerp", { label: "Heading smooth", min: 1, max: 12, step: 0.1 });
+          _slider(camSec, stCam, "lookLerp", { label: "Look smooth", min: 1, max: 12, step: 0.1 });
+          _slider(camSec, stCam, "posLerp", { label: "Position smooth", min: 1, max: 14, step: 0.1 });
+        }
+
+        // --- Stunt Car (mirrors modular-road's "Vehicle (test drive)" panel) ---
+        // Bound to the same exported TIRE/CHASSIS/AERO/DRIVETRAIN/DECK/SOLID
+        // singletons the Vehicle reads, so edits live-tune the car.
+        {
+          const T = STUNT_TIRE;
+          const C = STUNT_CHASSIS;
+          const rebuild = () => app.playMode?._stuntVehicle?.rebuildBody();
+
+          const driveSec = _section(panel, "Stunt Car · Drive", false);
+          _slider(driveSec, T, "accelForce", { label: "Accel (N)", min: 500, max: 20000, step: 100 });
+          _slider(driveSec, T, "topSpeed", { label: "Top speed", min: 5, max: 80, step: 1 });
+          _slider(driveSec, T, "brakeForce", { label: "Brake (N)", min: 0, max: 30000, step: 100 });
+          _dropdown(driveSec, STUNT_DRIVETRAIN, "layout", { label: "Drivetrain", options: { FWD: "FWD", AWD: "AWD", RWD: "RWD" } });
+          _slider(driveSec, STUNT_DRIVETRAIN, "powerBias", { label: "Power bias →R", min: 0, max: 1, step: 0.05 });
+
+          const gripSec = _section(panel, "Stunt Car · Steering & grip", false);
+          _slider(gripSec, T, "maxSteerAngle", { label: "Steer max", min: 0.1, max: 1.2, step: 0.01 });
+          _slider(gripSec, T, "steerSpeedReduce", { label: "Steer hi-spd cut", min: 0, max: 0.9, step: 0.05 });
+          _slider(gripSec, T, "steerSpeedRef", { label: "Steer cut @ (m/s)", min: 8, max: 60, step: 1 });
+          _slider(gripSec, T, "frictionCoeff", { label: "Friction μ", min: 0.5, max: 3, step: 0.05 });
+          _slider(gripSec, T, "tireStiffness", { label: "Tire stiffness", min: 2, max: 16, step: 0.5 });
+          _slider(gripSec, T, "gripFront", { label: "Grip front", min: 0, max: 1.2, step: 0.01 });
+          _slider(gripSec, T, "gripRear", { label: "Grip rear", min: 0, max: 1.2, step: 0.01 });
+          _slider(gripSec, T, "gripHandbrake", { label: "Grip handbrake", min: 0, max: 1, step: 0.01 });
+
+          const suspSec = _section(panel, "Stunt Car · Suspension", false);
+          _slider(suspSec, T, "springStrength", { label: "Spring k", min: 5000, max: 150000, step: 500 });
+          _slider(suspSec, T, "damper", { label: "Damper", min: 0, max: 20000, step: 50 });
+          _slider(suspSec, T, "rayRingCount", { label: "Wheel rays", min: 0, max: 16, step: 1 });
+
+          const airSec = _section(panel, "Stunt Car · Air & stabilizer", false);
+          _slider(airSec, T, "stabilizerStrength", { label: "Surface align", min: 0, max: 30000, step: 200 });
+          _slider(airSec, T, "stabilizerDamp", { label: "Align damp", min: 0, max: 8000, step: 100 });
+          _slider(airSec, T, "airControl", { label: "Air pitch/roll", min: 0, max: 15000, step: 250 });
+          _slider(airSec, T, "airYawControl", { label: "Air spin (Q/E)", min: 0, max: 15000, step: 250 });
+          _slider(airSec, T, "airAngularDamp", { label: "Air tilt damp", min: 0, max: 5000, step: 100 });
+          _slider(airSec, T, "airYawDamp", { label: "Air spin damp", min: 0, max: 5000, step: 50 });
+
+          const aeroSec = _section(panel, "Stunt Car · Aero", false);
+          _slider(aeroSec, STUNT_AERO, "drag", { label: "Aero drag", min: 0, max: 3, step: 0.05 });
+          _slider(aeroSec, STUNT_AERO, "downforce", { label: "Downforce", min: 0, max: 12, step: 0.25 });
+
+          const chSec = _section(panel, "Stunt Car · Chassis", false);
+          _slider(chSec, C, "mass", { label: "Mass (kg)", min: 400, max: 4000, step: 50, onChange: rebuild });
+          _slider(chSec, C, "comZ", { label: "CoM front (+Z)", min: -0.8, max: 0.8, step: 0.01, onChange: rebuild });
+          _slider(chSec, C, "comY", { label: "CoM up (+Y)", min: -0.35, max: 0.35, step: 0.01, onChange: rebuild });
+          _slider(chSec, C, "comX", { label: "CoM right (+X)", min: -0.5, max: 0.5, step: 0.01, onChange: rebuild });
+          _slider(chSec, C, "visualLift", { label: "Visual lift (m)", min: -0.5, max: 2, step: 0.01 });
+
+          const colSec = _section(panel, "Stunt Car · Collision & debug", false);
+          _toggle(colSec, STUNT_DECK, "enabled", { label: "Chassis-vs-deck" });
+          _toggle(colSec, STUNT_SOLID, "enabled", { label: "Guardrail collision" });
+          _slider(colSec, STUNT_SOLID, "radius", { label: "Box sample reach", min: 0.15, max: 1.2, step: 0.05 });
+          _slider(colSec, STUNT_SOLID, "stiffness", { label: "Collide stiff", min: 50000, max: 600000, step: 5000 });
+          const stuntArrows = { on: true };
+          _toggle(colSec, stuntArrows, "on", {
+            label: "Force arrows",
+            onChange: () => app.playMode?._stuntVehicle?.setArrowsVisible(stuntArrows.on),
+          });
+        }
+
         return panel;
       }
 
       // === Build custom Play Spawn panel ===
+      // === Build Spline Road panel (dedicated solid depth-road mode) ===
+      function buildSplineRoadPanel(app) {
+        const panel = document.createElement("div");
+        panel.id = "splineroad-panel";
+        const sr = app.toolState.splineRoad;
+        const sys = () => app.splineRoadSystem;
+        const rebuild = () => sys()?._rebuild();
+
+        const help = document.createElement("div");
+        help.style.cssText = "padding:8px 10px;color:#9fc4dd;font-size:11px;line-height:1.5;";
+        help.innerHTML = "<b>Left-click</b> adds a point to the active road · <b>Right-click</b> a point to select it &amp; grow from that end (first or last) · <b>New road</b> starts a separate segment for gaps/jumps · <b>W</b>/<b>E</b> = move/tilt gizmo · <b>Delete</b> removes the point.";
+        panel.appendChild(help);
+
+        const shape = _section(panel, "Road shape");
+        _slider(shape, sr, "width", { label: "Width", min: 3, max: 24, step: 0.5, onChange: rebuild });
+        _slider(shape, sr, "thickness", { label: "Thickness", min: 0.2, max: 5, step: 0.1, onChange: rebuild });
+        _slider(shape, sr, "bank", { label: "Banking", min: 0, max: 1.5, step: 0.05, onChange: rebuild, hint: "Lean into turns. 0 = flat." });
+        _slider(shape, sr, "bankSmooth", { label: "Bank smooth", min: 0, max: 0.3, step: 0.01, onChange: rebuild });
+        _slider(shape, sr, "segmentsPerPoint", { label: "Smoothness", min: 8, max: 60, step: 2, onChange: rebuild, hint: "Mesh subdivisions per control point." });
+        _slider(shape, sr, "tension", { label: "Curve tension", min: 0, max: 1, step: 0.05, onChange: rebuild });
+        _toggle(shape, sr, "closed", { label: "Closed loop", onChange: rebuild });
+
+        const pt = _section(panel, "Selected point", true);
+        _slider(pt, sr, "selectedPointY", {
+          label: "Point height (Y)",
+          min: -10,
+          max: 140,
+          step: 0.5,
+          onChange: () => sys()?.setSelectedPointY(sr.selectedPointY),
+          hint: "Lift the selected point above the terrain to build sky / floating sections.",
+        });
+        _slider(pt, sr, "selectedPointRoll", {
+          label: "Point bank (°)",
+          min: -180,
+          max: 180,
+          step: 1,
+          onChange: () => sys()?.setSelectedRoll((sr.selectedPointRoll * Math.PI) / 180),
+          hint: "Tilt the deck at this point. Set global Banking to 0 for fully-manual control (banked walls, corkscrews).",
+        });
+        _button(pt, {
+          title: "Gizmo: Move (W) ⇄ Tilt (E)",
+          onClick: () => sys()?.toggleGizmoMode(),
+          hint: "Switch the handle between moving the point (W) and twisting/banking the deck around the road direction (E).",
+        });
+
+        const barr = _section(panel, "Side barriers", true);
+        _toggle(barr, sr, "barrierEnabled", { label: "Enabled", onChange: rebuild });
+        _slider(barr, sr, "barrierHeight", { label: "Height", min: 0.1, max: 3, step: 0.05, onChange: rebuild });
+        _slider(barr, sr, "barrierDepth", { label: "Depth (thickness)", min: 0.05, max: 1.5, step: 0.05, onChange: rebuild });
+        _color(barr, sr, "barrierColor", { label: "Color", onChange: rebuild });
+
+        const look = _section(panel, "Appearance", false);
+        _color(look, sr, "deckColor", { label: "Deck color", onChange: rebuild });
+        _color(look, sr, "sideColor", { label: "Side / underside", onChange: rebuild });
+        _color(look, sr, "kerbColor", { label: "Kerb color", onChange: rebuild });
+
+        const acts = _section(panel, "Actions", true);
+        _button(acts, {
+          title: "+ New road segment",
+          onClick: () => { sys()?.newRoad(); app.ui?.pane.refresh(); },
+          hint: "Start a fresh, separate road. Left-clicks build it; right-click any point to switch which road you're editing.",
+        });
+        _button(acts, { title: "Clear all roads", onClick: () => { sys()?.clearAll(); app.ui?.pane.refresh(); } });
+
+        return panel;
+      }
+
       function buildPlaySpawnPanel(app) {
         const panel = document.createElement("div");
         panel.id = "playspawn-panel";
@@ -13951,6 +14142,7 @@
           toolsTab.appendChild(buildBillboardGrassPanel(app));
           toolsTab.appendChild(buildPlaySpawnPanel(app));
           toolsTab.appendChild(buildPlayPanel(app));
+          toolsTab.appendChild(buildSplineRoadPanel(app));
           toolsTab.appendChild(buildHolePanel(app));
           toolsTab.appendChild(buildCavePanel(app));
           toolsTab.appendChild(buildBarrierPanel(app));

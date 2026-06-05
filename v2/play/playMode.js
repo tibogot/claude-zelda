@@ -40,6 +40,7 @@ import {
 } from "./vvvCarPhysics.js";
 import { Vehicle as ModularVehicle } from "./modularRoadVehicle.js";
 import { createVehicleGround } from "./modularRoadGround.js";
+import { RoadBvh } from "./modularRoadBvh.js";
 
 // ============================================================
 // === VVV CAR scratch (module-scope; reused across frames to avoid GC).
@@ -54,6 +55,14 @@ const _vvvSpinQ = new THREE.Quaternion();
 const _vvvTireVel = new THREE.Vector3();
 const _vvvOffset = new THREE.Vector3();
 const _vvvArrowDir = new THREE.Vector3();
+
+// === STUNT chase-camera scratch (faithful port of modular-road's updateChaseCamera).
+const _stCamDesired = new THREE.Vector3();
+const _stCamLook = new THREE.Vector3();
+const _stCamV = new THREE.Vector3();
+const _stCamFwd = new THREE.Vector3();
+const _stCamTgtH = new THREE.Vector3();
+const _stWorldUp = new THREE.Vector3(0, 1, 0);
 
 const CAP_R = 0.4;
 const CAP_H = 1.2;
@@ -862,7 +871,13 @@ export class PlayMode {
     audioSystem,
     excludeFromReflection,
     onSpawnChanged,
+    getStuntRoadMeshes,
+    getStuntRoadSolidMeshes,
   }) {
+    this._getStuntRoadMeshes = getStuntRoadMeshes || (() => []);
+    this._getStuntRoadSolidMeshes = getStuntRoadSolidMeshes || (() => []);
+    this._stuntRoadBvh = null;
+    this._stuntRoadSolidsBvh = null;
     this.scene = scene;
     this.camera = camera;
     this.renderer = renderer;
@@ -1170,7 +1185,7 @@ export class PlayMode {
     // Self-contained: owns its chassis/wheel meshes and runs its own physics
     // step. The ground adapter feeds it v2's analytic terrain + cliffBvh (and a
     // road BVH later) through the duck-typed groundBvh interface it expects.
-    this._stuntVehicle = new ModularVehicle({ scene: this.scene });
+    this._stuntVehicle = new ModularVehicle({ scene: this.scene, showArrows: true });
     this._stuntVehicle.getFloorY = (x, z) => this.getTerrainHeight(x, z);
     this._stuntGround = createVehicleGround({
       getTerrainHeight: (x, z) => this.getTerrainHeight(x, z),
@@ -1178,6 +1193,26 @@ export class PlayMode {
     });
     this._stuntVehicle.enabled = false;
     this._stuntVehicle.group.visible = false;
+    // Exact modular-road follow camera (trails travel direction, tilts look to
+    // the landing). Separate from the VVV chase cam — see _updateStuntCamera.
+    this._stuntCam = {
+      fov: 60,
+      dist: 7.5,
+      height: 3.2,
+      lookAhead: 5.5,
+      lookUp: 1.2,
+      minSpeed: 3.0,
+      maxLookPitch: 0.85,
+      headingLerp: 4.0,
+      lookLerp: 5.0,
+      posLerp: 7.0,
+    };
+    this._stuntCamHeading = new THREE.Vector3(0, 0, 1);
+    this._stuntCamLookDir = new THREE.Vector3(0, 0, 1);
+    this._stuntCamInit = false;
+    /** Low-passed body Y for the FREE/detached orbit target — kills the
+     *  suspension micro-bob so the free camera doesn't drift up/down. */
+    this._stuntCamFocusYSmooth = null;
 
     this._modePill = null;
     this._modePillIcon = null;
@@ -1647,7 +1682,8 @@ export class PlayMode {
 
   _applyCameraFov() {
     let fov;
-    if (this.moveMode === "vvv" || this.moveMode === "stunt") fov = this.vvvCam.fov;
+    if (this.moveMode === "stunt") fov = this._stuntCam.fov;
+    else if (this.moveMode === "vvv") fov = this.vvvCam.fov;
     else if (this.moveMode === "lotus") fov = this.lotusCam.fov;
     else fov = this.cameraTuning[this.moveMode]?.fov ?? 60;
     if (this.camera.fov !== fov) {
@@ -1677,6 +1713,12 @@ export class PlayMode {
       this._cameraTuningGuiFolder.destroy();
       this._cameraTuningGuiFolder = null;
     }
+    // Stunt's camera controls live in the custom editor Play panel, not this
+    // lil-gui (which is hidden in Stunt) — skip building a folder for it.
+    if (this.moveMode === "stunt") {
+      this._cameraTuningGuiModeShown = "stunt";
+      return;
+    }
     const mode = this.moveMode;
     const meta = MODE_META[mode];
     const title = meta ? `${meta.icon}  ${meta.label}` : mode;
@@ -1702,8 +1744,7 @@ export class PlayMode {
         folder.add(this.carSettings, "cameraChaseSpeed", 0.5, 12, 0.1).name("Chase speed").onChange(onAny);
         folder.add(this.carSettings, "cameraDriftLag", 0, 5, 0.1).name("Drift lag").onChange(onAny);
       }
-    } else if (mode === "vvv" || mode === "stunt") {
-      // Stunt shares the VVV chase-camera tuning object.
+    } else if (mode === "vvv") {
       const vc = this.vvvCam;
       folder.add(vc, "fov", 40, 110, 1).name("FOV").onChange(onAny);
       folder.add(vc, "distance", 2, 16, 0.1).name("Distance").onChange(onAny);
@@ -1769,7 +1810,9 @@ export class PlayMode {
 
   _refreshCameraTuningGuiVisible() {
     if (!this._cameraTuningGui) return;
-    this._cameraTuningGui.domElement.style.display = this.active ? "" : "none";
+    // Hidden in Stunt — its camera controls live in the custom editor Play panel.
+    const show = this.active && this.moveMode !== "stunt";
+    this._cameraTuningGui.domElement.style.display = show ? "" : "none";
   }
 
   _createPauseBadge() {
@@ -3125,6 +3168,9 @@ export class PlayMode {
     if (this.moveMode === "lotus" && this.lotusRoot) {
       return this.lotusRoot.position.y + (this.lotusCam?.lookAtY ?? 1.4);
     }
+    if (this.moveMode === "stunt") {
+      return (this._stuntCamFocusYSmooth ?? this.playerPos.y) + 1.0;
+    }
     return this.playerPos.y + 1.0;
   }
 
@@ -3186,6 +3232,121 @@ export class PlayMode {
     while (heading > Math.PI) heading -= 2 * Math.PI;
     while (heading < -Math.PI) heading += 2 * Math.PI;
     this.carHeading = heading;
+
+    // Low-pass body Y (12/s) for the free/detached orbit target — same trick as
+    // the VVV camera, so the suspension micro-bob doesn't drift the free cam.
+    if (this._stuntCamFocusYSmooth == null) {
+      this._stuntCamFocusYSmooth = b.pos.y;
+    } else {
+      this._stuntCamFocusYSmooth +=
+        (b.pos.y - this._stuntCamFocusYSmooth) * (1 - Math.exp(-12 * dtSec));
+    }
+
+    // Feed v2's shared drift-marks / drift-smoke / car-audio systems.
+    this.carInAir = v.groundedCount === 0;
+    // Slip angle: lateral vs longitudinal velocity in the chassis frame (0 when
+    // driving/reversing straight, → ~π/2 when sliding fully sideways).
+    const lon = b.vel.x * _vvvFwdW.x + b.vel.z * _vvvFwdW.z;
+    const lat = b.vel.x * _vvvFwdW.z - b.vel.z * _vvvFwdW.x;
+    this.carDriftAngle = Math.atan2(Math.abs(lat), Math.abs(lon) + 0.5);
+    const vxz = Math.hypot(b.vel.x, b.vel.z);
+    this.carDrifting =
+      !this.carInAir && vxz > CAR_DRIFT_ENTRY_SPEED && this.carDriftAngle > 0.32;
+    // Rear-wheel ground contacts (RL=2, RR=3) for tire marks + smoke origins.
+    for (let i = 0; i < 2; i++) {
+      const t = v.tires[2 + i];
+      const wp = t.worldPos;
+      const gy = this.getWorldHeight(wp.x, wp.z) + DRIFT_MARK_Y_OFFSET;
+      this._carRearContactPoints[i].set(wp.x, gy, wp.z);
+      this._carRearContactGrounded[i] = t.grounded;
+    }
+  }
+
+  /** Bake the authored Spline Road into the stunt car's drive-surface BVH so the
+   *  wheels probe it (and DECK contact keeps the chassis on the thin deck). Called
+   *  on stunt-mode entry; re-call to refresh after editing the road. */
+  _bakeStuntRoad() {
+    this.scene.updateMatrixWorld(true);
+    // Deck → wheel-probe BVH.
+    const meshes = (this._getStuntRoadMeshes() || []).filter((m) => m && m.geometry);
+    if (meshes.length) {
+      if (!this._stuntRoadBvh) this._stuntRoadBvh = new RoadBvh();
+      this._stuntRoadBvh.bakeFromMeshes(meshes);
+      this._stuntGround.setRoadBvh(this._stuntRoadBvh.baked ? this._stuntRoadBvh : null);
+    } else {
+      this._stuntGround.setRoadBvh(null);
+    }
+    // Side barriers → chassis-collision solids BVH.
+    const solids = (this._getStuntRoadSolidMeshes() || []).filter((m) => m && m.geometry);
+    if (solids.length) {
+      if (!this._stuntRoadSolidsBvh) this._stuntRoadSolidsBvh = new RoadBvh();
+      this._stuntRoadSolidsBvh.bakeFromMeshes(solids);
+      this._stuntGround.setRoadSolidsBvh(this._stuntRoadSolidsBvh.baked ? this._stuntRoadSolidsBvh : null);
+    } else {
+      this._stuntGround.setRoadSolidsBvh(null);
+    }
+  }
+
+  /** Stunt chase camera — byte-faithful port of modular-road's
+   *  updateChaseCamera: trails the car's TRAVEL direction (not its facing), so
+   *  mid-air spins/loops don't whip the view, and the look tilts up climbing /
+   *  down falling so you see the landing. */
+  _updateStuntCamera(dt) {
+    const v = this._stuntVehicle;
+    if (!v) return;
+    const C = this._stuntCam;
+    const pos = v.body.pos;
+    const vel = v.body.vel;
+    const speed = vel.length();
+    const grounded = v.groundedCount > 0;
+    _stCamFwd.set(0, 0, 1).applyQuaternion(v.body.quat); // car facing (fallback)
+    const reversing = grounded && vel.dot(_stCamFwd) < -0.5;
+
+    // 3D look direction: travel dir when moving, else the car's facing.
+    if (speed > C.minSpeed && !reversing) _stCamV.copy(vel).multiplyScalar(1 / speed);
+    else _stCamV.copy(_stCamFwd);
+
+    // Horizontal trail heading: velocity when moving forward; facing on the
+    // ground; held steady in the air at low horizontal speed.
+    const hSpeed = Math.hypot(vel.x, vel.z);
+    if (hSpeed > C.minSpeed && !reversing) {
+      _stCamTgtH.set(vel.x, 0, vel.z).multiplyScalar(1 / hSpeed);
+    } else if (grounded) {
+      _stCamTgtH.set(_stCamFwd.x, 0, _stCamFwd.z);
+      if (_stCamTgtH.lengthSq() > 1e-6) _stCamTgtH.normalize();
+      else _stCamTgtH.copy(this._stuntCamHeading);
+    } else {
+      _stCamTgtH.copy(this._stuntCamHeading);
+    }
+
+    if (!this._stuntCamInit) {
+      this._stuntCamHeading.copy(_stCamTgtH);
+      this._stuntCamLookDir.copy(_stCamV);
+      this._stuntCamInit = true;
+    }
+
+    const kh = 1 - Math.exp(-C.headingLerp * dt);
+    this._stuntCamHeading.lerp(_stCamTgtH, kh);
+    if (this._stuntCamHeading.lengthSq() < 1e-6) this._stuntCamHeading.copy(_stCamTgtH);
+    this._stuntCamHeading.normalize();
+
+    const kl = 1 - Math.exp(-C.lookLerp * dt);
+    this._stuntCamLookDir.lerp(_stCamV, kl);
+    if (this._stuntCamLookDir.y > C.maxLookPitch) this._stuntCamLookDir.y = C.maxLookPitch;
+    else if (this._stuntCamLookDir.y < -C.maxLookPitch) this._stuntCamLookDir.y = -C.maxLookPitch;
+    if (this._stuntCamLookDir.lengthSq() < 1e-6) this._stuntCamLookDir.copy(_stCamV);
+    this._stuntCamLookDir.normalize();
+
+    _stCamDesired
+      .copy(pos)
+      .addScaledVector(this._stuntCamHeading, -C.dist)
+      .addScaledVector(_stWorldUp, C.height);
+    const kp = 1 - Math.exp(-C.posLerp * dt);
+    this.camera.position.lerp(_stCamDesired, kp);
+
+    _stCamLook.copy(pos).addScaledVector(this._stuntCamLookDir, C.lookAhead);
+    _stCamLook.y += C.lookUp;
+    this.camera.lookAt(_stCamLook);
   }
 
   async _initLotusCamGui() {
@@ -5879,8 +6040,8 @@ export class PlayMode {
       this._stuntVehicle.group.visible = this.moveMode === "stunt";
     }
 
-    // Drift marks & smoke (shared by both car modes)
-    if (anyCarRendered) {
+    // Drift marks & smoke (shared by the kinematic cars + the stunt rigid car)
+    if (anyCarRendered || this.moveMode === "stunt") {
       const speed = Math.sqrt(
         this.carVx * this.carVx + this.carVz * this.carVz,
       );
@@ -6059,7 +6220,8 @@ export class PlayMode {
       this._carHud.style.display = "none";
     }
     if (this._carSpeedometer) {
-      if (carDriving) {
+      // Stunt mode gets its own HUD later — hide the default speedometer for now.
+      if (carDriving && this.moveMode !== "stunt") {
         this._carSpeedometer.style.display = "";
         const maxSpeed = 280;
         const startAngle = 135;
@@ -6138,7 +6300,7 @@ export class PlayMode {
     const charLookY = this.playerPos.y + CHAR_HEIGHT * 0.75;
     const isLotusMode = this.moveMode === "lotus";
     // Stunt reuses the VVV chase camera (both sync playerPos/carHeading/carVx/Vz).
-    const isVvvMode = this.moveMode === "vvv" || this.moveMode === "stunt";
+    const isVvvMode = this.moveMode === "vvv";
     const _lc = isVvvMode ? this.vvvCam : isLotusMode ? this.lotusCam : null;
     const _carLookYOff = _lc ? _lc.lookAtY : 1.2;
     const carLookY = carDriving
@@ -6175,6 +6337,14 @@ export class PlayMode {
       tgt.y += (orbitY - tgt.y) * lerp;
       tgt.z += (this.playerPos.z - tgt.z) * lerp;
       this.controls.update();
+      return;
+    }
+
+    // Stunt uses the dedicated modular-road follow camera (no v2 camera-collision
+    // raising — matches the showcase feel). Early-return skips the chase blocks
+    // and the collision pass below, equivalent to the collision-disabled path.
+    if (this.moveMode === "stunt") {
+      this._updateStuntCamera(dtSec);
       return;
     }
 
@@ -6533,10 +6703,11 @@ export class PlayMode {
       sv.enabled = true;
       sv.group.visible = true;
       this.playerPos.y = spawnY;
-      // Reuse the VVV chase-camera smoothing state (shared camera path).
-      this._vvvCamFocusYSmooth = null;
-      this._vvvCamPosSmooth = null;
-      this._vvvCamDistSmooth = 0;
+      // Bake the authored spline road into the wheel-probe BVH so it's drivable.
+      this._bakeStuntRoad();
+      // Re-center the dedicated stunt follow camera on (re)entry.
+      this._stuntCamInit = false;
+      this._stuntCamFocusYSmooth = null;
       this.driftMarks.reset();
       this.driftSmoke.reset();
     } else if (target === "rts") {
@@ -6583,6 +6754,7 @@ export class PlayMode {
     if (this._cameraTuningGuiModeShown !== this.moveMode) {
       this._rebuildCameraTuningGui();
     }
+    this._refreshCameraTuningGuiVisible();
     // Leaving RTS back to a pawn mode → re-acquire pointer lock (immersive only)
     if (wasRts && target !== "rts" && this.camView !== "iso" && !this._editorRelaxedPointer) {
       this.renderer.domElement.style.cursor = "none";

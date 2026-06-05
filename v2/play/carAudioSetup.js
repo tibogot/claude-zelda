@@ -77,12 +77,10 @@ export function setupPlayModeCarAudio(playMode, audioSystem, pathOverrides = {})
   const registered = [];
 
   function carContextOk() {
-    return (
-      settings().enabled &&
-      playMode.active &&
-      playMode.moveMode === "car" &&
-      playMode.carLoaded
-    );
+    if (!settings().enabled || !playMode.active) return false;
+    // Stunt car (rigid body) is always "loaded" (procedural meshes).
+    if (playMode.moveMode === "stunt") return true;
+    return playMode.moveMode === "car" && playMode.carLoaded;
   }
 
   function whenCar(fn) {
