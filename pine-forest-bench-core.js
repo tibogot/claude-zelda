@@ -116,6 +116,32 @@ export const DEFAULT_PINE_PARAMS = {
     rimPower: 2.4,
   },
   wind: { enabled: true, speed: 1.1, strength: 0.14, micro: 0.04, directionDeg: 25 },
+  /** LOD1: no receive shadow — card UV gradient (trunk→tip) mimics cone interior shadow. */
+  lod1Match: {
+    aoStrengthMul: 1.15,
+    pivotAoMul: 1.22,
+    colorVarMul: 0.88,
+    sssMul: 0.75,
+    rimMul: 0.9,
+    brightnessMul: 0.96,
+    /** Dark at hook (u.y=0), bright at tip — mimics shadowed cone core. */
+    cardShadowStr: 0.92,
+    cardShadowFloor: 0.06,
+    cardShadowReach: 0.84,
+    cardShadowPower: 1.35,
+    sunDarkenStr: 0.12,
+    sunDarkenPower: 1.6,
+  },
+  lod2Cheap: {
+    colorVarMul: 0.35,
+    aoStrengthMul: 1.35,
+    pivotAoMul: 1.2,
+    sssMul: 0.2,
+    rimMul: 0.15,
+    sunDarkenMul: 0.35,
+    cardShadowMul: 0.88,
+    cardShadowFloorMul: 1.1,
+  },
 };
 
 const _v3 = new THREE.Vector3();
@@ -620,33 +646,93 @@ export async function loadPineLeafTexture(url) {
 
 export function createPineFoliageMaterial(params, leafTex, opts = {}) {
   const cheap = opts.cheap === true;
+  const lod1 = opts.lod1 === true;
+  const tier = cheap ? 2 : lod1 ? 1 : 0;
   const m = params.material;
   const w = params.wind;
+  const l1 = { ...DEFAULT_PINE_PARAMS.lod1Match, ...(params.lod1Match ?? {}) };
+  const l2 = { ...DEFAULT_PINE_PARAMS.lod2Cheap, ...(params.lod2Cheap ?? {}) };
   const aTreeCenter = attribute("aTreeCenter", "vec3");
   const treeCenterW = modelWorldMatrix.mul(vec4(aTreeCenter, 1)).xyz;
+
+  const colorVar =
+    tier === 2
+      ? m.colorVar * l2.colorVarMul
+      : tier === 1
+        ? m.colorVar * l1.colorVarMul
+        : m.colorVar;
+  const pivotAo =
+    tier === 2
+      ? Math.min(0.55, m.pivotAo * l2.pivotAoMul)
+      : tier === 1
+        ? Math.min(0.55, m.pivotAo * l1.pivotAoMul)
+        : m.pivotAo;
+  const aoStrength =
+    tier === 2
+      ? Math.min(0.75, m.aoStrength * l2.aoStrengthMul)
+      : tier === 1
+        ? Math.min(0.75, m.aoStrength * l1.aoStrengthMul)
+        : m.aoStrength;
+  const sssStrength =
+    tier === 2
+      ? m.sssStrength * l2.sssMul
+      : tier === 1
+        ? m.sssStrength * l1.sssMul
+        : m.sssStrength;
+  const rimStrength =
+    tier === 2
+      ? m.rimStrength * l2.rimMul
+      : tier === 1
+        ? m.rimStrength * l1.rimMul
+        : m.rimStrength;
+  const sunDarkenStr =
+    tier === 2 ? l1.sunDarkenStr * (l2.sunDarkenMul ?? 0.35) : tier === 1 ? l1.sunDarkenStr : 0;
+  const sunDarkenPower = tier >= 1 ? l1.sunDarkenPower : 1;
+  const brightnessMul = tier === 2 ? l1.brightnessMul * 0.96 : tier === 1 ? l1.brightnessMul : 1;
+  const cardShadowStr =
+    tier === 2
+      ? l1.cardShadowStr * (l2.cardShadowMul ?? 0.88)
+      : tier === 1
+        ? l1.cardShadowStr
+        : 0;
+  const cardShadowReach = tier >= 1 ? l1.cardShadowReach : 1;
+  const cardShadowPower = tier >= 1 ? l1.cardShadowPower : 1;
+  const cardShadowFloor =
+    tier === 2
+      ? l1.cardShadowFloor * (l2.cardShadowFloorMul ?? 1.1)
+      : tier === 1
+        ? l1.cardShadowFloor
+        : 1;
 
   const leafU = {
     bottomColor: uniform(new THREE.Color(m.bottomColor)),
     topColor: uniform(new THREE.Color(m.topColor)),
-    colorVar: uniform(cheap ? m.colorVar * 0.35 : m.colorVar),
+    colorVar: uniform(colorVar),
     normalBias: uniform(m.normalBias),
     leafWarp: uniform(m.leafWarp),
     radialUp: uniform(m.radialUp),
-    veinStrength: uniform(cheap ? m.veinStrength * 0.4 : m.veinStrength),
-    pivotAo: uniform(cheap ? Math.min(0.55, m.pivotAo * 1.2) : m.pivotAo),
-    aoStrength: uniform(cheap ? Math.min(0.75, m.aoStrength * 1.35) : m.aoStrength),
+    veinStrength: uniform(m.veinStrength),
+    pivotAo: uniform(pivotAo),
+    aoStrength: uniform(aoStrength),
     aoRadius: uniform(params._aoRadius ?? 2.2),
     alphaCutoff: uniform(m.alphaTest),
     maskInAlpha: uniform(m.maskMode === "alpha" ? 1 : 0),
     useMaskTex: uniform(leafTex ? 1 : 0),
     useImageColor: uniform(m.colorSource === "texture" && leafTex ? 1 : 0),
     sssColor: uniform(new THREE.Color(m.sssColor)),
-    sssStrength: uniform(cheap ? m.sssStrength * 0.2 : m.sssStrength),
+    sssStrength: uniform(sssStrength),
     sssPower: uniform(m.sssPower),
     rimColor: uniform(new THREE.Color(m.rimColor)),
-    rimStrength: uniform(cheap ? m.rimStrength * 0.15 : m.rimStrength),
+    rimStrength: uniform(rimStrength),
     rimPower: uniform(m.rimPower),
     sunDir: uniform(new THREE.Vector3(5, 12, 4).normalize()),
+    sunDarkenStr: uniform(sunDarkenStr),
+    sunDarkenPower: uniform(sunDarkenPower),
+    brightnessMul: uniform(brightnessMul),
+    cardShadowStr: uniform(cardShadowStr),
+    cardShadowFloor: uniform(cardShadowFloor),
+    cardShadowReach: uniform(cardShadowReach),
+    cardShadowPower: uniform(cardShadowPower),
     time: uniform(0),
     windEnabled: uniform(cheap ? 0 : w.enabled ? 1 : 0),
     windSpeed: uniform(w.speed),
@@ -700,6 +786,8 @@ export function createPineFoliageMaterial(params, leafTex, opts = {}) {
 
   const leafColorNode = Fn(() => {
     const u = uv();
+    /** After rotateGeometryUV(1): pivot on trunk ≈ u.y=1, tip/outward ≈ u.y=0. */
+    const shadeV = tier >= 1 ? sub(float(1), u.y) : u.y;
     let col = mix(leafU.bottomColor, leafU.topColor, u.y);
     const texRgb = leafMapNode.sample(leafMaskUv).rgb;
     col = mix(col, texRgb, leafU.useImageColor);
@@ -711,9 +799,24 @@ export function createPineFoliageMaterial(params, leafTex, opts = {}) {
     const hookAo = mix(
       float(1),
       sub(float(1), leafU.pivotAo),
-      smoothstep(float(0), float(0.38), u.y),
+      smoothstep(float(0), float(0.38), shadeV),
     );
     col = mul(col, hookAo);
+    const cardT = clamp(
+      div(shadeV, max(leafU.cardShadowReach, float(0.001))),
+      float(0),
+      float(1),
+    );
+    const trunkShade = max(
+      leafU.cardShadowFloor,
+      sub(float(1), leafU.cardShadowStr),
+    );
+    const cardGrad = mix(
+      trunkShade,
+      float(1),
+      pow(cardT, max(leafU.cardShadowPower, float(0.001))),
+    );
+    col = mul(col, cardGrad);
     const distC = length(sub(positionWorld, treeCenterW));
     col = mul(
       col,
@@ -728,6 +831,12 @@ export function createPineFoliageMaterial(params, leafTex, opts = {}) {
     col = add(col, mul(leafU.sssColor, mul(pow(backDot, leafU.sssPower), leafU.sssStrength)));
     const rimDot = sub(float(1), max(dot(leafTrunkRadial, viewDir), float(0)));
     col = add(col, mul(leafU.rimColor, mul(pow(rimDot, leafU.rimPower), leafU.rimStrength)));
+    const sunSide = max(dot(leafTrunkRadial, leafU.sunDir), float(0));
+    const fakeRecv = sub(
+      float(1),
+      mul(leafU.sunDarkenStr, pow(sunSide, max(leafU.sunDarkenPower, float(0.001)))),
+    );
+    col = mul(col, mul(fakeRecv, leafU.brightnessMul));
     return clamp(col, float(0), float(2));
   })();
 
@@ -836,6 +945,10 @@ export class PineForestBench {
     this.foliageMat = foliage.material;
     this.foliageUniforms = foliage.uniforms;
 
+    const foliageLod1 = createPineFoliageMaterial(p, leafTex, { lod1: true });
+    this.foliageMatLod1 = foliageLod1.material;
+    this.foliageUniformsLod1 = foliageLod1.uniforms;
+
     const foliageLod2 = createPineFoliageMaterial(p, leafTex, { cheap: true });
     this.foliageMatLod2 = foliageLod2.material;
     this.foliageUniformsLod2 = foliageLod2.uniforms;
@@ -843,12 +956,21 @@ export class PineForestBench {
     this.preset = buildPinePreset(p, this.foliageGeo);
     p._aoRadius = this.preset.bounds.aoRadius;
     this.foliageUniforms.aoRadius.value = this.preset.bounds.aoRadius;
+    this.foliageUniformsLod1.aoRadius.value = this.preset.bounds.aoRadius;
     this.foliageUniformsLod2.aoRadius.value = this.preset.bounds.aoRadius;
     applyFoliageMaterialTexture(
       this.foliageMat,
       this.foliageUniforms,
       foliage.leafMapNode,
       foliage.leafMaskAlphaNode,
+      p,
+      leafTex,
+    );
+    applyFoliageMaterialTexture(
+      this.foliageMatLod1,
+      this.foliageUniformsLod1,
+      foliageLod1.leafMapNode,
+      foliageLod1.leafMaskAlphaNode,
       p,
       leafTex,
     );
@@ -929,7 +1051,11 @@ export class PineForestBench {
     const cast = this.cfg.shadow?.castFoliage !== false;
     const im = new THREE.InstancedMesh(
       geo,
-      lodIdx === 2 ? this.foliageMatLod2 : this.foliageMat,
+      lodIdx === 2
+        ? this.foliageMatLod2
+        : lodIdx === 1
+          ? this.foliageMatLod1
+          : this.foliageMat,
       cappedTotal,
     );
     im.castShadow = lodIdx < 2 && cast;
@@ -1263,6 +1389,7 @@ export class PineForestBench {
 
   updateTime(t) {
     if (this.foliageUniforms) this.foliageUniforms.time.value = t;
+    if (this.foliageUniformsLod1) this.foliageUniformsLod1.time.value = t;
     if (this.foliageUniformsLod2) this.foliageUniformsLod2.time.value = t;
   }
 
@@ -1297,6 +1424,9 @@ export class PineForestBench {
     this.trunkMat = null;
     this.foliageMat?.dispose();
     this.foliageMat = null;
+    this.foliageMatLod1?.dispose();
+    this.foliageMatLod1 = null;
+    this.foliageUniformsLod1 = null;
     this.foliageMatLod2?.dispose();
     this.foliageMatLod2 = null;
     this.foliageUniformsLod2 = null;
