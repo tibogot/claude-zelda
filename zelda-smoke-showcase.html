@@ -1,0 +1,509 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Stylized Voronoi Smoke — Zelda style (WebGPU TSL)</title>
+  <style>
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    html, body { width: 100%; height: 100%; overflow: hidden; background: #111; }
+    canvas { display: block; width: 100vw; height: 100vh; }
+    #hint {
+      position: fixed; bottom: 16px; left: 16px; z-index: 10;
+      font: 12px/1.5 "SF Mono", Consolas, monospace;
+      color: #ccc; background: rgba(0,0,0,0.55); padding: 8px 12px;
+      border-radius: 6px; pointer-events: none;
+    }
+    #hint span { color: #9fd8ff; font-weight: 600; }
+    #panel {
+      position: fixed; top: 12px; right: 12px; z-index: 20;
+      width: min(300px, calc(100vw - 24px)); max-height: calc(100vh - 24px);
+      overflow: auto; padding: 12px 14px;
+      font: 11px/1.45 "SF Mono", Consolas, monospace;
+      color: #d8d8de; background: rgba(8, 10, 16, 0.88);
+      border: 1px solid rgba(255, 255, 255, 0.08);
+      border-radius: 10px; backdrop-filter: blur(8px);
+    }
+    #panel h2 {
+      font-size: 12px; font-weight: 600; color: #9fd8ff;
+      margin-bottom: 10px; letter-spacing: 0.04em; text-transform: uppercase;
+    }
+    #panel section { margin-bottom: 12px; }
+    #panel section > label {
+      display: block; font-size: 10px; color: #8a8a96;
+      text-transform: uppercase; letter-spacing: 0.06em;
+      margin-bottom: 6px; padding-bottom: 4px;
+      border-bottom: 1px solid rgba(255,255,255,0.06);
+    }
+    .row {
+      display: grid; grid-template-columns: 1fr 52px;
+      align-items: center; gap: 8px; margin-bottom: 6px;
+    }
+    .row span:first-child { color: #b8b8c2; }
+    .row output { text-align: right; color: #9fd8ff; font-variant-numeric: tabular-nums; }
+    .row input[type="range"] { grid-column: 1 / -1; width: 100%; accent-color: #9fd8ff; }
+    .row input[type="color"] {
+      grid-column: 1 / -1; width: 100%; height: 28px; padding: 0;
+      border: 1px solid rgba(255,255,255,0.12); border-radius: 4px;
+      background: transparent; cursor: pointer;
+    }
+    .btn-row { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 4px; }
+    .btn-row button {
+      flex: 1 1 auto; min-width: 72px;
+      font: inherit; color: #eee; background: rgba(255,255,255,0.06);
+      border: 1px solid rgba(255,255,255,0.1); border-radius: 6px;
+      padding: 6px 8px; cursor: pointer;
+    }
+    .btn-row button:hover { background: rgba(159,216,255,0.15); border-color: rgba(159,216,255,0.35); }
+    .toggle-row { display: flex; align-items: center; justify-content: space-between; margin-bottom: 6px; }
+    .toggle-row input { accent-color: #9fd8ff; }
+    .tex-hint { font-size: 10px; color: #666; margin-bottom: 8px; line-height: 1.4; }
+  </style>
+  <script type="importmap">
+    {
+      "imports": {
+        "three": "https://cdn.jsdelivr.net/npm/three@0.183.0/build/three.webgpu.min.js",
+        "three/webgpu": "https://cdn.jsdelivr.net/npm/three@0.183.0/build/three.webgpu.min.js",
+        "three/tsl": "https://cdn.jsdelivr.net/npm/three@0.183.0/build/three.tsl.min.js",
+        "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.183.0/examples/jsm/"
+      }
+    }
+  </script>
+</head>
+<body>
+  <div id="hint"><span>Click</span> ground to puff · smoke rises continuously</div>
+  <aside id="panel"></aside>
+  <script type="module">
+    import * as THREE from "three/webgpu";
+    import { MeshBasicNodeMaterial } from "three";
+    import {
+      attribute, float, floor, length, mix, smoothstep,
+      texture, uniform, uv, vec2, vec3,
+    } from "three/tsl";
+    import { OrbitControls } from "three/addons/controls/OrbitControls.js";
+
+    const VORO_URL = "./textures/particles/T_Voronoi01.png";
+
+    // ── Tunable look ──────────────────────────────────────────────────────
+    const LOOK = {
+      // Voronoi shaping
+      tiling: 1.3,        // how many voronoi cells across a puff (low = few big holes)
+      panSpeed: 0.08,     // UV scroll speed (the "alive" drift)
+      warp: 0.15,         // self-distortion → swirly cells
+      bodyInner: 0.06,    // radius of the solid core before the soft falloff
+      holeDepth: 0.6,     // how deep the voronoi carves holes/lobes (0 = plain disc)
+      cutoff: 0.18,       // alpha threshold (raises → smaller/holier puff)
+      dissolveSoft: 0.16, // softness of the alpha edge (high = feathery smoke)
+      erode: 0.55,        // how much AGE raises the cutoff → dissipation over life
+      fadeIn: 0.12,       // fraction of life spent fading/growing in
+      opacity: 1.0,
+      topThin: 0.75,      // how much the column thins toward the top (dense base)
+      // Shading
+      posterize: false,   // banding on the SHADING only (alpha stays soft)
+      steps: 4,
+      lightStrength: 0.5, // directional (top-lit) gradient vs flat voronoi shading
+      colShadow: "#9aa3ae", // crevices / shadow side (at the base)
+      colLit: "#f6f8fb",    // ridges / lit side (at the base)
+      colTop: "#cdd8e4",    // colour the smoke tints toward as it rises
+      heightTint: 0.55,     // strength of the base→top colour shift
+      bgColor: "#8d9aa8",
+      // Simulation
+      rise: 1.2,          // upward speed (u/s)
+      spread: 0.4,        // horizontal drift as it climbs
+      lifetime: 3.6,      // seconds per puff
+      rate: 12,           // puffs per second (higher near base = denser root)
+      sizeStart: 1.2,     // born small & dense at the source
+      sizeEnd: 4.2,       // expand as they climb
+      turbulence: 0.4,    // fine per-puff wobble
+      curlAmount: 0.7,    // amplitude of the coherent column sway
+      curlScale: 0.8,     // waves along the column height (S-curve shape)
+      curlSpeed: 0.9,     // how fast the sway travels up over time
+    };
+
+    // ── TSL uniforms (live-tunable) ───────────────────────────────────────
+    const u = {
+      time:      uniform(0),
+      tiling:    uniform(LOOK.tiling),
+      panSpeed:  uniform(LOOK.panSpeed),
+      warp:      uniform(LOOK.warp),
+      bodyInner: uniform(LOOK.bodyInner),
+      holeDepth: uniform(LOOK.holeDepth),
+      cutoff:    uniform(LOOK.cutoff),
+      dissolveSoft: uniform(LOOK.dissolveSoft),
+      erode:     uniform(LOOK.erode),
+      fadeIn:    uniform(LOOK.fadeIn),
+      opacity:   uniform(LOOK.opacity),
+      topThin:   uniform(LOOK.topThin),
+      posterize: uniform(LOOK.posterize ? 1 : 0),
+      steps:     uniform(LOOK.steps),
+      lightStrength: uniform(LOOK.lightStrength),
+      colShadow: uniform(new THREE.Color(LOOK.colShadow)),
+      colLit:    uniform(new THREE.Color(LOOK.colLit)),
+      colTop:    uniform(new THREE.Color(LOOK.colTop)),
+      heightTint: uniform(LOOK.heightTint),
+    };
+
+    // ── The stylized-smoke material ───────────────────────────────────────
+    // This is the whole technique. Per-instance the only thing that changes
+    // is iSeed (variety) and iLife (0→1 age, drives the dissolve).
+    function buildSmokeMaterial(voroTex) {
+      const iSeed = attribute("iSeed", "float");
+      const iLife = attribute("iLife", "float");
+      const iHeight = attribute("iHeight", "float"); // 0 at base → 1 at top of column
+
+      const st = uv();
+
+      // 1) Soft round BODY: opaque core (radius bodyInner) fading to 0 at the rim.
+      const dist = length(st.sub(vec2(0.5, 0.5)));
+      const body = float(1).sub(smoothstep(u.bodyInner, float(0.5), dist));
+
+      // 2) Animate the voronoi: scroll upward + per-puff seed offset.
+      const t = u.time.mul(u.panSpeed);
+      const seedOff = vec2(iSeed, iSeed.mul(1.7));
+      const vUV = st.mul(u.tiling).add(seedOff).add(vec2(t.mul(0.3), t.negate()));
+      const Vraw = texture(voroTex, vUV).r;
+      // gentle self-warp → cells swirl instead of sliding rigidly
+      const V = texture(voroTex, vUV.add(Vraw.sub(0.5).mul(u.warp))).r;
+
+      // 3) Carve with the voronoi. Texture is BLACK at cell centers, BRIGHT at
+      //    borders → un-inverted, dark centers pull alpha down = round HOLES,
+      //    and the same modulation lobes the outer silhouette (cauliflower edge).
+      const carved = body.mul(mix(float(1), V, u.holeDepth));
+
+      // 4) Soft threshold = feathered smoke edge. Cutoff climbs with AGE so the
+      //    puff dissipates (holes grow, body shrinks) as it rises. The column
+      //    also thins toward the top → dense, rooted base.
+      const cutoff = u.cutoff.add(iLife.mul(u.erode));
+      const fadeIn = smoothstep(float(0), u.fadeIn, iLife);
+      const heightFade = float(1).sub(iHeight.mul(u.topThin));
+      const alpha = smoothstep(cutoff, cutoff.add(u.dissolveSoft), carved)
+        .mul(fadeIn)
+        .mul(heightFade)
+        .mul(u.opacity);
+
+      // 5) SHADING: blend the voronoi detail with a directional (top-lit) ramp
+      //    so the column reads as a single lit volume, not random speckle.
+      //    Posterize is optional and applies to colour only — alpha stays soft.
+      const lit = st.y.mul(0.6).add(iHeight.mul(0.4)); // up the sprite + up the column
+      const shadeRaw = mix(V, lit, u.lightStrength);
+      const banded = shadeRaw.mul(u.steps).add(0.5).floor().div(u.steps);
+      const shade = mix(shadeRaw, banded, u.posterize);
+      // base colour = lit/shadow shading; then tint toward colTop as it rises.
+      const litCol = mix(u.colShadow, u.colLit, shade);
+      const col = mix(litCol, u.colTop, iHeight.mul(u.heightTint));
+
+      const mat = new MeshBasicNodeMaterial({
+        transparent: true,
+        depthWrite: false,
+        depthTest: true,
+        blending: THREE.NormalBlending,
+        side: THREE.DoubleSide,
+      });
+      mat.colorNode = col;
+      mat.opacityNode = alpha;
+      return mat;
+    }
+
+    // ── Puff emitter (CPU sim, camera-facing billboards) ──────────────────
+    class SmokeColumn {
+      constructor(scene, mat, max = 160) {
+        this.max = max;
+        const geo = new THREE.PlaneGeometry(1, 1);
+        geo.deleteAttribute("normal");
+
+        this.seedArr = new Float32Array(max);
+        this.lifeArr = new Float32Array(max);
+        this.heightArr = new Float32Array(max);
+        geo.setAttribute("iSeed", new THREE.InstancedBufferAttribute(this.seedArr, 1));
+        this.lifeAttr = new THREE.InstancedBufferAttribute(this.lifeArr, 1);
+        geo.setAttribute("iLife", this.lifeAttr);
+        this.heightAttr = new THREE.InstancedBufferAttribute(this.heightArr, 1);
+        geo.setAttribute("iHeight", this.heightAttr);
+
+        this.mesh = new THREE.InstancedMesh(geo, mat, max);
+        this.mesh.frustumCulled = false;
+        this.mesh.count = max;
+        scene.add(this.mesh);
+
+        // per-puff state
+        this.active = new Uint8Array(max);
+        this.px = new Float32Array(max);
+        this.py = new Float32Array(max);
+        this.pz = new Float32Array(max);
+        this.dx = new Float32Array(max);
+        this.dz = new Float32Array(max);
+        this.age = new Float32Array(max);
+        this.life = new Float32Array(max);
+        this.rot = new Float32Array(max);
+        this.rotV = new Float32Array(max);
+        this.phase = new Float32Array(max);
+
+        this.base = new THREE.Vector3(0, 0.2, 0);
+        this.acc = 0;
+        this._d = new THREE.Object3D();
+        this._hidden = new THREE.Matrix4().makeScale(0, 0, 0);
+      }
+
+      setBase(v) { this.base.copy(v); }
+
+      _spawn(i) {
+        const a = Math.random() * Math.PI * 2;
+        const r = Math.random() * 0.25;
+        this.active[i] = 1;
+        this.px[i] = this.base.x + Math.cos(a) * r;
+        this.py[i] = this.base.y;
+        this.pz[i] = this.base.z + Math.sin(a) * r;
+        this.dx[i] = Math.cos(a) * (0.3 + Math.random() * 0.7);
+        this.dz[i] = Math.sin(a) * (0.3 + Math.random() * 0.7);
+        this.age[i] = 0;
+        this.life[i] = LOOK.lifetime * (0.8 + Math.random() * 0.4);
+        this.rot[i] = (Math.random() - 0.5) * 0.5; // near-upright, slight tilt
+        this.rotV[i] = (Math.random() - 0.5) * 0.15; // gentle drift only
+        this.phase[i] = Math.random() * 100;
+        this.seedArr[i] = Math.random() * 10;
+      }
+
+      burst(n = 18) {
+        for (let k = 0; k < n; k++) {
+          const slot = this.active.indexOf(0);
+          if (slot < 0) break;
+          this._spawn(slot);
+        }
+      }
+
+      update(dt, time, camera) {
+        // emit
+        this.acc += LOOK.rate * dt;
+        while (this.acc >= 1) {
+          this.acc -= 1;
+          const slot = this.active.indexOf(0);
+          if (slot >= 0) this._spawn(slot);
+        }
+
+        const camQuat = camera.quaternion;
+        const colTop = Math.max(LOOK.rise * LOOK.lifetime * 0.8, 0.001);
+        for (let i = 0; i < this.max; i++) {
+          if (!this.active[i]) {
+            this.mesh.setMatrixAt(i, this._hidden);
+            this.lifeArr[i] = 1;
+            continue;
+          }
+          this.age[i] += dt;
+          const lr = this.age[i] / this.life[i];
+          if (lr >= 1) {
+            this.active[i] = 0;
+            this.mesh.setMatrixAt(i, this._hidden);
+            this.lifeArr[i] = 1;
+            continue;
+          }
+
+          // rise + outward spread (accelerates with height)
+          this.py[i] += LOOK.rise * dt;
+          this.px[i] += this.dx[i] * LOOK.spread * lr * dt;
+          this.pz[i] += this.dz[i] * LOOK.spread * lr * dt;
+
+          // coherent curl: a serpentine sway keyed to height + time, scaled so
+          // the base stays rooted and the top sways most (ribbon in wind).
+          const hAbove = this.py[i] - this.base.y;
+          const hNorm = Math.min(hAbove / colTop, 1);
+          const ts = time * 0.001 * LOOK.curlSpeed;
+          const curlX = Math.sin(hAbove * LOOK.curlScale + ts) * LOOK.curlAmount * hNorm;
+          const curlZ = Math.cos(hAbove * LOOK.curlScale * 0.8 + ts * 1.1) * LOOK.curlAmount * hNorm;
+
+          // fine per-puff wobble on top of the curl
+          const wob = LOOK.turbulence * 0.15;
+          const px = this.px[i] + curlX + Math.sin(time * 0.0011 + this.phase[i]) * wob;
+          const pz = this.pz[i] + curlZ + Math.cos(time * 0.0013 + this.phase[i]) * wob;
+          this.rot[i] += this.rotV[i] * dt;
+
+          // scale grows in fast, eases out
+          const ease = 1 - (1 - lr) * (1 - lr);
+          const scale = LOOK.sizeStart + (LOOK.sizeEnd - LOOK.sizeStart) * ease;
+
+          const d = this._d;
+          d.position.set(px, this.py[i], pz);
+          d.quaternion.copy(camQuat);
+          d.rotateZ(this.rot[i]);
+          d.scale.set(scale, scale, 1);
+          d.updateMatrix();
+          this.mesh.setMatrixAt(i, d.matrix);
+          this.lifeArr[i] = lr;
+          this.heightArr[i] = Math.min((this.py[i] - this.base.y) / colTop, 1);
+        }
+        this.mesh.instanceMatrix.needsUpdate = true;
+        this.lifeAttr.needsUpdate = true;
+        this.heightAttr.needsUpdate = true;
+      }
+    }
+
+    // ── Scene ─────────────────────────────────────────────────────────────
+    const renderer = new THREE.WebGPURenderer({ antialias: true });
+    renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+    renderer.setSize(window.innerWidth, window.innerHeight);
+    document.body.appendChild(renderer.domElement);
+    await renderer.init();
+
+    const scene = new THREE.Scene();
+    scene.background = new THREE.Color(LOOK.bgColor);
+
+    const camera = new THREE.PerspectiveCamera(55, innerWidth / innerHeight, 0.1, 500);
+    camera.position.set(8, 6, 11);
+
+    const controls = new OrbitControls(camera, renderer.domElement);
+    controls.enableDamping = true;
+    controls.target.set(0, 3, 0);
+
+    scene.add(new THREE.AmbientLight(0xffffff, 1));
+
+    // ground
+    const ground = new THREE.Mesh(
+      new THREE.PlaneGeometry(60, 60),
+      new THREE.MeshBasicMaterial({ color: 0x70808e }),
+    );
+    ground.rotation.x = -Math.PI / 2;
+    scene.add(ground);
+
+    // voronoi texture — sampled as raw data (no sRGB), tiling/repeat
+    const voroTex = await new Promise((res) => {
+      new THREE.TextureLoader().load(VORO_URL, (t) => {
+        t.wrapS = t.wrapT = THREE.RepeatWrapping;
+        t.colorSpace = THREE.NoColorSpace;
+        res(t);
+      });
+    });
+
+    const smokeMat = buildSmokeMaterial(voroTex);
+    const column = new SmokeColumn(scene, smokeMat);
+
+    // ── Interaction ───────────────────────────────────────────────────────
+    const raycaster = new THREE.Raycaster();
+    const pointer = new THREE.Vector2();
+    addEventListener("mousemove", (e) => {
+      pointer.x = (e.clientX / innerWidth) * 2 - 1;
+      pointer.y = -(e.clientY / innerHeight) * 2 + 1;
+    });
+    addEventListener("click", (e) => {
+      if (e.target.closest("#panel")) return;
+      raycaster.setFromCamera(pointer, camera);
+      const hit = raycaster.intersectObject(ground)[0];
+      if (hit) { column.setBase(hit.point.clone().setY(0.2)); column.burst(); }
+    });
+
+    // ── UI ────────────────────────────────────────────────────────────────
+    function buildUI() {
+      const panel = document.getElementById("panel");
+      panel.addEventListener("pointerdown", (e) => e.stopPropagation());
+      panel.innerHTML = "<h2>Voronoi Smoke Lab</h2>";
+
+      const mkSec = (title) => {
+        const s = document.createElement("section");
+        s.innerHTML = `<label>${title}</label>`;
+        panel.appendChild(s);
+        return s;
+      };
+      const mkRange = (sec, key, label, min, max, step, fmt = (v) => v.toFixed(2), onChange) => {
+        const row = document.createElement("div");
+        row.className = "row";
+        const name = document.createElement("span"); name.textContent = label;
+        const out = document.createElement("output"); out.textContent = fmt(LOOK[key]);
+        const inp = document.createElement("input");
+        inp.type = "range"; inp.min = min; inp.max = max; inp.step = step; inp.value = LOOK[key];
+        inp.addEventListener("input", () => {
+          LOOK[key] = parseFloat(inp.value);
+          out.textContent = fmt(LOOK[key]);
+          onChange?.(LOOK[key]);
+        });
+        row.append(name, out, inp);
+        sec.appendChild(row);
+      };
+      const mkColor = (sec, key, label, onChange) => {
+        const row = document.createElement("div");
+        row.className = "row";
+        row.innerHTML = `<span>${label}</span><output>${LOOK[key]}</output>`;
+        const out = row.querySelector("output");
+        const inp = document.createElement("input");
+        inp.type = "color"; inp.value = LOOK[key];
+        inp.addEventListener("input", () => {
+          LOOK[key] = inp.value; out.textContent = inp.value; onChange?.(inp.value);
+        });
+        row.appendChild(inp);
+        sec.appendChild(row);
+      };
+      const mkToggle = (sec, key, label, onChange) => {
+        const row = document.createElement("div");
+        row.className = "toggle-row";
+        row.innerHTML = `<span>${label}</span>`;
+        const inp = document.createElement("input");
+        inp.type = "checkbox"; inp.checked = LOOK[key];
+        inp.addEventListener("change", () => { LOOK[key] = inp.checked; onChange?.(inp.checked); });
+        row.appendChild(inp); sec.appendChild(row);
+      };
+
+      const shape = mkSec("Voronoi shaping");
+      mkRange(shape, "tiling", "Cell tiling", 0.5, 4, 0.05, undefined, (v) => u.tiling.value = v);
+      mkRange(shape, "panSpeed", "Drift speed", 0, 0.5, 0.01, undefined, (v) => u.panSpeed.value = v);
+      mkRange(shape, "warp", "Swirl warp", 0, 0.8, 0.01, undefined, (v) => u.warp.value = v);
+      mkRange(shape, "bodyInner", "Core radius", 0, 0.4, 0.01, undefined, (v) => u.bodyInner.value = v);
+      mkRange(shape, "holeDepth", "Hole depth", 0, 1, 0.01, undefined, (v) => u.holeDepth.value = v);
+
+      const diss = mkSec("Dissolve / edge");
+      mkRange(diss, "cutoff", "Cutoff", 0, 0.7, 0.01, undefined, (v) => u.cutoff.value = v);
+      mkRange(diss, "dissolveSoft", "Edge softness", 0.02, 0.5, 0.01, undefined, (v) => u.dissolveSoft.value = v);
+      mkRange(diss, "erode", "Age erosion", 0, 1, 0.01, undefined, (v) => u.erode.value = v);
+      mkRange(diss, "topThin", "Top thinning", 0, 1, 0.01, undefined, (v) => u.topThin.value = v);
+      mkRange(diss, "fadeIn", "Grow-in", 0.02, 0.4, 0.01, undefined, (v) => u.fadeIn.value = v);
+      mkRange(diss, "opacity", "Opacity", 0.2, 1, 0.01, undefined, (v) => u.opacity.value = v);
+
+      const cel = mkSec("Shading");
+      mkRange(cel, "lightStrength", "Light direction", 0, 1, 0.01, undefined, (v) => u.lightStrength.value = v);
+      mkToggle(cel, "posterize", "Posterize bands", (v) => u.posterize.value = v ? 1 : 0);
+      mkRange(cel, "steps", "Band count", 2, 8, 1, (v) => String(Math.round(v)), (v) => u.steps.value = v);
+      mkColor(cel, "colShadow", "Shadow color", (v) => u.colShadow.value.set(v));
+      mkColor(cel, "colLit", "Lit color", (v) => u.colLit.value.set(v));
+      mkColor(cel, "colTop", "Top color", (v) => u.colTop.value.set(v));
+      mkRange(cel, "heightTint", "Height tint", 0, 1, 0.01, undefined, (v) => u.heightTint.value = v);
+      mkColor(cel, "bgColor", "Background", (v) => scene.background.set(v));
+
+      const sim = mkSec("Simulation");
+      mkRange(sim, "rise", "Rise speed", 0.2, 4, 0.05);
+      mkRange(sim, "spread", "Spread", 0, 2, 0.05);
+      mkRange(sim, "lifetime", "Lifetime (s)", 1, 6, 0.1);
+      mkRange(sim, "rate", "Emission rate", 2, 40, 1, (v) => String(Math.round(v)));
+      mkRange(sim, "sizeStart", "Size start", 0.3, 3, 0.05);
+      mkRange(sim, "sizeEnd", "Size end", 1, 8, 0.1);
+      mkRange(sim, "turbulence", "Turbulence", 0, 2, 0.05);
+      mkRange(sim, "curlAmount", "Curl amount", 0, 2, 0.05);
+      mkRange(sim, "curlScale", "Curl waves", 0.1, 2, 0.05);
+      mkRange(sim, "curlSpeed", "Curl speed", 0, 3, 0.05);
+
+      const act = mkSec("Actions");
+      const br = document.createElement("div"); br.className = "btn-row";
+      const b1 = document.createElement("button"); b1.textContent = "Puff burst";
+      b1.onclick = () => column.burst(24);
+      const b2 = document.createElement("button"); b2.textContent = "Reset cam";
+      b2.onclick = () => { camera.position.set(8, 6, 11); controls.target.set(0, 3, 0); };
+      br.append(b1, b2); act.appendChild(br);
+    }
+    buildUI();
+
+    // ── Loop ──────────────────────────────────────────────────────────────
+    const timer = new THREE.Timer();
+    timer.connect(document);
+    addEventListener("resize", () => {
+      camera.aspect = innerWidth / innerHeight;
+      camera.updateProjectionMatrix();
+      renderer.setSize(innerWidth, innerHeight);
+    });
+
+    renderer.setAnimationLoop(() => {
+      timer.update();
+      const dt = Math.min(timer.getDelta(), 0.05);
+      const now = performance.now();
+      u.time.value = now * 0.001;
+      controls.update();
+      column.update(dt, now, camera);
+      renderer.render(scene, camera);
+    });
+  </script>
+</body>
+</html>

@@ -1,0 +1,605 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Stylized Voronoi Smoke — MESH blob (WebGPU TSL)</title>
+  <style>
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    html, body { width: 100%; height: 100%; overflow: hidden; background: #111; }
+    canvas { display: block; width: 100vw; height: 100vh; }
+    #hint {
+      position: fixed; bottom: 16px; left: 16px; z-index: 10;
+      font: 12px/1.5 "SF Mono", Consolas, monospace;
+      color: #ccc; background: rgba(0,0,0,0.55); padding: 8px 12px;
+      border-radius: 6px; pointer-events: none;
+    }
+    #hint span { color: #ffcf7a; font-weight: 600; }
+    #panel {
+      position: fixed; top: 12px; right: 12px; z-index: 20;
+      width: min(300px, calc(100vw - 24px)); max-height: calc(100vh - 24px);
+      overflow: auto; padding: 12px 14px;
+      font: 11px/1.45 "SF Mono", Consolas, monospace;
+      color: #d8d8de; background: rgba(8, 10, 16, 0.88);
+      border: 1px solid rgba(255, 255, 255, 0.08);
+      border-radius: 10px; backdrop-filter: blur(8px);
+    }
+    #panel h2 {
+      font-size: 12px; font-weight: 600; color: #ffcf7a;
+      margin-bottom: 10px; letter-spacing: 0.04em; text-transform: uppercase;
+    }
+    #panel section { margin-bottom: 12px; }
+    #panel section > label {
+      display: block; font-size: 10px; color: #8a8a96;
+      text-transform: uppercase; letter-spacing: 0.06em;
+      margin-bottom: 6px; padding-bottom: 4px;
+      border-bottom: 1px solid rgba(255,255,255,0.06);
+    }
+    .row {
+      display: grid; grid-template-columns: 1fr 52px;
+      align-items: center; gap: 8px; margin-bottom: 6px;
+    }
+    .row span:first-child { color: #b8b8c2; }
+    .row output { text-align: right; color: #ffcf7a; font-variant-numeric: tabular-nums; }
+    .row input[type="range"] { grid-column: 1 / -1; width: 100%; accent-color: #ffcf7a; }
+    .row input[type="color"] {
+      grid-column: 1 / -1; width: 100%; height: 28px; padding: 0;
+      border: 1px solid rgba(255,255,255,0.12); border-radius: 4px;
+      background: transparent; cursor: pointer;
+    }
+    .btn-row { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 4px; }
+    .btn-row button {
+      flex: 1 1 auto; min-width: 72px;
+      font: inherit; color: #eee; background: rgba(255,255,255,0.06);
+      border: 1px solid rgba(255,255,255,0.1); border-radius: 6px;
+      padding: 6px 8px; cursor: pointer;
+    }
+    .btn-row button:hover { background: rgba(255,207,122,0.15); border-color: rgba(255,207,122,0.35); }
+    .toggle-row { display: flex; align-items: center; justify-content: space-between; margin-bottom: 6px; }
+    .toggle-row input { accent-color: #ffcf7a; }
+  </style>
+  <script type="importmap">
+    {
+      "imports": {
+        "three": "https://cdn.jsdelivr.net/npm/three@0.183.0/build/three.webgpu.min.js",
+        "three/webgpu": "https://cdn.jsdelivr.net/npm/three@0.183.0/build/three.webgpu.min.js",
+        "three/tsl": "https://cdn.jsdelivr.net/npm/three@0.183.0/build/three.tsl.min.js",
+        "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.183.0/examples/jsm/"
+      }
+    }
+  </script>
+</head>
+<body>
+  <div id="hint"><span>Click</span> ground to puff · mesh blobs with fresnel erosion</div>
+  <aside id="panel"></aside>
+  <script type="module">
+    import * as THREE from "three/webgpu";
+    import { MeshBasicNodeMaterial } from "three";
+    import {
+      attribute, cameraPosition, dot, float, floor, mix, normalLocal,
+      normalWorld, pass, positionLocal, positionWorld, smoothstep, texture,
+      uniform, vec2, vec3,
+    } from "three/tsl";
+    import { bloom } from "three/addons/tsl/display/BloomNode.js";
+    import { OrbitControls } from "three/addons/controls/OrbitControls.js";
+    import { mergeGeometries } from "three/addons/utils/BufferGeometryUtils.js";
+
+    const VORO_URL = "./textures/particles/T_Voronoi01.png";
+
+    // ── Tunable look ──────────────────────────────────────────────────────
+    const LOOK = {
+      // Voronoi (sampled triplanar in object space → 3D cells on the surface)
+      tiling: 0.45,       // cell scale on the blob surface
+      panSpeed: 0.10,     // texture scroll → churning surface
+      holeDepth: 0.45,    // voronoi-driven holes punched into the surface
+      edgeNoise: 0.5,     // how irregular the eroding silhouette edge is
+      // Erosion / edge (this is the fresnel-driven dissolve)
+      cutoff: 0.12,       // base erosion threshold
+      dissolveSoft: 0.18, // softness of the eroding edge
+      erode: 0.6,         // how much AGE eats the blob (front-ward dissolve)
+      rimErode: 0.0,      // (kept 0; fresnel facing already drives edge erosion)
+      fadeIn: 0.12,
+      opacity: 1.0,
+      // Shading — REAL normals
+      lightStrength: 0.7, // 0 = flat, 1 = full N·L shadow range
+      rimStrength: 0.25,  // fresnel rim light on the silhouette
+      rimPow: 3.0,        // rim tightness
+      posterize: true,    // cel banding on the lighting
+      steps: 4,
+      colShadow: "#8a93a0",
+      colLit: "#f4f7fb",
+      colTop: "#cdd8e4",
+      heightTint: 0.5,
+      // Rounded normals (lighting only; fresnel/erosion keep real normals)
+      normalRound: 0,      // 0 = real geometry normals, 1 = fully spherical
+      columnPivot: false,  // false = per-blob center, true = whole-column pivot
+      bgColor: "#8d9aa8",
+      // Bloom (post)
+      bloomOn: false,
+      bloomStrength: 0.6,
+      bloomRadius: 0.5,
+      bloomThreshold: 0.7,
+      // Simulation
+      rise: 1.1,
+      spread: 0.35,
+      lifetime: 3.6,
+      rate: 5,            // FEW heavy hero puffs (mesh ≠ cheap billboards)
+      sizeStart: 0.35,
+      sizeEnd: 1.5,
+      spin: 0.4,          // blob tumble speed
+      curlAmount: 0.6,
+      curlScale: 0.8,
+      curlSpeed: 0.8,
+    };
+
+    const u = {
+      time:       uniform(0),
+      tiling:     uniform(LOOK.tiling),
+      panSpeed:   uniform(LOOK.panSpeed),
+      holeDepth:  uniform(LOOK.holeDepth),
+      edgeNoise:  uniform(LOOK.edgeNoise),
+      cutoff:     uniform(LOOK.cutoff),
+      dissolveSoft: uniform(LOOK.dissolveSoft),
+      erode:      uniform(LOOK.erode),
+      fadeIn:     uniform(LOOK.fadeIn),
+      opacity:    uniform(LOOK.opacity),
+      lightStrength: uniform(LOOK.lightStrength),
+      rimStrength: uniform(LOOK.rimStrength),
+      rimPow:     uniform(LOOK.rimPow),
+      posterize:  uniform(LOOK.posterize ? 1 : 0),
+      steps:      uniform(LOOK.steps),
+      colShadow:  uniform(new THREE.Color(LOOK.colShadow)),
+      colLit:     uniform(new THREE.Color(LOOK.colLit)),
+      colTop:     uniform(new THREE.Color(LOOK.colTop)),
+      heightTint: uniform(LOOK.heightTint),
+      colTopY:    uniform(LOOK.rise * LOOK.lifetime * 0.7),
+      lightDir:   uniform(new THREE.Vector3(0.4, 1.0, 0.35).normalize()),
+      round:      uniform(LOOK.normalRound),
+      pivotMode:  uniform(LOOK.columnPivot ? 1 : 0),
+      pivot:      uniform(new THREE.Vector3(0, 2, 0)),
+    };
+
+    // ── The mesh smoke material ───────────────────────────────────────────
+    // Same voronoi/dissolve idea as the billboard page, but now on REAL
+    // geometry: triplanar voronoi, fresnel-driven edge erosion, and N·L
+    // lighting from actual surface normals.
+    function buildMeshSmokeMaterial(voroTex) {
+      const iSeed = attribute("iSeed", "float");
+      const iLife = attribute("iLife", "float");
+      const iCenter = attribute("iCenter", "vec3"); // blob world centre
+
+      // ── triplanar voronoi in OBJECT space (stable cells per blob) ──
+      const p = positionLocal.mul(u.tiling);
+      const aN = normalLocal.abs();
+      const bl = aN.div(aN.x.add(aN.y).add(aN.z).add(0.0001));
+      const t = u.time.mul(u.panSpeed);
+      const off = vec2(iSeed, iSeed.mul(1.7)).add(vec2(t.mul(0.3), t.negate()));
+      const sX = texture(voroTex, p.yz.add(off)).r;
+      const sY = texture(voroTex, p.xz.add(off)).r;
+      const sZ = texture(voroTex, p.xy.add(off)).r;
+      const V = sX.mul(bl.x).add(sY.mul(bl.y)).add(sZ.mul(bl.z));
+
+      // ── fresnel: how much each fragment faces the camera ──
+      const N = normalWorld.normalize();
+      const viewDir = cameraPosition.sub(positionWorld).normalize();
+      const facing = dot(N, viewDir).clamp(0, 1); // 1 front, 0 grazing edge
+
+      // ── erosion: keep front faces, dissolve grazing edges, punch holes,
+      //    make the boundary irregular with the voronoi, dissolve over age ──
+      const holed = facing.mul(mix(float(1), V, u.holeDepth));
+      const edged = holed.add(V.sub(0.5).mul(u.edgeNoise));
+      const thr = u.cutoff.add(iLife.mul(u.erode));
+      const fadeIn = smoothstep(float(0), u.fadeIn, iLife);
+      const alpha = smoothstep(thr, thr.add(u.dissolveSoft), edged)
+        .mul(fadeIn)
+        .mul(u.opacity);
+
+      // ── rounded normal for LIGHTING ONLY: blend the real normal toward a
+      //    spherical normal (pointing out from the blob centre, or the whole
+      //    column pivot) so the cluster shades as one smooth volume. Fresnel
+      //    and rim above still use the REAL normal N for the true silhouette. ──
+      const center = mix(iCenter, u.pivot, u.pivotMode);
+      const sphN = positionWorld.sub(center).normalize();
+      const litN = mix(N, sphN, u.round).normalize();
+
+      // ── N·L lighting with optional cel banding ──
+      const ndl = dot(litN, u.lightDir).clamp(0, 1);
+      const lambert = mix(float(1), ndl, u.lightStrength);
+      const banded = lambert.mul(u.steps).add(0.5).floor().div(u.steps);
+      const shade = mix(lambert, banded, u.posterize);
+      const litCol = mix(u.colShadow, u.colLit, shade);
+
+      // ── colour over height + fresnel rim light ──
+      const hNorm = positionWorld.y.div(u.colTopY).clamp(0, 1);
+      const tinted = mix(litCol, u.colTop, hNorm.mul(u.heightTint));
+      const rim = float(1).sub(facing).pow(u.rimPow).mul(u.rimStrength);
+      const col = tinted.add(rim);
+
+      const mat = new MeshBasicNodeMaterial({
+        transparent: true,
+        depthWrite: false,
+        depthTest: true,
+        blending: THREE.NormalBlending,
+        side: THREE.DoubleSide,
+      });
+      mat.colorNode = col;
+      mat.opacityNode = alpha;
+      return mat;
+    }
+
+    // ── Fused-sphere blob geometry (the Blender shape, procedurally) ───────
+    function makeBlobGeometry() {
+      const a = new THREE.IcosahedronGeometry(1.0, 3);
+      const b = new THREE.IcosahedronGeometry(0.8, 3).translate(0.95, 0.45, 0.15);
+      const c = new THREE.IcosahedronGeometry(0.78, 3).translate(-0.7, 0.55, -0.35);
+      const g = mergeGeometries([a, b, c]);
+      g.deleteAttribute("uv");
+      g.center();
+      return g;
+    }
+
+    // ── Mesh blob emitter (CPU sim, real 3D meshes, no billboarding) ───────
+    class SmokeBlobs {
+      constructor(scene, mat, max = 40) {
+        this.max = max;
+        const geo = makeBlobGeometry();
+        this.seedArr = new Float32Array(max);
+        this.lifeArr = new Float32Array(max).fill(1);
+        geo.setAttribute("iSeed", new THREE.InstancedBufferAttribute(this.seedArr, 1));
+        this.lifeAttr = new THREE.InstancedBufferAttribute(this.lifeArr, 1);
+        geo.setAttribute("iLife", this.lifeAttr);
+        this.centerArr = new Float32Array(max * 3);
+        this.centerAttr = new THREE.InstancedBufferAttribute(this.centerArr, 3);
+        geo.setAttribute("iCenter", this.centerAttr);
+
+        this.mesh = new THREE.InstancedMesh(geo, mat, max);
+        this.mesh.frustumCulled = false;
+        this.mesh.count = max;
+        scene.add(this.mesh);
+
+        this.active = new Uint8Array(max);
+        this.px = new Float32Array(max);
+        this.py = new Float32Array(max);
+        this.pz = new Float32Array(max);
+        this.dx = new Float32Array(max);
+        this.dz = new Float32Array(max);
+        this.age = new Float32Array(max);
+        this.life = new Float32Array(max);
+        this.axX = new Float32Array(max);
+        this.axY = new Float32Array(max);
+        this.axZ = new Float32Array(max);
+        this.spin = new Float32Array(max);
+        this.ang = new Float32Array(max);
+
+        this.base = new THREE.Vector3(0, 0.3, 0);
+        this.acc = 0;
+        this._d = new THREE.Object3D();
+        this._axis = new THREE.Vector3();
+        this._hidden = new THREE.Matrix4().makeScale(0, 0, 0);
+      }
+
+      setBase(v) { this.base.copy(v); }
+
+      _spawn(i) {
+        const a = Math.random() * Math.PI * 2;
+        const r = Math.random() * 0.25;
+        this.active[i] = 1;
+        this.px[i] = this.base.x + Math.cos(a) * r;
+        this.py[i] = this.base.y;
+        this.pz[i] = this.base.z + Math.sin(a) * r;
+        this.dx[i] = Math.cos(a) * (0.3 + Math.random() * 0.7);
+        this.dz[i] = Math.sin(a) * (0.3 + Math.random() * 0.7);
+        this.age[i] = 0;
+        this.life[i] = LOOK.lifetime * (0.8 + Math.random() * 0.4);
+        const ax = new THREE.Vector3(Math.random() - 0.5, Math.random() - 0.5, Math.random() - 0.5).normalize();
+        this.axX[i] = ax.x; this.axY[i] = ax.y; this.axZ[i] = ax.z;
+        this.spin[i] = (Math.random() - 0.5) * 2;
+        this.ang[i] = Math.random() * Math.PI * 2;
+        this.seedArr[i] = Math.random() * 10;
+      }
+
+      burst(n = 8) {
+        for (let k = 0; k < n; k++) {
+          const slot = this.active.indexOf(0);
+          if (slot < 0) break;
+          this._spawn(slot);
+        }
+      }
+
+      update(dt, time) {
+        this.acc += LOOK.rate * dt;
+        while (this.acc >= 1) {
+          this.acc -= 1;
+          const slot = this.active.indexOf(0);
+          if (slot >= 0) this._spawn(slot);
+        }
+        const colTop = Math.max(LOOK.rise * LOOK.lifetime * 0.8, 0.001);
+
+        for (let i = 0; i < this.max; i++) {
+          if (!this.active[i]) {
+            this.mesh.setMatrixAt(i, this._hidden);
+            this.lifeArr[i] = 1;
+            continue;
+          }
+          this.age[i] += dt;
+          const lr = this.age[i] / this.life[i];
+          if (lr >= 1) {
+            this.active[i] = 0;
+            this.mesh.setMatrixAt(i, this._hidden);
+            this.lifeArr[i] = 1;
+            continue;
+          }
+
+          this.py[i] += LOOK.rise * dt;
+          this.px[i] += this.dx[i] * LOOK.spread * lr * dt;
+          this.pz[i] += this.dz[i] * LOOK.spread * lr * dt;
+
+          // coherent curl (rooted base, swaying top)
+          const hAbove = this.py[i] - this.base.y;
+          const hNorm = Math.min(hAbove / colTop, 1);
+          const ts = time * 0.001 * LOOK.curlSpeed;
+          const curlX = Math.sin(hAbove * LOOK.curlScale + ts) * LOOK.curlAmount * hNorm;
+          const curlZ = Math.cos(hAbove * LOOK.curlScale * 0.8 + ts * 1.1) * LOOK.curlAmount * hNorm;
+
+          this.ang[i] += this.spin[i] * LOOK.spin * dt;
+          const ease = 1 - (1 - lr) * (1 - lr);
+          const scale = LOOK.sizeStart + (LOOK.sizeEnd - LOOK.sizeStart) * ease;
+
+          const cx = this.px[i] + curlX;
+          const cz = this.pz[i] + curlZ;
+          const d = this._d;
+          d.position.set(cx, this.py[i], cz);
+          this._axis.set(this.axX[i], this.axY[i], this.axZ[i]);
+          d.quaternion.setFromAxisAngle(this._axis, this.ang[i]);
+          d.scale.set(scale, scale, scale);
+          d.updateMatrix();
+          this.mesh.setMatrixAt(i, d.matrix);
+          this.lifeArr[i] = lr;
+          this.centerArr[i * 3] = cx;
+          this.centerArr[i * 3 + 1] = this.py[i];
+          this.centerArr[i * 3 + 2] = cz;
+        }
+        this.mesh.instanceMatrix.needsUpdate = true;
+        this.lifeAttr.needsUpdate = true;
+        this.centerAttr.needsUpdate = true;
+      }
+    }
+
+    // ── Scene ─────────────────────────────────────────────────────────────
+    const renderer = new THREE.WebGPURenderer({ antialias: true });
+    renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+    renderer.setSize(window.innerWidth, window.innerHeight);
+    document.body.appendChild(renderer.domElement);
+    await renderer.init();
+
+    const scene = new THREE.Scene();
+    scene.background = new THREE.Color(LOOK.bgColor);
+
+    const camera = new THREE.PerspectiveCamera(55, innerWidth / innerHeight, 0.1, 500);
+    camera.position.set(7, 5, 10);
+
+    const controls = new OrbitControls(camera, renderer.domElement);
+    controls.enableDamping = true;
+    controls.target.set(0, 3, 0);
+
+    const ground = new THREE.Mesh(
+      new THREE.PlaneGeometry(60, 60),
+      new THREE.MeshBasicMaterial({ color: 0x70808e }),
+    );
+    ground.rotation.x = -Math.PI / 2;
+    scene.add(ground);
+
+    const voroTex = await new Promise((res) => {
+      new THREE.TextureLoader().load(VORO_URL, (tex) => {
+        tex.wrapS = tex.wrapT = THREE.RepeatWrapping;
+        tex.colorSpace = THREE.NoColorSpace;
+        res(tex);
+      });
+    });
+
+    // Swap the particle texture (used by BOTH the smoke and the impact ring).
+    function setVoronoiImage(file) {
+      const url = URL.createObjectURL(file);
+      const img = new Image();
+      img.onload = () => {
+        voroTex.image = img;
+        voroTex.needsUpdate = true;
+        URL.revokeObjectURL(url);
+      };
+      img.onerror = () => URL.revokeObjectURL(url);
+      img.src = url;
+    }
+    function resetVoronoi() {
+      new THREE.TextureLoader().load(VORO_URL, (t) => {
+        voroTex.image = t.image;
+        voroTex.needsUpdate = true;
+      });
+    }
+
+    const smokeMat = buildMeshSmokeMaterial(voroTex);
+    const blobs = new SmokeBlobs(scene, smokeMat);
+
+    // ── Post: bloom so the lit side + fresnel rim genuinely glow ───────────
+    const postProcessing = new THREE.PostProcessing(renderer);
+    const scenePass = pass(scene, camera);
+    const scenePassColor = scenePass.getTextureNode();
+    const bloomPass = bloom(
+      scenePassColor,
+      LOOK.bloomStrength,
+      LOOK.bloomRadius,
+      LOOK.bloomThreshold,
+    );
+    const withBloom = scenePassColor.add(bloomPass);
+    function applyBloom(on) {
+      postProcessing.outputNode = on ? withBloom : scenePassColor;
+      postProcessing.needsUpdate = true;
+    }
+    applyBloom(LOOK.bloomOn);
+
+    // ── Interaction ───────────────────────────────────────────────────────
+    const raycaster = new THREE.Raycaster();
+    const pointer = new THREE.Vector2();
+    addEventListener("mousemove", (e) => {
+      pointer.x = (e.clientX / innerWidth) * 2 - 1;
+      pointer.y = -(e.clientY / innerHeight) * 2 + 1;
+    });
+    addEventListener("click", (e) => {
+      if (e.target.closest("#panel")) return;
+      raycaster.setFromCamera(pointer, camera);
+      const hit = raycaster.intersectObject(ground)[0];
+      if (hit) { blobs.setBase(hit.point.clone().setY(0.3)); blobs.burst(); }
+    });
+
+    // ── UI ────────────────────────────────────────────────────────────────
+    function buildUI() {
+      const panel = document.getElementById("panel");
+      panel.addEventListener("pointerdown", (e) => e.stopPropagation());
+      panel.innerHTML = "<h2>Mesh Smoke Lab</h2>";
+
+      const mkSec = (title) => {
+        const s = document.createElement("section");
+        s.innerHTML = `<label>${title}</label>`;
+        panel.appendChild(s);
+        return s;
+      };
+      const mkRange = (sec, key, label, min, max, step, fmt = (v) => v.toFixed(2), onChange) => {
+        const row = document.createElement("div");
+        row.className = "row";
+        const name = document.createElement("span"); name.textContent = label;
+        const out = document.createElement("output"); out.textContent = fmt(LOOK[key]);
+        const inp = document.createElement("input");
+        inp.type = "range"; inp.min = min; inp.max = max; inp.step = step; inp.value = LOOK[key];
+        inp.addEventListener("input", () => {
+          LOOK[key] = parseFloat(inp.value);
+          out.textContent = fmt(LOOK[key]);
+          onChange?.(LOOK[key]);
+        });
+        row.append(name, out, inp);
+        sec.appendChild(row);
+      };
+      const mkColor = (sec, key, label, onChange) => {
+        const row = document.createElement("div");
+        row.className = "row";
+        row.innerHTML = `<span>${label}</span><output>${LOOK[key]}</output>`;
+        const out = row.querySelector("output");
+        const inp = document.createElement("input");
+        inp.type = "color"; inp.value = LOOK[key];
+        inp.addEventListener("input", () => {
+          LOOK[key] = inp.value; out.textContent = inp.value; onChange?.(inp.value);
+        });
+        row.appendChild(inp); sec.appendChild(row);
+      };
+      const mkToggle = (sec, key, label, onChange) => {
+        const row = document.createElement("div");
+        row.className = "toggle-row";
+        row.innerHTML = `<span>${label}</span>`;
+        const inp = document.createElement("input");
+        inp.type = "checkbox"; inp.checked = LOOK[key];
+        inp.addEventListener("change", () => { LOOK[key] = inp.checked; onChange?.(inp.checked); });
+        row.appendChild(inp); sec.appendChild(row);
+      };
+      const mkButton = (sec, label, onClick) => {
+        const br = document.createElement("div"); br.className = "btn-row";
+        const b = document.createElement("button"); b.textContent = label;
+        b.onclick = onClick; br.appendChild(b); sec.appendChild(br); return b;
+      };
+
+      const tex = mkSec("Particle texture");
+      const fileRow = document.createElement("div");
+      fileRow.className = "row";
+      const fileInp = document.createElement("input");
+      fileInp.type = "file";
+      fileInp.accept = "image/png,image/webp,image/jpeg";
+      fileInp.style.gridColumn = "1 / -1";
+      fileInp.style.color = "#aaa";
+      fileInp.addEventListener("change", () => {
+        const f = fileInp.files?.[0];
+        if (f) setVoronoiImage(f);
+        fileInp.value = "";
+      });
+      fileRow.appendChild(fileInp);
+      tex.appendChild(fileRow);
+      mkButton(tex, "Reset to default", resetVoronoi);
+
+      const shape = mkSec("Voronoi (triplanar)");
+      mkRange(shape, "tiling", "Cell scale", 0.1, 1.5, 0.01, undefined, (v) => u.tiling.value = v);
+      mkRange(shape, "panSpeed", "Churn speed", 0, 0.5, 0.01, undefined, (v) => u.panSpeed.value = v);
+      mkRange(shape, "holeDepth", "Hole depth", 0, 1, 0.01, undefined, (v) => u.holeDepth.value = v);
+      mkRange(shape, "edgeNoise", "Edge irregularity", 0, 1.2, 0.01, undefined, (v) => u.edgeNoise.value = v);
+
+      const diss = mkSec("Erosion (fresnel edge)");
+      mkRange(diss, "cutoff", "Cutoff", 0, 0.7, 0.01, undefined, (v) => u.cutoff.value = v);
+      mkRange(diss, "dissolveSoft", "Edge softness", 0.02, 0.5, 0.01, undefined, (v) => u.dissolveSoft.value = v);
+      mkRange(diss, "erode", "Age erosion", 0, 1, 0.01, undefined, (v) => u.erode.value = v);
+      mkRange(diss, "fadeIn", "Grow-in", 0.02, 0.4, 0.01, undefined, (v) => u.fadeIn.value = v);
+      mkRange(diss, "opacity", "Opacity", 0.2, 1, 0.01, undefined, (v) => u.opacity.value = v);
+
+      const cel = mkSec("Shading (real normals)");
+      mkRange(cel, "lightStrength", "Light contrast", 0, 1, 0.01, undefined, (v) => u.lightStrength.value = v);
+      mkRange(cel, "rimStrength", "Rim light", 0, 1, 0.01, undefined, (v) => u.rimStrength.value = v);
+      mkRange(cel, "rimPow", "Rim tightness", 1, 8, 0.1, undefined, (v) => u.rimPow.value = v);
+      mkToggle(cel, "posterize", "Posterize bands", (v) => u.posterize.value = v ? 1 : 0);
+      mkRange(cel, "steps", "Band count", 2, 8, 1, (v) => String(Math.round(v)), (v) => u.steps.value = v);
+      mkColor(cel, "colShadow", "Shadow color", (v) => u.colShadow.value.set(v));
+      mkColor(cel, "colLit", "Lit color", (v) => u.colLit.value.set(v));
+      mkColor(cel, "colTop", "Top color", (v) => u.colTop.value.set(v));
+      mkRange(cel, "heightTint", "Height tint", 0, 1, 0.01, undefined, (v) => u.heightTint.value = v);
+      mkColor(cel, "bgColor", "Background", (v) => scene.background.set(v));
+
+      const nrm = mkSec("Rounded normals (lighting)");
+      mkRange(nrm, "normalRound", "Rounding", 0, 1, 0.01, undefined, (v) => u.round.value = v);
+      mkToggle(nrm, "columnPivot", "Column pivot (vs per-blob)", (v) => u.pivotMode.value = v ? 1 : 0);
+
+      const blm = mkSec("Bloom (post)");
+      mkToggle(blm, "bloomOn", "Enable bloom", (v) => applyBloom(v));
+      mkRange(blm, "bloomStrength", "Strength", 0, 2, 0.01, undefined, (v) => bloomPass.strength.value = v);
+      mkRange(blm, "bloomRadius", "Radius", 0, 1, 0.01, undefined, (v) => bloomPass.radius.value = v);
+      mkRange(blm, "bloomThreshold", "Threshold", 0, 1, 0.01, undefined, (v) => bloomPass.threshold.value = v);
+
+      const sim = mkSec("Simulation");
+      mkRange(sim, "rise", "Rise speed", 0.2, 4, 0.05);
+      mkRange(sim, "spread", "Spread", 0, 2, 0.05);
+      mkRange(sim, "lifetime", "Lifetime (s)", 1, 6, 0.1);
+      mkRange(sim, "rate", "Emission rate", 1, 20, 1, (v) => String(Math.round(v)));
+      mkRange(sim, "sizeStart", "Size start", 0.1, 1.5, 0.05);
+      mkRange(sim, "sizeEnd", "Size end", 0.5, 3, 0.05);
+      mkRange(sim, "spin", "Tumble", 0, 2, 0.05);
+      mkRange(sim, "curlAmount", "Curl amount", 0, 2, 0.05);
+      mkRange(sim, "curlScale", "Curl waves", 0.1, 2, 0.05);
+      mkRange(sim, "curlSpeed", "Curl speed", 0, 3, 0.05);
+
+      const act = mkSec("Actions");
+      const br = document.createElement("div"); br.className = "btn-row";
+      const b1 = document.createElement("button"); b1.textContent = "Puff burst";
+      b1.onclick = () => blobs.burst(12);
+      const b2 = document.createElement("button"); b2.textContent = "Reset cam";
+      b2.onclick = () => { camera.position.set(7, 5, 10); controls.target.set(0, 3, 0); };
+      br.append(b1, b2); act.appendChild(br);
+    }
+    buildUI();
+
+    // ── Loop ──────────────────────────────────────────────────────────────
+    const timer = new THREE.Timer();
+    timer.connect(document);
+    addEventListener("resize", () => {
+      camera.aspect = innerWidth / innerHeight;
+      camera.updateProjectionMatrix();
+      renderer.setSize(innerWidth, innerHeight);
+    });
+
+    renderer.setAnimationLoop(() => {
+      timer.update();
+      const dt = Math.min(timer.getDelta(), 0.05);
+      const now = performance.now();
+      u.time.value = now * 0.001;
+      const colTopY = Math.max(LOOK.rise * LOOK.lifetime * 0.7, 0.001);
+      u.colTopY.value = colTopY;
+      // column pivot sits mid-height above the source
+      u.pivot.value.set(blobs.base.x, blobs.base.y + colTopY * 0.5, blobs.base.z);
+      controls.update();
+      blobs.update(dt, now);
+      postProcessing.render();
+    });
+  </script>
+</body>
+</html>

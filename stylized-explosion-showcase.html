@@ -109,6 +109,7 @@
       uv,
       vec2,
       vec3,
+      vec4,
     } from "three/tsl";
     import { OrbitControls } from "three/addons/controls/OrbitControls.js";
 
@@ -132,7 +133,8 @@
       '{"duration":0.36,"looping":false,"startLifetime":{"min":0.4,"max":0.67},"startSpeed":{"min":3.68,"max":5.87},"startSize":{"min":24.14,"max":53.38},"startOpacity":{"min":0.287,"max":0.442},"startRotation":{"min":-360,"max":360},"startColor":{"min":{"r":0.9098039215686274,"g":0.2901960784313726,"b":0.2901960784313726},"max":{"r":1,"g":0.9686274509803922,"b":0.0392156862745098}},"gravity":-0.5,"emission":{"rateOverTime":500},"shape":{"sphere":{"radius":0.4,"arc":180}},"sizeOverLifetime":{"isActive":true,"lifetimeCurve":{"bezierPoints":[{"x":0,"y":0,"percentage":0},{"x":0,"y":1},{"x":0,"y":1},{"x":0.5,"y":1,"percentage":0.5},{"x":1,"y":1},{"x":1,"y":1},{"x":1,"y":0,"percentage":1}]}},"opacityOverLifetime":{"isActive":true,"lifetimeCurve":{"bezierPoints":[{"x":0,"y":1,"percentage":0},{"x":0.1666,"y":0.8333},{"x":0.3333,"y":0.6666},{"x":0.5,"y":0.5,"percentage":0.5},{"x":0.6666,"y":0.3332},{"x":0.8333,"y":0.1665},{"x":1,"y":0,"percentage":1}]}},"rotationOverLifetime":{"isActive":true,"min":-22.4,"max":24.3},"noise":{"isActive":true,"useRandomOffset":true,"strength":0.09,"positionAmount":0.191,"rotationAmount":1.677}}',
     );
 
-    const DEFAULT_LOOK = {
+    const TUNED_LOOK = {
+      matchOriginal: false,
       exposure: 0.92,
       brightness: 0.88,
       contrast: 1.08,
@@ -153,6 +155,20 @@
       autoDemo: true,
     };
 
+    const DEFAULT_LOOK = {
+      ...TUNED_LOOK,
+      matchOriginal: true,
+      exposure: 1,
+      brightness: 1,
+      contrast: 1,
+      saturation: 1,
+      edgeSoft: 0,
+      fireTint: "#ffffff",
+      smokeTint: "#ffffff",
+      bgColor: "#000000",
+      groundBrightness: 1,
+    };
+
     const LOOK = { ...DEFAULT_LOOK };
 
     const uLook = {
@@ -160,6 +176,7 @@
       contrast: uniform(DEFAULT_LOOK.contrast),
       saturation: uniform(DEFAULT_LOOK.saturation),
       edgeSoft: uniform(DEFAULT_LOOK.edgeSoft),
+      bypassGrade: uniform(DEFAULT_LOOK.matchOriginal ? 1 : 0),
     };
 
     // ── Ported sim helpers (three-particles utils + bezier) ───────────────
@@ -321,16 +338,22 @@
       );
 
       const samp = texture(map, hasAtlas ? atlasUV : st);
-      let col = iColor.xyz.mul(samp.rgb).mul(uLayerTint);
-      const lum = dot(col, vec3(0.2126, 0.7152, 0.0722));
-      col = mix(vec3(lum), col, uLook.saturation);
-      col = col.sub(float(0.5)).mul(uLook.contrast).add(float(0.5));
-      col = col.mul(uLook.brightness);
-      const alpha = iColor.w.mul(samp.a).mul(circle).mul(uLayerOpacity);
+      // Library path: gl_FragColor = vColor * texture (component-wise vec4).
+      const particle = vec4(iColor.xyz.mul(uLayerTint), iColor.w.mul(uLayerOpacity));
+      const texel = vec4(samp.rgb, samp.a);
+      const frag4 = particle.mul(texel);
+      const lum = dot(frag4.xyz, vec3(0.2126, 0.7152, 0.0722));
+      let graded = mix(vec3(lum), frag4.xyz, uLook.saturation);
+      graded = graded.sub(float(0.5)).mul(uLook.contrast).add(float(0.5));
+      graded = graded.mul(uLook.brightness);
+      const col = mix(graded, frag4.xyz, uLook.bypassGrade);
+      const alpha = frag4.w.mul(circle);
 
       const mat = new MeshBasicNodeMaterial({
         transparent: true,
         depthWrite: false,
+        depthTest: true,
+        blending: THREE.NormalBlending,
         side: THREE.FrontSide,
       });
       mat.colorNode = col;
@@ -490,10 +513,15 @@
 
         const ratio = Math.random();
         const cmin = cfg.startColor.min;
-        const cmax = cfg.startColor.max;
-        this.instData[b] = cmin.r + ratio * ((cmax.r ?? cmin.r) - cmin.r);
-        this.instData[b + 1] = cmin.g + ratio * ((cmax.g ?? cmin.g) - cmin.g);
-        this.instData[b + 2] = cmin.b + ratio * ((cmax.b ?? cmin.b) - cmin.b);
+        const cmax = cfg.startColor.max ?? cmin;
+        const ch = (k) => {
+          const lo = cmin[k] ?? 0;
+          const hi = cmax[k] ?? 1;
+          return lo + ratio * (hi - lo);
+        };
+        this.instData[b] = ch("r");
+        this.instData[b + 1] = ch("g");
+        this.instData[b + 2] = ch("b");
 
         this.rotations[i] = calculateValue(cfg.startRotation);
         this.rotSpeeds[i] = cfg.rotationOverLifetime?.isActive
@@ -667,8 +695,9 @@
               : this.layerKey === "rocks"
                 ? LOOK.rocksOpacity
                 : 1;
-        const tint =
-          this.layerKey === "fire"
+        const tint = LOOK.matchOriginal
+          ? "#ffffff"
+          : this.layerKey === "fire"
             ? LOOK.fireTint
             : this.layerKey === "smoke"
               ? LOOK.smokeTint
@@ -771,13 +800,14 @@
     const renderer = new THREE.WebGPURenderer({ antialias: true });
     renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
     renderer.setSize(window.innerWidth, window.innerHeight);
-    renderer.toneMapping = THREE.ACESFilmicToneMapping;
-    renderer.toneMappingExposure = LOOK.exposure;
+    renderer.toneMapping = LOOK.matchOriginal
+      ? THREE.NoToneMapping
+      : THREE.ACESFilmicToneMapping;
+    renderer.toneMappingExposure = LOOK.matchOriginal ? 1 : LOOK.exposure;
     document.body.appendChild(renderer.domElement);
     await renderer.init();
 
     const scene = new THREE.Scene();
-    scene.background = new THREE.Color(LOOK.bgColor);
 
     const camera = new THREE.PerspectiveCamera(60, window.innerWidth / window.innerHeight, 0.1, 500);
     const DEFAULT_CAM = { pos: new THREE.Vector3(20, 20, 20), target: new THREE.Vector3(-1, -1, -1) };
@@ -893,14 +923,53 @@
       section.appendChild(row);
     }
 
+    function applyOriginalColorPreset() {
+      LOOK.exposure = 1;
+      LOOK.brightness = 1;
+      LOOK.contrast = 1;
+      LOOK.saturation = 1;
+      LOOK.edgeSoft = 0;
+      LOOK.fireTint = "#ffffff";
+      LOOK.smokeTint = "#ffffff";
+      LOOK.bgColor = "#000000";
+      LOOK.groundBrightness = 1;
+    }
+
+    function applyTunedColorPreset() {
+      LOOK.exposure = TUNED_LOOK.exposure;
+      LOOK.brightness = TUNED_LOOK.brightness;
+      LOOK.contrast = TUNED_LOOK.contrast;
+      LOOK.saturation = TUNED_LOOK.saturation;
+      LOOK.edgeSoft = TUNED_LOOK.edgeSoft;
+      LOOK.fireTint = TUNED_LOOK.fireTint;
+      LOOK.smokeTint = TUNED_LOOK.smokeTint;
+      LOOK.bgColor = TUNED_LOOK.bgColor;
+      LOOK.groundBrightness = TUNED_LOOK.groundBrightness;
+    }
+
     function syncLookUniforms() {
-      uLook.brightness.value = LOOK.brightness;
-      uLook.contrast.value = LOOK.contrast;
-      uLook.saturation.value = LOOK.saturation;
-      uLook.edgeSoft.value = LOOK.edgeSoft;
-      renderer.toneMappingExposure = LOOK.exposure;
-      scene.background.set(LOOK.bgColor);
-      groundMat.color.setRGB(LOOK.groundBrightness, LOOK.groundBrightness, LOOK.groundBrightness);
+      if (LOOK.matchOriginal) {
+        uLook.bypassGrade.value = 1;
+        uLook.brightness.value = 1;
+        uLook.contrast.value = 1;
+        uLook.saturation.value = 1;
+        uLook.edgeSoft.value = 0;
+        renderer.toneMapping = THREE.NoToneMapping;
+        renderer.toneMappingExposure = 1;
+        scene.background = null;
+        renderer.setClearColor(0x000000, 1);
+        groundMat.color.setScalar(1);
+      } else {
+        uLook.bypassGrade.value = 0;
+        uLook.brightness.value = LOOK.brightness;
+        uLook.contrast.value = LOOK.contrast;
+        uLook.saturation.value = LOOK.saturation;
+        uLook.edgeSoft.value = LOOK.edgeSoft;
+        renderer.toneMapping = THREE.ACESFilmicToneMapping;
+        renderer.toneMappingExposure = LOOK.exposure;
+        scene.background = new THREE.Color(LOOK.bgColor);
+        groundMat.color.setScalar(LOOK.groundBrightness);
+      }
       axes.visible = LOOK.showAxes;
       director.applyLookToActive();
     }
@@ -910,7 +979,7 @@
       panel.addEventListener("pointerdown", (e) => e.stopPropagation());
       panel.addEventListener("click", (e) => e.stopPropagation());
 
-      const mkRange = (section, key, label, min, max, step, fmt = (v) => v.toFixed(2)) => {
+      const mkRange = (section, key, label, min, max, step, fmt = (v) => v.toFixed(2), gradeControl = false, sceneControl = false) => {
         const row = document.createElement("div");
         row.className = "row";
         const name = document.createElement("span");
@@ -923,6 +992,7 @@
         input.max = String(max);
         input.step = String(step);
         input.value = String(LOOK[key]);
+        if (LOOK.matchOriginal && (gradeControl || sceneControl)) input.disabled = true;
         input.addEventListener("input", () => {
           LOOK[key] = parseFloat(input.value);
           out.textContent = fmt(LOOK[key]);
@@ -930,17 +1000,42 @@
         });
         row.append(name, out, input);
         section.appendChild(row);
+        return input;
       };
 
       panel.innerHTML = "<h2>Explosion Lab</h2>";
 
+      const presetSec = document.createElement("section");
+      presetSec.innerHTML = "<label>Color pipeline</label>";
+      const matchRow = document.createElement("div");
+      matchRow.className = "toggle-row";
+      matchRow.innerHTML = "<span>Match original colors</span>";
+      const matchToggle = document.createElement("input");
+      matchToggle.type = "checkbox";
+      matchToggle.checked = LOOK.matchOriginal;
+      matchToggle.addEventListener("change", () => {
+        LOOK.matchOriginal = matchToggle.checked;
+        if (LOOK.matchOriginal) applyOriginalColorPreset();
+        else applyTunedColorPreset();
+        buildLookUI();
+        syncLookUniforms();
+      });
+      matchRow.appendChild(matchToggle);
+      presetSec.appendChild(matchRow);
+      const presetHint = document.createElement("p");
+      presetHint.className = "tex-hint";
+      presetHint.textContent =
+        "Original: vec4 color×texture, black backdrop, full-bright ground, hard sprites, no ACES.";
+      presetSec.appendChild(presetHint);
+      panel.appendChild(presetSec);
+
       const lookSec = document.createElement("section");
-      lookSec.innerHTML = "<label>Look — match original repo</label>";
-      mkRange(lookSec, "exposure", "Exposure", 0.4, 1.6, 0.01);
-      mkRange(lookSec, "brightness", "Brightness", 0.4, 1.4, 0.01);
-      mkRange(lookSec, "contrast", "Contrast", 0.6, 1.6, 0.01);
-      mkRange(lookSec, "saturation", "Saturation", 0, 1.5, 0.01);
-      mkRange(lookSec, "edgeSoft", "Sprite edge soft", 0, 0.06, 0.001, (v) => v.toFixed(3));
+      lookSec.innerHTML = "<label>Look — fine tune (off when matching original)</label>";
+      mkRange(lookSec, "exposure", "Exposure", 0.4, 1.6, 0.01, (v) => v.toFixed(2), true);
+      mkRange(lookSec, "brightness", "Brightness", 0.4, 1.4, 0.01, (v) => v.toFixed(2), true);
+      mkRange(lookSec, "contrast", "Contrast", 0.6, 1.6, 0.01, (v) => v.toFixed(2), true);
+      mkRange(lookSec, "saturation", "Saturation", 0, 1.5, 0.01, (v) => v.toFixed(2), true);
+      mkRange(lookSec, "edgeSoft", "Sprite edge soft", 0, 0.06, 0.001, (v) => v.toFixed(3), true);
       panel.appendChild(lookSec);
 
       const layerSec = document.createElement("section");
@@ -957,6 +1052,7 @@
       const fireTint = document.createElement("input");
       fireTint.type = "color";
       fireTint.value = LOOK.fireTint;
+      fireTint.disabled = LOOK.matchOriginal;
       fireTint.addEventListener("input", () => {
         LOOK.fireTint = fireTint.value;
         fireTintOut.textContent = LOOK.fireTint;
@@ -973,6 +1069,7 @@
       const smokeTint = document.createElement("input");
       smokeTint.type = "color";
       smokeTint.value = LOOK.smokeTint;
+      smokeTint.disabled = LOOK.matchOriginal;
       smokeTint.addEventListener("input", () => {
         LOOK.smokeTint = smokeTint.value;
         smokeTintOut.textContent = LOOK.smokeTint;
@@ -1013,6 +1110,7 @@
       const bgInput = document.createElement("input");
       bgInput.type = "color";
       bgInput.value = LOOK.bgColor;
+      bgInput.disabled = LOOK.matchOriginal;
       bgInput.addEventListener("input", () => {
         LOOK.bgColor = bgInput.value;
         bgOut.textContent = LOOK.bgColor;
@@ -1020,7 +1118,7 @@
       });
       bgRow.appendChild(bgInput);
       sceneSec.appendChild(bgRow);
-      mkRange(sceneSec, "groundBrightness", "Ground brightness", 0.3, 1.5, 0.01);
+      mkRange(sceneSec, "groundBrightness", "Ground brightness", 0.3, 1.5, 0.01, (v) => v.toFixed(2), false, true);
 
       const axesRow = document.createElement("div");
       axesRow.className = "toggle-row";

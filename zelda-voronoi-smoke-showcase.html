@@ -1,0 +1,720 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Zelda Voronoi Smoke — WebGPU TSL</title>
+  <style>
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    html, body { width: 100%; height: 100%; overflow: hidden; background: #111; }
+    canvas { display: block; width: 100vw; height: 100vh; }
+    #hint {
+      position: fixed; bottom: 16px; left: 16px; z-index: 10;
+      font: 12px/1.5 "SF Mono", Consolas, monospace;
+      color: #ccc; background: rgba(0,0,0,0.55); padding: 8px 12px;
+      border-radius: 6px; pointer-events: none;
+    }
+    #hint span { color: #c8b8ff; font-weight: 600; }
+    #panel {
+      position: fixed; top: 12px; right: 12px; z-index: 20;
+      width: min(300px, calc(100vw - 24px)); max-height: calc(100vh - 24px);
+      overflow: auto; padding: 12px 14px;
+      font: 11px/1.45 "SF Mono", Consolas, monospace;
+      color: #d8d8de; background: rgba(8, 10, 16, 0.88);
+      border: 1px solid rgba(255, 255, 255, 0.08);
+      border-radius: 10px; backdrop-filter: blur(8px);
+    }
+    #panel h2 {
+      font-size: 12px; font-weight: 600; color: #c8b8ff;
+      margin-bottom: 10px; letter-spacing: 0.04em; text-transform: uppercase;
+    }
+    #panel section { margin-bottom: 12px; }
+    #panel section > label {
+      display: block; font-size: 10px; color: #8a8a96;
+      text-transform: uppercase; letter-spacing: 0.06em;
+      margin-bottom: 6px; padding-bottom: 4px;
+      border-bottom: 1px solid rgba(255,255,255,0.06);
+    }
+    .row {
+      display: grid; grid-template-columns: 1fr 52px;
+      align-items: center; gap: 8px; margin-bottom: 6px;
+    }
+    .row span:first-child { color: #b8b8c2; }
+    .row output {
+      text-align: right; color: #c8b8ff; font-variant-numeric: tabular-nums;
+    }
+    .row input[type="range"] { grid-column: 1 / -1; width: 100%; accent-color: #c8b8ff; }
+    .row input[type="color"] {
+      grid-column: 1 / -1; width: 100%; height: 28px; padding: 0;
+      border: 1px solid rgba(255,255,255,0.12); border-radius: 4px;
+      background: transparent; cursor: pointer;
+    }
+    .tex-hint { font-size: 10px; color: #666; margin-bottom: 8px; line-height: 1.4; }
+    .file-row { margin-bottom: 10px; }
+    .file-head {
+      display: flex; align-items: center; justify-content: space-between;
+      margin-bottom: 4px;
+    }
+    .file-head span { color: #b8b8c2; }
+    .file-head button {
+      font: inherit; font-size: 10px; color: #ccc;
+      background: rgba(255,255,255,0.06); border: 1px solid rgba(255,255,255,0.1);
+      border-radius: 4px; padding: 2px 6px; cursor: pointer;
+    }
+    .file-row input[type="file"] { width: 100%; font: 10px inherit; color: #aaa; }
+    .btn-row { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 4px; }
+    .btn-row button {
+      flex: 1 1 auto; min-width: 72px;
+      font: inherit; color: #eee; background: rgba(255,255,255,0.06);
+      border: 1px solid rgba(255,255,255,0.1); border-radius: 6px;
+      padding: 6px 8px; cursor: pointer;
+    }
+    .btn-row button:hover { background: rgba(200,184,255,0.15); border-color: rgba(200,184,255,0.35); }
+  </style>
+  <script type="importmap">
+    {
+      "imports": {
+        "three": "https://cdn.jsdelivr.net/npm/three@0.183.0/build/three.webgpu.min.js",
+        "three/webgpu": "https://cdn.jsdelivr.net/npm/three@0.183.0/build/three.webgpu.min.js",
+        "three/tsl": "https://cdn.jsdelivr.net/npm/three@0.183.0/build/three.tsl.min.js",
+        "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.183.0/examples/jsm/"
+      }
+    }
+  </script>
+</head>
+<body>
+  <div id="hint"><span>Click</span> ground to puff · Voronoi threshold smoke (UE T_Voronoi01 style)</div>
+  <aside id="panel"></aside>
+  <script type="module">
+    import * as THREE from "three/webgpu";
+    import { MeshBasicNodeMaterial } from "three";
+    import {
+      attribute,
+      float,
+      max,
+      smoothstep,
+      step,
+      texture,
+      time,
+      uniform,
+      uv,
+      vec2,
+      vec3,
+    } from "three/tsl";
+    import { OrbitControls } from "three/addons/controls/OrbitControls.js";
+
+    const VORONOI_TEX = "./textures/particles/T_Voronoi01.png";
+
+    const SMOKE_CFG = {
+      duration: 999,
+      looping: true,
+      transform: { rotation: { x: -90 } },
+      startLifetime: { min: 1.1, max: 2.2 },
+      startSpeed: { min: 0.35, max: 1.1 },
+      startSize: { min: 10, max: 18 },
+      startOpacity: { min: 0.9, max: 1 },
+      startRotation: { min: -180, max: 180 },
+      startColor: {
+        min: { r: 0.82, g: 0.82, b: 0.86 },
+        max: { r: 0.62, g: 0.62, b: 0.66 },
+      },
+      maxParticles: 56,
+      emission: { rateOverTime: 28 },
+      gravity: -0.12,
+      shape: {
+        cone: { angle: 11, radius: 0.32, radiusThickness: 0.85, arc: 360 },
+      },
+      sizeOverLifetime: {
+        isActive: true,
+        lifetimeCurve: {
+          bezierPoints: [
+            { x: 0, y: 0.35, percentage: 0 },
+            { x: 0.25, y: 0.85 },
+            { x: 0.55, y: 1, percentage: 0.55 },
+            { x: 0.85, y: 0.92 },
+            { x: 1, y: 0.7, percentage: 1 },
+          ],
+        },
+      },
+      opacityOverLifetime: {
+        isActive: true,
+        lifetimeCurve: {
+          bezierPoints: [
+            { x: 0, y: 0, percentage: 0 },
+            { x: 0.12, y: 0.95 },
+            { x: 0.65, y: 1, percentage: 0.65 },
+            { x: 0.88, y: 0.55 },
+            { x: 1, y: 0, percentage: 1 },
+          ],
+        },
+      },
+      rotationOverLifetime: { isActive: true, min: -18, max: 18 },
+    };
+
+    const LOOK = {
+      fillMin: 0.18,
+      fillMax: 0.52,
+      rimMin: 0.58,
+      rimMax: 0.72,
+      sharpness: 0.035,
+      tileScale: 2.4,
+      scrollU: 0.04,
+      scrollV: 0.07,
+      shadowColor: "#141418",
+      midColor: "#5a5a62",
+      highlightColor: "#ececf2",
+      opacity: 1,
+      sizeScale: 1,
+      emissionScale: 1,
+      bgColor: "#2a2a30",
+    };
+
+    const uVoro = {
+      fillMin: uniform(LOOK.fillMin),
+      fillMax: uniform(LOOK.fillMax),
+      rimMin: uniform(LOOK.rimMin),
+      rimMax: uniform(LOOK.rimMax),
+      sharpness: uniform(LOOK.sharpness),
+      tileScale: uniform(LOOK.tileScale),
+      scroll: uniform(vec2(LOOK.scrollU, LOOK.scrollV)),
+      shadow: uniform(new THREE.Color(LOOK.shadowColor)),
+      mid: uniform(new THREE.Color(LOOK.midColor)),
+      highlight: uniform(new THREE.Color(LOOK.highlightColor)),
+      opacity: uniform(LOOK.opacity),
+    };
+
+    const nCr = (n, k) => {
+      let z = 1;
+      for (let i = 1; i <= k; i++) z *= (n + 1 - i) / i;
+      return z;
+    };
+
+    function createBezierCurveFunction(bezierPoints) {
+      return (percentage) => {
+        if (percentage < 0) return bezierPoints[0].y;
+        if (percentage > 1) return bezierPoints[bezierPoints.length - 1].y;
+        let start = 0;
+        let stop = bezierPoints.length - 1;
+        bezierPoints.find((point, index) => {
+          const hit = percentage < (point.percentage ?? 0);
+          if (hit) stop = index;
+          else if (point.percentage !== undefined) start = index;
+          return hit;
+        });
+        const n = stop - start;
+        const calculated =
+          (percentage - (bezierPoints[start].percentage ?? 0)) /
+          ((bezierPoints[stop].percentage ?? 1) - (bezierPoints[start].percentage ?? 0));
+        let value = 0;
+        for (let i = 0; i <= n; i++) {
+          const p = bezierPoints[start + i];
+          value +=
+            nCr(n, i) * (1 - calculated) ** (n - i) * calculated ** i * p.y;
+        }
+        return value;
+      };
+    }
+
+    function calculateValue(value) {
+      if (typeof value === "number") return value;
+      if (value && "min" in value && "max" in value) {
+        if (value.min === value.max) return value.min ?? 0;
+        return THREE.MathUtils.randFloat(value.min ?? 0, value.max ?? 1);
+      }
+      if (value?.bezierPoints) {
+        return createBezierCurveFunction(value.bezierPoints)(0) * (value.scale ?? 1);
+      }
+      return 0;
+    }
+
+    const _pos = new THREE.Vector3();
+    const _vel = new THREE.Vector3();
+    const _q = new THREE.Quaternion();
+    const _partWorld = new THREE.Vector3();
+    const _mv = new THREE.Vector3();
+    const _rootInvQuat = new THREE.Quaternion();
+
+    function spawnOnCone(position, quaternion, velocity, speed, { radius, radiusThickness = 1, arc, angle = 90 }) {
+      const theta = 2 * Math.PI * Math.random() * (arc / 360);
+      const randomizedDistanceRatio = Math.random();
+      const xDir = Math.cos(theta);
+      const yDir = Math.sin(theta);
+      const nt = 1 - radiusThickness;
+      position.set(
+        radius * nt * xDir + radius * radiusThickness * randomizedDistanceRatio * xDir,
+        radius * nt * yDir + radius * radiusThickness * randomizedDistanceRatio * yDir,
+        0,
+      );
+      position.applyQuaternion(quaternion);
+      const len = Math.max(position.length(), 1e-6);
+      const normalizedAngle = Math.abs((len / radius) * THREE.MathUtils.degToRad(angle));
+      const sinA = Math.sin(normalizedAngle);
+      const mul = sinA * speed / len;
+      velocity.set(position.x * mul, position.y * mul, Math.cos(normalizedAngle) * speed);
+      velocity.applyQuaternion(quaternion);
+    }
+
+    function createVoronoiSmokeMaterial(map) {
+      const iColor = attribute("iColor", "vec4");
+      const iSeed = attribute("iSeed", "float");
+
+      const st = uv();
+      const dist = st.sub(vec2(0.5, 0.5)).length();
+      const circle = float(1).sub(step(float(0.5), dist));
+
+      const seedOff = vec2(iSeed, iSeed.mul(0.6180339887));
+      const scrollT = time.mul(uVoro.scroll);
+      const vUV = st.mul(uVoro.tileScale).add(seedOff).add(scrollT);
+      const v = texture(map, vUV).r;
+
+      const soft = uVoro.sharpness;
+      const fill = smoothstep(uVoro.fillMin.sub(soft), uVoro.fillMax.add(soft), v);
+      const rim = smoothstep(uVoro.rimMin.sub(soft), uVoro.rimMax.add(soft), v);
+
+      let col = uVoro.shadow;
+      col = col.mul(float(1).sub(fill)).add(uVoro.mid.mul(fill));
+      col = col.mul(float(1).sub(rim)).add(uVoro.highlight.mul(rim));
+      col = col.mul(iColor.xyz);
+
+      const alpha = max(fill, rim).mul(circle).mul(iColor.w).mul(uVoro.opacity);
+
+      const mat = new MeshBasicNodeMaterial({
+        transparent: true,
+        depthWrite: false,
+        depthTest: true,
+        blending: THREE.NormalBlending,
+        side: THREE.FrontSide,
+      });
+      mat.colorNode = col;
+      mat.opacityNode = alpha;
+      return mat;
+    }
+
+    const INST_STRIDE = 5;
+
+    class TSLParticleSystem {
+      constructor(scene, cfg, map) {
+        this.cfg = cfg;
+        this.maxParticles = cfg.maxParticles ?? 48;
+        this.sizeScale = 1;
+        this.emissionScale = 1;
+
+        const geo = new THREE.PlaneGeometry(1, 1);
+        geo.deleteAttribute("normal");
+        const n = this.maxParticles;
+        this.instData = new Float32Array(n * INST_STRIDE);
+        this.instBuffer = new THREE.InstancedInterleavedBuffer(this.instData, INST_STRIDE);
+        geo.setAttribute("iColor", new THREE.InterleavedBufferAttribute(this.instBuffer, 4, 0));
+        geo.setAttribute("iSeed", new THREE.InterleavedBufferAttribute(this.instBuffer, 1, 4));
+
+        this.velocities = Array.from({ length: n }, () => new THREE.Vector3());
+        this.creationTimes = new Float32Array(n);
+        this.startLifetimes = new Float32Array(n);
+        this.startSizes = new Float32Array(n);
+        this.startOpacities = new Float32Array(n);
+        this.rotSpeeds = new Float32Array(n);
+        this.isActive = new Uint8Array(n);
+        this.posX = new Float32Array(n);
+        this.posY = new Float32Array(n);
+        this.posZ = new Float32Array(n);
+        this.rotations = new Float32Array(n);
+
+        this.sizeCurve = cfg.sizeOverLifetime?.lifetimeCurve?.bezierPoints
+          ? createBezierCurveFunction(cfg.sizeOverLifetime.lifetimeCurve.bezierPoints)
+          : null;
+        this.opacityCurve = cfg.opacityOverLifetime?.lifetimeCurve?.bezierPoints
+          ? createBezierCurveFunction(cfg.opacityOverLifetime.lifetimeCurve.bezierPoints)
+          : null;
+        this.sizeOverLife = cfg.sizeOverLifetime?.isActive === true;
+        this.opacityOverLife = cfg.opacityOverLifetime?.isActive === true;
+
+        this.mesh = new THREE.InstancedMesh(geo, createVoronoiSmokeMaterial(map), n);
+        this.mesh.frustumCulled = false;
+        this.mesh.renderOrder = 10;
+
+        this.root = new THREE.Group();
+        const tr = cfg.transform?.rotation;
+        if (tr) {
+          this.root.rotation.set(
+            THREE.MathUtils.degToRad(tr.x ?? 0),
+            THREE.MathUtils.degToRad(tr.y ?? 0),
+            THREE.MathUtils.degToRad(tr.z ?? 0),
+          );
+        }
+        this.root.add(this.mesh);
+        scene.add(this.root);
+
+        this.gravityVelocity = new THREE.Vector3();
+        this.isEmitting = false;
+        this.creationTime = 0;
+        this.lastEmissionTime = 0;
+        this._dummy = new THREE.Object3D();
+      }
+
+      _ib(i) {
+        return i * INST_STRIDE;
+      }
+
+      start(worldPos, now) {
+        this.root.position.copy(worldPos);
+        this.isEmitting = true;
+        this.creationTime = now;
+        this.lastEmissionTime = now;
+        for (let i = 0; i < this.maxParticles; i++) this.deactivate(i);
+        this.mesh.count = 0;
+      }
+
+      deactivate(i) {
+        this.isActive[i] = 0;
+        this.instData[this._ib(i) + 3] = 0;
+      }
+
+      activate(i, now) {
+        const cfg = this.cfg;
+        const b = this._ib(i);
+        this.isActive[i] = 1;
+        this.creationTimes[i] = now;
+
+        this.startLifetimes[i] = calculateValue(cfg.startLifetime) * 1000;
+        const speed = calculateValue(cfg.startSpeed);
+        this.startSizes[i] = calculateValue(cfg.startSize);
+        this.startOpacities[i] = calculateValue(cfg.startOpacity);
+        this.instData[b + 3] = this.startOpacities[i];
+        this.instData[b + 4] = Math.random() * 100;
+
+        const ratio = Math.random();
+        const cmin = cfg.startColor.min;
+        const cmax = cfg.startColor.max ?? cmin;
+        const ch = (k) => {
+          const lo = cmin[k] ?? 0;
+          const hi = cmax[k] ?? 1;
+          return lo + ratio * (hi - lo);
+        };
+        this.instData[b] = ch("r");
+        this.instData[b + 1] = ch("g");
+        this.instData[b + 2] = ch("b");
+
+        this.rotations[i] = calculateValue(cfg.startRotation);
+        this.rotSpeeds[i] = cfg.rotationOverLifetime?.isActive
+          ? THREE.MathUtils.randFloat(cfg.rotationOverLifetime.min, cfg.rotationOverLifetime.max)
+          : 0;
+
+        _q.setFromEuler(this.root.rotation);
+        const cone = cfg.shape.cone;
+        spawnOnCone(_pos, _q, _vel, speed, {
+          radius: cone.radius,
+          radiusThickness: cone.radiusThickness ?? 1,
+          arc: cone.arc ?? 360,
+          angle: cone.angle ?? 90,
+        });
+
+        this.velocities[i].copy(_vel);
+        this.posX[i] = _pos.x;
+        this.posY[i] = _pos.y;
+        this.posZ[i] = _pos.z;
+      }
+
+      update(now, delta, camera, canvasHeight) {
+        const cfg = this.cfg;
+        if (!this.isEmitting && this.mesh.count === 0) return;
+
+        this.root.getWorldPosition(_pos);
+        this.gravityVelocity.set(_pos.x, _pos.y + (cfg.gravity ?? 0), _pos.z);
+        this.root.worldToLocal(this.gravityVelocity);
+
+        if (this.isEmitting) {
+          const emissionDelta = now - this.lastEmissionTime;
+          const needed = Math.floor(
+            calculateValue(cfg.emission?.rateOverTime ?? 0) *
+              this.emissionScale *
+              (emissionDelta / 1000),
+          );
+          for (let n = 0; n < needed; n++) {
+            const slot = this.isActive.findIndex((v) => v === 0);
+            if (slot < 0) break;
+            this.activate(slot, now);
+          }
+          this.lastEmissionTime = now;
+        }
+
+        this.root.updateMatrixWorld(true);
+        this.root.getWorldQuaternion(_rootInvQuat).invert();
+        const fovRad = THREE.MathUtils.degToRad(camera.fov);
+        const projFactor = (2 * Math.tan(fovRad * 0.5)) / Math.max(canvasHeight, 1);
+
+        for (let i = 0; i < this.maxParticles; i++) {
+          const b = this._ib(i);
+          if (!this.isActive[i]) {
+            this.instData[b + 3] = 0;
+            this._dummy.position.set(0, -9999, 0);
+            this._dummy.scale.set(0, 0, 0);
+            this._dummy.updateMatrix();
+            this.mesh.setMatrixAt(i, this._dummy.matrix);
+            continue;
+          }
+
+          const particleLife = now - this.creationTimes[i];
+          if (particleLife >= this.startLifetimes[i]) {
+            this.deactivate(i);
+            continue;
+          }
+
+          const lifePct = particleLife / this.startLifetimes[i];
+          const vel = this.velocities[i];
+          vel.x -= this.gravityVelocity.x * delta;
+          vel.y -= this.gravityVelocity.y * delta;
+          vel.z -= this.gravityVelocity.z * delta;
+          this.posX[i] += vel.x * delta;
+          this.posY[i] += vel.y * delta;
+          this.posZ[i] += vel.z * delta;
+          this.rotations[i] += this.rotSpeeds[i] * delta * 0.02;
+
+          let size = this.startSizes[i];
+          if (this.sizeOverLife && this.sizeCurve) {
+            size *= Math.max(0, this.sizeCurve(lifePct));
+          }
+          if (this.opacityOverLife && this.opacityCurve) {
+            this.instData[b + 3] =
+              this.startOpacities[i] * Math.max(0, this.opacityCurve(lifePct));
+          }
+
+          this._dummy.position.set(this.posX[i], this.posY[i], this.posZ[i]);
+          this._dummy.quaternion.copy(_rootInvQuat).multiply(camera.quaternion);
+          this._dummy.rotateZ(THREE.MathUtils.degToRad(this.rotations[i]));
+
+          _partWorld.set(this.posX[i], this.posY[i], this.posZ[i]).applyMatrix4(this.root.matrixWorld);
+          _mv.copy(_partWorld).applyMatrix4(camera.matrixWorldInverse);
+          const mvLen = Math.max(_mv.length(), 0.01);
+          const pixelSize = (size * 100) / mvLen;
+          const worldScale = pixelSize * projFactor * Math.abs(_mv.z) * this.sizeScale;
+          this._dummy.scale.set(worldScale, worldScale, 1);
+          this._dummy.updateMatrix();
+          this.mesh.setMatrixAt(i, this._dummy.matrix);
+        }
+
+        this.mesh.count = this.maxParticles;
+        this.mesh.instanceMatrix.needsUpdate = true;
+        this.instBuffer.needsUpdate = true;
+      }
+
+      applyLook() {
+        this.sizeScale = LOOK.sizeScale;
+        this.emissionScale = LOOK.emissionScale;
+      }
+    }
+
+    const renderer = new THREE.WebGPURenderer({ antialias: true });
+    renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+    renderer.setSize(window.innerWidth, window.innerHeight);
+    renderer.toneMapping = THREE.NoToneMapping;
+    document.body.appendChild(renderer.domElement);
+    await renderer.init();
+
+    const ORIGIN = new THREE.Vector3(-1, -1, -1);
+    const scene = new THREE.Scene();
+    scene.background = new THREE.Color(LOOK.bgColor);
+
+    const camera = new THREE.PerspectiveCamera(55, window.innerWidth / window.innerHeight, 0.1, 200);
+    camera.position.set(0, 1.2, 5.5);
+
+    const controls = new OrbitControls(camera, renderer.domElement);
+    controls.target.set(ORIGIN.x, ORIGIN.y + 1.4, ORIGIN.z);
+    controls.enableDamping = true;
+
+    const groundMat = new THREE.MeshBasicMaterial({ color: 0x1e1e24, side: THREE.DoubleSide });
+    const ground = new THREE.Mesh(new THREE.PlaneGeometry(40, 40), groundMat);
+    ground.rotation.x = -Math.PI / 2;
+    ground.position.y = ORIGIN.y;
+    scene.add(ground);
+
+    const loader = new THREE.TextureLoader();
+    const voronoiTex = await new Promise((resolve) => {
+      loader.load(VORONOI_TEX, (t) => {
+        t.colorSpace = THREE.NoColorSpace;
+        t.wrapS = t.wrapT = THREE.RepeatWrapping;
+        resolve(t);
+      });
+    });
+
+    const systems = [];
+    const spawnSmoke = (pos) => {
+      const sys = new TSLParticleSystem(scene, SMOKE_CFG, voronoiTex);
+      sys.applyLook();
+      sys.start(pos, performance.now());
+      systems.push(sys);
+      setTimeout(() => {
+        const idx = systems.indexOf(sys);
+        if (idx >= 0) systems.splice(idx, 1);
+        scene.remove(sys.root);
+        sys.mesh.geometry.dispose();
+        sys.mesh.material.dispose();
+      }, 8000);
+    };
+
+    spawnSmoke(ORIGIN.clone());
+
+    function syncLook() {
+      uVoro.fillMin.value = LOOK.fillMin;
+      uVoro.fillMax.value = LOOK.fillMax;
+      uVoro.rimMin.value = LOOK.rimMin;
+      uVoro.rimMax.value = LOOK.rimMax;
+      uVoro.sharpness.value = LOOK.sharpness;
+      uVoro.tileScale.value = LOOK.tileScale;
+      uVoro.scroll.value.set(LOOK.scrollU, LOOK.scrollV);
+      uVoro.shadow.value.set(LOOK.shadowColor);
+      uVoro.mid.value.set(LOOK.midColor);
+      uVoro.highlight.value.set(LOOK.highlightColor);
+      uVoro.opacity.value = LOOK.opacity;
+      scene.background.set(LOOK.bgColor);
+      for (const s of systems) s.applyLook();
+    }
+
+    const panel = document.getElementById("panel");
+    panel.addEventListener("pointerdown", (e) => e.stopPropagation());
+    panel.addEventListener("click", (e) => e.stopPropagation());
+
+    panel.innerHTML = "<h2>Voronoi Smoke</h2>";
+
+    const mkRange = (section, key, label, min, max, step, fmt = (v) => v.toFixed(3)) => {
+      const row = document.createElement("div");
+      row.className = "row";
+      row.innerHTML = `<span>${label}</span><output></output>`;
+      const out = row.querySelector("output");
+      out.textContent = fmt(LOOK[key]);
+      const input = document.createElement("input");
+      input.type = "range";
+      input.min = String(min);
+      input.max = String(max);
+      input.step = String(step);
+      input.value = String(LOOK[key]);
+      input.addEventListener("input", () => {
+        LOOK[key] = parseFloat(input.value);
+        out.textContent = fmt(LOOK[key]);
+        syncLook();
+      });
+      row.appendChild(input);
+      section.appendChild(row);
+    };
+
+    const mkColor = (section, key, label) => {
+      const row = document.createElement("div");
+      row.className = "row";
+      row.innerHTML = `<span>${label}</span><output></output>`;
+      const out = row.querySelector("output");
+      out.textContent = LOOK[key];
+      const input = document.createElement("input");
+      input.type = "color";
+      input.value = LOOK[key];
+      input.addEventListener("input", () => {
+        LOOK[key] = input.value;
+        out.textContent = LOOK[key];
+        syncLook();
+      });
+      row.appendChild(input);
+      section.appendChild(row);
+    };
+
+    const voroSec = document.createElement("section");
+    voroSec.innerHTML = "<label>Voronoi mask (T_Voronoi01)</label>";
+    const voroHint = document.createElement("p");
+    voroHint.className = "tex-hint";
+    voroHint.textContent =
+      "Two smoothsteps on texture R: fill (cell body) + rim (bright edges). Tune like UE threshold bands.";
+    voroSec.appendChild(voroHint);
+    mkRange(voroSec, "fillMin", "Fill min", 0, 1, 0.005);
+    mkRange(voroSec, "fillMax", "Fill max", 0, 1, 0.005);
+    mkRange(voroSec, "rimMin", "Rim min", 0, 1, 0.005);
+    mkRange(voroSec, "rimMax", "Rim max", 0, 1, 0.005);
+    mkRange(voroSec, "sharpness", "Edge sharpness", 0.001, 0.12, 0.001);
+    mkRange(voroSec, "tileScale", "UV tile scale", 0.5, 6, 0.05, (v) => v.toFixed(2));
+    mkRange(voroSec, "scrollU", "Scroll U", -0.2, 0.2, 0.005);
+    mkRange(voroSec, "scrollV", "Scroll V", -0.2, 0.2, 0.005);
+    panel.appendChild(voroSec);
+
+    const colSec = document.createElement("section");
+    colSec.innerHTML = "<label>Toon colors</label>";
+    mkColor(colSec, "shadowColor", "Shadow");
+    mkColor(colSec, "midColor", "Mid");
+    mkColor(colSec, "highlightColor", "Highlight");
+    mkRange(colSec, "opacity", "Opacity", 0.2, 1.5, 0.01, (v) => v.toFixed(2));
+    mkColor(colSec, "bgColor", "Background");
+    panel.appendChild(colSec);
+
+    const simSec = document.createElement("section");
+    simSec.innerHTML = "<label>Emitter</label>";
+    mkRange(simSec, "sizeScale", "Size scale", 0.4, 2, 0.01, (v) => v.toFixed(2));
+    mkRange(simSec, "emissionScale", "Emission", 0.2, 2.5, 0.01, (v) => v.toFixed(2));
+    panel.appendChild(simSec);
+
+    const texSec = document.createElement("section");
+    texSec.innerHTML = "<label>Texture</label>";
+    const texRow = document.createElement("div");
+    texRow.className = "file-row";
+    texRow.innerHTML =
+      '<div class="file-head"><span>Voronoi map</span><button type="button">Default</button></div>';
+    const fileInput = document.createElement("input");
+    fileInput.type = "file";
+    fileInput.accept = "image/png,image/webp,image/jpeg";
+    fileInput.addEventListener("change", () => {
+      const file = fileInput.files?.[0];
+      if (!file) return;
+      const img = new Image();
+      img.onload = () => {
+        voronoiTex.image = img;
+        voronoiTex.needsUpdate = true;
+        fileInput.value = "";
+      };
+      img.src = URL.createObjectURL(file);
+    });
+    texRow.querySelector("button").addEventListener("click", () => {
+      loader.load(VORONOI_TEX, (t) => {
+        voronoiTex.image = t.image;
+        voronoiTex.needsUpdate = true;
+      });
+    });
+    texRow.appendChild(fileInput);
+    texSec.appendChild(texRow);
+    panel.appendChild(texSec);
+
+    const actSec = document.createElement("section");
+    actSec.innerHTML = "<label>Actions</label>";
+    const btnRow = document.createElement("div");
+    btnRow.className = "btn-row";
+    const btnPuff = document.createElement("button");
+    btnPuff.textContent = "Puff here";
+    btnPuff.addEventListener("click", () => spawnSmoke(ORIGIN.clone()));
+    btnRow.appendChild(btnPuff);
+    actSec.appendChild(btnRow);
+    panel.appendChild(actSec);
+
+    syncLook();
+
+    const raycaster = new THREE.Raycaster();
+    const pointer = new THREE.Vector2();
+    document.addEventListener("mousemove", (e) => {
+      pointer.x = (e.clientX / window.innerWidth) * 2 - 1;
+      pointer.y = -(e.clientY / window.innerHeight) * 2 + 1;
+    });
+    document.addEventListener("click", (e) => {
+      if (e.target.closest("#panel")) return;
+      raycaster.setFromCamera(pointer, camera);
+      const hits = raycaster.intersectObject(ground);
+      if (hits.length) spawnSmoke(hits[0].point.clone());
+    });
+
+    window.addEventListener("resize", () => {
+      camera.aspect = window.innerWidth / window.innerHeight;
+      camera.updateProjectionMatrix();
+      renderer.setSize(window.innerWidth, window.innerHeight);
+    });
+
+    renderer.setAnimationLoop(() => {
+      const now = performance.now();
+      const delta = 1 / 60;
+      controls.update();
+      for (const s of systems) s.update(now, delta, camera, renderer.domElement.clientHeight);
+      renderer.render(scene, camera);
+    });
+  </script>
+</body>
+</html>
