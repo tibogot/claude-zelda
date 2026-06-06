@@ -294,8 +294,17 @@ export async function startV2App(opts = {}) {
   (_uiContainer || document.body).appendChild(renderer.domElement);
 
   // FPS / CPU / GPU stats overlay (stats-gl reads real WebGPU timestamps).
-  const stats = new Stats({ trackGPU: true });
+  const stats = new Stats({ trackGPU: true, trackCPT: true });
   await stats.init(renderer);
+  // Move the overlay to the bottom-left (stats-gl defaults to top-left).
+  // The panel canvases are absolutely positioned at top:0 inside a 0-height
+  // container, so anchoring at bottom:0 alone pushes them off-screen — give
+  // the container an explicit height (one horizontal row ≈ 48px) so they sit
+  // just above the bottom edge.
+  stats.dom.style.top = "auto";
+  stats.dom.style.bottom = "8px";
+  stats.dom.style.left = "8px";
+  stats.dom.style.height = "48px";
   (_uiContainer || document.body).appendChild(stats.dom);
 
   await renderer.init();
@@ -5244,6 +5253,10 @@ export async function startV2App(opts = {}) {
     // what stats-gl reads — stays 0. Matches template-unreal-objects.html and
     // daynight-sky.html. Fire-and-forget.
     renderer.resolveTimestampsAsync(THREE.TimestampQuery.RENDER);
+    // COMPUTE pool: the RevoGrass system runs a GPU compute dispatch each
+    // frame; the RENDER timestamp can't see it. Drain it so stats-gl's CPT
+    // panel reports real grass-sim GPU time. Fire-and-forget.
+    renderer.resolveTimestampsAsync(THREE.TimestampQuery.COMPUTE);
     stats.update();
   });
 
