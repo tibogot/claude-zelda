@@ -1218,6 +1218,7 @@ export function createToolState() {
       barrierHeight: 0.7,
       barrierDepth: 0.3,
       barrierColor: "#9aa3ad",
+      snapEnabled: true, // snap an endpoint onto a nearby other endpoint (seamless join)
       points: [], // legacy single-road (migrated into roadsData on load)
       rolls: [],
       roadsData: [], // [{ points:[{x,y,z}], rolls:[num] }] — multiple road segments

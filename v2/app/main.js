@@ -1235,6 +1235,10 @@ export async function startV2App(opts = {}) {
     if (toolState.mode === "smartRoad")
       smartRoadSystem.handleDecalTransformEnd();
     if (toolState.mode === "actors") actorSystem.handleTransformEnd();
+    if (toolState.mode === "splineRoad") {
+      splineRoadSystem.onGizmoDragEnd();
+      ui?.pane.refresh();
+    }
   });
 
   // ── Water system ──────────────────────────────────────────────────────────

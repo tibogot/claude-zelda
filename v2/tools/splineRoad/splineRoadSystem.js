@@ -7,6 +7,8 @@ import {
 const _AXIS_Z = new THREE.Vector3(0, 0, 1);
 const _rollQuat = new THREE.Quaternion();
 const _relQuat = new THREE.Quaternion();
+const _frameQuat = new THREE.Quaternion();
+const _snapTan = new THREE.Vector3();
 
 /**
  * Spline Road — a dedicated, isolated editor mode that builds solid "depth roads"
@@ -55,6 +57,10 @@ export class SplineRoadSystem {
     this._gizmo = null;
     this._gizmoMode = "translate"; // "translate" = move point, "rotate" = bank
     this._gizmoBaseQuat = new THREE.Quaternion();
+    // Roll-accumulation state so the Tilt gizmo can wind past ±180° (corkscrews).
+    this._rollAtAttach = 0;
+    this._gizmoPrevRaw = 0;
+    this._gizmoAccum = 0;
 
     this.undoStack = [];
     this.redoStack = [];
@@ -236,6 +242,57 @@ export class SplineRoadSystem {
     return true;
   }
 
+  /** Called when a gizmo MOVE drag ends — snap an endpoint to a nearby other
+   *  endpoint and align direction + bank for a seamless join. */
+  onGizmoDragEnd() {
+    if (this._s.snapEnabled === false) return;
+    if (this._gizmoMode !== "translate") return;
+    this._trySnapEndpoint(this.activeRoadIdx, this.selectedIdx);
+  }
+  _trySnapEndpoint(roadIdx, pointIdx) {
+    const rd = this.roads[roadIdx];
+    if (!rd || rd.points.length < 2 || pointIdx < 0) return;
+    const isFirst = pointIdx === 0;
+    const isLast = pointIdx === rd.points.length - 1;
+    if (!isFirst && !isLast) return; // only endpoints snap
+    const myPt = rd.points[pointIdx];
+    const snapR = Math.max(4, this._s.width ?? 9);
+    let best = null;
+    let bestD = snapR;
+    for (let ri = 0; ri < this.roads.length; ri++) {
+      const ord = this.roads[ri];
+      if (ord.points.length < 2) continue;
+      for (const ei of [0, ord.points.length - 1]) {
+        if (ri === roadIdx && ei === pointIdx) continue;
+        const d = myPt.distanceTo(ord.points[ei]);
+        if (d < bestD) {
+          bestD = d;
+          best = { ri, ei };
+        }
+      }
+    }
+    if (!best) return;
+    const tRoad = this.roads[best.ri];
+    const tPt = tRoad.points[best.ei];
+    myPt.copy(tPt); // 1) snap position
+    // 2) target's outward direction (the way it exits at that endpoint)
+    if (best.ei === tRoad.points.length - 1) _snapTan.copy(tPt).sub(tRoad.points[best.ei - 1]);
+    else _snapTan.copy(tPt).sub(tRoad.points[best.ei + 1]);
+    if (_snapTan.lengthSq() > 1e-8) {
+      _snapTan.normalize();
+      // 3) align my adjacent point so my road continues opposite the target's
+      //    exit (head-to-tail) → smooth, kink-free join.
+      const adjIdx = isFirst ? 1 : rd.points.length - 2;
+      const dist = Math.max(2, myPt.distanceTo(rd.points[adjIdx]));
+      rd.points[adjIdx].copy(myPt).addScaledVector(_snapTan, dist);
+    }
+    rd.rolls[pointIdx] = tRoad.rolls[best.ei] || 0; // 4) match bank at the join
+    this._syncToolState();
+    this._rebuild();
+    this._updateSelected();
+    if (this._gizmo) this.attachGizmo(this._gizmo); // re-seat gizmo on snapped point
+  }
+
   /** Deck meshes for the stunt car's drive-surface (wheel) collider. */
   getColliderMeshes() {
     return this.roadMeshes;
@@ -278,10 +335,17 @@ export class SplineRoadSystem {
       const curve = makeSplineRoadCurve(rd.points, !!this._s.closed, this._s.tension ?? 0.5);
       const t = THREE.MathUtils.clamp(this.selectedIdx / (rd.points.length - 1), 0, 1);
       const tangent = curve.getTangentAt(t).normalize();
-      this._gizmoBaseQuat.setFromUnitVectors(_AXIS_Z, tangent);
-      _rollQuat.setFromAxisAngle(_AXIS_Z, rd.rolls[this.selectedIdx] || 0);
+      const curRoll = rd.rolls[this.selectedIdx] || 0;
+      // Base = the current rolled frame; the gizmo drag delta accumulates from
+      // here (unwrapped), so you can twist past ±180° into full corkscrews.
+      _frameQuat.setFromUnitVectors(_AXIS_Z, tangent);
+      _rollQuat.setFromAxisAngle(_AXIS_Z, curRoll);
+      this._gizmoBaseQuat.copy(_frameQuat).multiply(_rollQuat);
+      this._rollAtAttach = curRoll;
+      this._gizmoPrevRaw = 0;
+      this._gizmoAccum = 0;
       this.gizmoProxy.position.copy(p);
-      this.gizmoProxy.quaternion.copy(this._gizmoBaseQuat).multiply(_rollQuat);
+      this.gizmoProxy.quaternion.copy(this._gizmoBaseQuat);
       gizmo.attach(this.gizmoProxy);
       gizmo.setMode("rotate");
       gizmo.setSpace("local");
@@ -315,8 +379,16 @@ export class SplineRoadSystem {
     const rd = this._active;
     if (this.selectedIdx < 0 || this.selectedIdx >= rd.points.length) return;
     if (this._gizmoMode === "rotate") {
+      // Drag delta since attach (around the tangent), unwrapped + accumulated so
+      // it can exceed ±180° → full corkscrews.
       _relQuat.copy(this._gizmoBaseQuat).invert().multiply(this.gizmoProxy.quaternion);
-      rd.rolls[this.selectedIdx] = 2 * Math.atan2(_relQuat.z, _relQuat.w);
+      const raw = 2 * Math.atan2(_relQuat.z, _relQuat.w);
+      let d = raw - this._gizmoPrevRaw;
+      if (d > Math.PI) d -= 2 * Math.PI;
+      else if (d < -Math.PI) d += 2 * Math.PI;
+      this._gizmoAccum += d;
+      this._gizmoPrevRaw = raw;
+      rd.rolls[this.selectedIdx] = this._rollAtAttach + this._gizmoAccum;
     } else {
       rd.points[this.selectedIdx].copy(this.gizmoProxy.position);
     }

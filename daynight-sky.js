@@ -111,6 +111,23 @@ export function createDayNightSky() {
   const uMeteorWidth = uniform(0.006); // streak thickness (radians of arc)
   const uMeteorLength = uniform(0.10); // trail length (radians of arc)
 
+  // ── High cirrus deck (2D analytic clouds painted on the dome) ─────────────
+  // Cheap fbm clouds projected onto a horizontal plane (so they converge to
+  // the horizon like a real high deck). Complements the volumetric cumulus and
+  // doubles as a perf fallback when the raymarch is off. Relit by sun/moon.
+  const uCloudEnabled = uniform(1);
+  const uCloudCoverage = uniform(0.5);   // fraction of sky covered
+  const uCloudDensity = uniform(0.85);   // per-cloud opacity
+  const uCloudOpacity = uniform(1.0);    // master opacity
+  const uCloudScale = uniform(0.7);      // feature scale (bigger = smaller clouds)
+  const uCloudStretch = uniform(2.5);    // anisotropy → cirrus streaks
+  const uCloudSharpness = uniform(0.22); // coverage edge softness
+  const uCloudDetail = uniform(0.8);     // fine-detail octave mix
+  const uCloudSunTint = uniform(1.0);    // strength of warm sunset tint
+  const uCloudSpeed = uniform(0.01);     // drift speed
+  const uCloudWind = uniform(new THREE.Vector2(1, 0.35)); // drift direction
+  const uCloudColor = uniform(new THREE.Color(0xffffff));
+
   const uFogEnabled = uniform(0);
   const uFogColor = uniform(new THREE.Color(0x9fb8c4));
   const uFogDensity = uniform(0.0003);
@@ -301,6 +318,48 @@ export function createDayNightSky() {
     return single.add(multi).mul(uSunIntensity);
   });
 
+  // ── High cirrus deck (2D analytic clouds on the dome) ─────────────────────
+  // Returns vec4(rgb, alpha). Projects the view ray onto a horizontal plane so
+  // clouds converge toward the horizon, samples a stretched fbm for streaky
+  // cirrus, then relights by sun (silver lining), sunset (warm tint) and moon.
+  const cirrus = Fn(([dir, dayF, twilightF]) => {
+    const y = dir.y.toVar();
+    // Floor yy so the near-horizon uv doesn't explode into noise aliasing
+    // (hidden by hMask anyway, but keeps the math finite).
+    const yy = max(y, float(0.08));
+    const proj = vec2(dir.x, dir.z).div(yy);
+    // Anisotropic stretch → streaky cirrus rather than round blobs; drift on wind.
+    const wind = uCloudWind.mul(uTime.mul(uCloudSpeed));
+    const uv = vec2(proj.x.div(uCloudStretch), proj.y).mul(uCloudScale).add(wind).toVar();
+
+    // Coverage field (slow morph on the 3rd axis) + a finer detail layer.
+    const n = fbm3(vec3(uv.x, uv.y, uTime.mul(uCloudSpeed).mul(0.4))).toVar();
+    const nHi = fbm3(vec3(uv.x.mul(2.7).add(19.0), uv.y.mul(2.7), 7.0));
+    n.assign(mix(n, n.mul(0.55).add(nHi.mul(0.45)), uCloudDetail));
+
+    // Threshold by coverage (higher coverage → lower threshold → more sky).
+    const edge = uCloudCoverage.oneMinus();
+    const cov = smoothstep(edge, edge.add(uCloudSharpness), n);
+    // Fade out at / below the horizon.
+    const hMask = smoothstep(float(0.02), float(0.2), y);
+    const alpha = cov.mul(uCloudDensity).mul(hMask).mul(uCloudOpacity);
+
+    // ── Lighting ──
+    const sunAmt = max(dot(dir, uSunDir), float(0.0));
+    const moonAmt = max(dot(dir, uMoonDir), float(0.0));
+    // Day: bright base with a silver lining toward the sun.
+    const dayBright = mix(float(0.82), float(1.3), pow(sunAmt, float(2.5)));
+    const dayCol = uCloudColor.mul(dayBright).toVar();
+    // Sunset: clouds catch warm low light near the horizon (pink mackerel sky).
+    const warm = clamp(twilightF.mul(mix(float(0.35), float(1.0), sunAmt)).mul(uCloudSunTint), 0.0, 1.0);
+    dayCol.assign(mix(dayCol, uSunsetColor.mul(1.15), warm));
+    // Night: dim, tinted by the moon.
+    const nightBright = mix(float(0.08), float(0.45), pow(moonAmt, float(2.5)));
+    const nightCol = uCloudColor.mul(uMoonColor).mul(nightBright);
+
+    return vec4(mix(nightCol, dayCol, dayF), alpha);
+  });
+
   // ── Sky color node ───────────────────────────────────────────────────────
   const skyColorNode = Fn(() => {
     const dir = normalize(positionWorld.sub(cameraPosition)).toVar();
@@ -371,6 +430,14 @@ export function createDayNightSky() {
     // Shooting stars (gated to night so day pays nothing).
     If(uMeteorEnabled.greaterThan(0.5).and(nightF.greaterThan(0.02)), () => {
       skyCol.addAssign(shootingStars(dir).mul(nightF).mul(aboveHorizon));
+    });
+
+    // High cirrus deck: sits OVER the sky + stars (occludes them) but UNDER the
+    // sun/moon discs below (thin clouds → the disc still shines through). Gated
+    // so a disabled deck pays nothing.
+    If(uCloudEnabled.greaterThan(0.5), () => {
+      const c = cirrus(dir, dayF, twilightF);
+      skyCol.assign(mix(skyCol, c.xyz, c.w));
     });
 
     // Sun disc + glow (fades out below the horizon).
@@ -515,6 +582,22 @@ export function createDayNightSky() {
     uMeteorWidth.value = P.meteorWidth;
     uMeteorLength.value = P.meteorLength;
 
+    uCloudEnabled.value = P.cloudEnabled ? 1 : 0;
+    uCloudCoverage.value = P.cloudCoverage;
+    uCloudDensity.value = P.cloudDensity;
+    uCloudOpacity.value = P.cloudOpacity;
+    uCloudScale.value = P.cloudScale;
+    uCloudStretch.value = P.cloudStretch;
+    uCloudSharpness.value = P.cloudSharpness;
+    uCloudDetail.value = P.cloudDetail;
+    uCloudSunTint.value = P.cloudSunTint;
+    uCloudSpeed.value = P.cloudSpeed;
+    uCloudWind.value.set(
+      Math.cos(THREE.MathUtils.degToRad(P.cloudWindDeg)),
+      Math.sin(THREE.MathUtils.degToRad(P.cloudWindDeg)),
+    );
+    uCloudColor.value.set(P.cloudColor);
+
     if (frame.fog) {
       uFogEnabled.value = frame.fog.enabled ? 1 : 0;
       uFogColor.value.copy(frame.fog.color);
@@ -584,4 +667,19 @@ export const SKY_DEFAULTS = {
   meteorSpeed: 1.0,
   meteorWidth: 0.006,
   meteorLength: 0.10,
+
+  // High cirrus deck (2D analytic clouds painted on the sky dome). Complements
+  // the volumetric cumulus and stands in as a cheap fallback when it's off.
+  cloudEnabled: true,
+  cloudCoverage: 0.5,
+  cloudDensity: 0.85,
+  cloudOpacity: 1.0,
+  cloudScale: 0.7,
+  cloudStretch: 2.5,
+  cloudSharpness: 0.22,
+  cloudDetail: 0.8,
+  cloudSunTint: 1.0,
+  cloudSpeed: 0.01,
+  cloudWindDeg: 20,
+  cloudColor: "#ffffff",
 };
