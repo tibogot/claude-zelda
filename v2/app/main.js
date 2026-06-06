@@ -307,6 +307,19 @@ export async function startV2App(opts = {}) {
   stats.dom.style.height = "48px";
   (_uiContainer || document.body).appendChild(stats.dom);
 
+  // Custom counter panels (scene complexity, read from renderer.info each
+  // frame). DRAW = draw calls, KTRI = triangles in thousands. These complement
+  // the timing panels: timing says "how slow", counters say "why".
+  const drawPanel = stats.addPanel(new Stats.Panel("DRAW", "#f0f", "#202"));
+  const triPanel = stats.addPanel(new Stats.Panel("KTRI", "#f90", "#210"));
+  let _statMaxDraw = 1;
+  let _statMaxTri = 1;
+  // We render many passes per frame (post-FX RenderPipeline + cloud RTs) and
+  // three resets `renderer.info` at the start of each one — so leave auto-reset
+  // off and reset once per frame ourselves (top of the loop) to get the true
+  // whole-frame totals instead of just the last pass.
+  renderer.info.autoReset = false;
+
   await renderer.init();
   initGlbLoaderRenderer(renderer);
 
@@ -4951,6 +4964,12 @@ export async function startV2App(opts = {}) {
   worldOcean.syncParams(toolState.worldOcean);
 
   renderer.setAnimationLoop(() => {
+    // Reset info once per frame (auto-reset is off) so draw/tri counters
+    // accumulate across all passes. stats-gl patches this call to also mark
+    // the start of its CPU profiling window — placing it first means the CPU
+    // panel now measures the whole frame's JS, not just render submission.
+    renderer.info.reset();
+
     const now = performance.now();
     const dtMs = now - last;
     last = now;
@@ -5257,6 +5276,18 @@ export async function startV2App(opts = {}) {
     // frame; the RENDER timestamp can't see it. Drain it so stats-gl's CPT
     // panel reports real grass-sim GPU time. Fire-and-forget.
     renderer.resolveTimestampsAsync(THREE.TimestampQuery.COMPUTE);
+
+    // Feed the custom counter panels from this frame's accumulated info.
+    const ri = renderer.info.render;
+    const draws = ri.drawCalls ?? ri.calls ?? 0;
+    const ktris = (ri.triangles ?? 0) / 1000;
+    _statMaxDraw = Math.max(_statMaxDraw, draws);
+    _statMaxTri = Math.max(_statMaxTri, ktris);
+    drawPanel.update(draws, _statMaxDraw, 0);
+    drawPanel.updateGraph(draws, _statMaxDraw);
+    triPanel.update(ktris, _statMaxTri, 0);
+    triPanel.updateGraph(ktris, _statMaxTri);
+
     stats.update();
   });
 
