@@ -18,6 +18,7 @@ import { CSMShadowNode } from "three/addons/csm/CSMShadowNode.js";
 import { OrbitControls } from "three/addons/controls/OrbitControls.js";
 import { SkyMesh } from "three/addons/objects/SkyMesh.js";
 import { HDRLoader } from "three/addons/loaders/HDRLoader.js";
+import Stats from "stats-gl";
 import { V2_CONFIG } from "./config.js";
 import {
   createPerfState,
@@ -291,6 +292,12 @@ export async function startV2App(opts = {}) {
   renderer.shadowMap.enabled = true;
   renderer.shadowMap.transmitted = true;
   (_uiContainer || document.body).appendChild(renderer.domElement);
+
+  // FPS / CPU / GPU stats overlay (stats-gl reads real WebGPU timestamps).
+  const stats = new Stats({ trackGPU: true });
+  await stats.init(renderer);
+  (_uiContainer || document.body).appendChild(stats.dom);
+
   await renderer.init();
   initGlbLoaderRenderer(renderer);
 
@@ -5231,6 +5238,13 @@ export async function startV2App(opts = {}) {
         renderer.render(scene, camera);
       }
     }
+    // Drain the GPU timestamp pool each frame so stats-gl's GPU panel gets a
+    // real value. Our frame issues many render passes (RenderPipeline post-FX
+    // + cloud RTs); without this `renderer.info.render.timestamp` — which is
+    // what stats-gl reads — stays 0. Matches template-unreal-objects.html and
+    // daynight-sky.html. Fire-and-forget.
+    renderer.resolveTimestampsAsync(THREE.TimestampQuery.RENDER);
+    stats.update();
   });
 
   return {
