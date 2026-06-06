@@ -1,0 +1,1142 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Stylized Explosion — WebGPU TSL</title>
+  <style>
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    html, body { width: 100%; height: 100%; overflow: hidden; background: #111; }
+    canvas { display: block; width: 100vw; height: 100vh; }
+    #hint {
+      position: fixed; bottom: 16px; left: 16px; z-index: 10;
+      font: 12px/1.5 "SF Mono", Consolas, monospace;
+      color: #ccc; background: rgba(0,0,0,0.55); padding: 8px 12px;
+      border-radius: 6px; pointer-events: none;
+    }
+    #hint span { color: #ffa060; font-weight: 600; }
+    #panel {
+      position: fixed; top: 12px; right: 12px; z-index: 20;
+      width: min(300px, calc(100vw - 24px)); max-height: calc(100vh - 24px);
+      overflow: auto; padding: 12px 14px;
+      font: 11px/1.45 "SF Mono", Consolas, monospace;
+      color: #d8d8de; background: rgba(8, 10, 16, 0.88);
+      border: 1px solid rgba(255, 255, 255, 0.08);
+      border-radius: 10px; backdrop-filter: blur(8px);
+    }
+    #panel h2 {
+      font-size: 12px; font-weight: 600; color: #ffa060;
+      margin-bottom: 10px; letter-spacing: 0.04em; text-transform: uppercase;
+    }
+    #panel section { margin-bottom: 12px; }
+    #panel section > label {
+      display: block; font-size: 10px; color: #8a8a96;
+      text-transform: uppercase; letter-spacing: 0.06em;
+      margin-bottom: 6px; padding-bottom: 4px;
+      border-bottom: 1px solid rgba(255,255,255,0.06);
+    }
+    .row {
+      display: grid; grid-template-columns: 1fr 52px;
+      align-items: center; gap: 8px; margin-bottom: 6px;
+    }
+    .row span:first-child { color: #b8b8c2; }
+    .row output {
+      text-align: right; color: #ffa060; font-variant-numeric: tabular-nums;
+    }
+    .row input[type="range"] { grid-column: 1 / -1; width: 100%; accent-color: #ffa060; }
+    .row input[type="color"] {
+      grid-column: 1 / -1; width: 100%; height: 28px; padding: 0;
+      border: 1px solid rgba(255,255,255,0.12); border-radius: 4px;
+      background: transparent; cursor: pointer;
+    }
+    .btn-row { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 4px; }
+    .btn-row button, .toggle-row button {
+      flex: 1 1 auto; min-width: 72px;
+      font: inherit; color: #eee; background: rgba(255,255,255,0.06);
+      border: 1px solid rgba(255,255,255,0.1); border-radius: 6px;
+      padding: 6px 8px; cursor: pointer;
+    }
+    .btn-row button:hover, .toggle-row button:hover { background: rgba(255,160,96,0.15); border-color: rgba(255,160,96,0.35); }
+    .toggle-row { display: flex; align-items: center; justify-content: space-between; margin-bottom: 6px; }
+    .toggle-row input { accent-color: #ffa060; }
+    .file-row { margin-bottom: 10px; }
+    .file-head {
+      display: flex; align-items: center; justify-content: space-between;
+      margin-bottom: 4px;
+    }
+    .file-head span { color: #b8b8c2; }
+    .file-head button {
+      font: inherit; font-size: 10px; color: #ccc;
+      background: rgba(255,255,255,0.06); border: 1px solid rgba(255,255,255,0.1);
+      border-radius: 4px; padding: 2px 6px; cursor: pointer;
+    }
+    .file-head button:hover { background: rgba(142,200,255,0.12); border-color: rgba(142,200,255,0.3); }
+    .file-row input[type="file"] {
+      width: 100%; font: 10px inherit; color: #aaa;
+    }
+    .file-name { display: block; margin-top: 3px; font-size: 10px; color: #666; }
+    .tex-hint { font-size: 10px; color: #666; margin-bottom: 8px; line-height: 1.4; }
+  </style>
+  <script type="importmap">
+    {
+      "imports": {
+        "three": "https://cdn.jsdelivr.net/npm/three@0.183.0/build/three.webgpu.min.js",
+        "three/webgpu": "https://cdn.jsdelivr.net/npm/three@0.183.0/build/three.webgpu.min.js",
+        "three/tsl": "https://cdn.jsdelivr.net/npm/three@0.183.0/build/three.tsl.min.js",
+        "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.183.0/examples/jsm/"
+      }
+    }
+  </script>
+</head>
+<body>
+  <div id="hint"><span>Click</span> ground to explode · auto demo loops</div>
+  <aside id="panel"></aside>
+  <script type="module">
+    import * as THREE from "three/webgpu";
+    import { MeshBasicNodeMaterial } from "three";
+    import {
+      attribute,
+      dot,
+      float,
+      floor,
+      length,
+      mix,
+      mod,
+      smoothstep,
+      step,
+      texture,
+      uniform,
+      uv,
+      vec2,
+      vec3,
+    } from "three/tsl";
+    import { OrbitControls } from "three/addons/controls/OrbitControls.js";
+
+    const TEX_BASE = "./textures/particles";
+    const TEX_DEFAULTS = {
+      flame: `${TEX_BASE}/flame.webp`,
+      cloud: `${TEX_BASE}/cloud.webp`,
+      rocks: `${TEX_BASE}/rocks.webp`,
+      ground: `${TEX_BASE}/chess-board.webp`,
+    };
+
+    const SMOKE_CFG = JSON.parse(
+      '{"duration":1,"looping":false,"startLifetime":{"min":0.67,"max":2.86},"startSpeed":{"min":0,"max":2.2},"startSize":{"min":35,"max":60},"startOpacity":{"min":1,"max":1},"startRotation":{"min":-360,"max":360},"startColor":{"min":{"r":0.1,"g":0.1,"b":0.1},"max":{"r":0.2,"g":0.2,"b":0.2}},"gravity":-0.5,"emission":{"rateOverTime":500},"shape":{"sphere":{"radius":0.4,"arc":180}},"sizeOverLifetime":{"isActive":true,"lifetimeCurve":{"bezierPoints":[{"x":0,"y":0,"percentage":0},{"x":0,"y":1},{"x":0,"y":1},{"x":0.5,"y":1,"percentage":0.5},{"x":1,"y":1},{"x":1,"y":1},{"x":1,"y":0,"percentage":1}]}},"opacityOverLifetime":{"isActive":true,"lifetimeCurve":{"bezierPoints":[{"x":0,"y":1,"percentage":0},{"x":0.1666,"y":0.8333},{"x":0.3333,"y":0.6666},{"x":0.5,"y":0.5,"percentage":0.5},{"x":0.6666,"y":0.3332},{"x":0.8333,"y":0.1665},{"x":1,"y":0,"percentage":1}]}},"rotationOverLifetime":{"isActive":true,"min":-22.4,"max":24.3},"noise":{"isActive":true,"useRandomOffset":true,"strength":0.09,"positionAmount":0.191,"rotationAmount":1.677}}',
+    );
+
+    const ROCKS_CFG = JSON.parse(
+      '{"transform":{"rotation":{"x":-90}},"duration":0.3,"looping":false,"startLifetime":{"min":0.67,"max":1.77},"startSpeed":{"min":5.6,"max":14.64},"startSize":{"min":0.37,"max":3.11},"startOpacity":{"min":1,"max":1},"startRotation":{"min":-360,"max":360},"startColor":{"min":{"r":0.38823529411764707,"g":0.37254901960784315,"b":0.37254901960784315},"max":{"r":0.2196078431372549,"g":0.1803921568627451,"b":0.1803921568627451}},"gravity":13.7,"maxParticles":36,"emission":{"rateOverTime":500},"shape":{"shape":"CONE","cone":{"angle":36.4845,"radius":1.9553}},"sizeOverLifetime":{"lifetimeCurve":{"bezierPoints":[{"x":0,"y":0,"percentage":0},{"x":1,"y":1,"percentage":1}]}},"opacityOverLifetime":{"isActive":true,"lifetimeCurve":{"bezierPoints":[{"x":0,"y":1,"percentage":0},{"x":0.1666,"y":0.8333},{"x":0.6366,"y":1.0466},{"x":0.8033,"y":0.88,"percentage":0.8033},{"x":0.9699,"y":0.7133},{"x":0.8333,"y":0.1665},{"x":1,"y":0,"percentage":1}]}},"rotationOverLifetime":{"isActive":true,"min":-342.5,"max":299},"textureSheetAnimation":{"tiles":{"x":5,"y":2},"timeMode":"FPS","fps":0,"startFrame":{"min":0,"max":10}}}',
+    );
+
+    const FIRE_CFG = JSON.parse(
+      '{"duration":0.36,"looping":false,"startLifetime":{"min":0.4,"max":0.67},"startSpeed":{"min":3.68,"max":5.87},"startSize":{"min":24.14,"max":53.38},"startOpacity":{"min":0.287,"max":0.442},"startRotation":{"min":-360,"max":360},"startColor":{"min":{"r":0.9098039215686274,"g":0.2901960784313726,"b":0.2901960784313726},"max":{"r":1,"g":0.9686274509803922,"b":0.0392156862745098}},"gravity":-0.5,"emission":{"rateOverTime":500},"shape":{"sphere":{"radius":0.4,"arc":180}},"sizeOverLifetime":{"isActive":true,"lifetimeCurve":{"bezierPoints":[{"x":0,"y":0,"percentage":0},{"x":0,"y":1},{"x":0,"y":1},{"x":0.5,"y":1,"percentage":0.5},{"x":1,"y":1},{"x":1,"y":1},{"x":1,"y":0,"percentage":1}]}},"opacityOverLifetime":{"isActive":true,"lifetimeCurve":{"bezierPoints":[{"x":0,"y":1,"percentage":0},{"x":0.1666,"y":0.8333},{"x":0.3333,"y":0.6666},{"x":0.5,"y":0.5,"percentage":0.5},{"x":0.6666,"y":0.3332},{"x":0.8333,"y":0.1665},{"x":1,"y":0,"percentage":1}]}},"rotationOverLifetime":{"isActive":true,"min":-22.4,"max":24.3},"noise":{"isActive":true,"useRandomOffset":true,"strength":0.09,"positionAmount":0.191,"rotationAmount":1.677}}',
+    );
+
+    const DEFAULT_LOOK = {
+      exposure: 0.92,
+      brightness: 0.88,
+      contrast: 1.08,
+      saturation: 0.92,
+      edgeSoft: 0.018,
+      sizeScale: 1,
+      emissionScale: 1,
+      gravityScale: 1,
+      smokeDelay: 200,
+      fireOpacity: 1,
+      smokeOpacity: 1,
+      rocksOpacity: 1,
+      fireTint: "#ffffff",
+      smokeTint: "#b8b8b8",
+      bgColor: "#1a1a22",
+      groundBrightness: 0.92,
+      showAxes: true,
+      autoDemo: true,
+    };
+
+    const LOOK = { ...DEFAULT_LOOK };
+
+    const uLook = {
+      brightness: uniform(DEFAULT_LOOK.brightness),
+      contrast: uniform(DEFAULT_LOOK.contrast),
+      saturation: uniform(DEFAULT_LOOK.saturation),
+      edgeSoft: uniform(DEFAULT_LOOK.edgeSoft),
+    };
+
+    // ── Ported sim helpers (three-particles utils + bezier) ───────────────
+    const nCr = (n, k) => {
+      let z = 1;
+      for (let i = 1; i <= k; i++) z *= (n + 1 - i) / i;
+      return z;
+    };
+
+    function createBezierCurveFunction(bezierPoints) {
+      return (percentage) => {
+        if (percentage < 0) return bezierPoints[0].y;
+        if (percentage > 1) return bezierPoints[bezierPoints.length - 1].y;
+        let start = 0;
+        let stop = bezierPoints.length - 1;
+        bezierPoints.find((point, index) => {
+          const hit = percentage < (point.percentage ?? 0);
+          if (hit) stop = index;
+          else if (point.percentage !== undefined) start = index;
+          return hit;
+        });
+        const n = stop - start;
+        const calculated =
+          (percentage - (bezierPoints[start].percentage ?? 0)) /
+          ((bezierPoints[stop].percentage ?? 1) -
+            (bezierPoints[start].percentage ?? 0));
+        let value = 0;
+        for (let i = 0; i <= n; i++) {
+          const p = bezierPoints[start + i];
+          const c =
+            nCr(n, i) *
+            (1 - calculated) ** (n - i) *
+            calculated ** i;
+          value += c * p.y;
+        }
+        return value;
+      };
+    }
+
+    function calculateValue(value, systemT = 0) {
+      if (typeof value === "number") return value;
+      if (value && "min" in value && "max" in value) {
+        if (value.min === value.max) return value.min ?? 0;
+        return THREE.MathUtils.randFloat(value.min ?? 0, value.max ?? 1);
+      }
+      if (value?.bezierPoints) {
+        const fn = createBezierCurveFunction(value.bezierPoints);
+        return fn(systemT) * (value.scale ?? 1);
+      }
+      return 0;
+    }
+
+    const _pos = new THREE.Vector3();
+    const _vel = new THREE.Vector3();
+    const _q = new THREE.Quaternion();
+    const _partWorld = new THREE.Vector3();
+    const _mv = new THREE.Vector3();
+    const _rootInvQuat = new THREE.Quaternion();
+
+    function spawnOnSphere(position, quaternion, velocity, speed, { radius, radiusThickness = 1, arc }) {
+      const u = Math.random() * (arc / 360);
+      const v = Math.random();
+      const randomizedDistanceRatio = Math.random();
+      const theta = 2 * Math.PI * u;
+      const phi = Math.acos(2 * v - 1);
+      const sinPhi = Math.sin(phi);
+      const xDir = sinPhi * Math.cos(theta);
+      const yDir = sinPhi * Math.sin(theta);
+      const zDir = Math.cos(phi);
+      const nt = 1 - radiusThickness;
+      position.set(
+        radius * nt * xDir + radius * radiusThickness * randomizedDistanceRatio * xDir,
+        radius * nt * yDir + radius * radiusThickness * randomizedDistanceRatio * yDir,
+        radius * nt * zDir + radius * radiusThickness * randomizedDistanceRatio * zDir,
+      );
+      position.applyQuaternion(quaternion);
+      const mul = speed / Math.max(position.length(), 1e-6);
+      velocity.set(position.x * mul, position.y * mul, position.z * mul);
+      velocity.applyQuaternion(quaternion);
+    }
+
+    function spawnOnCone(position, quaternion, velocity, speed, { radius, radiusThickness = 1, arc, angle = 90 }) {
+      const theta = 2 * Math.PI * Math.random() * (arc / 360);
+      const randomizedDistanceRatio = Math.random();
+      const xDir = Math.cos(theta);
+      const yDir = Math.sin(theta);
+      const nt = 1 - radiusThickness;
+      position.set(
+        radius * nt * xDir + radius * radiusThickness * randomizedDistanceRatio * xDir,
+        radius * nt * yDir + radius * radiusThickness * randomizedDistanceRatio * yDir,
+        0,
+      );
+      position.applyQuaternion(quaternion);
+      const len = Math.max(position.length(), 1e-6);
+      const normalizedAngle = Math.abs((len / radius) * THREE.MathUtils.degToRad(angle));
+      const sinA = Math.sin(normalizedAngle);
+      const mul = sinA * speed / len;
+      velocity.set(position.x * mul, position.y * mul, Math.cos(normalizedAngle) * speed);
+      velocity.applyQuaternion(quaternion);
+    }
+
+    // Lightweight 3D value noise (matches three-particles noise call pattern)
+    function noise3(x, y, z) {
+      const ix = Math.floor(x);
+      const iy = Math.floor(y);
+      const iz = Math.floor(z);
+      const fx = x - ix;
+      const fy = y - iy;
+      const fz = z - iz;
+      const hash = (i, j, k) => {
+        let n = i * 374761393 + j * 668265263 + k * 1274126177;
+        n = (n ^ (n >> 13)) * 1274126177;
+        return ((n ^ (n >> 16)) & 0x7fffffff) / 0x7fffffff * 2 - 1;
+      };
+      const lerp = (a, b, t) => a + (b - a) * t;
+      const x00 = lerp(hash(ix, iy, iz), hash(ix + 1, iy, iz), fx);
+      const x10 = lerp(hash(ix, iy, iz + 1), hash(ix + 1, iy, iz + 1), fx);
+      const x01 = lerp(hash(ix, iy + 1, iz), hash(ix + 1, iy + 1, iz), fx);
+      const x11 = lerp(hash(ix, iy + 1, iz + 1), hash(ix + 1, iy + 1, iz + 1), fx);
+      const y0 = lerp(x00, x01, fy);
+      const y1 = lerp(x10, x11, fy);
+      return lerp(y0, y1, fz);
+    }
+
+    function createSpriteMaterial(
+      map,
+      tilesX = 1,
+      tilesY = 1,
+      useLifetimeFrames = false,
+      hasAtlas = false,
+      layerOpacity = 1,
+      layerTint = "#ffffff",
+    ) {
+      const uTiles = uniform(vec2(tilesX, tilesY));
+      const uUseLifeFrames = uniform(useLifetimeFrames ? 1 : 0);
+      const uLayerOpacity = uniform(layerOpacity);
+      const uLayerTint = uniform(new THREE.Color(layerTint));
+
+      const iColor = attribute("iColor", "vec4");
+      const iStartFrame = hasAtlas ? attribute("iStartFrame") : float(0);
+      const iLifeRatio = hasAtlas ? attribute("iLifeRatio") : float(0);
+
+      const st = uv();
+      const dist = length(st.sub(vec2(0.5, 0.5)));
+      const edgeInner = float(0.5).sub(uLook.edgeSoft);
+      const insideHard = float(1).sub(step(float(0.5), dist));
+      const insideSoft = float(1).sub(smoothstep(edgeInner, float(0.5), dist));
+      const circle = mix(insideHard, insideSoft, step(float(0.001), uLook.edgeSoft));
+
+      const totalFrames = uTiles.x.mul(uTiles.y);
+      const frameIndex = iStartFrame.add(
+        iLifeRatio.mul(totalFrames.sub(iStartFrame)).mul(uUseLifeFrames),
+      ).floor();
+      const tileCol = mod(frameIndex, uTiles.x);
+      const tileRow = floor(frameIndex.div(uTiles.x));
+      const atlasUV = vec2(
+        st.x.div(uTiles.x).add(tileCol.div(uTiles.x)),
+        st.y.div(uTiles.y).add(tileRow.div(uTiles.y)),
+      );
+
+      const samp = texture(map, hasAtlas ? atlasUV : st);
+      let col = iColor.xyz.mul(samp.rgb).mul(uLayerTint);
+      const lum = dot(col, vec3(0.2126, 0.7152, 0.0722));
+      col = mix(vec3(lum), col, uLook.saturation);
+      col = col.sub(float(0.5)).mul(uLook.contrast).add(float(0.5));
+      col = col.mul(uLook.brightness);
+      const alpha = iColor.w.mul(samp.a).mul(circle).mul(uLayerOpacity);
+
+      const mat = new MeshBasicNodeMaterial({
+        transparent: true,
+        depthWrite: false,
+        side: THREE.FrontSide,
+      });
+      mat.colorNode = col;
+      mat.opacityNode = alpha;
+      return { mat, uLayerOpacity, uLayerTint };
+    }
+
+    const INST_STRIDE = 6;
+
+    class TSLParticleSystem {
+      constructor(scene, cfg, map, maxParticles, renderOrder, atlas = { x: 1, y: 1 }, layer = {}) {
+        this.cfg = cfg;
+        this.maxParticles = maxParticles;
+        this.layerKey = layer.key ?? "fire";
+        this.sizeScale = layer.sizeScale ?? 1;
+        this.emissionScale = layer.emissionScale ?? 1;
+        this.gravityScale = layer.gravityScale ?? 1;
+        this.atlas = atlas;
+        this.hasAtlas = atlas.x * atlas.y > 1;
+        this.useLifetimeFrames =
+          cfg.textureSheetAnimation?.timeMode !== "FPS" &&
+          !!cfg.textureSheetAnimation?.tiles;
+
+        const geo = new THREE.PlaneGeometry(1, 1);
+        geo.deleteAttribute("normal");
+        const n = maxParticles;
+        this.instData = new Float32Array(n * INST_STRIDE);
+        this.instBuffer = new THREE.InstancedInterleavedBuffer(this.instData, INST_STRIDE);
+        geo.setAttribute(
+          "iColor",
+          new THREE.InterleavedBufferAttribute(this.instBuffer, 4, 0),
+        );
+        if (this.hasAtlas) {
+          geo.setAttribute(
+            "iStartFrame",
+            new THREE.InterleavedBufferAttribute(this.instBuffer, 1, 4),
+          );
+          geo.setAttribute(
+            "iLifeRatio",
+            new THREE.InterleavedBufferAttribute(this.instBuffer, 1, 5),
+          );
+        }
+        this.sizes = new Float32Array(n);
+
+        this.velocities = Array.from({ length: n }, () => new THREE.Vector3());
+        this.creationTimes = new Float32Array(n);
+        this.startLifetimes = new Float32Array(n);
+        this.startSizes = new Float32Array(n);
+        this.startOpacities = new Float32Array(n);
+        this.rotSpeeds = new Float32Array(n);
+        this.noiseOffsets = new Float32Array(n);
+        this.isActive = new Uint8Array(n);
+        this.posX = new Float32Array(n);
+        this.posY = new Float32Array(n);
+        this.posZ = new Float32Array(n);
+        this.rotations = new Float32Array(n);
+        this.startFrames = new Float32Array(n);
+
+        this.sizeCurve = cfg.sizeOverLifetime?.lifetimeCurve?.bezierPoints
+          ? createBezierCurveFunction(cfg.sizeOverLifetime.lifetimeCurve.bezierPoints)
+          : null;
+        this.opacityCurve = cfg.opacityOverLifetime?.lifetimeCurve?.bezierPoints
+          ? createBezierCurveFunction(cfg.opacityOverLifetime.lifetimeCurve.bezierPoints)
+          : null;
+
+        this.sizeOverLife = cfg.sizeOverLifetime?.isActive === true;
+        this.opacityOverLife = cfg.opacityOverLifetime?.isActive === true;
+
+        const layerOpacity =
+          layer.key === "fire"
+            ? LOOK.fireOpacity
+            : layer.key === "smoke"
+              ? LOOK.smokeOpacity
+              : layer.key === "rocks"
+                ? LOOK.rocksOpacity
+                : 1;
+        const layerTint =
+          layer.key === "fire"
+            ? LOOK.fireTint
+            : layer.key === "smoke"
+              ? LOOK.smokeTint
+              : "#ffffff";
+
+        const { mat, uLayerOpacity, uLayerTint } = createSpriteMaterial(
+          map,
+          atlas.x,
+          atlas.y,
+          this.useLifetimeFrames,
+          this.hasAtlas,
+          layerOpacity,
+          layerTint,
+        );
+        this.uLayerOpacity = uLayerOpacity;
+        this.uLayerTint = uLayerTint;
+        this.mesh = new THREE.InstancedMesh(geo, mat, n);
+        this.mesh.count = 0;
+        this.mesh.frustumCulled = false;
+        this.mesh.renderOrder = renderOrder;
+
+        this.root = new THREE.Group();
+        const tr = cfg.transform?.rotation;
+        if (tr) {
+          this.root.rotation.set(
+            THREE.MathUtils.degToRad(tr.x ?? 0),
+            THREE.MathUtils.degToRad(tr.y ?? 0),
+            THREE.MathUtils.degToRad(tr.z ?? 0),
+          );
+        }
+        this.root.add(this.mesh);
+        scene.add(this.root);
+
+        this.gravityVelocity = new THREE.Vector3();
+        this.lastWorldPos = new THREE.Vector3(-99999, 0, 0);
+        this.lastWorldQuat = new THREE.Quaternion(-99999, 0, 0, 0);
+        this.worldQuat = new THREE.Quaternion();
+        this.isEmitting = false;
+        this.creationTime = 0;
+        this.lastEmissionTime = 0;
+        this.systemAge = 0;
+
+        this._dummy = new THREE.Object3D();
+      }
+
+      _ib(i) {
+        return i * INST_STRIDE;
+      }
+
+      start(worldPos, now) {
+        this.root.position.copy(worldPos);
+        this.isEmitting = true;
+        this.creationTime = now;
+        this.lastEmissionTime = now;
+        this.systemAge = 0;
+        for (let i = 0; i < this.maxParticles; i++) this.deactivate(i);
+        this.mesh.count = 0;
+      }
+
+      deactivate(i) {
+        this.isActive[i] = 0;
+        this.instData[this._ib(i) + 3] = 0;
+      }
+
+      activate(i, now) {
+        const cfg = this.cfg;
+        const b = this._ib(i);
+        this.isActive[i] = 1;
+        this.creationTimes[i] = now;
+        this.noiseOffsets[i] = Math.random() * 100;
+
+        const lt = calculateValue(cfg.startLifetime) * 1000;
+        this.startLifetimes[i] = lt;
+        const speed = calculateValue(cfg.startSpeed);
+        this.startSizes[i] = calculateValue(cfg.startSize);
+        this.sizes[i] = this.startSizes[i];
+        this.startOpacities[i] = calculateValue(cfg.startOpacity);
+        this.instData[b + 3] = this.startOpacities[i];
+
+        const ratio = Math.random();
+        const cmin = cfg.startColor.min;
+        const cmax = cfg.startColor.max;
+        this.instData[b] = cmin.r + ratio * ((cmax.r ?? cmin.r) - cmin.r);
+        this.instData[b + 1] = cmin.g + ratio * ((cmax.g ?? cmin.g) - cmin.g);
+        this.instData[b + 2] = cmin.b + ratio * ((cmax.b ?? cmin.b) - cmin.b);
+
+        this.rotations[i] = calculateValue(cfg.startRotation);
+        this.rotSpeeds[i] = cfg.rotationOverLifetime?.isActive
+          ? THREE.MathUtils.randFloat(
+              cfg.rotationOverLifetime.min,
+              cfg.rotationOverLifetime.max,
+            )
+          : 0;
+
+        const sheet = cfg.textureSheetAnimation;
+        if (this.hasAtlas) {
+          const sf = sheet?.startFrame ? calculateValue(sheet.startFrame) : 0;
+          this.startFrames[i] = sf;
+          this.instData[b + 4] = sf;
+          this.instData[b + 5] = 0;
+        }
+
+        _q.setFromEuler(this.root.rotation);
+        if (cfg.shape?.sphere) {
+          spawnOnSphere(_pos, _q, _vel, speed, {
+            radius: cfg.shape.sphere.radius,
+            radiusThickness: cfg.shape.sphere.radiusThickness ?? 1,
+            arc: cfg.shape.sphere.arc ?? 360,
+          });
+        } else if (cfg.shape?.cone || cfg.shape?.shape === "CONE") {
+          const cone = cfg.shape.cone;
+          spawnOnCone(_pos, _q, _vel, speed, {
+            radius: cone.radius,
+            radiusThickness: cone.radiusThickness ?? 1,
+            arc: cone.arc ?? 360,
+            angle: cone.angle ?? 90,
+          });
+        }
+
+        this.velocities[i].copy(_vel);
+        this.posX[i] = _pos.x;
+        this.posY[i] = _pos.y;
+        this.posZ[i] = _pos.z;
+      }
+
+      update(now, delta, camera, canvasHeight) {
+        const cfg = this.cfg;
+        if (!this.isEmitting && this.mesh.count === 0) return;
+
+        this.systemAge = (now - this.creationTime) / 1000;
+        this.root.getWorldPosition(_pos);
+        this.root.getWorldQuaternion(this.worldQuat);
+        this.gravityVelocity.set(_pos.x, _pos.y + (cfg.gravity ?? 0) * this.gravityScale, _pos.z);
+        this.root.worldToLocal(this.gravityVelocity);
+
+        if (this.isEmitting && this.systemAge <= cfg.duration) {
+          const emissionDelta = now - this.lastEmissionTime;
+          const needed = Math.floor(
+            calculateValue(cfg.emission?.rateOverTime ?? 0) *
+              this.emissionScale *
+              (emissionDelta / 1000),
+          );
+          for (let n = 0; n < needed; n++) {
+            const slot = this.isActive.findIndex((v) => v === 0);
+            if (slot < 0) break;
+            this.activate(slot, now);
+          }
+          this.lastEmissionTime = now;
+        } else if (this.systemAge > cfg.duration) {
+          this.isEmitting = false;
+        }
+
+        const noise = cfg.noise;
+
+        this.root.updateMatrixWorld(true);
+        this.root.getWorldQuaternion(_rootInvQuat).invert();
+        const fovRad = THREE.MathUtils.degToRad(camera.fov);
+        const projFactor = (2 * Math.tan(fovRad * 0.5)) / Math.max(canvasHeight, 1);
+
+        for (let i = 0; i < this.maxParticles; i++) {
+          const b = this._ib(i);
+          if (!this.isActive[i]) {
+            this.instData[b + 3] = 0;
+            this._dummy.position.set(0, -9999, 0);
+            this._dummy.scale.set(0, 0, 0);
+            this._dummy.updateMatrix();
+            this.mesh.setMatrixAt(i, this._dummy.matrix);
+            continue;
+          }
+
+          const particleLife = now - this.creationTimes[i];
+          if (particleLife >= this.startLifetimes[i]) {
+            this.deactivate(i);
+            continue;
+          }
+
+          const lifePct = particleLife / this.startLifetimes[i];
+          if (this.hasAtlas) this.instData[b + 5] = lifePct;
+
+          const vel = this.velocities[i];
+          vel.x -= this.gravityVelocity.x * delta;
+          vel.y -= this.gravityVelocity.y * delta;
+          vel.z -= this.gravityVelocity.z * delta;
+
+          this.posX[i] += vel.x * delta;
+          this.posY[i] += vel.y * delta;
+          this.posZ[i] += vel.z * delta;
+
+          if (noise?.isActive) {
+            const str = noise.strength ?? 1;
+            const nPos = (lifePct + this.noiseOffsets[i]) * 10 * str;
+            const nPow = 0.15 * str;
+            const nAmt = noise.positionAmount ?? 1;
+            this.posX[i] += noise3(nPos, 0, 0) * nPow * nAmt;
+            this.posY[i] += noise3(nPos, nPos, 0) * nPow * nAmt;
+            this.posZ[i] += noise3(nPos, nPos, nPos) * nPow * nAmt;
+            if (noise.rotationAmount) {
+              this.rotations[i] +=
+                noise3(nPos, 0, 0) * nPow * noise.rotationAmount;
+            }
+          }
+
+          this.rotations[i] += this.rotSpeeds[i] * delta * 0.02;
+
+          let size = this.startSizes[i];
+          if (this.sizeOverLife && this.sizeCurve) {
+            size *= Math.max(0, this.sizeCurve(lifePct));
+          }
+          this.sizes[i] = size;
+
+          if (this.opacityOverLife && this.opacityCurve) {
+            this.instData[b + 3] =
+              this.startOpacities[i] * Math.max(0, this.opacityCurve(lifePct));
+          }
+
+          const px = this.posX[i];
+          const py = this.posY[i];
+          const pz = this.posZ[i];
+
+          this._dummy.position.set(px, py, pz);
+          // THREE.Points: sprites parallel to camera image plane (not per-particle lookAt).
+          this._dummy.quaternion.copy(_rootInvQuat).multiply(camera.quaternion);
+          this._dummy.rotateZ(THREE.MathUtils.degToRad(this.rotations[i]));
+
+          _partWorld.set(px, py, pz).applyMatrix4(this.root.matrixWorld);
+          _mv.copy(_partWorld).applyMatrix4(camera.matrixWorldInverse);
+          const mvLen = Math.max(_mv.length(), 0.01);
+          const pixelSize = (size * 100) / mvLen;
+          const worldScale = pixelSize * projFactor * Math.abs(_mv.z) * this.sizeScale;
+          this._dummy.scale.set(worldScale, worldScale, 1);
+          this._dummy.updateMatrix();
+          this.mesh.setMatrixAt(i, this._dummy.matrix);
+        }
+
+        this.mesh.count = this.maxParticles;
+        this.mesh.instanceMatrix.needsUpdate = true;
+        this.instBuffer.needsUpdate = true;
+      }
+
+      isFinished(now) {
+        if (this.isEmitting) return false;
+        for (let i = 0; i < this.maxParticles; i++) {
+          if (this.isActive[i] && now - this.creationTimes[i] < this.startLifetimes[i]) {
+            return false;
+          }
+        }
+        return true;
+      }
+
+      applyLook() {
+        const opacity =
+          this.layerKey === "fire"
+            ? LOOK.fireOpacity
+            : this.layerKey === "smoke"
+              ? LOOK.smokeOpacity
+              : this.layerKey === "rocks"
+                ? LOOK.rocksOpacity
+                : 1;
+        const tint =
+          this.layerKey === "fire"
+            ? LOOK.fireTint
+            : this.layerKey === "smoke"
+              ? LOOK.smokeTint
+              : "#ffffff";
+        this.uLayerOpacity.value = opacity;
+        this.uLayerTint.value.set(tint);
+        this.sizeScale = LOOK.sizeScale;
+        this.emissionScale = LOOK.emissionScale;
+        this.gravityScale = LOOK.gravityScale;
+      }
+
+      dispose(scene) {
+        scene.remove(this.root);
+        this.mesh.geometry.dispose();
+        this.mesh.material.dispose();
+      }
+    }
+
+    class ExplosionDirector {
+      constructor(scene, textures, getLook) {
+        this.scene = scene;
+        this.textures = textures;
+        this.getLook = getLook;
+        this.groups = [];
+      }
+
+      applyLookToActive() {
+        for (const g of this.groups) {
+          g.fire.applyLook();
+          g.rocks.applyLook();
+          g.smoke.applyLook();
+        }
+      }
+
+      explode(pos, now) {
+        const look = this.getLook();
+        const layerOpts = {
+          sizeScale: look.sizeScale,
+          emissionScale: look.emissionScale,
+          gravityScale: look.gravityScale,
+        };
+        const fire = new TSLParticleSystem(
+          this.scene,
+          FIRE_CFG,
+          this.textures.flame,
+          100,
+          12,
+          { x: 1, y: 1 },
+          { key: "fire", ...layerOpts },
+        );
+        const rocks = new TSLParticleSystem(
+          this.scene,
+          ROCKS_CFG,
+          this.textures.rocks,
+          36,
+          13,
+          { x: 5, y: 2 },
+          { key: "rocks", ...layerOpts },
+        );
+        const smoke = new TSLParticleSystem(
+          this.scene,
+          SMOKE_CFG,
+          this.textures.cloud,
+          100,
+          14,
+          { x: 1, y: 1 },
+          { key: "smoke", ...layerOpts },
+        );
+
+        fire.start(pos, now);
+        rocks.start(pos, now);
+        const smokePos = pos.clone();
+        const smokeStart = now + look.smokeDelay;
+        const group = { fire, rocks, smoke, smokePos, smokeStart, smokeStarted: false, born: now };
+        this.groups.push(group);
+
+        setTimeout(() => {
+          const idx = this.groups.indexOf(group);
+          if (idx >= 0) this.groups.splice(idx, 1);
+          fire.dispose(this.scene);
+          rocks.dispose(this.scene);
+          smoke.dispose(this.scene);
+        }, 5000);
+      }
+
+      update(now, delta, camera, canvasHeight) {
+        for (const g of this.groups) {
+          if (!g.smokeStarted && now >= g.smokeStart) {
+            g.smoke.start(g.smokePos, now);
+            g.smokeStarted = true;
+          }
+          g.fire.update(now, delta, camera, canvasHeight);
+          g.rocks.update(now, delta, camera, canvasHeight);
+          if (g.smokeStarted) g.smoke.update(now, delta, camera, canvasHeight);
+        }
+      }
+    }
+
+    // ── Scene ─────────────────────────────────────────────────────────────
+    const renderer = new THREE.WebGPURenderer({ antialias: true });
+    renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+    renderer.setSize(window.innerWidth, window.innerHeight);
+    renderer.toneMapping = THREE.ACESFilmicToneMapping;
+    renderer.toneMappingExposure = LOOK.exposure;
+    document.body.appendChild(renderer.domElement);
+    await renderer.init();
+
+    const scene = new THREE.Scene();
+    scene.background = new THREE.Color(LOOK.bgColor);
+
+    const camera = new THREE.PerspectiveCamera(60, window.innerWidth / window.innerHeight, 0.1, 500);
+    const DEFAULT_CAM = { pos: new THREE.Vector3(20, 20, 20), target: new THREE.Vector3(-1, -1, -1) };
+    camera.position.copy(DEFAULT_CAM.pos);
+
+    const controls = new OrbitControls(camera, renderer.domElement);
+    controls.enableDamping = true;
+    controls.target.copy(DEFAULT_CAM.target);
+
+    scene.add(new THREE.AmbientLight(0xffffff, 1));
+
+    const loader = new THREE.TextureLoader();
+    const loadTex = (url) =>
+      new Promise((resolve) => {
+        loader.load(url, (t) => {
+          t.colorSpace = THREE.SRGBColorSpace;
+          resolve(t);
+        });
+      });
+
+    const [groundTex, cloudTex, rocksTex, flameTex] = await Promise.all([
+      loadTex(TEX_DEFAULTS.ground),
+      loadTex(TEX_DEFAULTS.cloud),
+      loadTex(TEX_DEFAULTS.rocks),
+      loadTex(TEX_DEFAULTS.flame),
+    ]);
+
+    const textures = { ground: groundTex, cloud: cloudTex, rocks: rocksTex, flame: flameTex };
+
+    groundTex.wrapS = groundTex.wrapT = THREE.MirroredRepeatWrapping;
+    groundTex.repeat.set(50, 50);
+
+    const groundMat = new THREE.MeshBasicMaterial({
+      color: 0xffffff,
+      map: textures.ground,
+      side: THREE.DoubleSide,
+    });
+    groundMat.color.setScalar(LOOK.groundBrightness);
+
+    const ground = new THREE.Mesh(new THREE.PlaneGeometry(100, 100, 100, 100), groundMat);
+    ground.rotation.x = -Math.PI / 2;
+    scene.add(ground);
+
+    const axes = new THREE.AxesHelper(5);
+    axes.position.copy(DEFAULT_CAM.target);
+    axes.visible = LOOK.showAxes;
+    scene.add(axes);
+
+    const director = new ExplosionDirector(
+      scene,
+      { cloud: textures.cloud, rocks: textures.rocks, flame: textures.flame },
+      () => LOOK,
+    );
+
+    function applyFileToTexture(tex, file, onName) {
+      const blobUrl = URL.createObjectURL(file);
+      const img = new Image();
+      img.onload = () => {
+        tex.image = img;
+        tex.needsUpdate = true;
+        if (tex === textures.ground) {
+          tex.wrapS = tex.wrapT = THREE.MirroredRepeatWrapping;
+          tex.repeat.set(50, 50);
+        }
+        onName?.(file.name);
+        URL.revokeObjectURL(blobUrl);
+      };
+      img.onerror = () => URL.revokeObjectURL(blobUrl);
+      img.src = blobUrl;
+    }
+
+    function resetTextureToDefault(tex, url, onName) {
+      loader.load(url, (t) => {
+        t.colorSpace = THREE.SRGBColorSpace;
+        tex.image = t.image;
+        tex.needsUpdate = true;
+        if (tex === textures.ground) {
+          tex.wrapS = tex.wrapT = THREE.MirroredRepeatWrapping;
+          tex.repeat.set(50, 50);
+        }
+        onName?.("default");
+      });
+    }
+
+    function mkTexturePicker(section, label, tex, defaultUrl) {
+      const row = document.createElement("div");
+      row.className = "file-row";
+      const head = document.createElement("div");
+      head.className = "file-head";
+      const lbl = document.createElement("span");
+      lbl.textContent = label;
+      const resetBtn = document.createElement("button");
+      resetBtn.type = "button";
+      resetBtn.textContent = "Default";
+      const nameEl = document.createElement("span");
+      nameEl.className = "file-name";
+      nameEl.textContent = "default";
+      resetBtn.addEventListener("click", () => {
+        resetTextureToDefault(tex, defaultUrl, (n) => {
+          nameEl.textContent = n;
+        });
+      });
+      head.append(lbl, resetBtn);
+      const input = document.createElement("input");
+      input.type = "file";
+      input.accept = "image/png,image/webp,image/jpeg,image/jpg";
+      input.addEventListener("change", () => {
+        const file = input.files?.[0];
+        if (file) applyFileToTexture(tex, file, (n) => { nameEl.textContent = n; });
+        input.value = "";
+      });
+      row.append(head, input, nameEl);
+      section.appendChild(row);
+    }
+
+    function syncLookUniforms() {
+      uLook.brightness.value = LOOK.brightness;
+      uLook.contrast.value = LOOK.contrast;
+      uLook.saturation.value = LOOK.saturation;
+      uLook.edgeSoft.value = LOOK.edgeSoft;
+      renderer.toneMappingExposure = LOOK.exposure;
+      scene.background.set(LOOK.bgColor);
+      groundMat.color.setRGB(LOOK.groundBrightness, LOOK.groundBrightness, LOOK.groundBrightness);
+      axes.visible = LOOK.showAxes;
+      director.applyLookToActive();
+    }
+
+    function buildLookUI() {
+      const panel = document.getElementById("panel");
+      panel.addEventListener("pointerdown", (e) => e.stopPropagation());
+      panel.addEventListener("click", (e) => e.stopPropagation());
+
+      const mkRange = (section, key, label, min, max, step, fmt = (v) => v.toFixed(2)) => {
+        const row = document.createElement("div");
+        row.className = "row";
+        const name = document.createElement("span");
+        name.textContent = label;
+        const out = document.createElement("output");
+        out.textContent = fmt(LOOK[key]);
+        const input = document.createElement("input");
+        input.type = "range";
+        input.min = String(min);
+        input.max = String(max);
+        input.step = String(step);
+        input.value = String(LOOK[key]);
+        input.addEventListener("input", () => {
+          LOOK[key] = parseFloat(input.value);
+          out.textContent = fmt(LOOK[key]);
+          syncLookUniforms();
+        });
+        row.append(name, out, input);
+        section.appendChild(row);
+      };
+
+      panel.innerHTML = "<h2>Explosion Lab</h2>";
+
+      const lookSec = document.createElement("section");
+      lookSec.innerHTML = "<label>Look — match original repo</label>";
+      mkRange(lookSec, "exposure", "Exposure", 0.4, 1.6, 0.01);
+      mkRange(lookSec, "brightness", "Brightness", 0.4, 1.4, 0.01);
+      mkRange(lookSec, "contrast", "Contrast", 0.6, 1.6, 0.01);
+      mkRange(lookSec, "saturation", "Saturation", 0, 1.5, 0.01);
+      mkRange(lookSec, "edgeSoft", "Sprite edge soft", 0, 0.06, 0.001, (v) => v.toFixed(3));
+      panel.appendChild(lookSec);
+
+      const layerSec = document.createElement("section");
+      layerSec.innerHTML = "<label>Layers</label>";
+      mkRange(layerSec, "fireOpacity", "Fire opacity", 0.1, 1.5, 0.01);
+      mkRange(layerSec, "smokeOpacity", "Smoke opacity", 0.1, 1.5, 0.01);
+      mkRange(layerSec, "rocksOpacity", "Rocks opacity", 0.1, 1.5, 0.01);
+
+      const fireTintRow = document.createElement("div");
+      fireTintRow.className = "row";
+      fireTintRow.innerHTML = "<span>Fire tint</span><output></output>";
+      const fireTintOut = fireTintRow.querySelector("output");
+      fireTintOut.textContent = LOOK.fireTint;
+      const fireTint = document.createElement("input");
+      fireTint.type = "color";
+      fireTint.value = LOOK.fireTint;
+      fireTint.addEventListener("input", () => {
+        LOOK.fireTint = fireTint.value;
+        fireTintOut.textContent = LOOK.fireTint;
+        syncLookUniforms();
+      });
+      fireTintRow.appendChild(fireTint);
+      layerSec.appendChild(fireTintRow);
+
+      const smokeTintRow = document.createElement("div");
+      smokeTintRow.className = "row";
+      smokeTintRow.innerHTML = "<span>Smoke tint</span><output></output>";
+      const smokeTintOut = smokeTintRow.querySelector("output");
+      smokeTintOut.textContent = LOOK.smokeTint;
+      const smokeTint = document.createElement("input");
+      smokeTint.type = "color";
+      smokeTint.value = LOOK.smokeTint;
+      smokeTint.addEventListener("input", () => {
+        LOOK.smokeTint = smokeTint.value;
+        smokeTintOut.textContent = LOOK.smokeTint;
+        syncLookUniforms();
+      });
+      smokeTintRow.appendChild(smokeTint);
+      layerSec.appendChild(smokeTintRow);
+      panel.appendChild(layerSec);
+
+      const texSec = document.createElement("section");
+      texSec.innerHTML = "<label>Textures</label>";
+      const texHint = document.createElement("p");
+      texHint.className = "tex-hint";
+      texHint.textContent =
+        "Upload PNG/WebP/JPEG with alpha. Updates live on active bursts. Rocks atlas: 5×2 sheet.";
+      texSec.appendChild(texHint);
+      mkTexturePicker(texSec, "Fire (flame)", textures.flame, TEX_DEFAULTS.flame);
+      mkTexturePicker(texSec, "Smoke (cloud)", textures.cloud, TEX_DEFAULTS.cloud);
+      mkTexturePicker(texSec, "Rocks (atlas)", textures.rocks, TEX_DEFAULTS.rocks);
+      mkTexturePicker(texSec, "Ground", textures.ground, TEX_DEFAULTS.ground);
+      panel.appendChild(texSec);
+
+      const simSec = document.createElement("section");
+      simSec.innerHTML = "<label>Simulation</label>";
+      mkRange(simSec, "sizeScale", "Size scale", 0.4, 2, 0.01);
+      mkRange(simSec, "emissionScale", "Emission density", 0.2, 2, 0.01);
+      mkRange(simSec, "gravityScale", "Gravity", 0, 2, 0.01);
+      mkRange(simSec, "smokeDelay", "Smoke delay (ms)", 0, 800, 10, (v) => String(Math.round(v)));
+      panel.appendChild(simSec);
+
+      const sceneSec = document.createElement("section");
+      sceneSec.innerHTML = "<label>Scene</label>";
+      const bgRow = document.createElement("div");
+      bgRow.className = "row";
+      bgRow.innerHTML = "<span>Background</span><output></output>";
+      const bgOut = bgRow.querySelector("output");
+      bgOut.textContent = LOOK.bgColor;
+      const bgInput = document.createElement("input");
+      bgInput.type = "color";
+      bgInput.value = LOOK.bgColor;
+      bgInput.addEventListener("input", () => {
+        LOOK.bgColor = bgInput.value;
+        bgOut.textContent = LOOK.bgColor;
+        syncLookUniforms();
+      });
+      bgRow.appendChild(bgInput);
+      sceneSec.appendChild(bgRow);
+      mkRange(sceneSec, "groundBrightness", "Ground brightness", 0.3, 1.5, 0.01);
+
+      const axesRow = document.createElement("div");
+      axesRow.className = "toggle-row";
+      axesRow.innerHTML = "<span>Show axes</span>";
+      const axesToggle = document.createElement("input");
+      axesToggle.type = "checkbox";
+      axesToggle.checked = LOOK.showAxes;
+      axesToggle.addEventListener("change", () => {
+        LOOK.showAxes = axesToggle.checked;
+        syncLookUniforms();
+      });
+      axesRow.appendChild(axesToggle);
+      sceneSec.appendChild(axesRow);
+
+      const demoRow = document.createElement("div");
+      demoRow.className = "toggle-row";
+      demoRow.innerHTML = "<span>Auto demo loop</span>";
+      const demoToggle = document.createElement("input");
+      demoToggle.type = "checkbox";
+      demoToggle.checked = LOOK.autoDemo;
+      demoToggle.addEventListener("change", () => {
+        LOOK.autoDemo = demoToggle.checked;
+        if (LOOK.autoDemo) startAutoDemo();
+        else stopAutoDemo();
+      });
+      demoRow.appendChild(demoToggle);
+      sceneSec.appendChild(demoRow);
+      panel.appendChild(sceneSec);
+
+      const actSec = document.createElement("section");
+      actSec.innerHTML = "<label>Actions</label>";
+      const btnRow = document.createElement("div");
+      btnRow.className = "btn-row";
+      const btnExplode = document.createElement("button");
+      btnExplode.textContent = "Explode center";
+      btnExplode.addEventListener("click", () => explodeAt(DEFAULT_CAM.target.clone()));
+      const btnTop = document.createElement("button");
+      btnTop.textContent = "Top view";
+      btnTop.addEventListener("click", () => {
+        camera.position.set(-1, 38, -1);
+        controls.target.copy(DEFAULT_CAM.target);
+      });
+      const btnResetCam = document.createElement("button");
+      btnResetCam.textContent = "Reset cam";
+      btnResetCam.addEventListener("click", () => {
+        camera.position.copy(DEFAULT_CAM.pos);
+        controls.target.copy(DEFAULT_CAM.target);
+      });
+      const btnResetLook = document.createElement("button");
+      btnResetLook.textContent = "Reset look";
+      btnResetLook.addEventListener("click", () => {
+        Object.assign(LOOK, DEFAULT_LOOK);
+        buildLookUI();
+        syncLookUniforms();
+      });
+      btnRow.append(btnExplode, btnTop, btnResetCam, btnResetLook);
+      actSec.appendChild(btnRow);
+      panel.appendChild(actSec);
+    }
+
+    buildLookUI();
+    syncLookUniforms();
+
+    const raycaster = new THREE.Raycaster();
+    const pointer = new THREE.Vector2();
+    document.addEventListener("mousemove", (e) => {
+      pointer.x = (e.clientX / window.innerWidth) * 2 - 1;
+      pointer.y = -(e.clientY / window.innerHeight) * 2 + 1;
+    });
+
+    const explodeAt = (pos) => director.explode(pos, performance.now());
+
+    document.addEventListener("click", (e) => {
+      if (e.target.closest("#panel")) return;
+      raycaster.setFromCamera(pointer, camera);
+      const hits = raycaster.intersectObject(ground);
+      if (hits.length) explodeAt(hits[0].point.clone());
+    });
+
+    let autoDemoTimers = [];
+    function stopAutoDemo() {
+      autoDemoTimers.forEach(clearTimeout);
+      autoDemoTimers = [];
+    }
+    function startAutoDemo() {
+      stopAutoDemo();
+      for (let i = 0; i < 8; i++) {
+        autoDemoTimers.push(
+          setTimeout(() => {
+            explodeAt(new THREE.Vector3(10 * Math.cos(i * 0.9), 0, 10 * Math.sin(i * 0.9)));
+          }, i * 1000),
+        );
+      }
+    }
+    if (LOOK.autoDemo) startAutoDemo();
+
+    const timer = new THREE.Timer();
+    timer.connect(document);
+    let canvasHeight = window.innerHeight;
+
+    function onResize() {
+      camera.aspect = window.innerWidth / window.innerHeight;
+      camera.updateProjectionMatrix();
+      renderer.setSize(window.innerWidth, window.innerHeight);
+      canvasHeight = window.innerHeight;
+    }
+    window.addEventListener("resize", onResize);
+
+    renderer.setAnimationLoop(() => {
+      timer.update();
+      const delta = Math.min(timer.getDelta(), 0.1);
+      const now = performance.now();
+      controls.update();
+      director.update(now, delta, camera, canvasHeight);
+      renderer.render(scene, camera);
+    });
+  </script>
+</body>
+</html>

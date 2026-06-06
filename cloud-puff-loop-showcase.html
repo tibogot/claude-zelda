@@ -1,0 +1,552 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Cloud Puff Loop — WebGPU TSL</title>
+  <style>
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    html, body { width: 100%; height: 100%; overflow: hidden; background: #111; }
+    canvas { display: block; width: 100vw; height: 100vh; }
+    #hint {
+      position: fixed; bottom: 16px; left: 16px; z-index: 10;
+      font: 12px/1.5 "SF Mono", Consolas, monospace;
+      color: #ccc; background: rgba(0,0,0,0.55); padding: 8px 12px;
+      border-radius: 6px; pointer-events: none;
+    }
+    #hint span { color: #8ec8ff; font-weight: 600; }
+    #panel {
+      position: fixed; top: 12px; right: 12px; z-index: 20;
+      width: min(280px, calc(100vw - 24px)); max-height: calc(100vh - 24px);
+      overflow: auto; padding: 12px 14px;
+      font: 11px/1.45 "SF Mono", Consolas, monospace;
+      color: #d8d8de; background: rgba(8, 10, 16, 0.88);
+      border: 1px solid rgba(255, 255, 255, 0.08);
+      border-radius: 10px; backdrop-filter: blur(8px);
+    }
+    #panel h2 {
+      font-size: 12px; font-weight: 600; color: #8ec8ff;
+      margin-bottom: 10px; letter-spacing: 0.04em; text-transform: uppercase;
+    }
+    .row {
+      display: grid; grid-template-columns: 1fr 52px;
+      align-items: center; gap: 8px; margin-bottom: 6px;
+    }
+    .row span:first-child { color: #b8b8c2; }
+    .row output { text-align: right; color: #8ec8ff; font-variant-numeric: tabular-nums; }
+    .row input[type="range"] { grid-column: 1 / -1; width: 100%; accent-color: #8ec8ff; }
+    .toggle-row {
+      display: flex; align-items: center; justify-content: space-between;
+      margin-bottom: 8px;
+    }
+    .toggle-row input { accent-color: #8ec8ff; }
+  </style>
+  <script type="importmap">
+    {
+      "imports": {
+        "three": "https://cdn.jsdelivr.net/npm/three@0.183.0/build/three.webgpu.min.js",
+        "three/webgpu": "https://cdn.jsdelivr.net/npm/three@0.183.0/build/three.webgpu.min.js",
+        "three/tsl": "https://cdn.jsdelivr.net/npm/three@0.183.0/build/three.tsl.min.js",
+        "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.183.0/examples/jsm/"
+      }
+    }
+  </script>
+</head>
+<body>
+  <div id="hint"><span>Looping</span> cone dust puff · ported from @newkrok/three-particles</div>
+  <aside id="panel"></aside>
+  <script type="module">
+    import * as THREE from "three/webgpu";
+    import { MeshBasicNodeMaterial } from "three";
+    import {
+      attribute,
+      dot,
+      float,
+      floor,
+      length,
+      mix,
+      mod,
+      step,
+      texture,
+      uniform,
+      uv,
+      vec2,
+      vec3,
+    } from "three/tsl";
+    import { OrbitControls } from "three/addons/controls/OrbitControls.js";
+
+    const CLOUD_TEX = "./textures/particles/cloud.webp";
+
+    const PUFF_CFG = {
+      duration: 0.25,
+      looping: true,
+      startLifetime: { min: 0.5, max: 0.6 },
+      startSpeed: { min: 0.5, max: 3.2 },
+      startSize: { min: 4.94, max: 9.51 },
+      startRotation: { min: -360, max: 360 },
+      startColor: {
+        min: { r: 0.5294117647058824, g: 0.4823529411764706, b: 0.45098039215686275 },
+        max: { r: 0.30980392156862746, g: 0.2901960784313726, b: 0.2901960784313726 },
+      },
+      maxParticles: 30,
+      emission: { rateOverTime: 45 },
+      shape: {
+        shape: "CONE",
+        sphere: { radius: 0.0001 },
+        cone: { angle: 5.7918, radius: 0.119 },
+      },
+      sizeOverLifetime: {
+        isActive: true,
+        lifetimeCurve: {
+          bezierPoints: [
+            { x: 0, y: 0.275, percentage: 0 },
+            { x: 0.1666, y: 0.4416 },
+            { x: 0.3399, y: 0.3283 },
+            { x: 0.5066, y: 0.495, percentage: 0.5066 },
+            { x: 0.6732, y: 0.6616 },
+            { x: 0.8333, y: 0.8333 },
+            { x: 1, y: 1, percentage: 1 },
+          ],
+          scale: 1,
+        },
+      },
+      opacityOverLifetime: {
+        isActive: true,
+        lifetimeCurve: {
+          bezierPoints: [
+            { x: 0, y: 0, percentage: 0 },
+            { x: 0, y: 1 },
+            { x: 0, y: 1 },
+            { x: 0.5, y: 1, percentage: 0.5 },
+            { x: 1, y: 1 },
+            { x: 1, y: 1 },
+            { x: 1, y: 0, percentage: 1 },
+          ],
+          scale: 1,
+        },
+      },
+      rotationOverLifetime: { isActive: true, min: -10, max: 10 },
+    };
+
+    const LOOK = {
+      exposure: 0.95,
+      brightness: 0.9,
+      contrast: 1.05,
+      saturation: 0.95,
+      opacity: 1,
+      sizeScale: 1,
+      emissionScale: 1,
+    };
+
+    const uLook = {
+      brightness: uniform(LOOK.brightness),
+      contrast: uniform(LOOK.contrast),
+      saturation: uniform(LOOK.saturation),
+      opacity: uniform(LOOK.opacity),
+    };
+
+    const nCr = (n, k) => {
+      let z = 1;
+      for (let i = 1; i <= k; i++) z *= (n + 1 - i) / i;
+      return z;
+    };
+
+    function createBezierCurveFunction(bezierPoints) {
+      return (percentage) => {
+        if (percentage < 0) return bezierPoints[0].y;
+        if (percentage > 1) return bezierPoints[bezierPoints.length - 1].y;
+        let start = 0;
+        let stop = bezierPoints.length - 1;
+        bezierPoints.find((point, index) => {
+          const hit = percentage < (point.percentage ?? 0);
+          if (hit) stop = index;
+          else if (point.percentage !== undefined) start = index;
+          return hit;
+        });
+        const n = stop - start;
+        const calculated =
+          (percentage - (bezierPoints[start].percentage ?? 0)) /
+          ((bezierPoints[stop].percentage ?? 1) - (bezierPoints[start].percentage ?? 0));
+        let value = 0;
+        for (let i = 0; i <= n; i++) {
+          const p = bezierPoints[start + i];
+          value +=
+            nCr(n, i) * (1 - calculated) ** (n - i) * calculated ** i * p.y;
+        }
+        return value;
+      };
+    }
+
+    function calculateValue(value, systemT = 0) {
+      if (typeof value === "number") return value;
+      if (value && "min" in value && "max" in value) {
+        if (value.min === value.max) return value.min ?? 0;
+        return THREE.MathUtils.randFloat(value.min ?? 0, value.max ?? 1);
+      }
+      if (value?.bezierPoints) {
+        return createBezierCurveFunction(value.bezierPoints)(systemT) * (value.scale ?? 1);
+      }
+      return 0;
+    }
+
+    const _pos = new THREE.Vector3();
+    const _vel = new THREE.Vector3();
+    const _q = new THREE.Quaternion();
+    const _partWorld = new THREE.Vector3();
+    const _mv = new THREE.Vector3();
+    const _rootInvQuat = new THREE.Quaternion();
+
+    function spawnOnCone(position, quaternion, velocity, speed, { radius, radiusThickness = 1, arc, angle = 90 }) {
+      const theta = 2 * Math.PI * Math.random() * (arc / 360);
+      const randomizedDistanceRatio = Math.random();
+      const xDir = Math.cos(theta);
+      const yDir = Math.sin(theta);
+      const nt = 1 - radiusThickness;
+      position.set(
+        radius * nt * xDir + radius * radiusThickness * randomizedDistanceRatio * xDir,
+        radius * nt * yDir + radius * radiusThickness * randomizedDistanceRatio * yDir,
+        0,
+      );
+      position.applyQuaternion(quaternion);
+      const len = Math.max(position.length(), 1e-6);
+      const normalizedAngle = Math.abs((len / radius) * THREE.MathUtils.degToRad(angle));
+      const sinA = Math.sin(normalizedAngle);
+      const mul = sinA * speed / len;
+      velocity.set(position.x * mul, position.y * mul, Math.cos(normalizedAngle) * speed);
+      velocity.applyQuaternion(quaternion);
+    }
+
+    function createSpriteMaterial(map) {
+      const iColor = attribute("iColor", "vec4");
+      const st = uv();
+      const dist = length(st.sub(vec2(0.5, 0.5)));
+      // Original points: hard discard at dist > 0.5 on gl_PointCoord.
+      const inside = float(1).sub(step(float(0.5), dist));
+      const samp = texture(map, st);
+      let col = iColor.xyz.mul(samp.rgb);
+      const lum = dot(col, vec3(0.2126, 0.7152, 0.0722));
+      col = mix(vec3(lum), col, uLook.saturation);
+      col = col.sub(float(0.5)).mul(uLook.contrast).add(float(0.5));
+      col = col.mul(uLook.brightness);
+      const alpha = iColor.w.mul(samp.a).mul(inside).mul(uLook.opacity);
+      const mat = new MeshBasicNodeMaterial({
+        transparent: true,
+        depthWrite: false,
+        side: THREE.FrontSide,
+      });
+      mat.colorNode = col;
+      mat.opacityNode = alpha;
+      return mat;
+    }
+
+    const INST_STRIDE = 4;
+
+    class TSLParticleSystem {
+      constructor(scene, cfg, map) {
+        this.cfg = cfg;
+        this.maxParticles = cfg.maxParticles ?? 100;
+        this.sizeScale = 1;
+        this.emissionScale = 1;
+
+        const geo = new THREE.PlaneGeometry(1, 1);
+        geo.deleteAttribute("normal");
+        const n = this.maxParticles;
+        this.instData = new Float32Array(n * INST_STRIDE);
+        this.instBuffer = new THREE.InstancedInterleavedBuffer(this.instData, INST_STRIDE);
+        geo.setAttribute("iColor", new THREE.InterleavedBufferAttribute(this.instBuffer, 4, 0));
+
+        this.velocities = Array.from({ length: n }, () => new THREE.Vector3());
+        this.creationTimes = new Float32Array(n);
+        this.startLifetimes = new Float32Array(n);
+        this.startSizes = new Float32Array(n);
+        this.startOpacities = new Float32Array(n);
+        this.rotSpeeds = new Float32Array(n);
+        this.isActive = new Uint8Array(n);
+        this.posX = new Float32Array(n);
+        this.posY = new Float32Array(n);
+        this.posZ = new Float32Array(n);
+        this.rotations = new Float32Array(n);
+
+        this.sizeCurve = cfg.sizeOverLifetime?.lifetimeCurve?.bezierPoints
+          ? createBezierCurveFunction(cfg.sizeOverLifetime.lifetimeCurve.bezierPoints)
+          : null;
+        this.opacityCurve = cfg.opacityOverLifetime?.lifetimeCurve?.bezierPoints
+          ? createBezierCurveFunction(cfg.opacityOverLifetime.lifetimeCurve.bezierPoints)
+          : null;
+        this.sizeOverLife = cfg.sizeOverLifetime?.isActive === true;
+        this.opacityOverLife = cfg.opacityOverLifetime?.isActive === true;
+
+        this.mesh = new THREE.InstancedMesh(geo, createSpriteMaterial(map), n);
+        this.mesh.frustumCulled = false;
+
+        this.root = new THREE.Group();
+        this.root.add(this.mesh);
+        scene.add(this.root);
+
+        this.gravityVelocity = new THREE.Vector3();
+        this.isEmitting = false;
+        this.creationTime = 0;
+        this.lastEmissionTime = 0;
+        this._dummy = new THREE.Object3D();
+      }
+
+      _ib(i) {
+        return i * INST_STRIDE;
+      }
+
+      start(worldPos, now) {
+        this.root.position.copy(worldPos);
+        this.isEmitting = true;
+        this.creationTime = now;
+        this.lastEmissionTime = now;
+        for (let i = 0; i < this.maxParticles; i++) this.deactivate(i);
+        this.mesh.count = 0;
+      }
+
+      deactivate(i) {
+        this.isActive[i] = 0;
+        this.instData[this._ib(i) + 3] = 0;
+      }
+
+      activate(i, now) {
+        const cfg = this.cfg;
+        const b = this._ib(i);
+        this.isActive[i] = 1;
+        this.creationTimes[i] = now;
+
+        this.startLifetimes[i] = calculateValue(cfg.startLifetime) * 1000;
+        const speed = calculateValue(cfg.startSpeed);
+        this.startSizes[i] = calculateValue(cfg.startSize);
+        this.startOpacities[i] = cfg.startOpacity ? calculateValue(cfg.startOpacity) : 1;
+        this.instData[b + 3] = this.startOpacities[i];
+
+        const ratio = Math.random();
+        const cmin = cfg.startColor.min;
+        const cmax = cfg.startColor.max;
+        this.instData[b] = cmin.r + ratio * ((cmax.r ?? cmin.r) - cmin.r);
+        this.instData[b + 1] = cmin.g + ratio * ((cmax.g ?? cmin.g) - cmin.g);
+        this.instData[b + 2] = cmin.b + ratio * ((cmax.b ?? cmin.b) - cmin.b);
+
+        this.rotations[i] = calculateValue(cfg.startRotation);
+        this.rotSpeeds[i] = cfg.rotationOverLifetime?.isActive
+          ? THREE.MathUtils.randFloat(cfg.rotationOverLifetime.min, cfg.rotationOverLifetime.max)
+          : 0;
+
+        _q.setFromEuler(this.root.rotation);
+        const cone = cfg.shape.cone;
+        spawnOnCone(_pos, _q, _vel, speed, {
+          radius: cone.radius,
+          radiusThickness: cone.radiusThickness ?? 1,
+          arc: cone.arc ?? 360,
+          angle: cone.angle ?? 90,
+        });
+
+        this.velocities[i].copy(_vel);
+        this.posX[i] = _pos.x;
+        this.posY[i] = _pos.y;
+        this.posZ[i] = _pos.z;
+      }
+
+      update(now, delta, camera, canvasHeight) {
+        const cfg = this.cfg;
+        if (!this.isEmitting && this.mesh.count === 0) return;
+
+        this.root.getWorldPosition(_pos);
+        this.gravityVelocity.set(_pos.x, _pos.y + (cfg.gravity ?? 0), _pos.z);
+        this.root.worldToLocal(this.gravityVelocity);
+
+        const emitWindow = cfg.looping || (now - this.creationTime) / 1000 <= cfg.duration;
+        if (this.isEmitting && emitWindow) {
+          const emissionDelta = now - this.lastEmissionTime;
+          const needed = Math.floor(
+            calculateValue(cfg.emission?.rateOverTime ?? 0) *
+              this.emissionScale *
+              (emissionDelta / 1000),
+          );
+          for (let n = 0; n < needed; n++) {
+            const slot = this.isActive.findIndex((v) => v === 0);
+            if (slot < 0) break;
+            this.activate(slot, now);
+          }
+          this.lastEmissionTime = now;
+        } else if (!cfg.looping && (now - this.creationTime) / 1000 > cfg.duration) {
+          this.isEmitting = false;
+        }
+
+        this.root.updateMatrixWorld(true);
+        this.root.getWorldQuaternion(_rootInvQuat).invert();
+        const fovRad = THREE.MathUtils.degToRad(camera.fov);
+        const projFactor = (2 * Math.tan(fovRad * 0.5)) / Math.max(canvasHeight, 1);
+
+        for (let i = 0; i < this.maxParticles; i++) {
+          const b = this._ib(i);
+          if (!this.isActive[i]) {
+            this.instData[b + 3] = 0;
+            this._dummy.position.set(0, -9999, 0);
+            this._dummy.scale.set(0, 0, 0);
+            this._dummy.updateMatrix();
+            this.mesh.setMatrixAt(i, this._dummy.matrix);
+            continue;
+          }
+
+          const particleLife = now - this.creationTimes[i];
+          if (particleLife >= this.startLifetimes[i]) {
+            this.deactivate(i);
+            continue;
+          }
+
+          const lifePct = particleLife / this.startLifetimes[i];
+          const vel = this.velocities[i];
+          vel.x -= this.gravityVelocity.x * delta;
+          vel.y -= this.gravityVelocity.y * delta;
+          vel.z -= this.gravityVelocity.z * delta;
+          this.posX[i] += vel.x * delta;
+          this.posY[i] += vel.y * delta;
+          this.posZ[i] += vel.z * delta;
+          this.rotations[i] += this.rotSpeeds[i] * delta * 0.02;
+
+          let size = this.startSizes[i];
+          if (this.sizeOverLife && this.sizeCurve) {
+            size *= Math.max(0, this.sizeCurve(lifePct));
+          }
+
+          if (this.opacityOverLife && this.opacityCurve) {
+            this.instData[b + 3] =
+              this.startOpacities[i] * Math.max(0, this.opacityCurve(lifePct));
+          }
+
+          this._dummy.position.set(this.posX[i], this.posY[i], this.posZ[i]);
+          // THREE.Points sprites: parallel to camera image plane (not per-particle lookAt).
+          this._dummy.quaternion.copy(_rootInvQuat).multiply(camera.quaternion);
+          this._dummy.rotateZ(THREE.MathUtils.degToRad(this.rotations[i]));
+
+          _partWorld.set(this.posX[i], this.posY[i], this.posZ[i]).applyMatrix4(this.root.matrixWorld);
+          _mv.copy(_partWorld).applyMatrix4(camera.matrixWorldInverse);
+          const mvLen = Math.max(_mv.length(), 0.01);
+          const pixelSize = (size * 100) / mvLen;
+          const worldScale = pixelSize * projFactor * Math.abs(_mv.z) * this.sizeScale;
+          this._dummy.scale.set(worldScale, worldScale, 1);
+          this._dummy.updateMatrix();
+          this.mesh.setMatrixAt(i, this._dummy.matrix);
+        }
+
+        this.mesh.count = this.maxParticles;
+        this.mesh.instanceMatrix.needsUpdate = true;
+        this.instBuffer.needsUpdate = true;
+      }
+
+      applyLook() {
+        this.sizeScale = LOOK.sizeScale;
+        this.emissionScale = LOOK.emissionScale;
+      }
+    }
+
+    const renderer = new THREE.WebGPURenderer({ antialias: true });
+    renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+    renderer.setSize(window.innerWidth, window.innerHeight);
+    renderer.toneMapping = THREE.ACESFilmicToneMapping;
+    renderer.toneMappingExposure = LOOK.exposure;
+    document.body.appendChild(renderer.domElement);
+    await renderer.init();
+
+    const scene = new THREE.Scene();
+    scene.background = new THREE.Color(0x0a0a10);
+
+    const ORIGIN = new THREE.Vector3(-1, -1, -1);
+    const camera = new THREE.PerspectiveCamera(60, window.innerWidth / window.innerHeight, 0.1, 200);
+    camera.position.set(2, 2, 2);
+
+    const controls = new OrbitControls(camera, renderer.domElement);
+    controls.target.copy(ORIGIN);
+    controls.enableDamping = true;
+
+    const axes = new THREE.AxesHelper(5);
+    axes.position.copy(ORIGIN);
+    scene.add(axes);
+
+    const cloudTex = await new Promise((resolve) => {
+      new THREE.TextureLoader().load(CLOUD_TEX, (t) => {
+        t.colorSpace = THREE.SRGBColorSpace;
+        resolve(t);
+      });
+    });
+
+    const puff = new TSLParticleSystem(scene, PUFF_CFG, cloudTex);
+    puff.start(ORIGIN, performance.now());
+
+    function syncLook() {
+      uLook.brightness.value = LOOK.brightness;
+      uLook.contrast.value = LOOK.contrast;
+      uLook.saturation.value = LOOK.saturation;
+      uLook.opacity.value = LOOK.opacity;
+      renderer.toneMappingExposure = LOOK.exposure;
+      puff.applyLook();
+    }
+
+    const panel = document.getElementById("panel");
+    panel.addEventListener("pointerdown", (e) => e.stopPropagation());
+    panel.innerHTML = "<h2>Cloud Puff</h2>";
+    const mkRange = (key, label, min, max, step) => {
+      const row = document.createElement("div");
+      row.className = "row";
+      const name = document.createElement("span");
+      name.textContent = label;
+      const out = document.createElement("output");
+      out.textContent = LOOK[key].toFixed(2);
+      const input = document.createElement("input");
+      input.type = "range";
+      input.min = min;
+      input.max = max;
+      input.step = step;
+      input.value = LOOK[key];
+      input.addEventListener("input", () => {
+        LOOK[key] = parseFloat(input.value);
+        out.textContent = LOOK[key].toFixed(2);
+        syncLook();
+      });
+      row.append(name, out, input);
+      panel.appendChild(row);
+    };
+    mkRange("exposure", "Exposure", 0.4, 1.6, 0.01);
+    mkRange("brightness", "Brightness", 0.4, 1.4, 0.01);
+    mkRange("contrast", "Contrast", 0.6, 1.6, 0.01);
+    mkRange("saturation", "Saturation", 0, 1.5, 0.01);
+    mkRange("opacity", "Opacity", 0.2, 1.5, 0.01);
+    mkRange("sizeScale", "Size scale", 0.4, 2, 0.01);
+    mkRange("emissionScale", "Emission rate", 0.2, 2, 0.01);
+
+    const pauseRow = document.createElement("div");
+    pauseRow.className = "toggle-row";
+    pauseRow.innerHTML = "<span>Emitting</span>";
+    const pauseToggle = document.createElement("input");
+    pauseToggle.type = "checkbox";
+    pauseToggle.checked = true;
+    pauseToggle.addEventListener("change", () => {
+      puff.isEmitting = pauseToggle.checked;
+    });
+    pauseRow.appendChild(pauseToggle);
+    panel.appendChild(pauseRow);
+
+    syncLook();
+
+    const timer = new THREE.Timer();
+    timer.connect(document);
+    let canvasHeight = window.innerHeight;
+
+    window.addEventListener("resize", () => {
+      camera.aspect = window.innerWidth / window.innerHeight;
+      camera.updateProjectionMatrix();
+      renderer.setSize(window.innerWidth, window.innerHeight);
+      canvasHeight = window.innerHeight;
+    });
+
+    renderer.setAnimationLoop(() => {
+      timer.update();
+      const delta = Math.min(timer.getDelta(), 0.1);
+      puff.update(performance.now(), delta, camera, canvasHeight);
+      controls.update();
+      renderer.render(scene, camera);
+    });
+  </script>
+</body>
+</html>
