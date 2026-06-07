@@ -76,9 +76,9 @@
     import * as THREE from "three/webgpu";
     import { MeshBasicNodeMaterial } from "three";
     import {
-      attribute, cameraPosition, dot, float, floor, mix, normalLocal,
+      attribute, cameraPosition, dot, float, floor, length, mix, normalLocal,
       normalWorld, pass, positionLocal, positionWorld, smoothstep, texture,
-      uniform, vec2, vec3,
+      uniform, uv, vec2, vec3,
     } from "three/tsl";
     import { bloom } from "three/addons/tsl/display/BloomNode.js";
     import { OrbitControls } from "three/addons/controls/OrbitControls.js";
@@ -110,9 +110,16 @@
       colLit: "#f4f7fb",
       colTop: "#cdd8e4",
       heightTint: 0.5,
+      selfShadow: 0,       // darken the side/underside away from the light (volume)
       // Rounded normals (lighting only; fresnel/erosion keep real normals)
       normalRound: 0,      // 0 = real geometry normals, 1 = fully spherical
       columnPivot: false,  // false = per-blob center, true = whole-column pivot
+      // Ground contact shadow (soft projected blob, not a shadow map)
+      shadowOn: true,
+      shadowStrength: 0.35,
+      shadowSize: 1.2,
+      shadowSoft: 0.25,
+      shadowColor: "#13161b",
       // Depth sorting (fixes far puffs showing through near ones)
       depthSort: true,     // on = depthWrite + alphaTest → correct occlusion
       alphaTest: 0.25,     // fringe below this is discarded (no depth halos)
@@ -123,6 +130,7 @@
       bloomRadius: 0.5,
       bloomThreshold: 0.7,
       // Simulation
+      clickToPuff: false, // off by default so orbiting doesn't spawn puffs
       rise: 1.1,
       spread: 0.35,
       lifetime: 3.6,
@@ -155,6 +163,7 @@
       colLit:     uniform(new THREE.Color(LOOK.colLit)),
       colTop:     uniform(new THREE.Color(LOOK.colTop)),
       heightTint: uniform(LOOK.heightTint),
+      selfShadow: uniform(LOOK.selfShadow),
       colTopY:    uniform(LOOK.rise * LOOK.lifetime * 0.7),
       lightDir:   uniform(new THREE.Vector3(0.4, 1.0, 0.35).normalize()),
       round:      uniform(LOOK.normalRound),
@@ -216,7 +225,13 @@
       const hNorm = positionWorld.y.div(u.colTopY).clamp(0, 1);
       const tinted = mix(litCol, u.colTop, hNorm.mul(u.heightTint));
       const rim = float(1).sub(facing).pow(u.rimPow).mul(u.rimStrength);
-      const col = tinted.add(rim);
+      const lit2 = tinted.add(rim);
+
+      // self-shadow: fake optical depth. Points whose direction from the column
+      // pivot faces AWAY from the light are deeper in the volume → darker.
+      const toP = positionWorld.sub(u.pivot).normalize();
+      const shadowed = dot(toP, u.lightDir).negate().clamp(0, 1);
+      const col = lit2.mul(float(1).sub(shadowed.mul(u.selfShadow)));
 
       const mat = new MeshBasicNodeMaterial({
         transparent: true,
@@ -226,6 +241,35 @@
         side: THREE.DoubleSide,
       });
       mat.colorNode = col;
+      mat.opacityNode = alpha;
+      return mat;
+    }
+
+    const smooth01 = (e0, e1, x) => {
+      const t = Math.min(Math.max((x - e0) / (e1 - e0), 0), 1);
+      return t * t * (3 - 2 * t);
+    };
+
+    // ── Ground contact shadow — soft dark disc projected under each blob ────
+    const uShadow = {
+      strength: uniform(LOOK.shadowStrength),
+      soft:     uniform(LOOK.shadowSoft),
+      color:    uniform(new THREE.Color(LOOK.shadowColor)),
+    };
+    function buildShadowMaterial() {
+      const iShadow = attribute("iShadow", "float"); // per-blob fade amount
+      const st = uv();
+      const d = length(st.sub(vec2(0.5, 0.5))).mul(2.0); // 0 centre → 1 edge
+      const radial = smoothstep(float(1.0), uShadow.soft, d);
+      const alpha = radial.mul(iShadow).mul(uShadow.strength);
+      const mat = new MeshBasicNodeMaterial({
+        transparent: true,
+        depthWrite: false,
+        depthTest: true,
+        blending: THREE.NormalBlending,
+        side: THREE.DoubleSide,
+      });
+      mat.colorNode = uShadow.color;
       mat.opacityNode = alpha;
       return mat;
     }
@@ -243,7 +287,7 @@
 
     // ── Mesh blob emitter (CPU sim, real 3D meshes, no billboarding) ───────
     class SmokeBlobs {
-      constructor(scene, mat, max = 40) {
+      constructor(scene, mat, shadowMat, max = 40) {
         this.max = max;
         const geo = makeBlobGeometry();
         this.seedArr = new Float32Array(max);
@@ -259,6 +303,19 @@
         this.mesh.frustumCulled = false;
         this.mesh.count = max;
         scene.add(this.mesh);
+
+        // ground contact-shadow mesh (flat quads under each blob)
+        const sgeo = new THREE.PlaneGeometry(1, 1);
+        sgeo.deleteAttribute("normal");
+        this.shadowArr = new Float32Array(max);
+        this.shadowAttr = new THREE.InstancedBufferAttribute(this.shadowArr, 1);
+        sgeo.setAttribute("iShadow", this.shadowAttr);
+        this.shadowMesh = new THREE.InstancedMesh(sgeo, shadowMat, max);
+        this.shadowMesh.frustumCulled = false;
+        this.shadowMesh.count = max;
+        this.shadowMesh.renderOrder = -1; // draw under the smoke
+        scene.add(this.shadowMesh);
+        this._sd = new THREE.Object3D();
 
         this.active = new Uint8Array(max);
         this.px = new Float32Array(max);
@@ -318,10 +375,13 @@
         }
         const colTop = Math.max(LOOK.rise * LOOK.lifetime * 0.8, 0.001);
 
+        const ld = u.lightDir.value;
         for (let i = 0; i < this.max; i++) {
           if (!this.active[i]) {
             this.mesh.setMatrixAt(i, this._hidden);
+            this.shadowMesh.setMatrixAt(i, this._hidden);
             this.lifeArr[i] = 1;
+            this.shadowArr[i] = 0;
             continue;
           }
           this.age[i] += dt;
@@ -329,7 +389,9 @@
           if (lr >= 1) {
             this.active[i] = 0;
             this.mesh.setMatrixAt(i, this._hidden);
+            this.shadowMesh.setMatrixAt(i, this._hidden);
             this.lifeArr[i] = 1;
+            this.shadowArr[i] = 0;
             continue;
           }
 
@@ -361,10 +423,27 @@
           this.centerArr[i * 3] = cx;
           this.centerArr[i * 3 + 1] = this.py[i];
           this.centerArr[i * 3 + 2] = cz;
+
+          // ground contact shadow: project the blob down the light direction
+          // onto y≈0, fade with height above ground and with life.
+          const projk = this.py[i] / Math.max(ld.y, 0.2);
+          const sd = this._sd;
+          sd.position.set(cx - ld.x * projk, 0.02, cz - ld.z * projk);
+          sd.rotation.set(-Math.PI / 2, 0, 0);
+          const ss = scale * 2.4 * LOOK.shadowSize;
+          sd.scale.set(ss, ss, ss);
+          sd.updateMatrix();
+          this.shadowMesh.setMatrixAt(i, sd.matrix);
+          const gFade = Math.max(0, 1 - this.py[i] / (colTop * 1.1));
+          const lifeFade = smooth01(0, 0.1, lr) * (1 - smooth01(0.65, 1, lr));
+          this.shadowArr[i] = gFade * lifeFade;
         }
         this.mesh.instanceMatrix.needsUpdate = true;
         this.lifeAttr.needsUpdate = true;
         this.centerAttr.needsUpdate = true;
+        this.shadowMesh.instanceMatrix.needsUpdate = true;
+        this.shadowAttr.needsUpdate = true;
+        this.shadowMesh.visible = LOOK.shadowOn;
       }
     }
 
@@ -427,7 +506,8 @@
     }
 
     const smokeMat = buildMeshSmokeMaterial(voroTex);
-    const blobs = new SmokeBlobs(scene, smokeMat);
+    const shadowMat = buildShadowMaterial();
+    const blobs = new SmokeBlobs(scene, smokeMat, shadowMat);
 
     // Depth mode: ON writes depth + alphaTests so near smoke occludes far smoke
     // (fixes the "far explosion shows through" sorting issue). OFF = soft blend.
@@ -463,6 +543,7 @@
       pointer.y = -(e.clientY / innerHeight) * 2 + 1;
     });
     addEventListener("click", (e) => {
+      if (!LOOK.clickToPuff) return;
       if (e.target.closest("#panel")) return;
       raycaster.setFromCamera(pointer, camera);
       const hit = raycaster.intersectObject(ground)[0];
@@ -566,11 +647,19 @@
       mkColor(cel, "colLit", "Lit color", (v) => u.colLit.value.set(v));
       mkColor(cel, "colTop", "Top color", (v) => u.colTop.value.set(v));
       mkRange(cel, "heightTint", "Height tint", 0, 1, 0.01, undefined, (v) => u.heightTint.value = v);
+      mkRange(cel, "selfShadow", "Self-shadow", 0, 1, 0.01, undefined, (v) => u.selfShadow.value = v);
       mkColor(cel, "bgColor", "Background", (v) => scene.background.set(v));
 
       const nrm = mkSec("Rounded normals (lighting)");
       mkRange(nrm, "normalRound", "Rounding", 0, 1, 0.01, undefined, (v) => u.round.value = v);
       mkToggle(nrm, "columnPivot", "Column pivot (vs per-blob)", (v) => u.pivotMode.value = v ? 1 : 0);
+
+      const sh = mkSec("Ground shadow");
+      mkToggle(sh, "shadowOn", "Enable");
+      mkRange(sh, "shadowStrength", "Strength", 0, 1, 0.01, undefined, (v) => uShadow.strength.value = v);
+      mkRange(sh, "shadowSize", "Size", 0.4, 3, 0.05);
+      mkRange(sh, "shadowSoft", "Softness", 0, 0.9, 0.01, undefined, (v) => uShadow.soft.value = v);
+      mkColor(sh, "shadowColor", "Color", (v) => uShadow.color.value.set(v));
 
       const dep = mkSec("Depth / sorting");
       mkToggle(dep, "depthSort", "Occlude (fix show-through)", (v) => applyDepthMode(v));
@@ -586,6 +675,7 @@
       mkRange(blm, "bloomThreshold", "Threshold", 0, 1, 0.01, undefined, (v) => bloomPass.threshold.value = v);
 
       const sim = mkSec("Simulation");
+      mkToggle(sim, "clickToPuff", "Click ground to puff");
       mkRange(sim, "rise", "Rise speed", 0.2, 4, 0.05);
       mkRange(sim, "spread", "Spread", 0, 2, 0.05);
       mkRange(sim, "lifetime", "Lifetime (s)", 1, 6, 0.1);
