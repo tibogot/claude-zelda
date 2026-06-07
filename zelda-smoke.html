@@ -1,0 +1,2157 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>FX Lab — Mesh Smoke</title>
+    <style>
+      :root {
+        --bg-dark: #222222;
+        --bg-panel: #2a2a2a;
+        --bg-item: #333333;
+        --bg-hover: #3a3a3a;
+        --bg-input: #1e1e1e;
+        --border: #3c3c3c;
+        --border-light: #4a4a4a;
+        --text: #cccccc;
+        --text-dim: #888888;
+        --accent: #4a9eff;
+        --green: #5cb85c;
+        --font: "Segoe UI", system-ui, -apple-system, sans-serif;
+        --font-mono: "Cascadia Code", "Fira Code", "Consolas", monospace;
+        --radius: 4px;
+      }
+      * {
+        margin: 0;
+        padding: 0;
+        box-sizing: border-box;
+      }
+      body {
+        overflow: hidden;
+        background: #000;
+        font-family: var(--font);
+        color: var(--text);
+      }
+      canvas {
+        display: block;
+        width: 100vw;
+        height: 100vh;
+      }
+      #info {
+        position: fixed;
+        bottom: 16px;
+        left: 16px;
+        z-index: 10;
+        font:
+          12px/1.5 "SF Mono",
+          "Fira Code",
+          monospace;
+        color: #b0d890;
+        background: rgba(0, 0, 0, 0.55);
+        padding: 8px 12px;
+        border-radius: 6px;
+        pointer-events: none;
+        user-select: none;
+        backdrop-filter: blur(4px);
+      }
+      #info span {
+        color: #e0f0c0;
+        font-weight: 600;
+      }
+
+      #lab-title {
+        position: fixed;
+        top: 14px;
+        left: 50%;
+        transform: translateX(-50%);
+        z-index: 15;
+        pointer-events: none;
+        user-select: none;
+        font-size: 13px;
+        font-weight: 600;
+        letter-spacing: 0.28em;
+        text-transform: uppercase;
+        color: var(--text);
+        padding: 8px 18px;
+        border-radius: 6px;
+        background: rgba(0, 0, 0, 0.45);
+        border: 1px solid rgba(255, 255, 255, 0.08);
+        backdrop-filter: blur(6px);
+        box-shadow: 0 2px 12px rgba(0, 0, 0, 0.25);
+      }
+
+      /* === RIGHT PANEL (v2/editor.html inspector look) === */
+      #inspector {
+        position: fixed;
+        top: 0;
+        right: 0;
+        width: var(--inspector-width, 300px);
+        min-width: 240px;
+        max-width: 70vw;
+        height: 100vh;
+        background: var(--bg-panel);
+        border-left: 1px solid var(--border);
+        display: flex;
+        flex-direction: column;
+        overflow: hidden;
+        z-index: 20;
+        box-shadow: -2px 0 10px rgba(0, 0, 0, 0.3);
+      }
+      /* Drag-to-resize strip on the inspector's left edge. Wider than the
+         visible border so it's easy to grab without obscuring panel chrome. */
+      #inspector-resize-handle {
+        position: absolute;
+        top: 0;
+        left: -3px;
+        width: 8px;
+        height: 100%;
+        cursor: ew-resize;
+        z-index: 21;
+        background: transparent;
+        transition: background 0.15s;
+      }
+      #inspector-resize-handle:hover,
+      body.inspector-resizing #inspector-resize-handle {
+        background: var(--accent);
+        opacity: 0.6;
+      }
+      body.inspector-resizing {
+        cursor: ew-resize;
+        user-select: none;
+      }
+      body.inspector-hidden #inspector-resize-handle,
+      body.immersive #inspector-resize-handle {
+        display: none;
+      }
+      #inspector-header {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        padding: 0 12px;
+        height: 32px;
+        background: var(--bg-dark);
+        border-bottom: 1px solid var(--border);
+        font-size: 11px;
+        font-weight: 600;
+        letter-spacing: 0.4px;
+        text-transform: uppercase;
+        color: var(--text-dim);
+      }
+      #inspector-toggle,
+      #immersive-toggle {
+        background: none;
+        border: 1px solid var(--border-light);
+        border-radius: var(--radius);
+        color: var(--text-dim);
+        cursor: pointer;
+        padding: 2px 8px;
+        font-size: 10px;
+      }
+      #inspector-toggle:hover,
+      #immersive-toggle:hover {
+        color: var(--text);
+        background: var(--bg-hover);
+      }
+      #immersive-toggle.active {
+        background: var(--accent);
+        border-color: var(--accent);
+        color: white;
+      }
+      body.immersive #inspector,
+      body.immersive #info,
+      body.immersive #lab-title {
+        display: none;
+      }
+      body.immersive canvas {
+        cursor: none;
+      }
+      #inspector-body {
+        flex: 1;
+        overflow-y: auto;
+        padding-bottom: 24px;
+      }
+      body.inspector-hidden #inspector-body,
+      body.inspector-hidden #inspector-header span {
+        display: none;
+      }
+      body.inspector-hidden #inspector {
+        width: auto;
+        height: auto;
+        border-left: none;
+        background: transparent;
+        box-shadow: none;
+      }
+      body.inspector-hidden #inspector-header {
+        background: transparent;
+        border: none;
+        padding: 6px;
+      }
+
+      .inspector-section {
+        border-bottom: 1px solid var(--border);
+      }
+      .section-header {
+        display: flex;
+        align-items: center;
+        gap: 6px;
+        padding: 6px 12px;
+        cursor: pointer;
+        font-size: 11px;
+        font-weight: 600;
+        text-transform: uppercase;
+        letter-spacing: 0.4px;
+        color: var(--text-dim);
+        user-select: none;
+      }
+      .section-header:hover {
+        background: var(--bg-hover);
+      }
+      .section-header .section-arrow {
+        width: 14px;
+        height: 14px;
+        transition: transform 0.15s;
+        flex-shrink: 0;
+      }
+      .section-header.collapsed .section-arrow {
+        transform: rotate(-90deg);
+      }
+      .section-body {
+        padding: 6px 12px 10px;
+      }
+      .section-body.hidden {
+        display: none;
+      }
+      .prop-row {
+        display: flex;
+        align-items: center;
+        gap: 8px;
+        padding: 3px 0;
+        min-height: 26px;
+      }
+      .prop-label {
+        width: 90px;
+        min-width: 90px;
+        font-size: 11px;
+        color: var(--text-dim);
+        text-align: right;
+        padding-right: 4px;
+      }
+      .prop-value {
+        flex: 1;
+        display: flex;
+        gap: 4px;
+        align-items: center;
+      }
+      .prop-color-wrap {
+        display: flex;
+        align-items: center;
+        gap: 6px;
+        flex: 1;
+      }
+      .prop-color {
+        width: 22px;
+        height: 22px;
+        border-radius: var(--radius);
+        border: 1px solid var(--border);
+        cursor: pointer;
+        flex-shrink: 0;
+        padding: 0;
+        -webkit-appearance: none;
+        appearance: none;
+      }
+      .prop-color::-webkit-color-swatch-wrapper {
+        padding: 0;
+      }
+      .prop-color::-webkit-color-swatch {
+        border: none;
+        border-radius: 2px;
+      }
+      .prop-slider-wrap {
+        flex: 1;
+        display: flex;
+        align-items: center;
+        gap: 6px;
+        min-width: 0;
+      }
+      .prop-num-input {
+        width: 72px;
+        height: 22px;
+        flex-shrink: 0;
+        box-sizing: border-box;
+        background: var(--bg-input);
+        border: 1px solid var(--border);
+        border-radius: var(--radius);
+        padding: 0 5px;
+        color: var(--text);
+        font-size: 11px;
+        font-family: var(--font-mono);
+        text-align: right;
+        outline: none;
+      }
+      .prop-num-input:focus {
+        border-color: var(--accent);
+      }
+      .prop-num-input::-webkit-outer-spin-button,
+      .prop-num-input::-webkit-inner-spin-button {
+        -webkit-appearance: none;
+        margin: 0;
+      }
+      .prop-num-input[type="number"] {
+        appearance: textfield;
+        -moz-appearance: textfield;
+      }
+      .prop-slider {
+        flex: 1;
+        height: 4px;
+        -webkit-appearance: none;
+        appearance: none;
+        background: var(--bg-input);
+        border-radius: 2px;
+        outline: none;
+      }
+      .prop-slider::-webkit-slider-thumb {
+        -webkit-appearance: none;
+        width: 12px;
+        height: 12px;
+        border-radius: 50%;
+        background: var(--accent);
+        cursor: pointer;
+      }
+      .prop-slider-val {
+        width: 44px;
+        font-size: 11px;
+        color: var(--text-dim);
+        font-family: var(--font-mono);
+        text-align: right;
+      }
+      .prop-dropdown {
+        flex: 1;
+        height: 22px;
+        background: var(--bg-input);
+        border: 1px solid var(--border);
+        border-radius: var(--radius);
+        padding: 0 6px;
+        color: var(--text);
+        font-size: 12px;
+        font-family: var(--font);
+        outline: none;
+        cursor: pointer;
+      }
+      .prop-toggle {
+        width: 14px;
+        height: 14px;
+        border: 1px solid var(--border-light);
+        border-radius: 3px;
+        background: var(--bg-input);
+        cursor: pointer;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        flex-shrink: 0;
+        padding: 0;
+        color: transparent;
+      }
+      .prop-toggle.checked {
+        background: var(--accent);
+        border-color: var(--accent);
+        color: white;
+      }
+      .prop-toggle svg {
+        width: 10px;
+        height: 10px;
+      }
+      .section-btn {
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        gap: 4px;
+        width: 100%;
+        height: 26px;
+        margin-top: 4px;
+        background: var(--bg-item);
+        border: 1px solid var(--border);
+        border-radius: var(--radius);
+        color: var(--text-dim);
+        cursor: pointer;
+        font-size: 11px;
+        font-family: var(--font);
+      }
+      .section-btn:hover {
+        background: var(--bg-hover);
+        color: var(--text);
+        border-color: var(--border-light);
+      }
+      .section-separator {
+        height: 1px;
+        background: var(--border);
+        margin: 6px 0;
+      }
+      /* Custom scrollbar */
+      #inspector-body::-webkit-scrollbar {
+        width: 8px;
+      }
+      #inspector-body::-webkit-scrollbar-track {
+        background: transparent;
+      }
+      #inspector-body::-webkit-scrollbar-thumb {
+        background: var(--border);
+        border-radius: 4px;
+      }
+      #inspector-body::-webkit-scrollbar-thumb:hover {
+        background: var(--border-light);
+      }
+    </style>
+    <script type="importmap">
+      {
+        "imports": {
+          "three": "https://cdn.jsdelivr.net/npm/three@0.183.1/build/three.webgpu.js",
+          "three/webgpu": "https://cdn.jsdelivr.net/npm/three@0.183.1/build/three.webgpu.js",
+          "three/tsl": "https://cdn.jsdelivr.net/npm/three@0.183.1/build/three.tsl.js",
+          "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.183.1/examples/jsm/",
+          "stats-gl": "https://cdn.jsdelivr.net/npm/stats-gl/dist/main.js"
+        }
+      }
+    </script>
+  </head>
+  <body>
+    <div id="lab-title">FX Lab</div>
+    <div id="info">
+      <span id="backend">loading…</span> &bull;
+      WASD/Arrows move &bull; Space jump &bull; RMB drag (or F immersive) to look &bull;
+      <span id="cammode">ORBIT</span> (Tab follow)
+    </div>
+    <div id="inspector">
+      <div id="inspector-resize-handle" title="Drag to resize"></div>
+      <div id="inspector-header">
+        <span>Inspector</span>
+        <div style="display: flex; gap: 4px">
+          <button id="immersive-toggle">Immersive</button>
+          <button id="inspector-toggle">Hide</button>
+        </div>
+      </div>
+      <div id="inspector-body"></div>
+    </div>
+    <script type="module">
+      import * as THREE from "three";
+      import { MeshBasicNodeMaterial } from "three";
+      import Stats from "stats-gl";
+      import {
+        attribute,
+        cameraPosition,
+        dot,
+        float,
+        floor,
+        length,
+        mix,
+        normalLocal,
+        normalWorld,
+        pass,
+        positionLocal,
+        positionWorld,
+        smoothstep,
+        texture,
+        uniform,
+        uv,
+        vec2,
+        vec3,
+      } from "three/tsl";
+      import { bloom } from "three/addons/tsl/display/BloomNode.js";
+      import { OrbitControls } from "three/addons/controls/OrbitControls.js";
+      import { SkyMesh } from "three/addons/objects/SkyMesh.js";
+      import { CSMShadowNode } from "three/addons/csm/CSMShadowNode.js";
+      import { mergeGeometries } from "three/addons/utils/BufferGeometryUtils.js";
+      import { createTileMaterial } from "./tileMaterial.js";
+
+      const PARAMS = {
+        camera: { fov: 60, followDist: 8 },
+        ground: { size: 800 },
+        tile: {
+          textureScale: 1500,
+          gradientIntensity: 0.5,
+          gradientBias: 0.1,
+          tileColor: "#d4d4d4",
+          gridColor: "#707070",
+          gridLineColor: "#404040",
+          roughness: 1,
+          metalness: 0,
+        },
+        // Same defaults as v2/editor (config.js light block).
+        light: {
+          sunAzimuth: 135,
+          sunElevation: 43,
+          dirColor: "#fff5e0",
+          dirIntensity: 2.2,
+          hemiSkyColor: "#c8e0ff",
+          hemiGroundColor: "#88aa55",
+          hemiIntensity: 0.4,
+          envIntensity: 0.2,
+          exposure: 0.5,
+          sunDistance: 600,
+          shadowBias: -0.0005,
+          shadowNormalBias: 0.02,
+        },
+        // Same defaults as v2/editor (config.js physicalSky block).
+        physicalSky: {
+          turbidity: 2,
+          rayleigh: 1.5,
+          mie: 0.005,
+          mieG: 0.8,
+          cloudCoverage: 0.4,
+          cloudDensity: 0.4,
+          cloudElevation: 0.5,
+          meshScale: 10000,
+        },
+        csm: {
+          cascades: 2,
+          maxFar: 300,
+          lightMargin: 100,
+          mapSize: 2048,
+        },
+      };
+
+      // Capsule + camera tuning — same constants as v2/play/playMode.js.
+      const CAP_R = 0.4;
+      const CAP_H = 1.2;
+      const GRAVITY = 20.0;
+      const JUMP_VEL = 11.0;
+      const MOVE_SPEED = 12;
+      const CAM_SENS_X = 0.002;
+      const CAM_SENS_Y = 0.002;
+
+      // Swap this for real terrain heightmap sampling when adding hills.
+      const sampleHeight = (_x, _z) => 0;
+
+      const VORO_URL = "./textures/particles/T_Voronoi01.png";
+
+      // ── Mesh smoke preset (ported from zelda-smoke-mesh-showcase.html) ────
+      const SMOKE_LOOK = {
+        tiling: 0.45,
+        panSpeed: 0.10,
+        holeDepth: 0.45,
+        edgeNoise: 0.5,
+        cutoff: 0.12,
+        dissolveSoft: 0.18,
+        erode: 0.6,
+        rimErode: 0.0,
+        fadeIn: 0.12,
+        opacity: 1.0,
+        lightStrength: 0.7,
+        rimStrength: 0.25,
+        rimPow: 3.0,
+        posterize: true,
+        steps: 4,
+        colShadow: "#8a93a0",
+        colLit: "#f4f7fb",
+        colTop: "#cdd8e4",
+        heightTint: 0.5,
+        selfShadow: 0,
+        voronoiShade: 0,
+        normalRound: 0,
+        columnPivot: false,
+        shadowOn: true,
+        shadowStrength: 0.35,
+        shadowSize: 1.2,
+        shadowSoft: 0.25,
+        shadowColor: "#13161b",
+        depthSort: true,
+        alphaTest: 0.25,
+        bgColor: "#8d9aa8",
+        bloomOn: false,
+        bloomStrength: 0.6,
+        bloomRadius: 0.5,
+        bloomThreshold: 0.7,
+        clickToPuff: false,
+        rise: 1.1,
+        spread: 0.35,
+        lifetime: 3.6,
+        rate: 5,
+        sizeStart: 0.35,
+        sizeEnd: 1.5,
+        spin: 0.4,
+        curlAmount: 0.6,
+        curlScale: 0.8,
+        curlSpeed: 0.8,
+      };
+
+      const smokeSmooth01 = (e0, e1, x) => {
+        const t = Math.min(Math.max((x - e0) / (e1 - e0), 0), 1);
+        return t * t * (3 - 2 * t);
+      };
+
+      function buildMeshSmokeMaterial(voroTex, u) {
+        const iSeed = attribute("iSeed", "float");
+        const iLife = attribute("iLife", "float");
+        const iCenter = attribute("iCenter", "vec3");
+
+        const p = positionLocal.mul(u.tiling);
+        const aN = normalLocal.abs();
+        const bl = aN.div(aN.x.add(aN.y).add(aN.z).add(0.0001));
+        const t = u.time.mul(u.panSpeed);
+        const off = vec2(iSeed, iSeed.mul(1.7)).add(vec2(t.mul(0.3), t.negate()));
+        const sX = texture(voroTex, p.yz.add(off)).r;
+        const sY = texture(voroTex, p.xz.add(off)).r;
+        const sZ = texture(voroTex, p.xy.add(off)).r;
+        const V = sX.mul(bl.x).add(sY.mul(bl.y)).add(sZ.mul(bl.z));
+
+        const N = normalWorld.normalize();
+        const viewDir = cameraPosition.sub(positionWorld).normalize();
+        const facing = dot(N, viewDir).clamp(0, 1);
+
+        const holed = facing.mul(mix(float(1), V, u.holeDepth));
+        const edged = holed.add(V.sub(0.5).mul(u.edgeNoise));
+        const thr = u.cutoff.add(iLife.mul(u.erode));
+        const fadeIn = smoothstep(float(0), u.fadeIn, iLife);
+        const alpha = smoothstep(thr, thr.add(u.dissolveSoft), edged)
+          .mul(fadeIn)
+          .mul(u.opacity);
+
+        const center = mix(iCenter, u.pivot, u.pivotMode);
+        const sphN = positionWorld.sub(center).normalize();
+        const litN = mix(N, sphN, u.round).normalize();
+
+        const ndl = dot(litN, u.lightDir).clamp(0, 1);
+        const lambert = mix(float(1), ndl, u.lightStrength);
+        const banded = lambert.mul(u.steps).add(0.5).floor().div(u.steps);
+        const litShade = mix(lambert, banded, u.posterize);
+        const shade = mix(litShade, V, u.voroShade);
+        const litCol = mix(u.colShadow, u.colLit, shade);
+
+        const hNorm = positionWorld.y.div(u.colTopY).clamp(0, 1);
+        const tinted = mix(litCol, u.colTop, hNorm.mul(u.heightTint));
+        const rim = float(1).sub(facing).pow(u.rimPow).mul(u.rimStrength);
+        const lit2 = tinted.add(rim);
+
+        const toP = positionWorld.sub(u.pivot).normalize();
+        const shadowed = dot(toP, u.lightDir).negate().clamp(0, 1);
+        const col = lit2.mul(float(1).sub(shadowed.mul(u.selfShadow)));
+
+        const mat = new MeshBasicNodeMaterial({
+          transparent: true,
+          depthWrite: false,
+          depthTest: true,
+          blending: THREE.NormalBlending,
+          side: THREE.DoubleSide,
+        });
+        mat.colorNode = col;
+        mat.opacityNode = alpha;
+        return mat;
+      }
+
+      function buildSmokeShadowMaterial(uShadow) {
+        const iShadow = attribute("iShadow", "float");
+        const st = uv();
+        const d = length(st.sub(vec2(0.5, 0.5))).mul(2.0);
+        const radial = smoothstep(float(1.0), uShadow.soft, d);
+        const alpha = radial.mul(iShadow).mul(uShadow.strength);
+        const mat = new MeshBasicNodeMaterial({
+          transparent: true,
+          depthWrite: false,
+          depthTest: true,
+          blending: THREE.NormalBlending,
+          side: THREE.DoubleSide,
+        });
+        mat.colorNode = uShadow.color;
+        mat.opacityNode = alpha;
+        return mat;
+      }
+
+      function makeBlobGeometry() {
+        const a = new THREE.IcosahedronGeometry(1.0, 3);
+        const b = new THREE.IcosahedronGeometry(0.8, 3).translate(0.95, 0.45, 0.15);
+        const c = new THREE.IcosahedronGeometry(0.78, 3).translate(-0.7, 0.55, -0.35);
+        const g = mergeGeometries([a, b, c]);
+        g.deleteAttribute("uv");
+        g.center();
+        return g;
+      }
+
+      class SmokeBlobs {
+        constructor(scene, mat, shadowMat, max = 40) {
+          this.max = max;
+          const geo = makeBlobGeometry();
+          this.seedArr = new Float32Array(max);
+          this.lifeArr = new Float32Array(max).fill(1);
+          geo.setAttribute("iSeed", new THREE.InstancedBufferAttribute(this.seedArr, 1));
+          this.lifeAttr = new THREE.InstancedBufferAttribute(this.lifeArr, 1);
+          geo.setAttribute("iLife", this.lifeAttr);
+          this.centerArr = new Float32Array(max * 3);
+          this.centerAttr = new THREE.InstancedBufferAttribute(this.centerArr, 3);
+          geo.setAttribute("iCenter", this.centerAttr);
+
+          this.mesh = new THREE.InstancedMesh(geo, mat, max);
+          this.mesh.frustumCulled = false;
+          this.mesh.count = max;
+          scene.add(this.mesh);
+
+          const sgeo = new THREE.PlaneGeometry(1, 1);
+          sgeo.deleteAttribute("normal");
+          this.shadowArr = new Float32Array(max);
+          this.shadowAttr = new THREE.InstancedBufferAttribute(this.shadowArr, 1);
+          sgeo.setAttribute("iShadow", this.shadowAttr);
+          this.shadowMesh = new THREE.InstancedMesh(sgeo, shadowMat, max);
+          this.shadowMesh.frustumCulled = false;
+          this.shadowMesh.count = max;
+          this.shadowMesh.renderOrder = -1;
+          scene.add(this.shadowMesh);
+          this._sd = new THREE.Object3D();
+
+          this.active = new Uint8Array(max);
+          this.px = new Float32Array(max);
+          this.py = new Float32Array(max);
+          this.pz = new Float32Array(max);
+          this.dx = new Float32Array(max);
+          this.dz = new Float32Array(max);
+          this.age = new Float32Array(max);
+          this.life = new Float32Array(max);
+          this.axX = new Float32Array(max);
+          this.axY = new Float32Array(max);
+          this.axZ = new Float32Array(max);
+          this.spin = new Float32Array(max);
+          this.ang = new Float32Array(max);
+
+          this.base = new THREE.Vector3(0, 0.3, 0);
+          this.acc = 0;
+          this._d = new THREE.Object3D();
+          this._axis = new THREE.Vector3();
+          this._hidden = new THREE.Matrix4().makeScale(0, 0, 0);
+        }
+
+        setBase(v) {
+          this.base.copy(v);
+        }
+
+        _spawn(i) {
+          const a = Math.random() * Math.PI * 2;
+          const r = Math.random() * 0.25;
+          this.active[i] = 1;
+          this.px[i] = this.base.x + Math.cos(a) * r;
+          this.py[i] = this.base.y;
+          this.pz[i] = this.base.z + Math.sin(a) * r;
+          this.dx[i] = Math.cos(a) * (0.3 + Math.random() * 0.7);
+          this.dz[i] = Math.sin(a) * (0.3 + Math.random() * 0.7);
+          this.age[i] = 0;
+          this.life[i] = SMOKE_LOOK.lifetime * (0.8 + Math.random() * 0.4);
+          const ax = new THREE.Vector3(
+            Math.random() - 0.5,
+            Math.random() - 0.5,
+            Math.random() - 0.5,
+          ).normalize();
+          this.axX[i] = ax.x;
+          this.axY[i] = ax.y;
+          this.axZ[i] = ax.z;
+          this.spin[i] = (Math.random() - 0.5) * 2;
+          this.ang[i] = Math.random() * Math.PI * 2;
+          this.seedArr[i] = Math.random() * 10;
+        }
+
+        burst(n = 8) {
+          for (let k = 0; k < n; k++) {
+            const slot = this.active.indexOf(0);
+            if (slot < 0) break;
+            this._spawn(slot);
+          }
+        }
+
+        update(dt, time, u) {
+          this.acc += SMOKE_LOOK.rate * dt;
+          while (this.acc >= 1) {
+            this.acc -= 1;
+            const slot = this.active.indexOf(0);
+            if (slot >= 0) this._spawn(slot);
+          }
+          const colTop = Math.max(SMOKE_LOOK.rise * SMOKE_LOOK.lifetime * 0.8, 0.001);
+
+          const ld = u.lightDir.value;
+          for (let i = 0; i < this.max; i++) {
+            if (!this.active[i]) {
+              this.mesh.setMatrixAt(i, this._hidden);
+              this.shadowMesh.setMatrixAt(i, this._hidden);
+              this.lifeArr[i] = 1;
+              this.shadowArr[i] = 0;
+              continue;
+            }
+            this.age[i] += dt;
+            const lr = this.age[i] / this.life[i];
+            if (lr >= 1) {
+              this.active[i] = 0;
+              this.mesh.setMatrixAt(i, this._hidden);
+              this.shadowMesh.setMatrixAt(i, this._hidden);
+              this.lifeArr[i] = 1;
+              this.shadowArr[i] = 0;
+              continue;
+            }
+
+            this.py[i] += SMOKE_LOOK.rise * dt;
+            this.px[i] += this.dx[i] * SMOKE_LOOK.spread * lr * dt;
+            this.pz[i] += this.dz[i] * SMOKE_LOOK.spread * lr * dt;
+
+            const hAbove = this.py[i] - this.base.y;
+            const hNorm = Math.min(hAbove / colTop, 1);
+            const ts = time * 0.001 * SMOKE_LOOK.curlSpeed;
+            const curlX =
+              Math.sin(hAbove * SMOKE_LOOK.curlScale + ts) *
+              SMOKE_LOOK.curlAmount *
+              hNorm;
+            const curlZ =
+              Math.cos(hAbove * SMOKE_LOOK.curlScale * 0.8 + ts * 1.1) *
+              SMOKE_LOOK.curlAmount *
+              hNorm;
+
+            this.ang[i] += this.spin[i] * SMOKE_LOOK.spin * dt;
+            const ease = 1 - (1 - lr) * (1 - lr);
+            const scale =
+              SMOKE_LOOK.sizeStart +
+              (SMOKE_LOOK.sizeEnd - SMOKE_LOOK.sizeStart) * ease;
+
+            const cx = this.px[i] + curlX;
+            const cz = this.pz[i] + curlZ;
+            const d = this._d;
+            d.position.set(cx, this.py[i], cz);
+            this._axis.set(this.axX[i], this.axY[i], this.axZ[i]);
+            d.quaternion.setFromAxisAngle(this._axis, this.ang[i]);
+            d.scale.set(scale, scale, scale);
+            d.updateMatrix();
+            this.mesh.setMatrixAt(i, d.matrix);
+            this.lifeArr[i] = lr;
+            this.centerArr[i * 3] = cx;
+            this.centerArr[i * 3 + 1] = this.py[i];
+            this.centerArr[i * 3 + 2] = cz;
+
+            const projk = this.py[i] / Math.max(ld.y, 0.2);
+            const sd = this._sd;
+            sd.position.set(cx - ld.x * projk, 0.02, cz - ld.z * projk);
+            sd.rotation.set(-Math.PI / 2, 0, 0);
+            const ss = scale * 2.4 * SMOKE_LOOK.shadowSize;
+            sd.scale.set(ss, ss, ss);
+            sd.updateMatrix();
+            this.shadowMesh.setMatrixAt(i, sd.matrix);
+            const gFade = Math.max(0, 1 - this.py[i] / (colTop * 1.1));
+            const lifeFade =
+              smokeSmooth01(0, 0.1, lr) * (1 - smokeSmooth01(0.65, 1, lr));
+            this.shadowArr[i] = gFade * lifeFade;
+          }
+          this.mesh.instanceMatrix.needsUpdate = true;
+          this.lifeAttr.needsUpdate = true;
+          this.centerAttr.needsUpdate = true;
+          this.shadowMesh.instanceMatrix.needsUpdate = true;
+          this.shadowAttr.needsUpdate = true;
+          this.shadowMesh.visible = SMOKE_LOOK.shadowOn;
+        }
+      }
+
+      async function createMeshSmokePreset({ scene, floor, renderer, camera }) {
+        const u = {
+          time: uniform(0),
+          tiling: uniform(SMOKE_LOOK.tiling),
+          panSpeed: uniform(SMOKE_LOOK.panSpeed),
+          holeDepth: uniform(SMOKE_LOOK.holeDepth),
+          edgeNoise: uniform(SMOKE_LOOK.edgeNoise),
+          cutoff: uniform(SMOKE_LOOK.cutoff),
+          dissolveSoft: uniform(SMOKE_LOOK.dissolveSoft),
+          erode: uniform(SMOKE_LOOK.erode),
+          fadeIn: uniform(SMOKE_LOOK.fadeIn),
+          opacity: uniform(SMOKE_LOOK.opacity),
+          lightStrength: uniform(SMOKE_LOOK.lightStrength),
+          rimStrength: uniform(SMOKE_LOOK.rimStrength),
+          rimPow: uniform(SMOKE_LOOK.rimPow),
+          posterize: uniform(SMOKE_LOOK.posterize ? 1 : 0),
+          steps: uniform(SMOKE_LOOK.steps),
+          colShadow: uniform(new THREE.Color(SMOKE_LOOK.colShadow)),
+          colLit: uniform(new THREE.Color(SMOKE_LOOK.colLit)),
+          colTop: uniform(new THREE.Color(SMOKE_LOOK.colTop)),
+          heightTint: uniform(SMOKE_LOOK.heightTint),
+          selfShadow: uniform(SMOKE_LOOK.selfShadow),
+          voroShade: uniform(SMOKE_LOOK.voronoiShade),
+          colTopY: uniform(SMOKE_LOOK.rise * SMOKE_LOOK.lifetime * 0.7),
+          lightDir: uniform(new THREE.Vector3(0.4, 1.0, 0.35).normalize()),
+          round: uniform(SMOKE_LOOK.normalRound),
+          pivotMode: uniform(SMOKE_LOOK.columnPivot ? 1 : 0),
+          pivot: uniform(new THREE.Vector3(0, 2, 0)),
+        };
+
+        const uShadow = {
+          strength: uniform(SMOKE_LOOK.shadowStrength),
+          soft: uniform(SMOKE_LOOK.shadowSoft),
+          color: uniform(new THREE.Color(SMOKE_LOOK.shadowColor)),
+        };
+
+        const voroTex = await new Promise((res) => {
+          new THREE.TextureLoader().load(VORO_URL, (tex) => {
+            tex.wrapS = tex.wrapT = THREE.RepeatWrapping;
+            tex.colorSpace = THREE.NoColorSpace;
+            res(tex);
+          });
+        });
+
+        async function setVoronoiImage(file, onStatus) {
+          try {
+            const bmp = await createImageBitmap(file);
+            voroTex.image = bmp;
+            voroTex.wrapS = voroTex.wrapT = THREE.RepeatWrapping;
+            voroTex.colorSpace = THREE.NoColorSpace;
+            voroTex.needsUpdate = true;
+            if (voroTex.source) voroTex.source.needsUpdate = true;
+            onStatus?.(`✓ ${file.name} — ${bmp.width}×${bmp.height}`);
+          } catch (e) {
+            onStatus?.(`✗ failed: ${e.message}`);
+          }
+        }
+
+        function resetVoronoi(onStatus) {
+          new THREE.TextureLoader().load(VORO_URL, (t) => {
+            voroTex.image = t.image;
+            voroTex.wrapS = voroTex.wrapT = THREE.RepeatWrapping;
+            voroTex.colorSpace = THREE.NoColorSpace;
+            voroTex.needsUpdate = true;
+            if (voroTex.source) voroTex.source.needsUpdate = true;
+            onStatus?.("default voronoi restored");
+          });
+        }
+
+        const smokeMat = buildMeshSmokeMaterial(voroTex, u);
+        const shadowMat = buildSmokeShadowMaterial(uShadow);
+        const blobs = new SmokeBlobs(scene, smokeMat, shadowMat);
+
+        function applyDepthMode(on) {
+          smokeMat.depthWrite = on;
+          smokeMat.alphaTest = on ? SMOKE_LOOK.alphaTest : 0;
+          smokeMat.needsUpdate = true;
+        }
+        applyDepthMode(SMOKE_LOOK.depthSort);
+
+        const postProcessing = new THREE.PostProcessing(renderer);
+        const scenePass = pass(scene, camera);
+        const scenePassColor = scenePass.getTextureNode();
+        const bloomPass = bloom(
+          scenePassColor,
+          SMOKE_LOOK.bloomStrength,
+          SMOKE_LOOK.bloomRadius,
+          SMOKE_LOOK.bloomThreshold,
+        );
+        const withBloom = scenePassColor.add(bloomPass);
+        function applyBloom(on) {
+          postProcessing.outputNode = on ? withBloom : scenePassColor;
+          postProcessing.needsUpdate = true;
+        }
+        applyBloom(SMOKE_LOOK.bloomOn);
+
+        const raycaster = new THREE.Raycaster();
+        const pointer = new THREE.Vector2();
+        window.addEventListener("mousemove", (e) => {
+          pointer.x = (e.clientX / innerWidth) * 2 - 1;
+          pointer.y = -(e.clientY / innerHeight) * 2 + 1;
+        });
+        window.addEventListener("click", (e) => {
+          if (!SMOKE_LOOK.clickToPuff) return;
+          if (e.target.closest("#inspector")) return;
+          raycaster.setFromCamera(pointer, camera);
+          const hit = raycaster.intersectObject(floor)[0];
+          if (hit) {
+            blobs.setBase(hit.point.clone().setY(0.3));
+            blobs.burst();
+          }
+        });
+
+        return {
+          u,
+          uShadow,
+          blobs,
+          smokeMat,
+          bloomPass,
+          postProcessing,
+          applyDepthMode,
+          applyBloom,
+          setVoronoiImage,
+          resetVoronoi,
+        };
+      }
+
+      function sunDirectionFromAngles(azDeg, elDeg, target = new THREE.Vector3()) {
+        const az = THREE.MathUtils.degToRad(azDeg);
+        const el = THREE.MathUtils.degToRad(elDeg);
+        return target
+          .set(
+            Math.cos(el) * Math.cos(az),
+            Math.sin(el),
+            Math.cos(el) * Math.sin(az),
+          )
+          .normalize();
+      }
+
+      async function init() {
+        const renderer = new THREE.WebGPURenderer({ antialias: true });
+
+        const stats = new Stats({ trackGPU: true });
+        await stats.init(renderer);
+
+        await renderer.init();
+        renderer.setSize(innerWidth, innerHeight);
+        renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
+        renderer.toneMapping = THREE.ACESFilmicToneMapping;
+        renderer.toneMappingExposure = PARAMS.light.exposure;
+        renderer.shadowMap.enabled = true;
+        renderer.shadowMap.type = THREE.PCFSoftShadowMap;
+        document.body.appendChild(renderer.domElement);
+        document.body.appendChild(stats.dom);
+
+        document.getElementById("backend").textContent =
+          renderer.backend?.constructor?.name?.includes("WebGPU")
+            ? "WebGPU ✓"
+            : "WebGL fallback";
+
+        const scene = new THREE.Scene();
+        const camera = new THREE.PerspectiveCamera(
+          PARAMS.camera.fov,
+          innerWidth / innerHeight,
+          0.5,
+          5000,
+        );
+        camera.position.set(0, 20, 60);
+
+        const controls = new OrbitControls(camera, renderer.domElement);
+        controls.target.set(0, 0, 0);
+        controls.enableDamping = true;
+        controls.dampingFactor = 0.05;
+        controls.maxPolarAngle = Math.PI * 0.49;
+        controls.enabled = true; // orbit is the default mode
+
+        // ── LIGHTS ──
+        const sunDir = new THREE.Vector3();
+        const hemi = new THREE.HemisphereLight(0xffffff, 0xffffff, 1);
+        scene.add(hemi);
+
+        const sun = new THREE.DirectionalLight(0xffffff, 1);
+        sun.castShadow = true;
+        sun.shadow.mapSize.set(PARAMS.csm.mapSize, PARAMS.csm.mapSize);
+        sun.shadow.camera.near = 1;
+        sun.shadow.camera.far = 300;
+        sun.shadow.camera.left = sun.shadow.camera.bottom = -300;
+        sun.shadow.camera.right = sun.shadow.camera.top = 300;
+        const shadowTarget = new THREE.Object3D();
+        scene.add(shadowTarget);
+        sun.target = shadowTarget;
+        scene.add(sun);
+
+        // CSM cascaded shadows — same setup as v2/editor.
+        let csm = null;
+        try {
+          csm = new CSMShadowNode(sun, {
+            cascades: PARAMS.csm.cascades,
+            maxFar: PARAMS.csm.maxFar,
+            mode: "practical",
+            lightMargin: PARAMS.csm.lightMargin,
+          });
+          sun.shadow.shadowNode = csm;
+        } catch (err) {
+          console.warn("[template] CSMShadowNode init failed.", err);
+        }
+
+        // ── SKY (SkyMesh physical sky + PMREM IBL) ──
+        const sky = new SkyMesh();
+        if (sky.material) sky.material.fog = false;
+        scene.add(sky);
+
+        let pmremGenerator = null;
+        let _disposePmrem = null;
+
+        function applySkyUniforms() {
+          const S = PARAMS.physicalSky;
+          sky.turbidity.value = S.turbidity;
+          sky.rayleigh.value = S.rayleigh;
+          sky.mieCoefficient.value = S.mie;
+          sky.mieDirectionalG.value = S.mieG;
+          sky.cloudCoverage.value = S.cloudCoverage;
+          sky.cloudDensity.value = S.cloudDensity;
+          sky.cloudElevation.value = S.cloudElevation;
+          sky.scale.setScalar(S.meshScale);
+          if (sky.sunPosition?.value?.copy) sky.sunPosition.value.copy(sunDir);
+          else if (sky.sunPosition?.copy) sky.sunPosition.copy(sunDir);
+        }
+
+        function rebuildSkyEnv() {
+          try {
+            applySkyUniforms();
+            if (_disposePmrem) {
+              _disposePmrem();
+              _disposePmrem = null;
+            }
+            pmremGenerator =
+              pmremGenerator ?? new THREE.PMREMGenerator(renderer);
+            const envScene = new THREE.Scene();
+            envScene.add(sky.clone());
+            const pmremRT = pmremGenerator.fromScene(envScene, 0.04);
+            scene.environment = pmremRT.texture;
+            _disposePmrem = () => pmremRT.dispose();
+          } catch (err) {
+            console.warn("[template] PMREM from SkyMesh failed.", err);
+          }
+        }
+
+        function updateSun() {
+          const L = PARAMS.light;
+          sunDirectionFromAngles(L.sunAzimuth, L.sunElevation, sunDir);
+          sun.position.copy(sunDir).multiplyScalar(L.sunDistance);
+          sun.color.set(L.dirColor);
+          sun.intensity = L.dirIntensity;
+          sun.shadow.bias = L.shadowBias;
+          sun.shadow.normalBias = L.shadowNormalBias;
+          hemi.color.set(L.hemiSkyColor);
+          hemi.groundColor.set(L.hemiGroundColor);
+          hemi.intensity = L.hemiIntensity;
+          renderer.toneMappingExposure = L.exposure;
+          scene.environmentIntensity = L.envIntensity;
+          applySkyUniforms();
+        }
+
+        updateSun();
+        rebuildSkyEnv();
+
+        // ── GROUND (tile material) ──
+        const floorGeo = new THREE.PlaneGeometry(
+          PARAMS.ground.size,
+          PARAMS.ground.size,
+        );
+        floorGeo.rotateX(-Math.PI / 2);
+        const floorMat = createTileMaterial({
+          textureScale: PARAMS.tile.textureScale,
+          gradientIntensity: PARAMS.tile.gradientIntensity,
+          gradientBias: PARAMS.tile.gradientBias,
+          tileColor: PARAMS.tile.tileColor,
+          gridColor: PARAMS.tile.gridColor,
+          gridLineColor: PARAMS.tile.gridLineColor,
+          roughness: PARAMS.tile.roughness,
+          metalness: PARAMS.tile.metalness,
+        });
+        const floor = new THREE.Mesh(floorGeo, floorMat);
+        floor.receiveShadow = true;
+        scene.add(floor);
+
+        const meshSmoke = await createMeshSmokePreset({
+          scene,
+          floor,
+          renderer,
+          camera,
+        });
+
+        // ── CAPSULE PLAYER (same shape + colors as v2/play/playMode.js) ──
+        const capsuleGeo = new THREE.CapsuleGeometry(CAP_R, CAP_H, 4, 8);
+        const capsuleMat = new THREE.MeshStandardMaterial({
+          color: 0xff6633,
+          roughness: 0.7,
+        });
+        const capsule = new THREE.Mesh(capsuleGeo, capsuleMat);
+        capsule.castShadow = true;
+        scene.add(capsule);
+
+        // playerPos.y stores the ground surface under the capsule (foot).
+        // The mesh sits half a capsule above that — matches v2 convention.
+        const playerPos = new THREE.Vector3(
+          0,
+          sampleHeight(0, 0),
+          0,
+        );
+        const capsuleBase = CAP_R + CAP_H * 0.5;
+
+        const state = {
+          velY: 0,
+          inAir: false,
+          camYaw: 0,
+          camPitch: 0.35,
+          mode: "orbit", // "follow" | "orbit" — orbit is the default
+          immersive: false,
+          lastFacingX: 0,
+          lastFacingZ: -1,
+        };
+
+        // ── INPUT ──
+        const keys = Object.create(null);
+        let rmbLook = false;
+        window.addEventListener("keydown", (e) => {
+          if (e.code === "Tab") {
+            e.preventDefault();
+            setMode(state.mode === "follow" ? "orbit" : "follow");
+            return;
+          }
+          if (e.code === "KeyF" && !e.ctrlKey && !e.metaKey) {
+            setImmersive(!state.immersive);
+            return;
+          }
+          keys[e.code] = true;
+        });
+        window.addEventListener("keyup", (e) => {
+          keys[e.code] = false;
+        });
+        renderer.domElement.addEventListener("contextmenu", (e) =>
+          e.preventDefault(),
+        );
+        renderer.domElement.addEventListener("pointerdown", (e) => {
+          if (e.button === 2 && state.mode === "follow") rmbLook = true;
+        });
+        window.addEventListener("pointerup", (e) => {
+          if (e.button === 2) rmbLook = false;
+        });
+        window.addEventListener("pointermove", (e) => {
+          // In immersive (pointer-locked) mode, mouse always rotates the
+          // camera. In windowed mode, only while RMB is held.
+          if (state.mode !== "follow") return;
+          if (!state.immersive && !rmbLook) return;
+          state.camYaw -= e.movementX * CAM_SENS_X;
+          state.camPitch += e.movementY * CAM_SENS_Y;
+          state.camPitch = Math.max(0.05, Math.min(Math.PI * 0.45, state.camPitch));
+        });
+
+        const cammodeEl = document.getElementById("cammode");
+        function setMode(next) {
+          state.mode = next;
+          controls.enabled = next === "orbit";
+          if (next === "orbit") {
+            // Orbit + pointer lock don't mix — exit immersive when switching.
+            if (state.immersive) setImmersive(false);
+            // Seed orbit target on the capsule so it orbits around the player.
+            controls.target.set(
+              playerPos.x,
+              playerPos.y + capsuleBase,
+              playerPos.z,
+            );
+            controls.update();
+          }
+          cammodeEl.textContent = next === "follow" ? "FOLLOW" : "ORBIT";
+        }
+
+        // ── IMMERSIVE MODE (pointer lock, hides UI) ──
+        const immersiveBtn = document.getElementById("immersive-toggle");
+        function setImmersive(on) {
+          if (on && state.mode !== "follow") setMode("follow");
+          state.immersive = on;
+          document.body.classList.toggle("immersive", on);
+          immersiveBtn.classList.toggle("active", on);
+          immersiveBtn.textContent = on ? "Windowed (Esc)" : "Immersive";
+          rmbLook = false;
+          if (on) {
+            renderer.domElement.requestPointerLock?.();
+          } else if (document.pointerLockElement) {
+            document.exitPointerLock();
+          }
+        }
+        immersiveBtn.addEventListener("click", () =>
+          setImmersive(!state.immersive),
+        );
+        // Browser releases pointer lock on Escape — keep state in sync.
+        document.addEventListener("pointerlockchange", () => {
+          if (!document.pointerLockElement && state.immersive) {
+            setImmersive(false);
+          }
+        });
+
+        // ── FRAME LOOP ──
+        let lastT = performance.now() / 1000;
+        renderer.setAnimationLoop(() => {
+          const now = performance.now() / 1000;
+          const dt = Math.min(now - lastT, 0.05);
+          lastT = now;
+
+          // Movement input is camera-relative. In orbit mode, derive a yaw
+          // from the camera → capsule vector so "forward" still feels right.
+          let moveYaw = state.camYaw;
+          if (state.mode === "orbit") {
+            moveYaw = Math.atan2(
+              camera.position.x - playerPos.x,
+              camera.position.z - playerPos.z,
+            );
+          }
+
+          let mx = 0,
+            mz = 0;
+          if (keys.KeyW || keys.ArrowUp) {
+            mx -= Math.sin(moveYaw);
+            mz -= Math.cos(moveYaw);
+          }
+          if (keys.KeyS || keys.ArrowDown) {
+            mx += Math.sin(moveYaw);
+            mz += Math.cos(moveYaw);
+          }
+          if (keys.KeyA || keys.ArrowLeft) {
+            mx -= Math.cos(moveYaw);
+            mz += Math.sin(moveYaw);
+          }
+          if (keys.KeyD || keys.ArrowRight) {
+            mx += Math.cos(moveYaw);
+            mz -= Math.sin(moveYaw);
+          }
+          const mlen = Math.hypot(mx, mz);
+          if (mlen > 0) {
+            mx = (mx / mlen) * MOVE_SPEED * dt;
+            mz = (mz / mlen) * MOVE_SPEED * dt;
+            playerPos.x += mx;
+            playerPos.z += mz;
+            state.lastFacingX = mx / Math.hypot(mx, mz);
+            state.lastFacingZ = mz / Math.hypot(mx, mz);
+          }
+
+          // Ground stick + gravity (v2 playMode capsule branch).
+          const groundY = sampleHeight(playerPos.x, playerPos.z);
+          const prevY = playerPos.y;
+          if (keys.Space && !state.inAir) {
+            state.velY = JUMP_VEL;
+            state.inAir = true;
+          }
+          if (state.inAir) {
+            state.velY -= GRAVITY * dt;
+            playerPos.y += state.velY * dt;
+            if (playerPos.y <= groundY) {
+              playerPos.y = groundY;
+              state.velY = 0;
+              state.inAir = false;
+            }
+          } else {
+            // 0.4 drop threshold lets the capsule walk off ledges without
+            // teleporting down on tiny dips — same as v2.
+            const drop = prevY - groundY;
+            if (drop > 0.4) {
+              state.inAir = true;
+              state.velY = 0;
+              playerPos.y = prevY;
+            } else {
+              playerPos.y = groundY;
+            }
+          }
+
+          // Visual: capsule mesh origin is its center, foot at playerPos.y.
+          const capsuleCY = playerPos.y + capsuleBase;
+          capsule.position.set(playerPos.x, capsuleCY, playerPos.z);
+          capsule.rotation.y =
+            Math.atan2(state.lastFacingX, state.lastFacingZ) + Math.PI;
+
+          // Camera.
+          if (state.mode === "follow") {
+            const followDist = PARAMS.camera.followDist;
+            const hDist = followDist * Math.cos(state.camPitch);
+            const vDist = followDist * Math.sin(state.camPitch);
+            const sinH = Math.sin(state.camYaw);
+            const cosH = Math.cos(state.camYaw);
+            const lookAtY = capsuleCY;
+            camera.position.set(
+              playerPos.x + sinH * hDist,
+              lookAtY + vDist,
+              playerPos.z + cosH * hDist,
+            );
+            camera.lookAt(playerPos.x, lookAtY, playerPos.z);
+          } else {
+            // Orbit: keep target glued to capsule so player stays in view.
+            controls.target.set(playerPos.x, capsuleCY, playerPos.z);
+            controls.update();
+          }
+
+          meshSmoke.blobs.setBase(
+            new THREE.Vector3(playerPos.x, playerPos.y + 0.3, playerPos.z),
+          );
+          const nowMs = performance.now();
+          meshSmoke.u.time.value = nowMs * 0.001;
+          const colTopY = Math.max(
+            SMOKE_LOOK.rise * SMOKE_LOOK.lifetime * 0.7,
+            0.001,
+          );
+          meshSmoke.u.colTopY.value = colTopY;
+          meshSmoke.u.pivot.value.set(
+            meshSmoke.blobs.base.x,
+            meshSmoke.blobs.base.y + colTopY * 0.5,
+            meshSmoke.blobs.base.z,
+          );
+          meshSmoke.blobs.update(dt, nowMs, meshSmoke.u);
+
+          meshSmoke.postProcessing.render();
+          renderer.resolveTimestampsAsync(THREE.TimestampQuery.RENDER);
+          stats.update();
+        });
+
+        window.addEventListener("resize", () => {
+          camera.aspect = innerWidth / innerHeight;
+          camera.updateProjectionMatrix();
+          renderer.setSize(innerWidth, innerHeight);
+          if (csm?.mainFrustum) csm.updateFrustums();
+        });
+
+        // ── UI PANEL (v2/editor.html helpers) ──────────────────────────────
+        buildInspector({
+          camera,
+          controls,
+          scene,
+          floorMat,
+          updateSun,
+          rebuildSkyEnv,
+          meshSmoke,
+        });
+      }
+
+      // === Widget factory (mirrors v2/editor.html _section/_slider/etc.) ===
+      const _checkSvg =
+        '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12"></polyline></svg>';
+      const _arrowSvg =
+        '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="section-arrow"><polyline points="6 9 12 15 18 9"></polyline></svg>';
+
+      function _fmt(v, step) {
+        if (step >= 1) return String(Math.round(v));
+        const d = Math.max(0, -Math.floor(Math.log10(step)));
+        return v.toFixed(d);
+      }
+      function _clampSnap(v, min, max, step) {
+        if (!Number.isFinite(v)) return min;
+        const n = Math.round((v - min) / step);
+        let out = min + n * step;
+        const stepStr = String(step);
+        let decimals = 0;
+        if (stepStr.includes(".")) decimals = stepStr.split(".")[1].length;
+        else if (stepStr.includes("e-")) decimals = 8;
+        if (decimals > 0) out = Number(out.toFixed(decimals));
+        return Math.min(max, Math.max(min, out));
+      }
+      function _section(parent, title, expanded = true) {
+        const sec = document.createElement("div");
+        sec.className = "inspector-section";
+        const hdr = document.createElement("div");
+        hdr.className = "section-header" + (expanded ? "" : " collapsed");
+        hdr.innerHTML = _arrowSvg + " " + title;
+        const body = document.createElement("div");
+        body.className = "section-body" + (expanded ? "" : " hidden");
+        hdr.addEventListener("click", () => {
+          hdr.classList.toggle("collapsed");
+          body.classList.toggle("hidden");
+        });
+        sec.appendChild(hdr);
+        sec.appendChild(body);
+        parent.appendChild(sec);
+        return body;
+      }
+      function _slider(parent, obj, key, opts) {
+        const { label, min, max, step = 0.01, onChange } = opts;
+        const row = document.createElement("div");
+        row.className = "prop-row";
+        const cur = obj[key];
+        row.innerHTML = `<span class="prop-label">${label}</span><div class="prop-value"><div class="prop-slider-wrap"><input type="range" class="prop-slider" min="${min}" max="${max}" step="${step}" value="${cur}"><input type="number" class="prop-num-input" min="${min}" max="${max}" step="${step}" value="${_fmt(cur, step)}"></div></div>`;
+        const sl = row.querySelector(".prop-slider");
+        const num = row.querySelector(".prop-num-input");
+        sl.addEventListener("input", () => {
+          const v = _clampSnap(parseFloat(sl.value), min, max, step);
+          obj[key] = v;
+          num.value = _fmt(v, step);
+          onChange?.(v);
+        });
+        num.addEventListener("change", () => {
+          const raw = String(num.value).trim();
+          if (raw === "" || raw === "-" || raw === "." || raw === "-.") {
+            num.value = _fmt(obj[key], step);
+            return;
+          }
+          let v = parseFloat(raw);
+          if (!Number.isFinite(v)) {
+            num.value = _fmt(obj[key], step);
+            return;
+          }
+          v = _clampSnap(v, min, max, step);
+          obj[key] = v;
+          sl.value = String(v);
+          num.value = _fmt(v, step);
+          onChange?.(v);
+        });
+        num.addEventListener("keydown", (e) => {
+          if (e.key === "Enter") num.blur();
+        });
+        num.addEventListener(
+          "wheel",
+          (e) => {
+            if (document.activeElement === num) e.preventDefault();
+          },
+          { passive: false },
+        );
+        parent.appendChild(row);
+        return row;
+      }
+      function _color(parent, obj, key, opts) {
+        const { label, onChange } = opts;
+        const row = document.createElement("div");
+        row.className = "prop-row";
+        row.innerHTML = `<span class="prop-label">${label}</span><div class="prop-value"><div class="prop-color-wrap"><input type="color" class="prop-color" value="${obj[key]}"><span class="prop-slider-val" style="width:auto">${obj[key]}</span></div></div>`;
+        const inp = row.querySelector(".prop-color");
+        const hex = row.querySelector(".prop-slider-val");
+        inp.addEventListener("input", () => {
+          obj[key] = inp.value;
+          hex.textContent = inp.value;
+          onChange?.(inp.value);
+        });
+        parent.appendChild(row);
+        return row;
+      }
+      function _toggle(parent, obj, key, opts) {
+        const { label, onChange } = opts;
+        const row = document.createElement("div");
+        row.className = "prop-row";
+        row.innerHTML = `<span class="prop-label">${label}</span><div class="prop-value"><button class="prop-toggle ${obj[key] ? "checked" : ""}">${_checkSvg}</button></div>`;
+        const btn = row.querySelector(".prop-toggle");
+        btn.addEventListener("click", () => {
+          obj[key] = !obj[key];
+          btn.classList.toggle("checked", obj[key]);
+          onChange?.(obj[key]);
+        });
+        parent.appendChild(row);
+        return row;
+      }
+      function _button(parent, opts) {
+        const { title, onClick } = opts;
+        const btn = document.createElement("button");
+        btn.className = "section-btn";
+        btn.textContent = title;
+        btn.addEventListener("click", onClick);
+        parent.appendChild(btn);
+        return btn;
+      }
+      function _separator(parent) {
+        const div = document.createElement("div");
+        div.className = "section-separator";
+        parent.appendChild(div);
+      }
+      function _select(parent, obj, key, opts) {
+        const { label, options, onChange } = opts;
+        const row = document.createElement("div");
+        row.className = "prop-row";
+        row.innerHTML = `<span class="prop-label">${label}</span><div class="prop-value"><select class="prop-dropdown"></select></div>`;
+        const sel = row.querySelector(".prop-dropdown");
+        for (const [text, value] of Object.entries(options)) {
+          const opt = document.createElement("option");
+          opt.value = value;
+          opt.textContent = text;
+          if (obj[key] === value) opt.selected = true;
+          sel.appendChild(opt);
+        }
+        sel.addEventListener("change", () => {
+          obj[key] = sel.value;
+          onChange?.(sel.value);
+        });
+        parent.appendChild(row);
+        return row;
+      }
+
+      function buildMeshSmokeInspector(body, { meshSmoke, scene, controls, camera }) {
+        const { u, uShadow, blobs, bloomPass, applyDepthMode, applyBloom, setVoronoiImage, resetVoronoi } =
+          meshSmoke;
+
+        const tex = _section(body, "Particle texture", false);
+        const texStatus = document.createElement("div");
+        texStatus.style.cssText =
+          "font-size:10px;color:var(--text-dim);margin:4px 0 6px;min-height:13px;";
+        texStatus.textContent = "grayscale image (red channel is read)";
+        const fileRow = document.createElement("div");
+        fileRow.className = "prop-row";
+        fileRow.innerHTML =
+          '<span class="prop-label">Texture</span><div class="prop-value"><input type="file" accept="image/*" style="width:100%;font-size:11px;color:var(--text-dim)"></div>';
+        const fileInp = fileRow.querySelector("input");
+        fileInp.addEventListener("change", () => {
+          const f = fileInp.files?.[0];
+          if (f) setVoronoiImage(f, (s) => { texStatus.textContent = s; });
+        });
+        tex.appendChild(fileRow);
+        tex.appendChild(texStatus);
+        _button(tex, {
+          title: "Reset to default",
+          onClick: () => resetVoronoi((s) => { texStatus.textContent = s; }),
+        });
+
+        const shape = _section(body, "Voronoi (triplanar)", false);
+        _slider(shape, SMOKE_LOOK, "tiling", {
+          label: "Cell scale",
+          min: 0.1,
+          max: 1.5,
+          step: 0.01,
+          onChange: (v) => (u.tiling.value = v),
+        });
+        _slider(shape, SMOKE_LOOK, "panSpeed", {
+          label: "Churn speed",
+          min: 0,
+          max: 0.5,
+          step: 0.01,
+          onChange: (v) => (u.panSpeed.value = v),
+        });
+        _slider(shape, SMOKE_LOOK, "holeDepth", {
+          label: "Hole depth",
+          min: 0,
+          max: 1,
+          step: 0.01,
+          onChange: (v) => (u.holeDepth.value = v),
+        });
+        _slider(shape, SMOKE_LOOK, "edgeNoise", {
+          label: "Edge irregularity",
+          min: 0,
+          max: 1.2,
+          step: 0.01,
+          onChange: (v) => (u.edgeNoise.value = v),
+        });
+
+        const diss = _section(body, "Erosion (fresnel edge)", false);
+        _slider(diss, SMOKE_LOOK, "cutoff", {
+          label: "Cutoff",
+          min: 0,
+          max: 0.7,
+          step: 0.01,
+          onChange: (v) => (u.cutoff.value = v),
+        });
+        _slider(diss, SMOKE_LOOK, "dissolveSoft", {
+          label: "Edge softness",
+          min: 0.02,
+          max: 0.5,
+          step: 0.01,
+          onChange: (v) => (u.dissolveSoft.value = v),
+        });
+        _slider(diss, SMOKE_LOOK, "erode", {
+          label: "Age erosion",
+          min: 0,
+          max: 1,
+          step: 0.01,
+          onChange: (v) => (u.erode.value = v),
+        });
+        _slider(diss, SMOKE_LOOK, "fadeIn", {
+          label: "Grow-in",
+          min: 0.02,
+          max: 0.4,
+          step: 0.01,
+          onChange: (v) => (u.fadeIn.value = v),
+        });
+        _slider(diss, SMOKE_LOOK, "opacity", {
+          label: "Opacity",
+          min: 0.2,
+          max: 1,
+          step: 0.01,
+          onChange: (v) => (u.opacity.value = v),
+        });
+
+        const cel = _section(body, "Shading (real normals)", false);
+        _slider(cel, SMOKE_LOOK, "lightStrength", {
+          label: "Light contrast",
+          min: 0,
+          max: 1,
+          step: 0.01,
+          onChange: (v) => (u.lightStrength.value = v),
+        });
+        _slider(cel, SMOKE_LOOK, "rimStrength", {
+          label: "Rim light",
+          min: 0,
+          max: 1,
+          step: 0.01,
+          onChange: (v) => (u.rimStrength.value = v),
+        });
+        _slider(cel, SMOKE_LOOK, "rimPow", {
+          label: "Rim tightness",
+          min: 1,
+          max: 8,
+          step: 0.1,
+          onChange: (v) => (u.rimPow.value = v),
+        });
+        _toggle(cel, SMOKE_LOOK, "posterize", {
+          label: "Posterize bands",
+          onChange: (v) => (u.posterize.value = v ? 1 : 0),
+        });
+        _slider(cel, SMOKE_LOOK, "steps", {
+          label: "Band count",
+          min: 2,
+          max: 8,
+          step: 1,
+          onChange: (v) => (u.steps.value = v),
+        });
+        _color(cel, SMOKE_LOOK, "colShadow", {
+          label: "Shadow color",
+          onChange: (v) => u.colShadow.value.set(v),
+        });
+        _color(cel, SMOKE_LOOK, "colLit", {
+          label: "Lit color",
+          onChange: (v) => u.colLit.value.set(v),
+        });
+        _color(cel, SMOKE_LOOK, "colTop", {
+          label: "Top color",
+          onChange: (v) => u.colTop.value.set(v),
+        });
+        _slider(cel, SMOKE_LOOK, "heightTint", {
+          label: "Height tint",
+          min: 0,
+          max: 1,
+          step: 0.01,
+          onChange: (v) => (u.heightTint.value = v),
+        });
+        _slider(cel, SMOKE_LOOK, "selfShadow", {
+          label: "Self-shadow",
+          min: 0,
+          max: 1,
+          step: 0.01,
+          onChange: (v) => (u.selfShadow.value = v),
+        });
+        _slider(cel, SMOKE_LOOK, "voronoiShade", {
+          label: "Voronoi shading",
+          min: 0,
+          max: 1,
+          step: 0.01,
+          onChange: (v) => (u.voroShade.value = v),
+        });
+        _color(cel, SMOKE_LOOK, "bgColor", {
+          label: "Background",
+          onChange: (v) => scene.background?.set?.(v),
+        });
+
+        const nrm = _section(body, "Rounded normals (lighting)", false);
+        _slider(nrm, SMOKE_LOOK, "normalRound", {
+          label: "Rounding",
+          min: 0,
+          max: 1,
+          step: 0.01,
+          onChange: (v) => (u.round.value = v),
+        });
+        _toggle(nrm, SMOKE_LOOK, "columnPivot", {
+          label: "Column pivot (vs per-blob)",
+          onChange: (v) => (u.pivotMode.value = v ? 1 : 0),
+        });
+
+        const sh = _section(body, "Ground shadow", false);
+        _toggle(sh, SMOKE_LOOK, "shadowOn", { label: "Enable" });
+        _slider(sh, SMOKE_LOOK, "shadowStrength", {
+          label: "Strength",
+          min: 0,
+          max: 1,
+          step: 0.01,
+          onChange: (v) => (uShadow.strength.value = v),
+        });
+        _slider(sh, SMOKE_LOOK, "shadowSize", {
+          label: "Size",
+          min: 0.4,
+          max: 3,
+          step: 0.05,
+        });
+        _slider(sh, SMOKE_LOOK, "shadowSoft", {
+          label: "Softness",
+          min: 0,
+          max: 0.9,
+          step: 0.01,
+          onChange: (v) => (uShadow.soft.value = v),
+        });
+        _color(sh, SMOKE_LOOK, "shadowColor", {
+          label: "Color",
+          onChange: (v) => uShadow.color.value.set(v),
+        });
+
+        const dep = _section(body, "Depth / sorting", false);
+        _toggle(dep, SMOKE_LOOK, "depthSort", {
+          label: "Occlude (fix show-through)",
+          onChange: (v) => applyDepthMode(v),
+        });
+        _slider(dep, SMOKE_LOOK, "alphaTest", {
+          label: "Edge clip",
+          min: 0,
+          max: 0.6,
+          step: 0.01,
+          onChange: (v) => {
+            if (SMOKE_LOOK.depthSort) applyDepthMode(true);
+          },
+        });
+
+        const blm = _section(body, "Bloom (post)", false);
+        _toggle(blm, SMOKE_LOOK, "bloomOn", {
+          label: "Enable bloom",
+          onChange: (v) => applyBloom(v),
+        });
+        _slider(blm, SMOKE_LOOK, "bloomStrength", {
+          label: "Strength",
+          min: 0,
+          max: 2,
+          step: 0.01,
+          onChange: (v) => (bloomPass.strength.value = v),
+        });
+        _slider(blm, SMOKE_LOOK, "bloomRadius", {
+          label: "Radius",
+          min: 0,
+          max: 1,
+          step: 0.01,
+          onChange: (v) => (bloomPass.radius.value = v),
+        });
+        _slider(blm, SMOKE_LOOK, "bloomThreshold", {
+          label: "Threshold",
+          min: 0,
+          max: 1,
+          step: 0.01,
+          onChange: (v) => (bloomPass.threshold.value = v),
+        });
+
+        const sim = _section(body, "Simulation", false);
+        _toggle(sim, SMOKE_LOOK, "clickToPuff", {
+          label: "Click ground to puff",
+        });
+        _slider(sim, SMOKE_LOOK, "rise", {
+          label: "Rise speed",
+          min: 0.2,
+          max: 4,
+          step: 0.05,
+        });
+        _slider(sim, SMOKE_LOOK, "spread", {
+          label: "Spread",
+          min: 0,
+          max: 2,
+          step: 0.05,
+        });
+        _slider(sim, SMOKE_LOOK, "lifetime", {
+          label: "Lifetime (s)",
+          min: 1,
+          max: 6,
+          step: 0.1,
+        });
+        _slider(sim, SMOKE_LOOK, "rate", {
+          label: "Emission rate",
+          min: 1,
+          max: 20,
+          step: 1,
+        });
+        _slider(sim, SMOKE_LOOK, "sizeStart", {
+          label: "Size start",
+          min: 0.1,
+          max: 1.5,
+          step: 0.05,
+        });
+        _slider(sim, SMOKE_LOOK, "sizeEnd", {
+          label: "Size end",
+          min: 0.5,
+          max: 3,
+          step: 0.05,
+        });
+        _slider(sim, SMOKE_LOOK, "spin", {
+          label: "Tumble",
+          min: 0,
+          max: 2,
+          step: 0.05,
+        });
+        _slider(sim, SMOKE_LOOK, "curlAmount", {
+          label: "Curl amount",
+          min: 0,
+          max: 2,
+          step: 0.05,
+        });
+        _slider(sim, SMOKE_LOOK, "curlScale", {
+          label: "Curl waves",
+          min: 0.1,
+          max: 2,
+          step: 0.05,
+        });
+        _slider(sim, SMOKE_LOOK, "curlSpeed", {
+          label: "Curl speed",
+          min: 0,
+          max: 3,
+          step: 0.05,
+        });
+
+        const act = _section(body, "Actions", false);
+        _button(act, {
+          title: "Puff burst",
+          onClick: () => blobs.burst(12),
+        });
+        _button(act, {
+          title: "Reset cam",
+          onClick: () => {
+            camera.position.set(0, 20, 60);
+            controls.target.set(0, 0, 0);
+            controls.update();
+          },
+        });
+      }
+
+      // === Build inspector panel ===
+      function buildInspector({
+        camera,
+        controls,
+        scene,
+        floorMat,
+        updateSun,
+        rebuildSkyEnv,
+        meshSmoke,
+      }) {
+        const body = document.getElementById("inspector-body");
+
+        // Toggle show/hide.
+        document.getElementById("inspector-toggle").addEventListener("click", (e) => {
+          const hidden = document.body.classList.toggle("inspector-hidden");
+          e.target.textContent = hidden ? "Show" : "Hide";
+        });
+
+        // ── Drag-to-resize the inspector panel ──
+        // Width persists in localStorage so it survives reloads. Double-
+        // click the handle to reset to the default 300px.
+        {
+          const inspectorEl = document.getElementById("inspector");
+          const handle = document.getElementById("inspector-resize-handle");
+          const KEY = "inspectorWidth";
+          const MIN = 240;
+          const MAX_VW = 0.7;
+          const clamp = (w) =>
+            Math.max(MIN, Math.min(window.innerWidth * MAX_VW, w));
+          const applyWidth = (w) => {
+            document.documentElement.style.setProperty(
+              "--inspector-width",
+              clamp(w) + "px",
+            );
+          };
+          const saved = parseFloat(localStorage.getItem(KEY));
+          if (Number.isFinite(saved)) applyWidth(saved);
+
+          let dragging = false;
+          handle.addEventListener("pointerdown", (e) => {
+            dragging = true;
+            document.body.classList.add("inspector-resizing");
+            handle.setPointerCapture?.(e.pointerId);
+            e.preventDefault();
+          });
+          window.addEventListener("pointermove", (e) => {
+            if (!dragging) return;
+            // Right-anchored panel: width = (viewport right edge) - mouseX.
+            applyWidth(window.innerWidth - e.clientX);
+          });
+          const stopDrag = (e) => {
+            if (!dragging) return;
+            dragging = false;
+            document.body.classList.remove("inspector-resizing");
+            handle.releasePointerCapture?.(e.pointerId);
+            const w = parseFloat(
+              getComputedStyle(inspectorEl).width || "300",
+            );
+            if (Number.isFinite(w)) localStorage.setItem(KEY, String(w));
+          };
+          window.addEventListener("pointerup", stopDrag);
+          window.addEventListener("pointercancel", stopDrag);
+          handle.addEventListener("dblclick", () => {
+            document.documentElement.style.removeProperty(
+              "--inspector-width",
+            );
+            localStorage.removeItem(KEY);
+          });
+        }
+
+        const FX_PRESETS = { preset: "meshSmoke" };
+        const fxPresetSection = _section(body, "FX Preset", true);
+        _select(fxPresetSection, FX_PRESETS, "preset", {
+          label: "Preset",
+          options: { "Mesh Smoke": "meshSmoke" },
+        });
+        const meshSmokeRoot = _section(body, "Mesh Smoke", true);
+        buildMeshSmokeInspector(meshSmokeRoot, {
+          meshSmoke,
+          scene,
+          controls,
+          camera,
+        });
+
+        // ── Camera ──
+        {
+          const sec = _section(body, "Camera", true);
+          _slider(sec, PARAMS.camera, "fov", {
+            label: "FOV",
+            min: 30,
+            max: 100,
+            step: 1,
+            onChange: (v) => {
+              camera.fov = v;
+              camera.updateProjectionMatrix();
+            },
+          });
+          _slider(sec, PARAMS.camera, "followDist", {
+            label: "Follow dist",
+            min: 3,
+            max: 25,
+            step: 0.25,
+          });
+        }
+
+        // ── Sun + Lights ──
+        {
+          const sec = _section(body, "Lights", true);
+          _slider(sec, PARAMS.light, "sunAzimuth", {
+            label: "Sun azimuth",
+            min: 0,
+            max: 360,
+            step: 1,
+            onChange: () => {
+              updateSun();
+              rebuildSkyEnv();
+            },
+          });
+          _slider(sec, PARAMS.light, "sunElevation", {
+            label: "Sun elev",
+            min: -10,
+            max: 90,
+            step: 1,
+            onChange: () => {
+              updateSun();
+              rebuildSkyEnv();
+            },
+          });
+          _color(sec, PARAMS.light, "dirColor", {
+            label: "Sun color",
+            onChange: () => updateSun(),
+          });
+          _slider(sec, PARAMS.light, "dirIntensity", {
+            label: "Sun int",
+            min: 0,
+            max: 10,
+            step: 0.05,
+            onChange: () => updateSun(),
+          });
+          _separator(sec);
+          _color(sec, PARAMS.light, "hemiSkyColor", {
+            label: "Hemi sky",
+            onChange: () => updateSun(),
+          });
+          _color(sec, PARAMS.light, "hemiGroundColor", {
+            label: "Hemi ground",
+            onChange: () => updateSun(),
+          });
+          _slider(sec, PARAMS.light, "hemiIntensity", {
+            label: "Hemi int",
+            min: 0,
+            max: 3,
+            step: 0.05,
+            onChange: () => updateSun(),
+          });
+          _separator(sec);
+          _slider(sec, PARAMS.light, "envIntensity", {
+            label: "Env int",
+            min: 0,
+            max: 3,
+            step: 0.05,
+            onChange: () => updateSun(),
+          });
+          _slider(sec, PARAMS.light, "exposure", {
+            label: "Exposure",
+            min: 0,
+            max: 3,
+            step: 0.05,
+            onChange: () => updateSun(),
+          });
+        }
+
+        // ── Sky (physical) ──
+        {
+          const sec = _section(body, "Sky", true);
+          const reb = () => rebuildSkyEnv();
+          _slider(sec, PARAMS.physicalSky, "turbidity", {
+            label: "Turbidity",
+            min: 0.1,
+            max: 20,
+            step: 0.1,
+            onChange: reb,
+          });
+          _slider(sec, PARAMS.physicalSky, "rayleigh", {
+            label: "Rayleigh",
+            min: 0,
+            max: 4,
+            step: 0.01,
+            onChange: reb,
+          });
+          _slider(sec, PARAMS.physicalSky, "mie", {
+            label: "Mie",
+            min: 0,
+            max: 0.1,
+            step: 0.0005,
+            onChange: reb,
+          });
+          _slider(sec, PARAMS.physicalSky, "mieG", {
+            label: "Mie G",
+            min: 0,
+            max: 0.999,
+            step: 0.001,
+            onChange: reb,
+          });
+          _slider(sec, PARAMS.physicalSky, "cloudCoverage", {
+            label: "Cloud cov",
+            min: 0,
+            max: 1,
+            step: 0.01,
+            onChange: reb,
+          });
+          _slider(sec, PARAMS.physicalSky, "cloudDensity", {
+            label: "Cloud dens",
+            min: 0,
+            max: 2,
+            step: 0.01,
+            onChange: reb,
+          });
+          _slider(sec, PARAMS.physicalSky, "cloudElevation", {
+            label: "Cloud elev",
+            min: 0,
+            max: 1,
+            step: 0.01,
+            onChange: reb,
+          });
+          _slider(sec, PARAMS.physicalSky, "meshScale", {
+            label: "Mesh scale",
+            min: 1000,
+            max: 50000,
+            step: 100,
+            onChange: () => {
+              rebuildSkyEnv();
+            },
+          });
+        }
+
+        // ── Ground (tile material) ──
+        {
+          const sec = _section(body, "Ground", true);
+          const U = floorMat._tileUniforms;
+          const toLinear = (hex) =>
+            new THREE.Color(hex).convertSRGBToLinear();
+
+          _color(sec, PARAMS.tile, "tileColor", {
+            label: "Tile color",
+            onChange: (hex) => U.tileColor.value.copy(toLinear(hex)),
+          });
+          _color(sec, PARAMS.tile, "gridColor", {
+            label: "Grid color",
+            onChange: (hex) => U.gridColor.value.copy(toLinear(hex)),
+          });
+          _color(sec, PARAMS.tile, "gridLineColor", {
+            label: "Grid line",
+            onChange: (hex) => U.gridLineColor.value.copy(toLinear(hex)),
+          });
+          _slider(sec, PARAMS.tile, "textureScale", {
+            label: "Tex scale",
+            min: 50,
+            max: 5000,
+            step: 10,
+            onChange: (v) => (U.textureScale.value = v),
+          });
+          _slider(sec, PARAMS.tile, "gradientIntensity", {
+            label: "Grad int",
+            min: 0,
+            max: 2,
+            step: 0.01,
+            onChange: (v) => (U.gradientIntensity.value = v),
+          });
+          _slider(sec, PARAMS.tile, "gradientBias", {
+            label: "Grad bias",
+            min: -1,
+            max: 1,
+            step: 0.01,
+            onChange: (v) => (U.gradientBias.value = v),
+          });
+          _slider(sec, PARAMS.tile, "roughness", {
+            label: "Roughness",
+            min: 0,
+            max: 1,
+            step: 0.01,
+            onChange: (v) => (floorMat.roughness = v),
+          });
+          _slider(sec, PARAMS.tile, "metalness", {
+            label: "Metalness",
+            min: 0,
+            max: 1,
+            step: 0.01,
+            onChange: (v) => (floorMat.metalness = v),
+          });
+        }
+      }
+
+      init().catch((e) => {
+        console.error("Init failed:", e);
+        document.getElementById("backend").textContent = "Error: " + e.message;
+      });
+    </script>
+  </body>
+</html>

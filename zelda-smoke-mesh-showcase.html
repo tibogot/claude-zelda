@@ -111,6 +111,7 @@
       colTop: "#cdd8e4",
       heightTint: 0.5,
       selfShadow: 0,       // darken the side/underside away from the light (volume)
+      voronoiShade: 0,     // blend shading from smooth N·L → voronoi-shaped (painterly)
       // Rounded normals (lighting only; fresnel/erosion keep real normals)
       normalRound: 0,      // 0 = real geometry normals, 1 = fully spherical
       columnPivot: false,  // false = per-blob center, true = whole-column pivot
@@ -164,6 +165,7 @@
       colTop:     uniform(new THREE.Color(LOOK.colTop)),
       heightTint: uniform(LOOK.heightTint),
       selfShadow: uniform(LOOK.selfShadow),
+      voroShade:  uniform(LOOK.voronoiShade),
       colTopY:    uniform(LOOK.rise * LOOK.lifetime * 0.7),
       lightDir:   uniform(new THREE.Vector3(0.4, 1.0, 0.35).normalize()),
       round:      uniform(LOOK.normalRound),
@@ -218,7 +220,10 @@
       const ndl = dot(litN, u.lightDir).clamp(0, 1);
       const lambert = mix(float(1), ndl, u.lightStrength);
       const banded = lambert.mul(u.steps).add(0.5).floor().div(u.steps);
-      const shade = mix(lambert, banded, u.posterize);
+      const litShade = mix(lambert, banded, u.posterize);
+      // blend toward voronoi-shaped value → shadow/light patches follow the
+      // cells (painterly) instead of a smooth N·L gradient or flat bands.
+      const shade = mix(litShade, V, u.voroShade);
       const litCol = mix(u.colShadow, u.colLit, shade);
 
       // ── colour over height + fresnel rim light ──
@@ -648,6 +653,7 @@
       mkColor(cel, "colTop", "Top color", (v) => u.colTop.value.set(v));
       mkRange(cel, "heightTint", "Height tint", 0, 1, 0.01, undefined, (v) => u.heightTint.value = v);
       mkRange(cel, "selfShadow", "Self-shadow", 0, 1, 0.01, undefined, (v) => u.selfShadow.value = v);
+      mkRange(cel, "voronoiShade", "Voronoi shading", 0, 1, 0.01, undefined, (v) => u.voroShade.value = v);
       mkColor(cel, "bgColor", "Background", (v) => scene.background.set(v));
 
       const nrm = mkSec("Rounded normals (lighting)");
