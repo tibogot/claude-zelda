@@ -113,6 +113,9 @@
       // Rounded normals (lighting only; fresnel/erosion keep real normals)
       normalRound: 0,      // 0 = real geometry normals, 1 = fully spherical
       columnPivot: false,  // false = per-blob center, true = whole-column pivot
+      // Depth sorting (fixes far puffs showing through near ones)
+      depthSort: true,     // on = depthWrite + alphaTest → correct occlusion
+      alphaTest: 0.25,     // fringe below this is discarded (no depth halos)
       bgColor: "#8d9aa8",
       // Bloom (post)
       bloomOn: false,
@@ -397,27 +400,43 @@
       });
     });
 
-    // Swap the particle texture (used by BOTH the smoke and the impact ring).
-    function setVoronoiImage(file) {
-      const url = URL.createObjectURL(file);
-      const img = new Image();
-      img.onload = () => {
-        voroTex.image = img;
+    // Swap the particle texture. Uses createImageBitmap (the reliable path for
+    // the WebGPU backend) and re-applies wrap/colorSpace after the swap.
+    async function setVoronoiImage(file, onStatus) {
+      try {
+        const bmp = await createImageBitmap(file);
+        voroTex.image = bmp;
+        voroTex.wrapS = voroTex.wrapT = THREE.RepeatWrapping;
+        voroTex.colorSpace = THREE.NoColorSpace;
         voroTex.needsUpdate = true;
-        URL.revokeObjectURL(url);
-      };
-      img.onerror = () => URL.revokeObjectURL(url);
-      img.src = url;
+        if (voroTex.source) voroTex.source.needsUpdate = true;
+        onStatus?.(`✓ ${file.name} — ${bmp.width}×${bmp.height}`);
+      } catch (e) {
+        onStatus?.(`✗ failed: ${e.message}`);
+      }
     }
-    function resetVoronoi() {
+    function resetVoronoi(onStatus) {
       new THREE.TextureLoader().load(VORO_URL, (t) => {
         voroTex.image = t.image;
+        voroTex.wrapS = voroTex.wrapT = THREE.RepeatWrapping;
+        voroTex.colorSpace = THREE.NoColorSpace;
         voroTex.needsUpdate = true;
+        if (voroTex.source) voroTex.source.needsUpdate = true;
+        onStatus?.("default voronoi restored");
       });
     }
 
     const smokeMat = buildMeshSmokeMaterial(voroTex);
     const blobs = new SmokeBlobs(scene, smokeMat);
+
+    // Depth mode: ON writes depth + alphaTests so near smoke occludes far smoke
+    // (fixes the "far explosion shows through" sorting issue). OFF = soft blend.
+    function applyDepthMode(on) {
+      smokeMat.depthWrite = on;
+      smokeMat.alphaTest = on ? LOOK.alphaTest : 0;
+      smokeMat.needsUpdate = true;
+    }
+    applyDepthMode(LOOK.depthSort);
 
     // ── Post: bloom so the lit side + fresnel rim genuinely glow ───────────
     const postProcessing = new THREE.PostProcessing(renderer);
@@ -505,21 +524,24 @@
       };
 
       const tex = mkSec("Particle texture");
+      const texStatus = document.createElement("div");
+      texStatus.style.cssText = "font-size:10px;color:#9aa;margin:4px 0 6px;min-height:13px;";
+      texStatus.textContent = "grayscale image (red channel is read)";
       const fileRow = document.createElement("div");
       fileRow.className = "row";
       const fileInp = document.createElement("input");
       fileInp.type = "file";
-      fileInp.accept = "image/png,image/webp,image/jpeg";
+      fileInp.accept = "image/*";
       fileInp.style.gridColumn = "1 / -1";
       fileInp.style.color = "#aaa";
       fileInp.addEventListener("change", () => {
         const f = fileInp.files?.[0];
-        if (f) setVoronoiImage(f);
-        fileInp.value = "";
+        if (f) setVoronoiImage(f, (s) => { texStatus.textContent = s; });
       });
       fileRow.appendChild(fileInp);
       tex.appendChild(fileRow);
-      mkButton(tex, "Reset to default", resetVoronoi);
+      tex.appendChild(texStatus);
+      mkButton(tex, "Reset to default", () => resetVoronoi((s) => { texStatus.textContent = s; }));
 
       const shape = mkSec("Voronoi (triplanar)");
       mkRange(shape, "tiling", "Cell scale", 0.1, 1.5, 0.01, undefined, (v) => u.tiling.value = v);
@@ -549,6 +571,13 @@
       const nrm = mkSec("Rounded normals (lighting)");
       mkRange(nrm, "normalRound", "Rounding", 0, 1, 0.01, undefined, (v) => u.round.value = v);
       mkToggle(nrm, "columnPivot", "Column pivot (vs per-blob)", (v) => u.pivotMode.value = v ? 1 : 0);
+
+      const dep = mkSec("Depth / sorting");
+      mkToggle(dep, "depthSort", "Occlude (fix show-through)", (v) => applyDepthMode(v));
+      mkRange(dep, "alphaTest", "Edge clip", 0, 0.6, 0.01, undefined, (v) => {
+        LOOK.alphaTest = v;
+        if (LOOK.depthSort) applyDepthMode(true);
+      });
 
       const blm = mkSec("Bloom (post)");
       mkToggle(blm, "bloomOn", "Enable bloom", (v) => applyBloom(v));
