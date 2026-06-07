@@ -163,6 +163,14 @@ export function createCloudLayer({ camera }) {
   const uMainCamPos = uniform(new THREE.Vector3());
   const _shadowPV = new THREE.Matrix4();
 
+  // ── Aerial perspective: distant clouds fade toward the horizon haze color, so
+  // the deck recedes into the distance instead of holding full contrast to the
+  // horizon. Driven by the transmittance-weighted mean march distance.
+  const uAerialEnabled = uniform(1);
+  const uAerialColor = uniform(new THREE.Color(0x9fb8c4)); // = scene fog away-color
+  const uAerialDensity = uniform(0.00012);  // larger = haze sets in nearer
+  const uAerialAmount = uniform(1.0);        // max strength of the color shift
+
   // ── Offscreen buffers ─────────────────────────────────────────────────────
   // Full-res scene (color + depth) so the cloud march can be occluded by world
   // geometry; half-res cloud buffer for the cheap raymarch.
@@ -286,6 +294,9 @@ export function createCloudLayer({ camera }) {
 
     const transmittance = vec3(1.0).toVar();
     const scattered = vec3(0.0).toVar();
+    // Transmittance-weighted mean distance to the visible cloud mass (for aerial).
+    const distAcc = float(0.0).toVar();
+    const wAcc = float(0.0).toVar();
 
     If(valid, () => {
       const isEnv = uEnvMode.greaterThan(0.5);
@@ -324,6 +335,11 @@ export function createCloudLayer({ camera }) {
           const lum = sun.add(amb).mul(density).mul(baseStep);
           const stepT = exp(density.mul(baseStep).mul(uOpacity).mul(EXTINCTION).negate());
           scattered.addAssign(transmittance.mul(lum));
+          // Visible weight of this sample (light it adds before being extincted) →
+          // weight its distance for the aerial-perspective mean.
+          const vis = transmittance.r.mul(stepT.r.oneMinus());
+          distAcc.addAssign(vis.mul(travel));
+          wAcc.addAssign(vis);
           transmittance.mulAssign(stepT);
         });
         travel.addAssign(advance);
@@ -331,6 +347,15 @@ export function createCloudLayer({ camera }) {
     });
 
     const alpha = transmittance.r.oneMinus();
+    // Aerial perspective: fade the (premultiplied) cloud color toward the horizon
+    // haze color by the mean distance — distant clouds recede, matching the
+    // terrain/ocean fog. Alpha is unchanged, so the deck still occludes.
+    If(uAerialEnabled.greaterThan(0.5), () => {
+      const meanDist = distAcc.div(wAcc.max(float(0.0001)));
+      const fog = exp(meanDist.mul(uAerialDensity).negate()).oneMinus()
+        .mul(uAerialAmount).clamp(0.0, 1.0);
+      scattered.assign(mix(scattered, uAerialColor.mul(alpha), fog));
+    });
     return vec4(scattered, alpha);
   });
 
@@ -575,6 +600,13 @@ export function createCloudLayer({ camera }) {
     uLightIntensity.value = frame.lightIntensity;
     uAmbientColor.value.copy(frame.ambientColor);
     uAmbientIntensity.value = frame.ambientIntensity;
+
+    // Aerial perspective: fade distant clouds toward the scene's horizon-haze
+    // color (matches terrain/ocean fog for a cohesive recede).
+    uAerialEnabled.value = (P.aerialEnabled ?? true) ? 1 : 0;
+    uAerialDensity.value = P.aerialDensity ?? 0.00012;
+    uAerialAmount.value = P.aerialAmount ?? 1.0;
+    if (frame.fog) uAerialColor.value.copy(frame.fog.color);
   }
 
   /**
@@ -716,4 +748,9 @@ export const CLOUD_DEFAULTS = {
   msEccentricity: 0.5,
   windDeg: 35,
   windSpeed: 0.02,
+
+  // Aerial perspective (distant clouds fade to the horizon-haze color).
+  aerialEnabled: true,
+  aerialDensity: 0.00012,
+  aerialAmount: 1.0,
 };

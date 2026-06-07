@@ -127,6 +127,7 @@ export function createDayNightSky() {
   const uCloudSpeed = uniform(0.01);     // drift speed
   const uCloudWind = uniform(new THREE.Vector2(1, 0.35)); // drift direction
   const uCloudColor = uniform(new THREE.Color(0xffffff));
+  const uCloudAerial = uniform(0.8);     // aerial perspective: low cirrus → sky behind it
 
   const uFogEnabled = uniform(0);
   const uFogColor = uniform(new THREE.Color(0x9fb8c4));
@@ -322,7 +323,7 @@ export function createDayNightSky() {
   // Returns vec4(rgb, alpha). Projects the view ray onto a horizontal plane so
   // clouds converge toward the horizon, samples a stretched fbm for streaky
   // cirrus, then relights by sun (silver lining), sunset (warm tint) and moon.
-  const cirrus = Fn(([dir, dayF, twilightF]) => {
+  const cirrus = Fn(([dir, dayF, twilightF, bgCol]) => {
     const y = dir.y.toVar();
     // Floor yy so the near-horizon uv doesn't explode into noise aliasing
     // (hidden by hMask anyway, but keeps the math finite).
@@ -357,7 +358,12 @@ export function createDayNightSky() {
     const nightBright = mix(float(0.08), float(0.45), pow(moonAmt, float(2.5)));
     const nightCol = uCloudColor.mul(uMoonColor).mul(nightBright);
 
-    return vec4(mix(nightCol, dayCol, dayF), alpha);
+    const col = mix(nightCol, dayCol, dayF).toVar();
+    // Aerial perspective: low (distant) cirrus recedes into the sky BEHIND it,
+    // so the deck dissolves toward the horizon instead of holding full contrast.
+    const aerial = smoothstep(float(0.5), float(0.05), y).mul(uCloudAerial);
+    col.assign(mix(col, bgCol, aerial));
+    return vec4(col, alpha);
   });
 
   // ── Sky color node ───────────────────────────────────────────────────────
@@ -436,7 +442,7 @@ export function createDayNightSky() {
     // sun/moon discs below (thin clouds → the disc still shines through). Gated
     // so a disabled deck pays nothing.
     If(uCloudEnabled.greaterThan(0.5), () => {
-      const c = cirrus(dir, dayF, twilightF);
+      const c = cirrus(dir, dayF, twilightF, skyCol);
       skyCol.assign(mix(skyCol, c.xyz, c.w));
     });
 
@@ -597,6 +603,7 @@ export function createDayNightSky() {
       Math.sin(THREE.MathUtils.degToRad(P.cloudWindDeg)),
     );
     uCloudColor.value.set(P.cloudColor);
+    uCloudAerial.value = P.cloudAerial ?? 0.8;
 
     if (frame.fog) {
       uFogEnabled.value = frame.fog.enabled ? 1 : 0;
@@ -682,4 +689,5 @@ export const SKY_DEFAULTS = {
   cloudSpeed: 0.01,
   cloudWindDeg: 20,
   cloudColor: "#ffffff",
+  cloudAerial: 0.8,
 };
