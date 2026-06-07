@@ -665,9 +665,14 @@
         return g;
       }
 
-      class SmokeBlobs {
-        constructor(scene, mat, shadowMat, max = 40) {
+      // Generic blob particle sim — driven by a cfg object (a *_LOOK). Shadow
+      // is optional (pass null to skip, e.g. for fire). Reused by every
+      // mesh-blob effect; the material/look is what differs between them.
+      class BlobSystem {
+        constructor(scene, mat, shadowMat, cfg, max = 40) {
           this.max = max;
+          this.cfg = cfg;
+          this.hasShadow = !!shadowMat;
           const geo = makeBlobGeometry();
           this.seedArr = new Float32Array(max);
           this.lifeArr = new Float32Array(max).fill(1);
@@ -683,17 +688,19 @@
           this.mesh.count = max;
           scene.add(this.mesh);
 
-          const sgeo = new THREE.PlaneGeometry(1, 1);
-          sgeo.deleteAttribute("normal");
-          this.shadowArr = new Float32Array(max);
-          this.shadowAttr = new THREE.InstancedBufferAttribute(this.shadowArr, 1);
-          sgeo.setAttribute("iShadow", this.shadowAttr);
-          this.shadowMesh = new THREE.InstancedMesh(sgeo, shadowMat, max);
-          this.shadowMesh.frustumCulled = false;
-          this.shadowMesh.count = max;
-          this.shadowMesh.renderOrder = -1;
-          scene.add(this.shadowMesh);
-          this._sd = new THREE.Object3D();
+          if (this.hasShadow) {
+            const sgeo = new THREE.PlaneGeometry(1, 1);
+            sgeo.deleteAttribute("normal");
+            this.shadowArr = new Float32Array(max);
+            this.shadowAttr = new THREE.InstancedBufferAttribute(this.shadowArr, 1);
+            sgeo.setAttribute("iShadow", this.shadowAttr);
+            this.shadowMesh = new THREE.InstancedMesh(sgeo, shadowMat, max);
+            this.shadowMesh.frustumCulled = false;
+            this.shadowMesh.count = max;
+            this.shadowMesh.renderOrder = -1;
+            scene.add(this.shadowMesh);
+            this._sd = new THREE.Object3D();
+          }
 
           this.active = new Uint8Array(max);
           this.px = new Float32Array(max);
@@ -730,7 +737,7 @@
           this.dx[i] = Math.cos(a) * (0.3 + Math.random() * 0.7);
           this.dz[i] = Math.sin(a) * (0.3 + Math.random() * 0.7);
           this.age[i] = 0;
-          this.life[i] = SMOKE_LOOK.lifetime * (0.8 + Math.random() * 0.4);
+          this.life[i] = this.cfg.lifetime * (0.8 + Math.random() * 0.4);
           const ax = new THREE.Vector3(
             Math.random() - 0.5,
             Math.random() - 0.5,
@@ -753,21 +760,24 @@
         }
 
         update(dt, time, u) {
-          this.acc += SMOKE_LOOK.rate * dt;
+          const cfg = this.cfg;
+          this.acc += cfg.rate * dt;
           while (this.acc >= 1) {
             this.acc -= 1;
             const slot = this.active.indexOf(0);
             if (slot >= 0) this._spawn(slot);
           }
-          const colTop = Math.max(SMOKE_LOOK.rise * SMOKE_LOOK.lifetime * 0.8, 0.001);
+          const colTop = Math.max(cfg.rise * cfg.lifetime * 0.8, 0.001);
 
-          const ld = u.lightDir.value;
+          const ld = this.hasShadow ? u.lightDir.value : null;
           for (let i = 0; i < this.max; i++) {
             if (!this.active[i]) {
               this.mesh.setMatrixAt(i, this._hidden);
-              this.shadowMesh.setMatrixAt(i, this._hidden);
               this.lifeArr[i] = 1;
-              this.shadowArr[i] = 0;
+              if (this.hasShadow) {
+                this.shadowMesh.setMatrixAt(i, this._hidden);
+                this.shadowArr[i] = 0;
+              }
               continue;
             }
             this.age[i] += dt;
@@ -775,33 +785,31 @@
             if (lr >= 1) {
               this.active[i] = 0;
               this.mesh.setMatrixAt(i, this._hidden);
-              this.shadowMesh.setMatrixAt(i, this._hidden);
               this.lifeArr[i] = 1;
-              this.shadowArr[i] = 0;
+              if (this.hasShadow) {
+                this.shadowMesh.setMatrixAt(i, this._hidden);
+                this.shadowArr[i] = 0;
+              }
               continue;
             }
 
-            this.py[i] += SMOKE_LOOK.rise * dt;
-            this.px[i] += this.dx[i] * SMOKE_LOOK.spread * lr * dt;
-            this.pz[i] += this.dz[i] * SMOKE_LOOK.spread * lr * dt;
+            this.py[i] += cfg.rise * dt;
+            this.px[i] += this.dx[i] * cfg.spread * lr * dt;
+            this.pz[i] += this.dz[i] * cfg.spread * lr * dt;
 
             const hAbove = this.py[i] - this.base.y;
             const hNorm = Math.min(hAbove / colTop, 1);
-            const ts = time * 0.001 * SMOKE_LOOK.curlSpeed;
+            const ts = time * 0.001 * cfg.curlSpeed;
             const curlX =
-              Math.sin(hAbove * SMOKE_LOOK.curlScale + ts) *
-              SMOKE_LOOK.curlAmount *
-              hNorm;
+              Math.sin(hAbove * cfg.curlScale + ts) * cfg.curlAmount * hNorm;
             const curlZ =
-              Math.cos(hAbove * SMOKE_LOOK.curlScale * 0.8 + ts * 1.1) *
-              SMOKE_LOOK.curlAmount *
+              Math.cos(hAbove * cfg.curlScale * 0.8 + ts * 1.1) *
+              cfg.curlAmount *
               hNorm;
 
-            this.ang[i] += this.spin[i] * SMOKE_LOOK.spin * dt;
+            this.ang[i] += this.spin[i] * cfg.spin * dt;
             const ease = 1 - (1 - lr) * (1 - lr);
-            const scale =
-              SMOKE_LOOK.sizeStart +
-              (SMOKE_LOOK.sizeEnd - SMOKE_LOOK.sizeStart) * ease;
+            const scale = cfg.sizeStart + (cfg.sizeEnd - cfg.sizeStart) * ease;
 
             const cx = this.px[i] + curlX;
             const cz = this.pz[i] + curlZ;
@@ -817,25 +825,29 @@
             this.centerArr[i * 3 + 1] = this.py[i];
             this.centerArr[i * 3 + 2] = cz;
 
-            const projk = this.py[i] / Math.max(ld.y, 0.2);
-            const sd = this._sd;
-            sd.position.set(cx - ld.x * projk, 0.02, cz - ld.z * projk);
-            sd.rotation.set(-Math.PI / 2, 0, 0);
-            const ss = scale * 2.4 * SMOKE_LOOK.shadowSize;
-            sd.scale.set(ss, ss, ss);
-            sd.updateMatrix();
-            this.shadowMesh.setMatrixAt(i, sd.matrix);
-            const gFade = Math.max(0, 1 - this.py[i] / (colTop * 1.1));
-            const lifeFade =
-              smokeSmooth01(0, 0.1, lr) * (1 - smokeSmooth01(0.65, 1, lr));
-            this.shadowArr[i] = gFade * lifeFade;
+            if (this.hasShadow) {
+              const projk = this.py[i] / Math.max(ld.y, 0.2);
+              const sd = this._sd;
+              sd.position.set(cx - ld.x * projk, 0.02, cz - ld.z * projk);
+              sd.rotation.set(-Math.PI / 2, 0, 0);
+              const ss = scale * 2.4 * cfg.shadowSize;
+              sd.scale.set(ss, ss, ss);
+              sd.updateMatrix();
+              this.shadowMesh.setMatrixAt(i, sd.matrix);
+              const gFade = Math.max(0, 1 - this.py[i] / (colTop * 1.1));
+              const lifeFade =
+                smokeSmooth01(0, 0.1, lr) * (1 - smokeSmooth01(0.65, 1, lr));
+              this.shadowArr[i] = gFade * lifeFade;
+            }
           }
           this.mesh.instanceMatrix.needsUpdate = true;
           this.lifeAttr.needsUpdate = true;
           this.centerAttr.needsUpdate = true;
-          this.shadowMesh.instanceMatrix.needsUpdate = true;
-          this.shadowAttr.needsUpdate = true;
-          this.shadowMesh.visible = SMOKE_LOOK.shadowOn;
+          if (this.hasShadow) {
+            this.shadowMesh.instanceMatrix.needsUpdate = true;
+            this.shadowAttr.needsUpdate = true;
+            this.shadowMesh.visible = cfg.shadowOn;
+          }
         }
       }
 
@@ -910,7 +922,7 @@
 
         const smokeMat = buildMeshSmokeMaterial(voroTex, u);
         const shadowMat = buildSmokeShadowMaterial(uShadow);
-        const blobs = new SmokeBlobs(scene, smokeMat, shadowMat);
+        const blobs = new BlobSystem(scene, smokeMat, shadowMat, SMOKE_LOOK);
 
         function applyDepthMode(on) {
           smokeMat.depthWrite = on;
@@ -918,22 +930,6 @@
           smokeMat.needsUpdate = true;
         }
         applyDepthMode(SMOKE_LOOK.depthSort);
-
-        const postProcessing = new THREE.PostProcessing(renderer);
-        const scenePass = pass(scene, camera);
-        const scenePassColor = scenePass.getTextureNode();
-        const bloomPass = bloom(
-          scenePassColor,
-          SMOKE_LOOK.bloomStrength,
-          SMOKE_LOOK.bloomRadius,
-          SMOKE_LOOK.bloomThreshold,
-        );
-        const withBloom = scenePassColor.add(bloomPass);
-        function applyBloom(on) {
-          postProcessing.outputNode = on ? withBloom : scenePassColor;
-          postProcessing.needsUpdate = true;
-        }
-        applyBloom(SMOKE_LOOK.bloomOn);
 
         const raycaster = new THREE.Raycaster();
         const pointer = new THREE.Vector2();
@@ -952,19 +948,272 @@
           }
         });
 
+        // ── FX module interface (called by the registry / frame loop) ──
+        // The smoke base follows the player; effects that should sit still
+        // would just ignore ctx.playerPos.
+        function update(dt, ctx) {
+          blobs.setBase(
+            new THREE.Vector3(ctx.playerPos.x, ctx.playerPos.y + 0.3, ctx.playerPos.z),
+          );
+          u.time.value = ctx.timeMs * 0.001;
+          const colTopY = Math.max(SMOKE_LOOK.rise * SMOKE_LOOK.lifetime * 0.7, 0.001);
+          u.colTopY.value = colTopY;
+          u.pivot.value.set(
+            blobs.base.x,
+            blobs.base.y + colTopY * 0.5,
+            blobs.base.z,
+          );
+          blobs.update(dt, ctx.timeMs, u);
+        }
+        function setActive(on) {
+          blobs.mesh.visible = on;
+          blobs.shadowMesh.visible = on && SMOKE_LOOK.shadowOn;
+        }
+
         return {
           u,
           uShadow,
           blobs,
           smokeMat,
-          bloomPass,
-          postProcessing,
           applyDepthMode,
-          applyBloom,
           setVoronoiImage,
           resetVoronoi,
+          update,
+          setActive,
         };
       }
+
+      // ── Fire preset — warm ADDITIVE blobs, emissive colour ramp over life ─
+      const FIRE_LOOK = {
+        // shape / erosion (same voronoi machinery as smoke)
+        tiling: 0.5,
+        panSpeed: 0.25,
+        holeDepth: 0.5,
+        edgeNoise: 0.6,
+        cutoff: 0.1,
+        dissolveSoft: 0.2,
+        erode: 0.7,
+        fadeIn: 0.1,
+        opacity: 1.0,
+        // fire colour ramp (young → old) + HDR intensity for bloom
+        colHot: "#fff2c0",
+        colMid: "#ff7a18",
+        colTip: "#5a1203",
+        intensity: 2.2,
+        midPoint: 0.4,
+        // sim — faster, shorter, smaller than smoke
+        rise: 2.6,
+        spread: 0.25,
+        lifetime: 1.4,
+        rate: 14,
+        sizeStart: 0.5,
+        sizeEnd: 1.0,
+        spin: 0.5,
+        curlAmount: 0.5,
+        curlScale: 1.1,
+        curlSpeed: 1.4,
+        // no ground shadow for fire
+        shadowOn: false,
+        shadowSize: 1,
+        clickToPuff: false,
+      };
+
+      function buildFireMaterial(voroTex, u) {
+        const iSeed = attribute("iSeed", "float");
+        const iLife = attribute("iLife", "float");
+
+        // triplanar voronoi (object space) — identical to the smoke recipe
+        const p = positionLocal.mul(u.tiling);
+        const aN = normalLocal.abs();
+        const bl = aN.div(aN.x.add(aN.y).add(aN.z).add(0.0001));
+        const t = u.time.mul(u.panSpeed);
+        const off = vec2(iSeed, iSeed.mul(1.7)).add(vec2(t.mul(0.3), t.negate()));
+        const sX = texture(voroTex, p.yz.add(off)).r;
+        const sY = texture(voroTex, p.xz.add(off)).r;
+        const sZ = texture(voroTex, p.xy.add(off)).r;
+        const V = sX.mul(bl.x).add(sY.mul(bl.y)).add(sZ.mul(bl.z));
+
+        const N = normalWorld.normalize();
+        const viewDir = cameraPosition.sub(positionWorld).normalize();
+        const facing = dot(N, viewDir).clamp(0, 1);
+
+        // erosion / dissolve (same as smoke)
+        const holed = facing.mul(mix(float(1), V, u.holeDepth));
+        const edged = holed.add(V.sub(0.5).mul(u.edgeNoise));
+        const thr = u.cutoff.add(iLife.mul(u.erode));
+        const fadeIn = smoothstep(float(0), u.fadeIn, iLife);
+        const alpha = smoothstep(thr, thr.add(u.dissolveSoft), edged)
+          .mul(fadeIn)
+          .mul(u.opacity);
+
+        // emissive colour ramp over life: hot core → orange → dark tip.
+        const a = iLife;
+        const c1 = mix(u.colHot, u.colMid, smoothstep(float(0), u.midPoint, a));
+        const ramp = mix(c1, u.colTip, smoothstep(u.midPoint, float(1), a));
+        const col = ramp.mul(u.intensity);
+
+        const mat = new MeshBasicNodeMaterial({
+          transparent: true,
+          depthWrite: false,
+          depthTest: true,
+          blending: THREE.AdditiveBlending,
+          side: THREE.DoubleSide,
+        });
+        mat.colorNode = col;
+        mat.opacityNode = alpha;
+        return mat;
+      }
+
+      async function createFirePreset({ scene, floor, renderer, camera }) {
+        const u = {
+          time: uniform(0),
+          tiling: uniform(FIRE_LOOK.tiling),
+          panSpeed: uniform(FIRE_LOOK.panSpeed),
+          holeDepth: uniform(FIRE_LOOK.holeDepth),
+          edgeNoise: uniform(FIRE_LOOK.edgeNoise),
+          cutoff: uniform(FIRE_LOOK.cutoff),
+          dissolveSoft: uniform(FIRE_LOOK.dissolveSoft),
+          erode: uniform(FIRE_LOOK.erode),
+          fadeIn: uniform(FIRE_LOOK.fadeIn),
+          opacity: uniform(FIRE_LOOK.opacity),
+          colHot: uniform(new THREE.Color(FIRE_LOOK.colHot)),
+          colMid: uniform(new THREE.Color(FIRE_LOOK.colMid)),
+          colTip: uniform(new THREE.Color(FIRE_LOOK.colTip)),
+          intensity: uniform(FIRE_LOOK.intensity),
+          midPoint: uniform(FIRE_LOOK.midPoint),
+        };
+
+        const voroTex = await new Promise((res) => {
+          new THREE.TextureLoader().load(VORO_URL, (tex) => {
+            tex.wrapS = tex.wrapT = THREE.RepeatWrapping;
+            tex.colorSpace = THREE.NoColorSpace;
+            res(tex);
+          });
+        });
+
+        const fireMat = buildFireMaterial(voroTex, u);
+        const blobs = new BlobSystem(scene, fireMat, null, FIRE_LOOK);
+
+        function update(dt, ctx) {
+          blobs.setBase(
+            new THREE.Vector3(ctx.playerPos.x, ctx.playerPos.y + 0.3, ctx.playerPos.z),
+          );
+          u.time.value = ctx.timeMs * 0.001;
+          blobs.update(dt, ctx.timeMs, u);
+        }
+        function setActive(on) {
+          blobs.mesh.visible = on;
+        }
+
+        const raycaster = new THREE.Raycaster();
+        const pointer = new THREE.Vector2();
+        window.addEventListener("mousemove", (e) => {
+          pointer.x = (e.clientX / innerWidth) * 2 - 1;
+          pointer.y = -(e.clientY / innerHeight) * 2 + 1;
+        });
+        window.addEventListener("click", (e) => {
+          if (!FIRE_LOOK.clickToPuff) return;
+          if (e.target.closest("#inspector")) return;
+          raycaster.setFromCamera(pointer, camera);
+          const hit = raycaster.intersectObject(floor)[0];
+          if (hit) {
+            blobs.setBase(hit.point.clone().setY(0.3));
+            blobs.burst();
+          }
+        });
+
+        return { u, blobs, fireMat, update, setActive };
+      }
+
+      function buildFireInspector(body, { handle, scene, controls, camera }) {
+        const { u, blobs } = handle;
+
+        const shape = _section(body, "Voronoi (triplanar)", false);
+        _slider(shape, FIRE_LOOK, "tiling", { label: "Cell scale", min: 0.1, max: 1.5, step: 0.01, onChange: (v) => (u.tiling.value = v) });
+        _slider(shape, FIRE_LOOK, "panSpeed", { label: "Churn speed", min: 0, max: 1, step: 0.01, onChange: (v) => (u.panSpeed.value = v) });
+        _slider(shape, FIRE_LOOK, "holeDepth", { label: "Hole depth", min: 0, max: 1, step: 0.01, onChange: (v) => (u.holeDepth.value = v) });
+        _slider(shape, FIRE_LOOK, "edgeNoise", { label: "Edge irregularity", min: 0, max: 1.2, step: 0.01, onChange: (v) => (u.edgeNoise.value = v) });
+
+        const diss = _section(body, "Erosion (fresnel edge)", false);
+        _slider(diss, FIRE_LOOK, "cutoff", { label: "Cutoff", min: 0, max: 0.7, step: 0.01, onChange: (v) => (u.cutoff.value = v) });
+        _slider(diss, FIRE_LOOK, "dissolveSoft", { label: "Edge softness", min: 0.02, max: 0.5, step: 0.01, onChange: (v) => (u.dissolveSoft.value = v) });
+        _slider(diss, FIRE_LOOK, "erode", { label: "Age erosion", min: 0, max: 1, step: 0.01, onChange: (v) => (u.erode.value = v) });
+        _slider(diss, FIRE_LOOK, "fadeIn", { label: "Grow-in", min: 0.02, max: 0.4, step: 0.01, onChange: (v) => (u.fadeIn.value = v) });
+        _slider(diss, FIRE_LOOK, "opacity", { label: "Opacity", min: 0.2, max: 1, step: 0.01, onChange: (v) => (u.opacity.value = v) });
+
+        const col = _section(body, "Fire color", true);
+        _color(col, FIRE_LOOK, "colHot", { label: "Hot (young)", onChange: (v) => u.colHot.value.set(v) });
+        _color(col, FIRE_LOOK, "colMid", { label: "Mid", onChange: (v) => u.colMid.value.set(v) });
+        _color(col, FIRE_LOOK, "colTip", { label: "Tip (old)", onChange: (v) => u.colTip.value.set(v) });
+        _slider(col, FIRE_LOOK, "midPoint", { label: "Mid point", min: 0.05, max: 0.95, step: 0.01, onChange: (v) => (u.midPoint.value = v) });
+        _slider(col, FIRE_LOOK, "intensity", { label: "Intensity (HDR)", min: 0.5, max: 5, step: 0.05, onChange: (v) => (u.intensity.value = v) });
+
+        const sim = _section(body, "Simulation", false);
+        _toggle(sim, FIRE_LOOK, "clickToPuff", { label: "Click ground to puff" });
+        _slider(sim, FIRE_LOOK, "rise", { label: "Rise speed", min: 0.2, max: 6, step: 0.05 });
+        _slider(sim, FIRE_LOOK, "spread", { label: "Spread", min: 0, max: 2, step: 0.05 });
+        _slider(sim, FIRE_LOOK, "lifetime", { label: "Lifetime (s)", min: 0.4, max: 4, step: 0.05 });
+        _slider(sim, FIRE_LOOK, "rate", { label: "Emission rate", min: 1, max: 30, step: 1 });
+        _slider(sim, FIRE_LOOK, "sizeStart", { label: "Size start", min: 0.1, max: 1.5, step: 0.05 });
+        _slider(sim, FIRE_LOOK, "sizeEnd", { label: "Size end", min: 0.3, max: 3, step: 0.05 });
+        _slider(sim, FIRE_LOOK, "spin", { label: "Tumble", min: 0, max: 2, step: 0.05 });
+        _slider(sim, FIRE_LOOK, "curlAmount", { label: "Curl amount", min: 0, max: 2, step: 0.05 });
+        _slider(sim, FIRE_LOOK, "curlScale", { label: "Curl waves", min: 0.1, max: 2, step: 0.05 });
+        _slider(sim, FIRE_LOOK, "curlSpeed", { label: "Curl speed", min: 0, max: 3, step: 0.05 });
+
+        const act = _section(body, "Actions", false);
+        _button(act, { title: "Puff burst", onClick: () => blobs.burst(12) });
+        _button(act, {
+          title: "Reset cam",
+          onClick: () => {
+            camera.position.set(0, 20, 60);
+            controls.target.set(0, 0, 0);
+            controls.update();
+          },
+        });
+      }
+
+      // ── Scene-level post-processing (shared by all effects) ──────────────
+      const POST = {
+        bloomOn: false,
+        strength: 0.6,
+        radius: 0.5,
+        threshold: 0.7,
+      };
+      function createPost(renderer, scene, camera) {
+        const postProcessing = new THREE.RenderPipeline(renderer);
+        const scenePass = pass(scene, camera);
+        const scenePassColor = scenePass.getTextureNode();
+        const bloomPass = bloom(
+          scenePassColor,
+          POST.strength,
+          POST.radius,
+          POST.threshold,
+        );
+        const withBloom = scenePassColor.add(bloomPass);
+        function applyBloom(on) {
+          postProcessing.outputNode = on ? withBloom : scenePassColor;
+          postProcessing.needsUpdate = true;
+        }
+        applyBloom(POST.bloomOn);
+        return { postProcessing, bloomPass, applyBloom };
+      }
+
+      // ── FX registry: each effect is a self-contained module ──────────────
+      // create(ctx) → handle with { update(dt, frameCtx), setActive(on),
+      // and an inspector builder }. Add a new effect = add one entry here.
+      const FX_REGISTRY = {
+        meshSmoke: {
+          label: "Mesh Smoke",
+          create: createMeshSmokePreset,
+          buildInspector: buildMeshSmokeInspector,
+        },
+        fire: {
+          label: "Fire",
+          create: createFirePreset,
+          buildInspector: buildFireInspector,
+        },
+      };
 
       function sunDirectionFromAngles(azDeg, elDeg, target = new THREE.Vector3()) {
         const az = THREE.MathUtils.degToRad(azDeg);
@@ -1126,12 +1375,31 @@
         floor.receiveShadow = true;
         scene.add(floor);
 
-        const meshSmoke = await createMeshSmokePreset({
-          scene,
-          floor,
-          renderer,
-          camera,
-        });
+        // ── Shared post-processing + FX manager ──
+        const post = createPost(renderer, scene, camera);
+
+        const fxCtx = { scene, floor, renderer, camera };
+        const fxHandles = {};
+        let activeFX = null;
+        let activeKey = null;
+        let fxInspectorContainer = null;
+        async function activateFX(key) {
+          if (activeFX) activeFX.setActive(false);
+          if (!fxHandles[key]) fxHandles[key] = await FX_REGISTRY[key].create(fxCtx);
+          activeFX = fxHandles[key];
+          activeKey = key;
+          activeFX.setActive(true);
+          if (fxInspectorContainer) {
+            fxInspectorContainer.innerHTML = "";
+            FX_REGISTRY[key].buildInspector(fxInspectorContainer, {
+              handle: activeFX,
+              scene,
+              controls,
+              camera,
+            });
+          }
+        }
+        await activateFX("meshSmoke");
 
         // ── CAPSULE PLAYER (same shape + colors as v2/play/playMode.js) ──
         const capsuleGeo = new THREE.CapsuleGeometry(CAP_R, CAP_H, 4, 8);
@@ -1342,24 +1610,12 @@
             controls.update();
           }
 
-          meshSmoke.blobs.setBase(
-            new THREE.Vector3(playerPos.x, playerPos.y + 0.3, playerPos.z),
-          );
           const nowMs = performance.now();
-          meshSmoke.u.time.value = nowMs * 0.001;
-          const colTopY = Math.max(
-            SMOKE_LOOK.rise * SMOKE_LOOK.lifetime * 0.7,
-            0.001,
-          );
-          meshSmoke.u.colTopY.value = colTopY;
-          meshSmoke.u.pivot.value.set(
-            meshSmoke.blobs.base.x,
-            meshSmoke.blobs.base.y + colTopY * 0.5,
-            meshSmoke.blobs.base.z,
-          );
-          meshSmoke.blobs.update(dt, nowMs, meshSmoke.u);
+          if (activeFX) {
+            activeFX.update(dt, { dt, timeMs: nowMs, playerPos, camera });
+          }
 
-          meshSmoke.postProcessing.render();
+          post.postProcessing.render();
           renderer.resolveTimestampsAsync(THREE.TimestampQuery.RENDER);
           stats.update();
         });
@@ -1379,7 +1635,16 @@
           floorMat,
           updateSun,
           rebuildSkyEnv,
-          meshSmoke,
+          post,
+          fx: {
+            registry: FX_REGISTRY,
+            activate: activateFX,
+            activeKey: () => activeKey,
+            activeHandle: () => activeFX,
+            setContainer: (el) => {
+              fxInspectorContainer = el;
+            },
+          },
         });
       }
 
@@ -1530,9 +1795,9 @@
         return row;
       }
 
-      function buildMeshSmokeInspector(body, { meshSmoke, scene, controls, camera }) {
-        const { u, uShadow, blobs, bloomPass, applyDepthMode, applyBloom, setVoronoiImage, resetVoronoi } =
-          meshSmoke;
+      function buildMeshSmokeInspector(body, { handle, scene, controls, camera }) {
+        const { u, uShadow, blobs, applyDepthMode, setVoronoiImage, resetVoronoi } =
+          handle;
 
         const tex = _section(body, "Particle texture", false);
         const texStatus = document.createElement("div");
@@ -1748,33 +2013,6 @@
           },
         });
 
-        const blm = _section(body, "Bloom (post)", false);
-        _toggle(blm, SMOKE_LOOK, "bloomOn", {
-          label: "Enable bloom",
-          onChange: (v) => applyBloom(v),
-        });
-        _slider(blm, SMOKE_LOOK, "bloomStrength", {
-          label: "Strength",
-          min: 0,
-          max: 2,
-          step: 0.01,
-          onChange: (v) => (bloomPass.strength.value = v),
-        });
-        _slider(blm, SMOKE_LOOK, "bloomRadius", {
-          label: "Radius",
-          min: 0,
-          max: 1,
-          step: 0.01,
-          onChange: (v) => (bloomPass.radius.value = v),
-        });
-        _slider(blm, SMOKE_LOOK, "bloomThreshold", {
-          label: "Threshold",
-          min: 0,
-          max: 1,
-          step: 0.01,
-          onChange: (v) => (bloomPass.threshold.value = v),
-        });
-
         const sim = _section(body, "Simulation", false);
         _toggle(sim, SMOKE_LOOK, "clickToPuff", {
           label: "Click ground to puff",
@@ -1863,7 +2101,8 @@
         floorMat,
         updateSun,
         rebuildSkyEnv,
-        meshSmoke,
+        post,
+        fx,
       }) {
         const body = document.getElementById("inspector-body");
 
@@ -1925,19 +2164,56 @@
           });
         }
 
-        const FX_PRESETS = { preset: "meshSmoke" };
+        // ── FX preset selector (switches the active effect) ──
+        const FX_SEL = { preset: fx.activeKey() };
         const fxPresetSection = _section(body, "FX Preset", true);
-        _select(fxPresetSection, FX_PRESETS, "preset", {
-          label: "Preset",
-          options: { "Mesh Smoke": "meshSmoke" },
+        _select(fxPresetSection, FX_SEL, "preset", {
+          label: "Effect",
+          options: Object.fromEntries(
+            Object.entries(fx.registry).map(([k, v]) => [v.label, k]),
+          ),
+          onChange: (key) => fx.activate(key),
         });
-        const meshSmokeRoot = _section(body, "Mesh Smoke", true);
-        buildMeshSmokeInspector(meshSmokeRoot, {
-          meshSmoke,
+        // Container the active effect's controls are (re)built into on switch.
+        const fxContainer = document.createElement("div");
+        body.appendChild(fxContainer);
+        fx.setContainer(fxContainer);
+        fx.registry[fx.activeKey()].buildInspector(fxContainer, {
+          handle: fx.activeHandle(),
           scene,
           controls,
           camera,
         });
+
+        // ── Post (scene-level bloom) ──
+        {
+          const sec = _section(body, "Post (bloom)", true);
+          _toggle(sec, POST, "bloomOn", {
+            label: "Enable bloom",
+            onChange: (v) => post.applyBloom(v),
+          });
+          _slider(sec, POST, "strength", {
+            label: "Strength",
+            min: 0,
+            max: 2,
+            step: 0.01,
+            onChange: (v) => (post.bloomPass.strength.value = v),
+          });
+          _slider(sec, POST, "radius", {
+            label: "Radius",
+            min: 0,
+            max: 1,
+            step: 0.01,
+            onChange: (v) => (post.bloomPass.radius.value = v),
+          });
+          _slider(sec, POST, "threshold", {
+            label: "Threshold",
+            min: 0,
+            max: 1,
+            step: 0.01,
+            onChange: (v) => (post.bloomPass.threshold.value = v),
+          });
+        }
 
         // ── Camera ──
         {
