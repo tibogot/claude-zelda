@@ -443,8 +443,10 @@
         floor,
         length,
         mix,
+        mrt,
         normalLocal,
         normalWorld,
+        output,
         pass,
         positionLocal,
         positionWorld,
@@ -1061,6 +1063,9 @@
         });
         mat.colorNode = col;
         mat.opacityNode = alpha;
+        // Opt into the emissive MRT buffer → this is what bloom reads. The
+        // colour ramp (×intensity) glows; everything else writes black.
+        mat.mrtNode = mrt({ output, emissive: col });
         return mat;
       }
 
@@ -1178,25 +1183,36 @@
         bloomOn: false,
         strength: 0.6,
         radius: 0.5,
-        threshold: 0.7,
+        threshold: 0.0,
+        debugEmissive: false,
       };
       function createPost(renderer, scene, camera) {
         const postProcessing = new THREE.RenderPipeline(renderer);
         const scenePass = pass(scene, camera);
-        const scenePassColor = scenePass.getTextureNode();
+        // MRT: render colour + a separate EMISSIVE buffer. The default emissive
+        // is black, so NOTHING blooms (sky, ground, smoke) unless a material
+        // opts in by setting its own mrtNode (see buildFireMaterial). Bloom
+        // reads only the emissive buffer → the bright sky can never bloom.
+        scenePass.setMRT(mrt({ output, emissive: vec3(0) }));
+        const sceneColor = scenePass.getTextureNode("output");
+        const emissiveColor = scenePass.getTextureNode("emissive");
         const bloomPass = bloom(
-          scenePassColor,
+          emissiveColor,
           POST.strength,
           POST.radius,
           POST.threshold,
         );
-        const withBloom = scenePassColor.add(bloomPass);
-        function applyBloom(on) {
-          postProcessing.outputNode = on ? withBloom : scenePassColor;
+        const composed = sceneColor.add(bloomPass);
+        function refresh() {
+          postProcessing.outputNode = POST.debugEmissive
+            ? emissiveColor
+            : POST.bloomOn
+              ? composed
+              : sceneColor;
           postProcessing.needsUpdate = true;
         }
-        applyBloom(POST.bloomOn);
-        return { postProcessing, bloomPass, applyBloom };
+        refresh();
+        return { postProcessing, bloomPass, emissiveColor, refresh };
       }
 
       // ── FX registry: each effect is a self-contained module ──────────────
@@ -2185,12 +2201,12 @@
           camera,
         });
 
-        // ── Post (scene-level bloom) ──
+        // ── Post (scene-level selective bloom via emissive MRT) ──
         {
-          const sec = _section(body, "Post (bloom)", true);
+          const sec = _section(body, "Post (selective bloom)", true);
           _toggle(sec, POST, "bloomOn", {
             label: "Enable bloom",
-            onChange: (v) => post.applyBloom(v),
+            onChange: () => post.refresh(),
           });
           _slider(sec, POST, "strength", {
             label: "Strength",
@@ -2212,6 +2228,10 @@
             max: 1,
             step: 0.01,
             onChange: (v) => (post.bloomPass.threshold.value = v),
+          });
+          _toggle(sec, POST, "debugEmissive", {
+            label: "Debug: emissive buffer",
+            onChange: () => post.refresh(),
           });
         }
 
