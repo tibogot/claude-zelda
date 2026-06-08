@@ -407,8 +407,16 @@ export function createDayNightSky() {
 
     const skyCol = mix(analyticSky, physicalSky, uScatterMix).toVar();
 
-    // Ground hemisphere (below the horizon line).
-    const groundMix = smoothstep(0.0, -0.04, up);
+    // Below the horizon. In SCATTER mode the Nishita march already clamps to the
+    // planet ground, so it naturally fades from the bright horizon (long grazing
+    // path) down to dark (steep, short path) — exactly like SkyMesh. So let it
+    // show and only blend the explicit ground color in DEEP down (a floor instead
+    // of black). In ANALYTIC mode the gradient is flat below the horizon, so blend
+    // the ground in sooner. Either way the bottom follows the sky — no hard grey
+    // seam at the waterline (the old code cut to ground over just ~2°).
+    const groundDeep = smoothstep(-0.05, -0.6, up); // 0 at horizon → 1 far down
+    const groundNear = smoothstep(0.0, -0.15, up); // analytic floor (sooner)
+    const groundMix = mix(groundNear, groundDeep, uScatterMix);
     skyCol.assign(
       mix(skyCol, uGroundColor.mul(mix(float(0.12), float(1.0), dayF)), groundMix),
     );

@@ -5272,6 +5272,72 @@ export async function startV2App(opts = {}) {
   _oceanEnvRef = scene.environment;
   worldOcean.syncParams(toolState.worldOcean);
 
+  // --- Pipeline pre-warm for the lazily-built systems --------------------------
+  // Foliage (per-chunk, disposed on prune) and billboards are built/torn down at
+  // runtime, so their pipelines compile on FIRST DRAW during play — the orbit
+  // stutter. Trees/props/terrain create their meshes once and persist, so the
+  // load-time compileAsync already covers them. Here we instantiate ONE
+  // representative mesh per foliage/billboard slot (real geometry + shared
+  // material → the exact pipeline), park it far below the world, compile, then
+  // dispose. compileAsync also re-covers everything persistent in the scene.
+  // Runs once per play-mode entry (re-armed on exit) so edits are picked up.
+  const _pwMat = new THREE.Matrix4();
+  let _prewarmRunning = false;
+  let _prewarmedForPlay = false;
+  async function prewarmLazyPipelines() {
+    if (_prewarmRunning) return;
+    _prewarmRunning = true;
+    const temp = []; // { mesh, disposeGeo }
+    try {
+      // Foliage: real build path → correct instanced attributes (aRand/aLeafCenter/…).
+      const fakeTree = { x: 0, y: -100000, z: 0, rotY: 0, scale: 1, slotIdx: 0 };
+      for (let s = 0; s < foliageLodRenderer.slotPresets.length; s++) {
+        if (!foliageLodRenderer.slotPresets[s]) continue;
+        fakeTree.slotIdx = s;
+        for (let lod = 0; lod < 3; lod++) {
+          const im = foliageLodRenderer._buildChunkSlotLod([fakeTree], s, lod);
+          if (im) {
+            im.visible = true; // off-screen at y=-100000, frustumCulled stays false
+            scene.add(im);
+            temp.push({ mesh: im, disposeGeo: true }); // geometry is a clone — safe to dispose
+          }
+        }
+      }
+      // Billboards: shared geometry + material, instanceMatrix only.
+      _pwMat.makeTranslation(0, -100000, 0);
+      for (let s = 0; s < billboardRenderer.slotRender.length; s++) {
+        const sr = billboardRenderer.slotRender[s];
+        if (!sr || !sr.material) continue;
+        for (const k of ["lod0", "lod1", "lod2"]) {
+          const geo = sr.geometries?.[k];
+          if (!geo) continue;
+          const im = new THREE.InstancedMesh(geo, sr.material, 1);
+          im.castShadow = false;
+          im.receiveShadow = true;
+          im.frustumCulled = false;
+          im.setMatrixAt(0, _pwMat);
+          im.count = 1;
+          im.instanceMatrix.needsUpdate = true;
+          scene.add(im);
+          temp.push({ mesh: im, disposeGeo: false }); // shared geo — do NOT dispose
+        }
+      }
+      camera.updateMatrixWorld();
+      await renderer.compileAsync(scene, camera);
+    } catch (e) {
+      console.warn("[prewarm] skipped:", e);
+    } finally {
+      for (const { mesh, disposeGeo } of temp) {
+        scene.remove(mesh);
+        // InstancedMesh.dispose() frees the instance buffers only (not the shared
+        // material). Dispose the geometry separately, and only the foliage clones.
+        mesh.dispose?.();
+        if (disposeGeo) mesh.geometry?.dispose?.();
+      }
+      _prewarmRunning = false;
+    }
+  }
+
   // --- frameProbe wiring (TEMPORARY perf attribution; remove with the import) ---
   // Wrap each system's lazy (re)build method so the probe can count how many
   // InstancedMeshes are (re)built per frame and how long that CPU work took.
@@ -5310,6 +5376,17 @@ export async function startV2App(opts = {}) {
     if (!playMode.active) controls.update();
     const dtSec = dtMs * 0.001;
     playMode.update(dtSec);
+    // Pre-warm foliage/billboard pipelines once when entering play (re-arm on exit
+    // so world edits are recompiled). Fire-and-forget: compiles behind the scene
+    // so first-draw shader stalls don't hit during flight.
+    if (playMode.active) {
+      if (!_prewarmedForPlay) {
+        _prewarmedForPlay = true;
+        prewarmLazyPipelines();
+      }
+    } else if (_prewarmedForPlay) {
+      _prewarmedForPlay = false;
+    }
     if (playMode.active) {
       actorSystem.updatePlay(dtSec, playMode.playerPos);
       dialogueRunner.update(playMode.playerPos);
