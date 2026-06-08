@@ -259,6 +259,175 @@ export const V2_CONFIG = {
     cloudElevation: 0.5,
     meshScale: 10000,
   },
+  /**
+   * `skyMode === "procedural"` — the daynight-sky dome (gradient + Nishita
+   * scattering + sun/moon/stars/Milky Way/meteors + 2D cirrus). Mirrors
+   * `SKY_DEFAULTS` in `render/sky/dayNightSky.js`; keep the two in sync.
+   * The volumetric cloud deck is a separate (later) system — NOT here.
+   */
+  proceduralSky: {
+    // 0–24 convenience slider: writes the scene sun's Azimuth/Elevation (the
+    // single sun source). Not authoritative on load — az/el are serialized.
+    timeOfDay: 9.5,
+    autoAdvance: false, // animate the day/night cycle over time
+    daySpeed: 0.5, // hours of timeOfDay advanced per real second
+
+    zenithDay: "#2a6bd8",
+    horizonDay: "#bfe0ff",
+    zenithNight: "#05080f",
+    horizonNight: "#1a2740",
+    sunsetColor: "#ff7a33",
+    groundColor: "#4a4a52",
+
+    // Atmospheric scattering (Nishita). scatter:true = physical sky.
+    scatter: true,
+    sunIntensity: 22,
+    rayleigh: 1.0,
+    mie: 1.0,
+    mieG: 0.76,
+    atmoAltitude: 1500,
+    msAmount: 1.0,
+    msExtinct: 0.3,
+    // Sky-dome horizon haze height (lab PARAMS.fog.hazeHeight). Lower = the
+    // haze hugs the waterline so the scattering band reads clearly above it.
+    hazeHeight: 0.12,
+
+    sunColor: "#fff3d8",
+    sunSizeDeg: 1.2,
+    sunGlowPow: 280,
+    sunGlowStrength: 0.55,
+    sunDiscBright: 8.0,
+
+    moonColor: "#cdd9ff",
+    moonSizeDeg: 1.6,
+    moonGlowStrength: 0.25,
+    moonDiscBright: 3.0,
+    moonPhase: 0.85,
+    moonPhaseOrient: 30,
+    moonSurface: 0.85,
+    moonEarthshine: 0.12,
+    moonTermSoft: 0.06,
+
+    starDensity: 220,
+    starThreshold: 0.92,
+    starSize: 0.08,
+    starBrightness: 1.0,
+    starTwinkle: 3.0,
+
+    milkyWayEnabled: true,
+    milkyWayIntensity: 1.0,
+    milkyWayWidth: 0.32,
+    milkyWayScale: 4.0,
+    milkyWayColor1: "#5566a0",
+    milkyWayColor2: "#efe6cf",
+
+    meteorEnabled: false,
+    meteorIntensity: 1.0,
+    meteorRate: 0.45,
+    meteorSpeed: 1.0,
+    meteorWidth: 0.006,
+    meteorLength: 0.1,
+
+    // High cirrus deck (2D analytic clouds on the dome — NOT the volumetric).
+    cloudEnabled: true,
+    cloudCoverage: 0.5,
+    cloudDensity: 0.85,
+    cloudOpacity: 1.0,
+    cloudScale: 0.7,
+    cloudStretch: 2.5,
+    cloudSharpness: 0.22,
+    cloudDetail: 0.8,
+    cloudSunTint: 1.0,
+    cloudSpeed: 0.01,
+    cloudWindDeg: 20,
+    cloudColor: "#ffffff",
+    cloudAerial: 0.8,
+  },
+  /**
+   * Volumetric cloud DECK for the procedural sky — faithful port of the
+   * daynight-sky lab `cloud-layer.js` (mirrors its CLOUD_DEFAULTS). Separate from
+   * the 3 existing volumetric systems; only used when skyMode === "procedural".
+   * Disabled by default (baking the 96³ noise volume is a one-time CPU cost).
+   */
+  volumetricCloudDayNight: {
+    enabled: false,
+    // Lab defaults. Once the far-plane march cull was fixed (occlusion now gated
+    // on real geometry), the deck reaches the ground horizon regardless of base,
+    // so there's no need to lower it for v2's camera — restored to match the lab.
+    base: 1900,
+    thickness: 1400,
+    scale: 0.00015,
+    detailMul: 4.0,
+    coverage: 0.4,
+    softness: 0.12,
+    erode: 0.15,
+    densityMul: 12.0,
+    steps: 128,
+    lightSteps: 8,
+    emptySkip: 1.0,
+    bufferScale: 0.5,
+    maxDist: 24000, // lab default
+    planetRadius: 160000,
+    opacity: 0.7,
+    lightAbsorb: 1.1,
+    phaseG: 0.3,
+    powder: 0.5,
+    msAmount: 0.7,
+    msExtinction: 0.5,
+    msContribution: 0.5,
+    msEccentricity: 0.5,
+    windDeg: 35,
+    windSpeed: 0.02,
+    aerialEnabled: true,
+    aerialDensity: 0.00012,
+    aerialAmount: 1.0,
+  },
+  /**
+   * Cloud shadows for the daynight volumetric deck (lab PARAMS.cloudShadows).
+   * Darkens terrain + ocean under the deck in the cloud composite pass; only
+   * active when the deck is enabled + procedural sky. Strength fades with day.
+   */
+  cloudShadows: {
+    enabled: true,
+    strength: 0.6,
+  },
+  /**
+   * God-rays / light shafts for the daynight deck (lab GOD_RAYS_DEFAULTS). Its
+   * own cloud-aware pass (the occlusion silhouette uses the cloud deck, so shafts
+   * stream through the gaps). Default OFF like the lab page. Only the deck +
+   * procedural sky path runs it.
+   */
+  cloudGodRays: {
+    enabled: false,
+    effectScale: 0.35,
+    exposure: 0.58,
+    samples: 64,
+    density: 0.98,
+    decay: 0.975,
+    weight: 0.55,
+    skipOffscreen: true,
+    occCloudSteps: 12,
+    // Lab uses sunDistance 8000 / discRadius 260, but v2's camera far plane is
+    // 5000 — a disc past it gets clipped (no rays). The disc's SCREEN position
+    // only depends on the sun direction (all points along a ray project the
+    // same), so we pull it inside the far plane and scale the radius to keep the
+    // same angular size (260/8000 ≈ 130/4000). Keep sunDistance < ~4800.
+    sunDistance: 4000,
+    sunDiscRadius: 130,
+    sunTint: "#ffddaa",
+    matchLightColor: false,
+  },
+  /**
+   * Cloud bloom for the daynight deck (lab PARAMS.bloom). Blooms the FINAL
+   * scene+clouds composite (owns-the-frame path / post-FX OFF) so sunlit cloud
+   * edges glow — v2's own post-FX bloom can't reach the clouds (solids-only).
+   */
+  cloudBloom: {
+    enabled: false,
+    strength: 0.4,
+    radius: 0.6,
+    threshold: 0.92,
+  },
   /** `splatmap-chunks.html` PARAMS.csm — WebGPU `CSMShadowNode` on the sun. */
   csm: {
     enabled: true,

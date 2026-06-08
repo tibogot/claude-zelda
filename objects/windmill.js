@@ -173,7 +173,18 @@ export function buildWindmillMesh({
     const pt = points[0];
     const v = pt.isVector3 ? pt : new THREE.Vector3(pt.x, pt.y, pt.z);
     const unit = cloneWindmillUnit(p);
-    const rotY = p.facePath ? Math.PI * 0.5 : 0;
+    let rotY = 0;
+    if (pt.heading != null) {
+      rotY = pt.heading;
+    } else if (p.faceOutwardFrom) {
+      const ox = v.x - p.faceOutwardFrom.x;
+      const oz = v.z - p.faceOutwardFrom.z;
+      if (ox * ox + oz * oz > 1e-6) {
+        rotY = Math.atan2(ox, oz);
+      }
+    } else if (p.facePath) {
+      rotY = Math.PI * 0.5;
+    }
     unit.rotation.y = rotY;
     groundUnit(unit, v.x, getWorldHeight(v.x, v.z), v.z);
     group.add(unit);

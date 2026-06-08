@@ -134,6 +134,16 @@ export function createToolState() {
     light: { ...V2_CONFIG.light },
     skyMode: "physical",
     physicalSky: { ...V2_CONFIG.physicalSky },
+    /** `skyMode === "procedural"` — daynight-sky dome params (see config.js). */
+    proceduralSky: { ...V2_CONFIG.proceduralSky },
+    /** Volumetric cloud deck for the procedural sky (daynight-sky port). */
+    volumetricCloudDayNight: { ...V2_CONFIG.volumetricCloudDayNight },
+    /** Cloud shadows for the daynight volumetric deck (terrain + ocean). */
+    cloudShadows: { ...V2_CONFIG.cloudShadows },
+    /** God-rays / light shafts for the daynight volumetric deck. */
+    cloudGodRays: { ...V2_CONFIG.cloudGodRays },
+    /** Cloud bloom for the daynight volumetric deck (final-frame bloom). */
+    cloudBloom: { ...V2_CONFIG.cloudBloom },
     lensFlare: { ...V2_CONFIG.lensFlare },
     /**
      * Post-processing master switch + per-effect params.

@@ -76,6 +76,10 @@ export class PostFxPipeline {
 
     /** Bloom (lazy). */
     this._bloomPass = null;
+    // Second bloom for the cloud path — reads the linear RT AFTER clouds are
+    // composited, so bloom covers scene + clouds together (the solids-only
+    // `_bloomPass` can't reach the clouds; they land after it).
+    this._cloudBloomPass = null;
     this._bloomEnabled = true;
     this._bloomParams = {
       strength: 0.3,
@@ -393,6 +397,7 @@ export class PostFxPipeline {
   dispose() {
     if (this._ssaoNode?.dispose) this._ssaoNode.dispose();
     if (this._bloomPass?.dispose) this._bloomPass.dispose();
+    if (this._cloudBloomPass?.dispose) this._cloudBloomPass.dispose();
     if (this._sharpenNode?.dispose) this._sharpenNode.dispose();
     if (this._sharpenNodeDisplay?.dispose) this._sharpenNodeDisplay.dispose();
     if (this._dofNode?.dispose) this._dofNode.dispose();
@@ -405,6 +410,7 @@ export class PostFxPipeline {
     this._scenePass = null;
     this._scenePassColor = null;
     this._bloomPass = null;
+    this._cloudBloomPass = null;
     this._ssaoNode = null;
     this._sharpenNode = null;
     this._sharpenNodeDisplay = null;
@@ -449,6 +455,16 @@ export class PostFxPipeline {
       magFilter: THREE.LinearFilter,
     });
     this._linearTextureNode = texture(this._linearRT.texture);
+
+    // Cloud-path bloom: reads the linear RT (solids + composited clouds), so the
+    // display pass blooms scene+clouds together. The linear pass for the cloud
+    // path renders solids WITHOUT bloom (see `_refreshOutputNode`).
+    this._cloudBloomPass = bloom(
+      this._linearTextureNode,
+      this._bloomParams.strength,
+      this._bloomParams.radius,
+      this._bloomParams.threshold,
+    );
 
     this._linearPipeline = new THREE.RenderPipeline(renderer);
     this._linearPipeline.outputColorTransform = false;
@@ -504,12 +520,14 @@ export class PostFxPipeline {
   }
 
   _applyBloomUniforms() {
-    const p = this._bloomPass;
-    if (!p) return;
-    p.strength.value = this._bloomParams.strength;
-    p.threshold.value = this._bloomParams.threshold;
-    p.radius.value = this._bloomParams.radius;
-    if (p.smoothWidth) p.smoothWidth.value = this._bloomParams.smoothWidth;
+    const bp = this._bloomParams;
+    for (const p of [this._bloomPass, this._cloudBloomPass]) {
+      if (!p) continue;
+      p.strength.value = bp.strength;
+      p.threshold.value = bp.threshold;
+      p.radius.value = bp.radius;
+      if (p.smoothWidth) p.smoothWidth.value = bp.smoothWidth;
+    }
   }
 
   _applyDofUniforms() {
@@ -586,29 +604,29 @@ export class PostFxPipeline {
     }
   }
 
-  _buildLinearBeautyNode() {
+  // Solids (+ SSAO) with DOF applied, but NOT bloom. DOF goes before bloom now
+  // (a lens effect after focus — arguably more correct), and keeping it as one
+  // node lets both the no-cloud path (adds solids bloom) and the cloud path
+  // (adds bloom after clouds) share it. Bloom is added by `_refreshOutputNode`.
+  _buildDofBaseNode() {
     const sceneInput =
       this._ssaoEnabled && this._ssaoNode
         ? this._ssaoNode.getTextureNode()
         : this._scenePassColor;
 
-    let linearBeauty = this._bloomEnabled
-      ? sceneInput.add(this._bloomPass)
-      : sceneInput;
-
     if (this._dofEnabled && this._dofUniforms) {
       const viewZ = this._scenePass.getViewZNode();
       this._dofNode = dof(
-        linearBeauty,
+        sceneInput,
         viewZ,
         this._dofUniforms.focusDistance,
         this._dofUniforms.focalLength,
         this._dofUniforms.bokehScale,
       );
-      linearBeauty = this._dofNode;
+      return this._dofNode;
     }
 
-    return linearBeauty;
+    return sceneInput;
   }
 
   _buildDisplayChain(inputNode) {
@@ -652,19 +670,31 @@ export class PostFxPipeline {
     this._sharpenNodeDisplay = null;
     this._chromaticAberrationNode = null;
 
-    const linearBeauty = this._buildLinearBeautyNode();
-    const mainDisplay = this._buildDisplayChain(linearBeauty);
-    this._sharpenNode = mainDisplay.sharpenNode;
+    const dofBase = this._buildDofBaseNode();
 
+    // No-cloud path (`render()`): solids + bloom(solids), full display chain.
+    const noCloudBeauty =
+      this._bloomEnabled && this._bloomPass
+        ? dofBase.add(this._bloomPass)
+        : dofBase;
+    const mainDisplay = this._buildDisplayChain(noCloudBeauty);
+    this._sharpenNode = mainDisplay.sharpenNode;
     this._renderPipeline.outputNode = mainDisplay.node;
     this._renderPipeline.needsUpdate = true;
 
+    // Cloud path (`renderWithClouds()`): the linear pass renders solids WITHOUT
+    // bloom → linear RT; clouds are composited onto it; then the display pass
+    // blooms the COMBINED buffer (scene + clouds) via `_cloudBloomPass`.
     if (this._linearPipeline) {
-      this._linearPipeline.outputNode = linearBeauty;
+      this._linearPipeline.outputNode = dofBase;
       this._linearPipeline.needsUpdate = true;
     }
     if (this._displayPipeline && this._linearTextureNode) {
-      const cloudDisplay = this._buildDisplayChain(this._linearTextureNode);
+      const cloudInput =
+        this._bloomEnabled && this._cloudBloomPass
+          ? this._linearTextureNode.add(this._cloudBloomPass)
+          : this._linearTextureNode;
+      const cloudDisplay = this._buildDisplayChain(cloudInput);
       this._sharpenNodeDisplay = cloudDisplay.sharpenNode;
       this._displayPipeline.outputNode = cloudDisplay.node;
       this._displayPipeline.needsUpdate = true;

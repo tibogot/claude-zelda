@@ -115,11 +115,17 @@ export function updateRtsFogOfWarTexture(
     for (let i = 0; i < strengths.length; i++) {
       const s = Math.min(1, Math.max(0, strengths[i]));
       const p = i * 4;
-      const tint = s < 0.05 ? 0 : s < shroudAlpha + 0.08 ? 18 : 0;
-      md[p] = tint;
-      md[p + 1] = tint;
-      md[p + 2] = tint + 6;
-      md[p + 3] = Math.round(s * 255);
+      if (s < 0.04) {
+        md[p] = 255;
+        md[p + 1] = 255;
+        md[p + 2] = 255;
+        md[p + 3] = 0;
+      } else {
+        md[p] = 14;
+        md[p + 1] = 20;
+        md[p + 2] = 28;
+        md[p + 3] = Math.round(s * 235);
+      }
     }
     minimapCtx.putImageData(mini, 0, 0);
   }

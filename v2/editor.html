@@ -2321,6 +2321,189 @@
         parent.appendChild(div);
       }
 
+      /**
+       * Build the full control surface for the procedural (daynight-sky) dome
+       * into a wrapper div appended to `parent`, and return that wrapper so the
+       * caller can show/hide it by sky mode. All controls write straight to
+       * `ts.proceduralSky`; the engine's `driveProceduralSky()` reads that object
+       * every frame, so no per-control onChange is needed for live response, and
+       * IBL-relevant params auto re-bake via the render loop's proc-sky snapshot.
+       */
+      function _buildProceduralSkyControls(parent, ts, app) {
+        const ps = ts.proceduralSky;
+        const wrap = document.createElement("div");
+        parent.appendChild(wrap);
+
+        const tod = _section(wrap, "Time of day", true);
+        _slider(tod, ps, "timeOfDay", {
+          label: "Time (0–24h)",
+          min: 0,
+          max: 24,
+          step: 0.01,
+          hint: "Drives the scene sun (writes Azimuth/Elevation). Smooth day↔night sweep.",
+          onChange: () => app.setTimeOfDay?.(ps.timeOfDay),
+        });
+        _toggle(tod, ps, "autoAdvance", {
+          label: "Auto-advance",
+          hint: "Animate the day/night cycle over time",
+        });
+        _slider(tod, ps, "daySpeed", {
+          label: "Day speed (h/s)",
+          min: 0.05,
+          max: 4,
+          step: 0.05,
+          hint: "Hours of time-of-day advanced per real second",
+        });
+
+        const atmo = _section(wrap, "Atmosphere (scattering)", true);
+        _toggle(atmo, ps, "scatter", { label: "Physical scatter", hint: "On = Nishita atmosphere; off = analytic gradient (uses the Gradient colors below)" });
+        _slider(atmo, ps, "sunIntensity", { label: "Sun intensity", min: 0, max: 50, step: 0.5 });
+        _slider(atmo, ps, "rayleigh", { label: "Rayleigh", min: 0, max: 4, step: 0.05 });
+        _slider(atmo, ps, "mie", { label: "Mie", min: 0, max: 4, step: 0.05 });
+        _slider(atmo, ps, "mieG", { label: "Mie G (aureole)", min: 0, max: 0.99, step: 0.01 });
+        _slider(atmo, ps, "atmoAltitude", { label: "Altitude (m)", min: 0, max: 8000, step: 50 });
+        _slider(atmo, ps, "msAmount", { label: "Multi-scatter", min: 0, max: 3, step: 0.05 });
+        _slider(atmo, ps, "msExtinct", { label: "MS energy keep", min: 0, max: 1, step: 0.02 });
+        _slider(atmo, ps, "hazeHeight", { label: "Horizon haze", min: 0.02, max: 0.5, step: 0.01, hint: "Sky-dome horizon haze height — lower hugs the waterline" });
+
+        const grad = _section(wrap, "Gradient (analytic only)", false);
+        _color(grad, ps, "zenithDay", { label: "Zenith day" });
+        _color(grad, ps, "horizonDay", { label: "Horizon day" });
+        _color(grad, ps, "zenithNight", { label: "Zenith night" });
+        _color(grad, ps, "horizonNight", { label: "Horizon night" });
+        _color(grad, ps, "sunsetColor", { label: "Sunset" });
+        _color(grad, ps, "groundColor", { label: "Ground" });
+
+        const sun = _section(wrap, "Sun", false);
+        _color(sun, ps, "sunColor", { label: "Color" });
+        _slider(sun, ps, "sunSizeDeg", { label: "Size (deg)", min: 0.2, max: 6, step: 0.05 });
+        _slider(sun, ps, "sunGlowPow", { label: "Glow falloff", min: 10, max: 1000, step: 5 });
+        _slider(sun, ps, "sunGlowStrength", { label: "Glow strength", min: 0, max: 2, step: 0.01 });
+        _slider(sun, ps, "sunDiscBright", { label: "Disc bright", min: 0, max: 20, step: 0.1 });
+
+        const moon = _section(wrap, "Moon", false);
+        _color(moon, ps, "moonColor", { label: "Color" });
+        _slider(moon, ps, "moonSizeDeg", { label: "Size (deg)", min: 0.2, max: 6, step: 0.05 });
+        _slider(moon, ps, "moonGlowStrength", { label: "Glow strength", min: 0, max: 2, step: 0.01 });
+        _slider(moon, ps, "moonDiscBright", { label: "Disc bright", min: 0, max: 10, step: 0.1 });
+        _slider(moon, ps, "moonPhase", { label: "Phase (1=full)", min: 0, max: 1, step: 0.01 });
+        _slider(moon, ps, "moonPhaseOrient", { label: "Phase orient", min: 0, max: 360, step: 1 });
+        _slider(moon, ps, "moonSurface", { label: "Surface detail", min: 0, max: 1, step: 0.01 });
+        _slider(moon, ps, "moonEarthshine", { label: "Earthshine", min: 0, max: 1, step: 0.01 });
+        _slider(moon, ps, "moonTermSoft", { label: "Terminator soft", min: 0, max: 0.3, step: 0.005 });
+
+        const stars = _section(wrap, "Stars", false);
+        _slider(stars, ps, "starDensity", { label: "Density", min: 0, max: 1000, step: 5 });
+        _slider(stars, ps, "starThreshold", { label: "Threshold", min: 0, max: 1, step: 0.005 });
+        _slider(stars, ps, "starSize", { label: "Size", min: 0, max: 0.5, step: 0.005 });
+        _slider(stars, ps, "starBrightness", { label: "Brightness", min: 0, max: 3, step: 0.05 });
+        _slider(stars, ps, "starTwinkle", { label: "Twinkle", min: 0, max: 10, step: 0.1 });
+
+        const mw = _section(wrap, "Milky Way", false);
+        _toggle(mw, ps, "milkyWayEnabled", { label: "Enabled" });
+        _slider(mw, ps, "milkyWayIntensity", { label: "Intensity", min: 0, max: 3, step: 0.05 });
+        _slider(mw, ps, "milkyWayWidth", { label: "Band width", min: 0, max: 1, step: 0.01 });
+        _slider(mw, ps, "milkyWayScale", { label: "Scale", min: 0.5, max: 12, step: 0.1 });
+        _color(mw, ps, "milkyWayColor1", { label: "Dust" });
+        _color(mw, ps, "milkyWayColor2", { label: "Cloud" });
+
+        const met = _section(wrap, "Shooting stars", false);
+        _toggle(met, ps, "meteorEnabled", { label: "Enabled" });
+        _slider(met, ps, "meteorIntensity", { label: "Intensity", min: 0, max: 3, step: 0.05 });
+        _slider(met, ps, "meteorRate", { label: "Rate", min: 0, max: 1, step: 0.01 });
+        _slider(met, ps, "meteorSpeed", { label: "Speed", min: 0.1, max: 4, step: 0.05 });
+        _slider(met, ps, "meteorWidth", { label: "Width", min: 0.001, max: 0.05, step: 0.001 });
+        _slider(met, ps, "meteorLength", { label: "Trail length", min: 0.01, max: 0.5, step: 0.01 });
+
+        const cir = _section(wrap, "High clouds (cirrus)", false);
+        _toggle(cir, ps, "cloudEnabled", { label: "Enabled" });
+        _slider(cir, ps, "cloudCoverage", { label: "Coverage", min: 0, max: 1, step: 0.01 });
+        _slider(cir, ps, "cloudDensity", { label: "Density", min: 0, max: 2, step: 0.02 });
+        _slider(cir, ps, "cloudOpacity", { label: "Opacity", min: 0, max: 1, step: 0.02 });
+        _slider(cir, ps, "cloudScale", { label: "Scale", min: 0.1, max: 3, step: 0.02 });
+        _slider(cir, ps, "cloudStretch", { label: "Streakiness", min: 0.5, max: 6, step: 0.05 });
+        _slider(cir, ps, "cloudSharpness", { label: "Edge sharpness", min: 0.01, max: 1, step: 0.01 });
+        _slider(cir, ps, "cloudDetail", { label: "Detail", min: 0, max: 1, step: 0.02 });
+        _slider(cir, ps, "cloudSunTint", { label: "Sun tint", min: 0, max: 3, step: 0.05 });
+        _slider(cir, ps, "cloudSpeed", { label: "Drift speed", min: 0, max: 0.1, step: 0.001 });
+        _slider(cir, ps, "cloudWindDeg", { label: "Wind dir", min: 0, max: 360, step: 1 });
+        _color(cir, ps, "cloudColor", { label: "Color" });
+        _slider(cir, ps, "cloudAerial", { label: "Aerial fade", min: 0, max: 1, step: 0.02 });
+
+        const vc = ts.volumetricCloudDayNight;
+        // 1:1 with the daynight-sky lab's "Cloud layer (volumetric)" panel —
+        // identical order, labels and ranges (lab daynight-sky.html L922-946) so
+        // the two read the same side-by-side.
+        const vcSec = _section(wrap, "Cloud layer (volumetric)", false);
+        _toggle(vcSec, vc, "enabled", { label: "enabled", hint: "Raymarched cloud deck (daynight-sky port). Procedural sky only." });
+        _slider(vcSec, vc, "coverage", { label: "coverage", min: 0, max: 1, step: 0.01 });
+        _slider(vcSec, vc, "softness", { label: "softness", min: 0.02, max: 0.4, step: 0.01 });
+        _slider(vcSec, vc, "densityMul", { label: "densityMul", min: 0.5, max: 16, step: 0.1 });
+        _slider(vcSec, vc, "erode", { label: "erode", min: 0, max: 1, step: 0.01 });
+        _slider(vcSec, vc, "detailMul", { label: "detailMul", min: 1, max: 8, step: 0.1 });
+        _slider(vcSec, vc, "base", { label: "base", min: 600, max: 4000, step: 10 });
+        _slider(vcSec, vc, "thickness", { label: "thickness", min: 200, max: 2500, step: 10 });
+        _slider(vcSec, vc, "planetRadius", { label: "planetRadius", min: 15000, max: 400000, step: 1000 });
+        _slider(vcSec, vc, "scale", { label: "scale", min: 0.00005, max: 0.002, step: 0.00001 });
+        _dropdown(vcSec, vc, "bufferScale", { label: "Resolution", options: { "Half (fast)": 0.5, "¾": 0.75, "Full (sharp)": 1.0 } });
+        _slider(vcSec, vc, "steps", { label: "steps", min: 16, max: 128, step: 1 });
+        _slider(vcSec, vc, "lightSteps", { label: "lightSteps", min: 2, max: 8, step: 1 });
+        _slider(vcSec, vc, "emptySkip", { label: "Empty-space skip", min: 1, max: 4, step: 0.1 });
+        _slider(vcSec, vc, "opacity", { label: "opacity", min: 0.2, max: 3, step: 0.05 });
+        _slider(vcSec, vc, "phaseG", { label: "phaseG", min: 0, max: 0.9, step: 0.01 });
+        _slider(vcSec, vc, "powder", { label: "powder", min: 0, max: 1, step: 0.01 });
+        _slider(vcSec, vc, "msAmount", { label: "★ Multi-scatter", min: 0, max: 1.5, step: 0.05 });
+        _slider(vcSec, vc, "msExtinction", { label: "MS light depth", min: 0.1, max: 0.9, step: 0.05 });
+        _slider(vcSec, vc, "msEccentricity", { label: "MS phase broad", min: 0.1, max: 0.9, step: 0.05 });
+        _slider(vcSec, vc, "windSpeed", { label: "windSpeed", min: 0, max: 0.2, step: 0.001 });
+        _slider(vcSec, vc, "windDeg", { label: "windDeg", min: 0, max: 360, step: 1 });
+        _toggle(vcSec, vc, "aerialEnabled", { label: "Aerial perspective" });
+        _slider(vcSec, vc, "aerialDensity", { label: "Aerial density", min: 0.00002, max: 0.0006, step: 0.00001 });
+        _slider(vcSec, vc, "aerialAmount", { label: "Aerial amount", min: 0, max: 1, step: 0.05 });
+        // v2 extras — real cloud params the lab hard-codes (not in its UI).
+        const vcAdv = _section(wrap, "Cloud layer · v2 extras", false);
+        _slider(vcAdv, vc, "lightAbsorb", { label: "lightAbsorb", min: 0.2, max: 3, step: 0.05 });
+        _slider(vcAdv, vc, "maxDist", { label: "maxDist", min: 8000, max: 48000, step: 1000 });
+        _slider(vcAdv, vc, "msContribution", { label: "msContribution", min: 0.1, max: 0.9, step: 0.05 });
+
+        // Cloud shadows on terrain + ocean (lab "Cloud shadows" section).
+        const csSec = _section(wrap, "Cloud shadows", false);
+        _toggle(csSec, ts.cloudShadows, "enabled", { label: "enabled", hint: "Deck shadows on terrain + ocean. Needs the cloud deck enabled; fades at night." });
+        _slider(csSec, ts.cloudShadows, "strength", { label: "strength", min: 0, max: 1, step: 0.01 });
+
+        // God rays / light shafts (lab "God rays" section). Cloud-aware: shafts
+        // stream through the deck's gaps. Needs the deck enabled + sun on screen.
+        const gr = ts.cloudGodRays;
+        const grSec = _section(wrap, "God rays", false);
+        _toggle(grSec, gr, "enabled", { label: "enabled", hint: "Light shafts from the sun through the cloud gaps. Deck must be enabled." });
+        _toggle(grSec, gr, "skipOffscreen", { label: "Skip off-screen" });
+        _slider(grSec, gr, "effectScale", { label: "Buffer scale", min: 0.2, max: 1, step: 0.05 });
+        _slider(grSec, gr, "exposure", { label: "exposure", min: 0, max: 1, step: 0.01 });
+        _slider(grSec, gr, "samples", { label: "samples", min: 16, max: 96, step: 1 });
+        _slider(grSec, gr, "density", { label: "density", min: 0, max: 1, step: 0.01 });
+        _slider(grSec, gr, "decay", { label: "decay", min: 0.8, max: 1, step: 0.001 });
+        _slider(grSec, gr, "weight", { label: "weight", min: 0, max: 1, step: 0.01 });
+        _slider(grSec, gr, "occCloudSteps", { label: "Cloud occ steps", min: 4, max: 16, step: 1 });
+        _slider(grSec, gr, "sunDistance", { label: "sunDistance", min: 1000, max: 4800, step: 50, hint: "Keep below v2's 5000 far plane or the sun disc clips" });
+        _slider(grSec, gr, "sunDiscRadius", { label: "sunDiscRadius", min: 40, max: 400, step: 5 });
+        _color(grSec, gr, "sunTint", { label: "Sun tint" });
+        _toggle(grSec, gr, "matchLightColor", { label: "Tint = light color" });
+
+        // Cloud bloom (lab "Bloom" section) — blooms the final scene+clouds
+        // frame. Owns-the-frame path only (turn v2 POST FX OFF to see it).
+        const bl = ts.cloudBloom;
+        const blSec = _section(wrap, "Bloom", false);
+        _toggle(blSec, bl, "enabled", { label: "enabled", hint: "Blooms sunlit cloud edges. Only with v2 POST FX OFF (the deck owns the frame)." });
+        _slider(blSec, bl, "strength", { label: "strength", min: 0, max: 2, step: 0.01 });
+        _slider(blSec, bl, "radius", { label: "radius", min: 0, max: 1, step: 0.01 });
+        _slider(blSec, bl, "threshold", { label: "threshold", min: 0, max: 1.5, step: 0.01 });
+
+        const ibl = _section(wrap, "Lighting (IBL)", false);
+        _button(ibl, { title: "Rebake Sky IBL", onClick: () => app.rebuildProceduralSkyEnv?.() });
+
+        return wrap;
+      }
+
       // === Mode → custom-panel visibility ===
       // (Every mode now uses a custom UI panel built in this file.)
       function syncToolsTab(mode) {
@@ -11180,7 +11363,7 @@
         });
         _slider(sunBody, ts.light, "sunElevation", {
           label: "Elevation",
-          min: -10,
+          min: -90,
           max: 90,
           step: 1,
         });
@@ -11667,7 +11850,11 @@
         const skyModeWidgets = [];
         _dropdown(skyBody, ts, "skyMode", {
           label: "Mode",
-          options: { Physical: "physical", "Import HDR": "hdr" },
+          options: {
+            Physical: "physical",
+            "Import HDR": "hdr",
+            Procedural: "procedural",
+          },
           onChange: () => {
             app.applySkyMode(ts.skyMode);
             syncSkyWidgets();
@@ -11777,13 +11964,15 @@
         for (const w of physWidgets)
           skyModeWidgets.push({ el: w, mode: "physical" });
 
+        // Procedural (daynight-sky) dome controls — one wrapper toggled by mode.
+        const procWrap = _buildProceduralSkyControls(skyBody, ts, app);
+        skyModeWidgets.push({ el: procWrap, mode: "procedural" });
+
         function syncSkyWidgets() {
-          const isPhysical = ts.skyMode === "physical";
           for (const { el, mode } of skyModeWidgets) {
             const domEl = el instanceof HTMLElement ? el : el?.row;
             if (!domEl) continue;
-            const show = mode === "physical" ? isPhysical : !isPhysical;
-            domEl.style.display = show ? "" : "none";
+            domEl.style.display = mode === ts.skyMode ? "" : "none";
           }
         }
         syncSkyWidgets();
@@ -13510,7 +13699,7 @@
             });
             _slider(hdr, ts.light, "sunElevation", {
               label: "Elevation",
-              min: -10,
+              min: -90,
               max: 90,
               step: 1,
             });
@@ -13571,8 +13760,15 @@
             const sk = _section(container, "Sky · Environment");
             _dropdown(sk, ts, "skyMode", {
               label: "Mode",
-              options: { Physical: "physical", "Import HDR": "hdr" },
-              onChange: () => app.applySkyMode(ts.skyMode),
+              options: {
+                Physical: "physical",
+                "Import HDR": "hdr",
+                Procedural: "procedural",
+              },
+              onChange: () => {
+                app.applySkyMode(ts.skyMode);
+                buildInspector(app, itemId);
+              },
             });
             _separator(sk);
             const phys = _section(
@@ -13631,6 +13827,9 @@
               max: 5,
               step: 0.05,
             });
+            if (ts.skyMode === "procedural") {
+              _buildProceduralSkyControls(container, ts, app);
+            }
             break;
           }
           case "terrain": {

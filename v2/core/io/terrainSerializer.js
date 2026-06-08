@@ -431,6 +431,11 @@ function extractSerializableSettings(toolState) {
     light: { ...toolState.light },
     skyMode: toolState.skyMode,
     physicalSky: { ...toolState.physicalSky },
+    proceduralSky: { ...toolState.proceduralSky },
+    volumetricCloudDayNight: { ...toolState.volumetricCloudDayNight },
+    cloudShadows: { ...toolState.cloudShadows },
+    cloudGodRays: { ...toolState.cloudGodRays },
+    cloudBloom: { ...toolState.cloudBloom },
     lensFlare: { ...toolState.lensFlare },
     postFx: {
       enabled: toolState.postFx.enabled,
@@ -582,6 +587,11 @@ export function applySettings(toolState, settings) {
   if (settings.light) Object.assign(toolState.light, settings.light);
   if (settings.skyMode) toolState.skyMode = settings.skyMode;
   if (settings.physicalSky) Object.assign(toolState.physicalSky, settings.physicalSky);
+  if (settings.proceduralSky) Object.assign(toolState.proceduralSky, settings.proceduralSky);
+  if (settings.volumetricCloudDayNight) Object.assign(toolState.volumetricCloudDayNight, settings.volumetricCloudDayNight);
+  if (settings.cloudShadows) Object.assign(toolState.cloudShadows, settings.cloudShadows);
+  if (settings.cloudGodRays) Object.assign(toolState.cloudGodRays, settings.cloudGodRays);
+  if (settings.cloudBloom) Object.assign(toolState.cloudBloom, settings.cloudBloom);
   if (settings.lensFlare) Object.assign(toolState.lensFlare, settings.lensFlare);
   if (settings.postFx) {
     if (settings.postFx.enabled != null) {

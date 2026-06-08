@@ -163,6 +163,8 @@ import { BorderMountains } from "../render/terrain/borderMountains.js";
 import { createVolumetricCloudSystem } from "../render/clouds/volumetricCloudSystem.js";
 import { createVolumetricCloudSystemOptimized } from "../render/clouds/volumetricCloudSystemv2.js";
 import { createVolumetricCloudSystemV3 } from "../render/clouds/volumetricCloudSystemv3.js";
+import { createDayNightSky } from "../render/sky/dayNightSky.js";
+import { createDayNightCloudLayer } from "../render/clouds/dayNightCloudLayer.js";
 import { PostFxPipeline } from "../render/post/postFxPipeline.js";
 
 // Returned by `getTerrainHeight` whenever the sampled XZ is over a painted
@@ -340,7 +342,11 @@ export async function startV2App(opts = {}) {
   const controls = new OrbitControls(camera, renderer.domElement);
   controls.target.set(0, 10, 0);
   controls.enableDamping = true;
-  controls.maxPolarAngle = Math.PI * 0.49;
+  // Allow looking UP at the sky / cloud deck. The old 0.49π clamp locked the
+  // camera to horizontal-or-below (terrain-editing default); 0.92π lets you tilt
+  // well up into the sky while still stopping just short of flipping fully under
+  // the world. Set to Math.PI for fully unconstrained.
+  controls.maxPolarAngle = Math.PI * 0.92;
   controls.minDistance = 15;
   controls.maxDistance = 1500;
   // Match splatmap-chunks.html interaction: LMB sculpt, MMB orbit, RMB pan.
@@ -410,6 +416,38 @@ export async function startV2App(opts = {}) {
   sky.scale.setScalar(toolState.physicalSky.meshScale);
   if (sky.material) sky.material.fog = false;
   scene.add(sky);
+
+  // Procedural day/night sky dome (skyMode === "procedural"). Self-contained
+  // module ported from the daynight-sky lab; hidden until that mode is picked.
+  // Follows the camera + reads sun/moon from the same single sun driver below.
+  const dayNightSky = createDayNightSky();
+  dayNightSky.mesh.visible = false;
+  scene.add(dayNightSky.mesh);
+  const _moonDir = new THREE.Vector3();
+  const _procSkyFogColor = new THREE.Color();
+  const _todSunDir = new THREE.Vector3();
+  // Scratch for the volumetric cloud deck's per-frame lighting frame.
+  const _cloudLightColor = new THREE.Color();
+  const _cloudAmbColor = new THREE.Color();
+  const _cloudAmbNight = new THREE.Color();
+  // Procedural-sky IBL: AMORTIZED cube bake (matches daynight-sky.html) — render
+  // ONE cube face per frame, convolve to PMREM only when all 6 are ready, then
+  // idle. Never a full 6-face bake in a single frame → no per-second stutter
+  // during auto-advance. The dome clone shares the live material/uniforms.
+  let _procEnvScene = null;
+  let _procCubeRT = null;
+  let _procCubeCam = null;
+  let _procEnvRT = null; // current PMREM RT (= scene.environment)
+  let _procEnvRTOld = null; // previous RT — disposed ONE cycle later (see below)
+  let _procEnvFace = -1; // -1 = idle, 0..5 = rendering that face
+  let _procEnvIdle = 0; // seconds remaining before the next bake cycle
+  let _procEnvNeeds = false; // a param/sun change requested a fresh bake
+  // v2 has many scene.environment consumers (ocean reflection, every PBR
+  // material), so bakes are heavier than the lab and the swapped-out PMREM RT
+  // may still be referenced by in-flight GPU work. Bake less often than the lab
+  // (3 s vs 1.5 s) and DEFER disposing the old RT by a cycle to avoid a
+  // use-after-dispose device-loss ("external Instance reference no longer exists").
+  const PROC_ENV_IDLE = 3.0; // seconds between re-bake cycles
 
   const F = toolState.fog;
   const uHFogEnabled = uniform(F.height.enabled ? 1 : 0);
@@ -514,19 +552,185 @@ export async function startV2App(opts = {}) {
     }
   }
 
+  // Convenience: set the scene sun from a 0–24 "time of day" (the daynight-sky
+  // lab's single control). It writes the existing Azimuth/Elevation — the ONE
+  // sun source the whole scene (light, shadows, fog, ocean) reads — so there's
+  // no second sun. Same arc as the lab (sin / -cos / tilt); the az/el sliders
+  // auto-sync via the UI poll, and the render loop's lightSnap drives the rest.
+  function setTimeOfDay(t) {
+    const SKY_TILT = 0.28; // matches daynight-sky.html
+    const ang = (t / 24) * Math.PI * 2;
+    _todSunDir.set(Math.sin(ang), -Math.cos(ang), SKY_TILT).normalize();
+    toolState.light.sunElevation = THREE.MathUtils.radToDeg(
+      Math.asin(THREE.MathUtils.clamp(_todSunDir.y, -1, 1)),
+    );
+    toolState.light.sunAzimuth =
+      (THREE.MathUtils.radToDeg(Math.atan2(_todSunDir.z, _todSunDir.x)) + 360) %
+      360;
+    toolState.proceduralSky.timeOfDay = t;
+  }
+
+  // Feed the procedural dome each frame: it follows the camera and reads the
+  // SAME sun the rest of the scene uses (updateSunSky writes `sunDir`); the moon
+  // is the antipode. Cheap (uniform writes only) — safe to call every frame.
+  function driveProceduralSky() {
+    _moonDir.copy(sunDir).negate();
+    const F = toolState.fog.distance;
+    dayNightSky.update(toolState.proceduralSky, {
+      time: _appTimeSec,
+      sunDir,
+      moonDir: _moonDir,
+      camera,
+      fog: {
+        enabled: F.enabled,
+        color: _procSkyFogColor.set(F.color),
+        density: F.density,
+        hazeHeight: toolState.proceduralSky.hazeHeight,
+      },
+    });
+  }
+
+  // Drive the volumetric cloud deck each frame (procedural sky only). The deck
+  // relights by the SAME sun by day / moon by night that the dome uses; ambient
+  // crossfades the dome's horizon palette. Mirrors the lab's computeFrameLighting.
+  function driveDayNightClouds(dtSec) {
+    if (!dayNightCloudLayer) return;
+    const P = toolState.volumetricCloudDayNight;
+    const ps = toolState.proceduralSky;
+    const sunUp = sunDir.y;
+    const dayF = THREE.MathUtils.clamp((sunUp + 0.15) / 0.4, 0, 1);
+    let lightDir;
+    if (sunUp >= 0) {
+      lightDir = sunDir;
+      _cloudLightColor.set(ps.sunColor);
+    } else {
+      lightDir = _moonDir; // = -sunDir, refreshed in driveProceduralSky()
+      _cloudLightColor.set(ps.moonColor);
+    }
+    _cloudAmbColor.set(ps.horizonDay);
+    _cloudAmbNight.set(ps.horizonNight);
+    _cloudAmbColor.lerp(_cloudAmbNight, 1 - dayF);
+    dayNightCloudLayer.update(P, {
+      dt: Math.min(dtSec, 0.05),
+      camera,
+      lightDir,
+      lightColor: _cloudLightColor,
+      lightIntensity: THREE.MathUtils.lerp(0.35, 3.0, dayF),
+      ambientColor: _cloudAmbColor,
+      ambientIntensity: THREE.MathUtils.lerp(0.2, 0.5, dayF),
+      // Aerial fade dissolves distant clouds into the SKY horizon color (like the
+      // lab's matchSky fog) — NOT the generic distance-fog color — so the deck
+      // recedes seamlessly into the scattering horizon. Reuse the same horizon
+      // crossfade we feed ambient.
+      fog: { color: _cloudAmbColor },
+    });
+
+    // Cloud shadows on terrain + ocean (composite pass). Always from the SUN;
+    // strength fades with day so they vanish at night (matches the lab).
+    const cs = toolState.cloudShadows;
+    dayNightCloudLayer.setCloudShadow({
+      enabled: cs.enabled && P.enabled,
+      strength: cs.strength * dayF,
+      sunDir,
+    });
+    // Cloud bloom (owns-the-frame path only; ignored when v2 post-FX is ON).
+    dayNightCloudLayer.setBloom(toolState.cloudBloom);
+  }
+
+  // Persistent cube rig for the procedural IBL (built lazily). The dome clone
+  // sits at the origin (cube cameras render from there) and SHARES the live
+  // material/uniforms, so it auto-tracks the sky every frame — no per-bake
+  // rebuild. Matches daynight-sky.html's envScene + CubeCamera setup.
+  function ensureProcEnvRig() {
+    if (_procCubeRT) return;
+    _procEnvScene = new THREE.Scene();
+    const domeClone = dayNightSky.mesh.clone();
+    domeClone.position.set(0, 0, 0);
+    _procEnvScene.add(domeClone);
+    // 64 (not 128): IBL is blurred by PMREM anyway, and a smaller cube quarters
+    // the per-face scattering-raymarch cost — the dominant per-bake GPU expense.
+    _procCubeRT = new THREE.CubeRenderTarget(64, { type: THREE.HalfFloatType });
+    _procCubeCam = new THREE.CubeCamera(0.1, 20000, _procCubeRT);
+    _procCubeCam.updateMatrixWorld(true);
+    pmremGenerator = pmremGenerator ?? new THREE.PMREMGenerator(renderer);
+  }
+  function renderProcEnvFace(face) {
+    ensureProcEnvRig();
+    const prev = renderer.getRenderTarget();
+    renderer.setRenderTarget(_procCubeRT, face);
+    renderer.render(_procEnvScene, _procCubeCam.children[face]);
+    renderer.setRenderTarget(prev);
+  }
+  function convolveProcEnv() {
+    const rt = pmremGenerator.fromCubemap(_procCubeRT.texture);
+    scene.environment = rt.texture;
+    // Defer disposal by one cycle: free the RT from TWO bakes ago, which has had
+    // a full cycle to stop being referenced by any in-flight GPU work.
+    if (_procEnvRTOld) _procEnvRTOld.dispose();
+    _procEnvRTOld = _procEnvRT;
+    _procEnvRT = rt;
+  }
+  function disposeProcEnvRT() {
+    if (_procEnvRTOld) {
+      _procEnvRTOld.dispose();
+      _procEnvRTOld = null;
+    }
+    if (_procEnvRT) {
+      _procEnvRT.dispose();
+      _procEnvRT = null;
+    }
+  }
+  // Amortized scheduler — one face per frame, convolve on completion, then idle.
+  // Runs while a change is pending OR auto-advance is on; otherwise sits idle.
+  function updateProcEnvBake(dt) {
+    if (_procEnvFace < 0) {
+      if (!_procEnvNeeds && !toolState.proceduralSky.autoAdvance) return;
+      _procEnvIdle -= dt;
+      if (_procEnvIdle > 0) return;
+      _procEnvNeeds = false;
+      _procEnvFace = 0;
+    }
+    renderProcEnvFace(_procEnvFace);
+    _procEnvFace++;
+    if (_procEnvFace >= 6) {
+      convolveProcEnv();
+      _procEnvFace = -1;
+      _procEnvIdle = PROC_ENV_IDLE;
+    }
+  }
+  // Full synchronous bake — only for one-off events (mode switch, Rebake button)
+  // where a single-frame cost is fine. Animation uses the amortized path above.
+  function rebuildProceduralSkyEnv() {
+    try {
+      updateSunSky();
+      driveProceduralSky(); // make sure dome uniforms are current before baking
+      ensureProcEnvRig();
+      for (let f = 0; f < 6; f++) renderProcEnvFace(f);
+      convolveProcEnv();
+      _procEnvFace = -1;
+      _procEnvIdle = PROC_ENV_IDLE;
+      _procEnvNeeds = false;
+    } catch (err) {
+      console.warn("[V2] PMREM from procedural sky failed; IBL disabled.", err);
+    }
+  }
+
   function applySkyMode(mode) {
     toolState.skyMode = mode;
+    dayNightSky.mesh.visible = mode === "procedural";
     if (mode === "physical") {
       if (disposeHdrEnv) {
         disposeHdrEnv();
         disposeHdrEnv = null;
       }
+      disposeProcEnvRT();
       sky.visible = true;
       scene.background = null;
       scene.backgroundIntensity = 1;
       rebuildSkyEnv();
     } else if (mode === "hdr") {
       sky.visible = false;
+      disposeProcEnvRT();
       if (hdrTexture) {
         if (disposeSkyEnv) {
           disposeSkyEnv();
@@ -542,6 +746,20 @@ export async function startV2App(opts = {}) {
         scene.backgroundIntensity = 1;
         scene.environment = null;
       }
+    } else if (mode === "procedural") {
+      // The dome fills the view (renderOrder -2); SkyMesh + HDR off.
+      sky.visible = false;
+      if (disposeSkyEnv) {
+        disposeSkyEnv();
+        disposeSkyEnv = null;
+      }
+      if (disposeHdrEnv) {
+        disposeHdrEnv();
+        disposeHdrEnv = null;
+      }
+      scene.background = null;
+      scene.backgroundIntensity = 1;
+      rebuildProceduralSkyEnv();
     }
     updateSunSky();
   }
@@ -3780,6 +3998,21 @@ export async function startV2App(opts = {}) {
   let _vcInitPromise = null;
   let _vcOptInitPromise = null;
   let _vcV3InitPromise = null;
+  // Daynight-sky volumetric cloud deck (procedural sky only). Synchronous bake,
+  // so no init promise — created lazily on first enable.
+  let dayNightCloudLayer = null;
+  function ensureDayNightCloudLayer() {
+    if (dayNightCloudLayer) return dayNightCloudLayer;
+    try {
+      dayNightCloudLayer = createDayNightCloudLayer({ scene, camera, renderer });
+      scene.add(dayNightCloudLayer.mesh);
+      // God-rays sun disc — hidden except during the occlusion pass.
+      scene.add(dayNightCloudLayer.sunMesh);
+    } catch (err) {
+      console.warn("[V2] Daynight cloud layer failed to init:", err);
+    }
+    return dayNightCloudLayer;
+  }
   function ensureVolumetricCloudSystem() {
     if (volumetricCloudSystem || _vcInitPromise) return _vcInitPromise;
     _vcInitPromise = createVolumetricCloudSystem({
@@ -4955,6 +5188,7 @@ export async function startV2App(opts = {}) {
 
   let last = performance.now();
   let _lastLightSnap = "";
+  let _lastProcSkySnap = "";
   let _lastInteriorSnap = "";
   const _interiorFocusPos = new THREE.Vector3();
   // World ocean: initial sun/env + params (sky & sun are set up by now).
@@ -5008,6 +5242,33 @@ export async function startV2App(opts = {}) {
     }
     lensFlare.update();
 
+    // Procedural dome: drive every frame (camera follow + star/cloud animation),
+    // and re-bake its IBL only when the IBL-relevant params or the sun change.
+    if (toolState.skyMode === "procedural") {
+      const ps = toolState.proceduralSky;
+      // CLAMP the time step (matches lab `Math.min(getDelta(), 0.05)`) so a frame
+      // hitch can't lurch the sun forward — even progression regardless of FPS.
+      const procDt = Math.min(dtSec, 0.05);
+      // Auto day/night cycle: advance timeOfDay → sun az/el (the single source).
+      if (ps.autoAdvance) {
+        setTimeOfDay((ps.timeOfDay + ps.daySpeed * procDt) % 24);
+      }
+      driveProceduralSky();
+      // A param/sun change requests a fresh IBL bake (promptly, but amortized).
+      const procSnap = `${Li.sunAzimuth},${Li.sunElevation},${ps.scatter},${ps.rayleigh},${ps.mie},${ps.mieG},${ps.sunIntensity},${ps.msAmount},${ps.msExtinct},${ps.zenithDay},${ps.horizonDay},${ps.zenithNight},${ps.horizonNight},${ps.sunsetColor},${ps.groundColor},${ps.sunColor},${ps.moonColor},${ps.cloudEnabled},${ps.cloudCoverage},${ps.cloudColor}`;
+      if (procSnap !== _lastProcSkySnap) {
+        _lastProcSkySnap = procSnap;
+        _procEnvNeeds = true;
+        // Manual tweaks: debounce — keep resetting the idle so we only bake ~0.3 s
+        // AFTER you stop dragging (no baking mid-drag). Auto-advance changes every
+        // frame, so leave its idle alone → it bakes on the steady PROC_ENV_IDLE.
+        if (!ps.autoAdvance) _procEnvIdle = 0.3;
+      }
+      // Amortized IBL bake: one cube face per frame, convolve on completion, then
+      // idle — never a single-frame full bake, so no per-frame stutter.
+      updateProcEnvBake(procDt);
+    }
+
     const Int = toolState.interior;
     const interiorSnap = `${Int.enabled},${Int.strength},${Int.color},${Int.ambientScale},${Int.tunnelRadiusScale},${Int.segmentStep},${Int.edgeSoftness},${Int.openingLength},${Int.boxEdgeSoftness},${Int.caveShrink},${splineSystem.tunnels.length}`;
     if (interiorSnap !== _lastInteriorSnap) {
@@ -5028,7 +5289,10 @@ export async function startV2App(opts = {}) {
       );
     }
     hemi.intensity = Li.hemiIntensity * fillScale;
-    if (toolState.skyMode === "physical") {
+    if (
+      toolState.skyMode === "physical" ||
+      toolState.skyMode === "procedural"
+    ) {
       scene.environmentIntensity = Li.envIntensity * fillScale;
     } else if (toolState.skyMode === "hdr") {
       scene.environmentIntensity = Li.hdrEnvIntensity * fillScale;
@@ -5218,6 +5482,16 @@ export async function startV2App(opts = {}) {
     riverSystem.update(dtMs * 0.001);
     splineSystem.update(dtMs * 0.001);
 
+    // Daynight cloud deck — procedural sky only. Highest priority; owns the
+    // frame (post-FX off path), like the lab. Gated so it can't fight the other
+    // 3 systems. Hide its layer-18 dome whenever it isn't the active renderer so
+    // a V3 `enableAll()` pass can't pick it up.
+    const dncOn =
+      toolState.skyMode === "procedural" &&
+      toolState.volumetricCloudDayNight.enabled;
+    if (dncOn) ensureDayNightCloudLayer();
+    if (!dncOn && dayNightCloudLayer) dayNightCloudLayer.mesh.visible = false;
+
     const vcOn = toolState.volumetricCloud.enabled;
     const vcOptOn = toolState.volumetricCloudOptimized.enabled;
     const vcV3On = toolState.volumetricCloudV3.enabled;
@@ -5242,9 +5516,32 @@ export async function startV2App(opts = {}) {
       volumetricCloudSystem.tryRenderFrame(cloudFollowAnchor, dtSec);
     }
     let didCloudRt = false;
-    // Priority: V3 > Optimized > Classic. UI toggle exclusivity normally
-    // ensures only one is enabled, but the priority chain is the safety net.
-    if (vcV3On && postFxPipeline.isActive()) {
+    // Priority: Daynight deck > V3 > Optimized > Classic. UI toggle exclusivity
+    // normally ensures only one is enabled; the priority chain is the safety net.
+    if (dncOn && dayNightCloudLayer) {
+      driveDayNightClouds(dtSec);
+      if (postFxPipeline.isActive()) {
+        // Post-FX ON: clouds flow through v2's pipeline so bloom/SSAO/DOF apply
+        // over them (composited into the linear HDR buffer, single tonemap).
+        // NOTE: god-rays + cloud-shadows are owns-the-frame-only for now.
+        postFxPipeline.renderWithClouds(
+          dayNightCloudLayer,
+          cloudFollowAnchor,
+          dtSec,
+        );
+        didCloudRt = true;
+      } else {
+        // Post-FX OFF (default): the deck owns the frame (god-rays come from the
+        // SUN, occluded by terrain + the cloud silhouette; dome hidden in the
+        // occlusion pass; cloud-shadows applied in the composite).
+        didCloudRt = dayNightCloudLayer.tryRenderFrame({
+          godRays: toolState.cloudGodRays,
+          frame: { camera, sunDir, lightColor: _cloudLightColor },
+          occluders: chunkStream.raycastMeshes(),
+          skyMesh: dayNightSky.mesh,
+        });
+      }
+    } else if (vcV3On && postFxPipeline.isActive()) {
       postFxPipeline.renderWithClouds(oV3, cloudFollowAnchor, dtSec);
       didCloudRt = true;
     } else if (vcV3On) {
@@ -5361,6 +5658,8 @@ export async function startV2App(opts = {}) {
     rebuildInteriorVolumes,
     setCsmEnabled,
     rebuildSkyEnv,
+    rebuildProceduralSkyEnv,
+    setTimeOfDay,
     applySkyMode,
     importHdr,
     postFxPipeline,
@@ -6168,6 +6467,12 @@ export async function startV2App(opts = {}) {
       volumetricCloudSystemOptimized = null;
       volumetricCloudSystemV3?.dispose?.();
       volumetricCloudSystemV3 = null;
+      if (dayNightCloudLayer) {
+        scene.remove(dayNightCloudLayer.mesh);
+        scene.remove(dayNightCloudLayer.sunMesh);
+        dayNightCloudLayer.dispose?.();
+        dayNightCloudLayer = null;
+      }
       ui?.dispose?.();
       chunkStream.dispose();
       treeLodRenderer.dispose();
