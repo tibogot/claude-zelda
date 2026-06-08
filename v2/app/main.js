@@ -7,6 +7,11 @@ import {
   step,
   texture,
   positionLocal,
+  positionWorld,
+  cameraPosition,
+  normalize,
+  dot,
+  pow,
   mix,
   clamp,
   fog,
@@ -30,6 +35,7 @@ import { TerrainMesher } from "../render/terrain/terrainMesher.js";
 import { createSharedTileMaterial } from "../render/terrain/sharedTileMaterial.js";
 import { createV2ProceduralGroundMaterial } from "../render/terrain/proceduralGroundMaterial.js";
 import { ChunkStreamManager } from "../core/streaming/chunkStreamManager.js";
+import { frameProbe } from "./frameProbe.js";
 import { SculptSystem } from "../tools/sculpt/sculptSystem.js";
 import { createHud } from "../ui/hud.js";
 import { createLensFlareSystem } from "../effects/lensFlare.js";
@@ -327,6 +333,11 @@ export async function startV2App(opts = {}) {
 
   /** Same convention as `splatmap-chunks.html` `sunDirectionFromAngles`. */
   const sunDir = new THREE.Vector3();
+  // The direction the scene KEY LIGHT comes from: the sun by day, the moon
+  // (sun antipode) at night in procedural mode. Distinct from `sunDir`, which the
+  // sky dome always needs as the true sun (for the sun disc). Used by the
+  // directional light + grass/foliage/ocean lighting.
+  const _effectiveLightDir = new THREE.Vector3();
   function sunDirectionFromAngles(azDeg, elDeg, target = new THREE.Vector3()) {
     const az = THREE.MathUtils.degToRad(azDeg);
     const el = THREE.MathUtils.degToRad(elDeg);
@@ -430,6 +441,9 @@ export async function startV2App(opts = {}) {
   const _cloudLightColor = new THREE.Color();
   const _cloudAmbColor = new THREE.Color();
   const _cloudAmbNight = new THREE.Color();
+  // Scratch for the sun-tinted distance fog (lab aerial perspective).
+  const _fogAwayColor = new THREE.Color();
+  const _fogAwayNight = new THREE.Color();
   // Procedural-sky IBL: AMORTIZED cube bake (matches daynight-sky.html) — render
   // ONE cube face per frame, convolve to PMREM only when all 6 are ready, then
   // idle. Never a full 6-face bake in a single frame → no per-second stutter
@@ -457,9 +471,18 @@ export async function startV2App(opts = {}) {
   const uHFogDensity = uniform(F.height.density);
   const uHFogHeight = uniform(F.height.height);
   const uDFogEnabled = uniform(F.distance.enabled ? 1 : 0);
+  // Distance-fog "away" color (the color seen perpendicular to / away from the
+  // sun). Driven from the procedural sky's horizon each frame when matchSky is on.
   const uDFogColor = uniform(
     new THREE.Color(F.distance.color).convertSRGBToLinear(),
   );
+  // Daynight aerial perspective — warm haze toward the sun (lab fog model).
+  const uDFogSunTint = uniform(
+    new THREE.Color(F.distance.sunTint).convertSRGBToLinear(),
+  );
+  const uDFogSunDir = uniform(new THREE.Vector3(0, 1, 0));
+  const uDFogTintPow = uniform(F.distance.tintPow ?? 2.0);
+  const uDFogSunStrength = uniform(0); // fades the warm tint out at night
   const uDFogDensity = uniform(F.distance.density);
   const _hFactor = exponentialHeightFogFactor(uHFogDensity, uHFogHeight).mul(
     uHFogEnabled,
@@ -471,7 +494,17 @@ export async function startV2App(opts = {}) {
   const _weatherFactor = clamp(_hFactor.add(_dFactor), 0, 1);
   const _combinedFactor = clamp(_weatherFactor.add(_iFactor), 0, 1);
   const _weatherW = _hFactor.add(_dFactor).add(0.0001);
-  const _weatherFogColor = mix(uHFogColor, uDFogColor, _dFactor.div(_weatherW));
+  // Sun-tinted distance fog color (lab aerial perspective): warm toward the sun,
+  // the matched "away" color elsewhere. View-dependent, so it goes in the node
+  // graph (uniforms drive it per frame — never reassign scene.fogNode).
+  const _fogView = normalize(positionWorld.sub(cameraPosition));
+  const _fogSunAmt = clamp(dot(_fogView, uDFogSunDir), 0, 1);
+  const _distFogColor = mix(
+    uDFogColor,
+    uDFogSunTint,
+    pow(_fogSunAmt, uDFogTintPow).mul(uDFogSunStrength),
+  );
+  const _weatherFogColor = mix(uHFogColor, _distFogColor, _dFactor.div(_weatherW));
   const _blendedFogColor = mix(
     _weatherFogColor,
     interiorNodes.uColor,
@@ -491,10 +524,33 @@ export async function startV2App(opts = {}) {
     uDFogColor.value.set(F.distance.color).convertSRGBToLinear();
     uDFogDensity.value = F.distance.density;
   }
+  // Per-frame aerial-perspective fog drive (lab fog model): warm tint toward the
+  // sun (fades at night) + an "away" color that tracks the procedural sky horizon
+  // when matchSky is on, so distant geometry dissolves into the horizon.
+  function driveFogSun() {
+    const D = toolState.fog.distance;
+    const sunUp = sunDir.y;
+    uDFogSunDir.value.copy(sunDir);
+    uDFogSunTint.value.set(D.sunTint).convertSRGBToLinear();
+    uDFogTintPow.value = D.tintPow ?? 2.0;
+    // Warm sun tint fades out at night (lab smoothstep(-0.1, 0.05, sunUp)).
+    uDFogSunStrength.value = THREE.MathUtils.clamp((sunUp + 0.1) / 0.15, 0, 1);
+    if (D.matchSky && toolState.skyMode === "procedural") {
+      const ps = toolState.proceduralSky;
+      const dayF = THREE.MathUtils.clamp((sunUp + 0.15) / 0.4, 0, 1);
+      _fogAwayColor.set(ps.horizonDay);
+      _fogAwayNight.set(ps.horizonNight);
+      _fogAwayColor.lerp(_fogAwayNight, 1 - dayF);
+      uDFogColor.value.copy(_fogAwayColor).convertSRGBToLinear();
+    } else {
+      uDFogColor.value.set(D.color).convertSRGBToLinear();
+    }
+  }
   function syncInteriorUniforms() {
     interiorNodes.syncFromRegistry(interiorRegistry, toolState.interior);
   }
   syncFog();
+  driveFogSun();
   syncInteriorUniforms();
 
   let pmremGenerator = null;
@@ -3875,9 +3931,28 @@ export async function startV2App(opts = {}) {
   function updateSunSky() {
     const Li = toolState.light;
     sunDirectionFromAngles(Li.sunAzimuth, Li.sunElevation, sunDir);
-    sun.position.copy(sunDir).multiplyScalar(Li.sunDistance);
-    sun.color.set(Li.dirColor);
-    sun.intensity = Li.dirIntensity;
+    // Directional key light. In PROCEDURAL mode, relight by the MOON (antipode of
+    // the sun) once the sun drops below the horizon, and fade the sun out across
+    // twilight — so night terrain is moonlit + casts moon shadows (matches the
+    // lab). Other sky modes keep the user's sun unchanged.
+    const sunUp = sunDir.y;
+    if (toolState.skyMode === "procedural" && sunUp < 0) {
+      _effectiveLightDir.copy(sunDir).negate(); // moon direction
+      sun.position.copy(_effectiveLightDir).multiplyScalar(Li.sunDistance);
+      sun.color.set(toolState.proceduralSky.moonColor);
+      sun.intensity =
+        (Li.moonIntensity ?? 0.3) *
+        THREE.MathUtils.smoothstep(-sunUp, 0.0, 0.15);
+    } else {
+      _effectiveLightDir.copy(sunDir);
+      sun.position.copy(sunDir).multiplyScalar(Li.sunDistance);
+      sun.color.set(Li.dirColor);
+      const sunFade =
+        toolState.skyMode === "procedural"
+          ? THREE.MathUtils.smoothstep(sunUp, -0.05, 0.1)
+          : 1;
+      sun.intensity = Li.dirIntensity * sunFade;
+    }
     hemi.color.set(Li.hemiSkyColor);
     hemi.groundColor.set(Li.hemiGroundColor);
     hemi.intensity = Li.hemiIntensity;
@@ -5197,6 +5272,28 @@ export async function startV2App(opts = {}) {
   _oceanEnvRef = scene.environment;
   worldOcean.syncParams(toolState.worldOcean);
 
+  // --- frameProbe wiring (TEMPORARY perf attribution; remove with the import) ---
+  // Wrap each system's lazy (re)build method so the probe can count how many
+  // InstancedMeshes are (re)built per frame and how long that CPU work took.
+  {
+    const wrapBuild = (obj, method, counter, msCounter, countWhenTruthy = false) => {
+      if (!obj || typeof obj[method] !== "function") return;
+      const orig = obj[method].bind(obj);
+      obj[method] = (...args) => {
+        const t = performance.now();
+        const r = orig(...args);
+        if (!countWhenTruthy || r) frameProbe.c[counter]++;
+        frameProbe.c[msCounter] += performance.now() - t;
+        return r;
+      };
+    };
+    wrapBuild(foliageLodRenderer, "_buildChunkSlotLod", "foliage", "foliageMs", true);
+    wrapBuild(billboardRenderer, "_rebuildChunkMeshes", "billboard", "billboardMs");
+    wrapBuild(treeLodRenderer, "_rebuildChunkCache", "tree", "treeMs");
+    wrapBuild(propInstancer, "_rebuildCache", "prop", "propMs");
+    wrapBuild(chunkStream, "createChunk", "chunk", "chunkMs");
+  }
+
   renderer.setAnimationLoop(() => {
     // Reset info once per frame (auto-reset is off) so draw/tri counters
     // accumulate across all passes. stats-gl patches this call to also mark
@@ -5208,6 +5305,7 @@ export async function startV2App(opts = {}) {
     const dtMs = now - last;
     last = now;
     tickPerf(perf, now, dtMs);
+    frameProbe.beginFrame();
 
     if (!playMode.active) controls.update();
     const dtSec = dtMs * 0.001;
@@ -5226,21 +5324,27 @@ export async function startV2App(opts = {}) {
 
     const Li = toolState.light;
     const S = toolState.physicalSky;
-    const lightSnap = `${Li.sunAzimuth},${Li.sunElevation},${Li.dirColor},${Li.dirIntensity},${Li.hemiSkyColor},${Li.hemiGroundColor},${Li.hemiIntensity},${Li.shadowBias},${Li.shadowNormalBias},${Li.exposure},${Li.envIntensity},${Li.hdrEnvIntensity},${Li.hdrBackgroundIntensity},${Li.sunDistance},${S.turbidity},${S.rayleigh},${S.mie},${S.mieG},${S.cloudCoverage},${S.cloudDensity},${S.cloudElevation},${S.meshScale}`;
+    const lightSnap = `${Li.sunAzimuth},${Li.sunElevation},${Li.dirColor},${Li.dirIntensity},${Li.moonIntensity},${toolState.proceduralSky.moonColor},${Li.hemiSkyColor},${Li.hemiGroundColor},${Li.hemiIntensity},${Li.shadowBias},${Li.shadowNormalBias},${Li.exposure},${Li.envIntensity},${Li.hdrEnvIntensity},${Li.hdrBackgroundIntensity},${Li.sunDistance},${S.turbidity},${S.rayleigh},${S.mie},${S.mieG},${S.cloudCoverage},${S.cloudDensity},${S.cloudElevation},${S.meshScale}`;
     if (lightSnap !== _lastLightSnap) {
       _lastLightSnap = lightSnap;
-      updateSunSky();
+      updateSunSky(); // sets `_effectiveLightDir` (sun by day / moon at night)
+      // Foliage / grass / ocean relight from the same key-light direction as the
+      // terrain — so they're moon-lit at night, not lit from the buried sun.
       if (grassManager.uniforms)
-        grassManager.uniforms.uSunDir.value.copy(sunDir);
+        grassManager.uniforms.uSunDir.value.copy(_effectiveLightDir);
       if (toolState.revoGrass.enabled) {
-        revoGrassSystem.syncFromState(toolState.revoGrass, sunDir);
+        revoGrassSystem.syncFromState(toolState.revoGrass, _effectiveLightDir);
       }
-      foliageLodRenderer.updateSunDirection(sunDir);
-      billboardRenderer.updateSunDirection(sunDir);
-      billboardGrassRenderer.updateSunDirection(sunDir);
-      worldOcean.setSunDir(sunDir);
+      foliageLodRenderer.updateSunDirection(_effectiveLightDir);
+      billboardRenderer.updateSunDirection(_effectiveLightDir);
+      billboardGrassRenderer.updateSunDirection(_effectiveLightDir);
+      worldOcean.setSunDir(_effectiveLightDir);
     }
     lensFlare.update();
+
+    // Aerial-perspective fog: warm tint toward the sun + sky-matched away color
+    // (only matters when distance fog is on; cheap uniform writes otherwise).
+    if (toolState.fog.distance.enabled) driveFogSun();
 
     // Procedural dome: drive every frame (camera follow + star/cloud animation),
     // and re-bake its IBL only when the IBL-relevant params or the sun change.
@@ -5332,7 +5436,11 @@ export async function startV2App(opts = {}) {
       lastHeightTexSyncMs = now;
     }
 
+    const _pPreStream = performance.now();
+    frameProbe.t.misc += _pPreStream - now; // frame head (sky/light/csm/interior)
     chunkStream.update(focusPos);
+    const _pStream = performance.now();
+    frameProbe.t.stream += _pStream - _pPreStream;
     cliffInstancer.update();
     propInstancer.update(camera, toolState.propLod);
     livePropManager.update(dtSec);
@@ -5354,6 +5462,8 @@ export async function startV2App(opts = {}) {
       }
       if (!shown && collectibleGizmo.isVisible()) collectibleGizmo.hide();
     }
+    const _pProps = performance.now();
+    frameProbe.t.props += _pProps - _pStream;
     treeLodRenderer.update(treeStore, camera, toolState.treeLod);
     foliageLodRenderer.update(treeStore, camera, toolState.foliageLod);
     foliageLodRenderer.updateTime(now * 0.001);
@@ -5372,6 +5482,8 @@ export async function startV2App(opts = {}) {
       { aerialStrict: playMode.active },
     );
     billboardGrassRenderer.updateTime(now * 0.001);
+    const _pFoliage = performance.now();
+    frameProbe.t.foliage += _pFoliage - _pProps;
     if (grassManager.uniforms) {
       grassManager.uniforms.uPlayerPos.value.copy(focusPos);
     }
@@ -5390,6 +5502,8 @@ export async function startV2App(opts = {}) {
         playMode: playMode.active,
       });
     }
+    const _pGrass = performance.now();
+    frameProbe.t.grass += _pGrass - _pFoliage;
 
     /**
      * Snow tile per-frame update. The anchor follows the same `focusPos` used by
@@ -5486,6 +5600,8 @@ export async function startV2App(opts = {}) {
     // frame (post-FX off path), like the lab. Gated so it can't fight the other
     // 3 systems. Hide its layer-18 dome whenever it isn't the active renderer so
     // a V3 `enableAll()` pass can't pick it up.
+    const _pRenderStart = performance.now();
+    frameProbe.t.misc += _pRenderStart - _pGrass; // misc tail (snow/water/ocean/etc.)
     const dncOn =
       toolState.skyMode === "procedural" &&
       toolState.volumetricCloudDayNight.enabled;
@@ -5563,6 +5679,7 @@ export async function startV2App(opts = {}) {
         renderer.render(scene, camera);
       }
     }
+    frameProbe.t.render += performance.now() - _pRenderStart;
     // Drain the GPU timestamp pool each frame so stats-gl's GPU panel gets a
     // real value. Our frame issues many render passes (RenderPipeline post-FX
     // + cloud RTs); without this `renderer.info.render.timestamp` — which is
@@ -5584,6 +5701,8 @@ export async function startV2App(opts = {}) {
     drawPanel.updateGraph(draws, _statMaxDraw);
     triPanel.update(ktris, _statMaxTri, 0);
     triPanel.updateGraph(ktris, _statMaxTri);
+
+    frameProbe.endFrame(dtMs, draws, ri.triangles ?? 0);
 
     stats.update();
   });

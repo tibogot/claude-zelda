@@ -222,6 +222,10 @@ export const V2_CONFIG = {
     sunElevation: 43,
     dirColor: "#fff5e0",
     dirIntensity: 2.2,
+    /** Directional key-light intensity at NIGHT (moon), procedural sky only. The
+     * light switches to the moon (sun antipode, `proceduralSky.moonColor`) once
+     * the sun drops below the horizon, so night terrain is moonlit. */
+    moonIntensity: 0.3,
     hemiSkyColor: "#c8e0ff",
     hemiGroundColor: "#88aa55",
     hemiIntensity: 0.4,
@@ -453,6 +457,13 @@ export const V2_CONFIG = {
       enabled: false,
       color: "#d0e4f0",
       density: 0.006,
+      // Daynight-lab aerial perspective: when `matchSky` is on (procedural sky),
+      // the away-from-sun fog color tracks the sky's horizon each frame so distant
+      // geometry dissolves into the horizon; `sunTint`/`tintPow` add a warm haze
+      // glow toward the sun that fades out at night.
+      matchSky: true,
+      sunTint: "#ffd6a0",
+      tintPow: 2.0,
     },
   },
   /**
