@@ -962,7 +962,7 @@
         backdrop-filter: blur(6px);
       }
       .bh-card.player {
-        border-color: rgba(73, 224, 255, 0.35);
+        border-color: rgba(88, 168, 255, 0.4);
       }
       .bh-card.enemy {
         border-color: rgba(255, 90, 74, 0.35);
@@ -980,7 +980,7 @@
         margin-bottom: 4px;
       }
       .bh-card.player .bh-label {
-        color: #9ecfb0;
+        color: #88b8e8;
       }
       .bh-card.enemy .bh-label {
         color: #d4a098;
@@ -998,7 +998,7 @@
         transition: transform 0.12s linear;
       }
       .bh-card.player .bh-fill {
-        background: linear-gradient(90deg, #3a9a4a, #59d35a);
+        background: linear-gradient(90deg, #3060a8, #58a0e8);
       }
       .bh-card.enemy .bh-fill {
         background: linear-gradient(90deg, #a03020, #e0503a);
@@ -1886,6 +1886,7 @@
       import { bakeRtsThumbnails } from "./rtsThumbnails.js";
       import { createRtsMinimap } from "./rtsMinimap.js";
       import { createStylizedExplosionSystem } from "./stylized-explosion.js";
+      import { RtsTankInstancer } from "./objects/rtsTankInstancer.js";
 
       const DIFFICULTY_PRESETS = {
         easy: {
@@ -1975,11 +1976,11 @@
           edgeSpeed: 1.0, // edge-scroll speed (RTS mode)
           edgeSize: 26, // px from a screen edge that triggers scrolling
           // Iso RTS pose — locked in RTS mode (orbit mode [C] to tune, then Capture).
-          polarDeg: 40, // pitch from top-down (°)
+          polarDeg: 50, // pitch from top-down (°) — slightly steeper for tactical feel
           azimuthDeg: 75, // yaw around map center (°)
-          distance: 280, // zoom distance from target
+          distance: 220, // zoom distance from target
           targetY: 0,
-          minDistance: 120,
+          minDistance: 50,
           maxDistance: 1300,
           minPolarDeg: 25, // orbit-mode pitch limits only
           maxPolarDeg: 86,
@@ -2842,6 +2843,24 @@
         // ── TEAM BASES (opposite map edges) ───────────────────────────────
         // Visual command centers + spawn anchors. Footprints block nav so
         // units route around, not through, the structures.
+        const FACTION_PALETTE = {
+          player: {
+            hull: 0x4568a8,
+            accent: 0x5080c0,
+            trim: 0x304870,
+            health: 0x58a0e8,
+            node: 0x5090d0,
+            decal: 0x58a8ff,
+          },
+          enemy: {
+            hull: 0xa03830,
+            accent: 0xd04838,
+            trim: 0x902820,
+            health: 0xe85040,
+            node: 0xd04838,
+            decal: 0xff5a4a,
+          },
+        };
         const BASE_FOOTPRINTS = [];
         const BASE_DEFS = Object.create(null);
         const basePickBodies = [];
@@ -2938,7 +2957,7 @@
           const decal = new THREE.Mesh(
             decalGeo,
             new THREE.MeshBasicMaterial({
-              color: faction === "player" ? 0x49e0ff : 0xff5a4a,
+              color: FACTION_PALETTE[faction]?.decal ?? FACTION_PALETTE.player.decal,
               transparent: true,
               opacity: 0.35,
               depthWrite: false,
@@ -2999,9 +3018,8 @@
         ];
 
         function baseTurretColors(faction) {
-          return faction === "player"
-            ? { accent: 0x7a9444, trim: 0x5a6830 }
-            : { accent: 0xc04838, trim: 0x8a3028 };
+          const p = FACTION_PALETTE[faction];
+          return p ? { accent: p.accent, trim: p.trim } : FACTION_PALETTE.player;
         }
 
         function startTurretCount(faction) {
@@ -3063,8 +3081,8 @@
 
           const d = PARAMS.bases.distance;
           const defs = [
-            { faction: "player", x: 0, z: d, accent: 0x7a9444, trim: 0x5a6830 },
-            { faction: "enemy", x: 0, z: -d, accent: 0xc04838, trim: 0x8a3028 },
+            { faction: "player", x: 0, z: d, ...baseTurretColors("player") },
+            { faction: "enemy", x: 0, z: -d, ...baseTurretColors("enemy") },
           ];
           for (const def of defs) {
             const group = buildBaseMesh(def.faction, def.accent, def.trim);
@@ -4120,7 +4138,7 @@
           if (!PARAMS.fog.enabled) {
             for (const u of units) {
               if (!u.dead) {
-                u.group.visible = true;
+                setUnitVisible(u, true);
                 u.bar.visible = true;
               }
             }
@@ -4136,12 +4154,12 @@
           for (const u of units) {
             if (u.dead) continue;
             if (u.faction === "player") {
-              u.group.visible = true;
+              setUnitVisible(u, true);
               u.bar.visible = true;
               continue;
             }
             const vis = visibleToPlayer(u.pos.x, u.pos.z);
-            u.group.visible = vis;
+            setUnitVisible(u, vis);
             u.bar.visible = vis;
             if (!vis) u.ring.visible = false;
           }
@@ -4495,8 +4513,8 @@
         // ── CAPTURE POINTS (supply nodes) ─────────────────────────────────
         const NODE_COLORS = {
           neutral: 0x8a8a80,
-          player: 0x4a9e6a,
-          enemy: 0xc04838,
+          player: FACTION_PALETTE.player.node,
+          enemy: FACTION_PALETTE.enemy.node,
         };
         const CAPTURE_NODES = [];
         const nodesGroup = new THREE.Group();
@@ -4926,18 +4944,49 @@
         const unitsGroup = new THREE.Group();
         scene.add(unitsGroup);
 
-        // Per-faction look. Player = khaki, enemy = red.
+        let tankInstancer = null;
+        try {
+          tankInstancer = new RtsTankInstancer(unitsGroup, {
+            palette: FACTION_PALETTE,
+          });
+          await tankInstancer.init();
+          console.info("[rts] tank GLB instancer ready");
+        } catch (err) {
+          console.warn("[rts] tank instancer failed; using primitive tanks.", err);
+          tankInstancer = null;
+        }
+
+        function setUnitVisible(u, visible) {
+          u.group.visible = visible;
+          if (u.instancedTank && tankInstancer) {
+            tankInstancer.setUnitVisible(u, visible);
+          }
+        }
+
+        function resolvePickUnit(hit) {
+          if (!hit) return null;
+          if (
+            hit.object.userData?.tankInstancerHitbox &&
+            hit.instanceId != null &&
+            tankInstancer
+          ) {
+            return tankInstancer.getUnitAt(hit.instanceId);
+          }
+          return hit.object.userData?.unit ?? null;
+        }
+
+        // Per-faction unit materials (palette defined with bases).
         const FACTIONS = {
           player: {
             hull: new THREE.MeshStandardMaterial({
-              color: 0x6b7a3a,
+              color: FACTION_PALETTE.player.hull,
               roughness: 0.75,
               metalness: 0.1,
             }),
           },
           enemy: {
             hull: new THREE.MeshStandardMaterial({
-              color: 0x9a3b2e,
+              color: FACTION_PALETTE.enemy.hull,
               roughness: 0.75,
               metalness: 0.1,
             }),
@@ -4995,8 +5044,8 @@
               impactSize: 0.55,
               impactLife: 0.16,
               impactColor: 0xff8833,
-              muzzleFwd: 1.9,
-              muzzleUp: 1.2,
+              muzzleFwd: 3.2,
+              muzzleUp: 1.35,
             },
           },
           bulldozer: {
@@ -5173,6 +5222,8 @@
             );
             barrel.rotation.x = Math.PI / 2 - 0.5; // tilt muzzle upward
             add(barrel, 0, 1.5, 1.0);
+          } else if (type === "tank" && tankInstancer?.ready) {
+            return tankInstancer.buildPreviewMesh(faction);
           } else if (type === "helicopter") {
             add(new THREE.Mesh(new THREE.BoxGeometry(0.5, 0.45, 2.2), hullMat), 0, 0.5, 0);
             add(new THREE.Mesh(new THREE.BoxGeometry(0.9, 0.55, 1.2), hullMat), 0, 0.85, -0.2);
@@ -5198,8 +5249,7 @@
               barrelMat,
             );
             add(rocket, 0.42, 0.62, 0.75);
-          } else {
-            // Tank (default): boxy hull + turret + barrel.
+          } else if (type === "tank") {
             add(new THREE.Mesh(new THREE.BoxGeometry(2.2, 0.8, 3.0), hullMat), 0, 0.55, 0);
             add(new THREE.Mesh(new THREE.BoxGeometry(1.3, 0.6, 1.3), hullMat), 0, 1.15, -0.1);
             const barrel = new THREE.Mesh(
@@ -5208,6 +5258,9 @@
             );
             barrel.rotation.x = Math.PI / 2;
             add(barrel, 0, 1.2, 1.1);
+          } else {
+            // Unknown type — small placeholder.
+            add(new THREE.Mesh(new THREE.BoxGeometry(1, 1, 1), hullMat), 0, 0.5, 0);
           }
           return g;
         }
@@ -5238,7 +5291,7 @@
           const fill = new THREE.Mesh(
             barFillGeo,
             new THREE.MeshBasicMaterial({
-              color: faction === "player" ? 0x59d35a : 0xe0503a,
+              color: FACTION_PALETTE[faction]?.health ?? FACTION_PALETTE.player.health,
               depthTest: false,
               depthWrite: false,
             }),
@@ -5307,20 +5360,36 @@
           });
         }
         function makeSelectionRing() {
-          const m = new THREE.Mesh(ringGeo, makeRingMaterial(0x49e0ff, 0.9));
+          const m = new THREE.Mesh(
+            ringGeo,
+            makeRingMaterial(FACTION_PALETTE.player.decal, 0.9),
+          );
           m.visible = false;
           m.renderOrder = 4;
           ringsGroup.add(m);
           return m;
         }
 
+        function unitPickTargets() {
+          if (tankInstancer?.ready) {
+            return tankBodies.concat(tankInstancer.getPickTargets());
+          }
+          return tankBodies;
+        }
+
         function spawnUnit(x, z, faction, type, heading) {
           const T = UNIT_TYPES[type];
           const face = heading ?? (faction === "enemy" ? Math.PI : 0);
-          const group = buildUnitMesh(faction, type);
+          const useInstancedTank = type === "tank" && tankInstancer?.ready;
+          const group = useInstancedTank
+            ? new THREE.Group()
+            : buildUnitMesh(faction, type);
           const ring = makeSelectionRing(); // added to ringsGroup, not the tank
           ring.scale.setScalar(T.ringScale); // ring sized to the unit
           unitsGroup.add(group);
+          const groundY = terrainHeight(x, z);
+          group.position.set(x, groundY, z);
+          group.rotation.y = face;
           let hp = T.hp;
           let maxHp = T.hp;
           if (faction === "player") {
@@ -5334,7 +5403,7 @@
             bar: makeHealthBar(faction),
             faction, // "player" | "enemy"
             type, // "scout" | "tank" | "artillery"
-            pos: new THREE.Vector3(x, terrainHeight(x, z), z),
+            pos: new THREE.Vector3(x, groundY, z),
             path: null, // array of {x,z} waypoints from A*
             attackMove: false, // path issued as attack-move (stop to fight)
             attackBase: false, // explicit siege order on enemy HQ
@@ -5362,7 +5431,12 @@
             autoHarvest: false,
             flying: !!T.flying,
             flyHeight: T.flying ? (PARAMS.helicopter?.flyHeight ?? 9) : 0,
+            instancedTank: useInstancedTank,
+            tankSlot: null,
           };
+          if (useInstancedTank) {
+            u.tankSlot = tankInstancer.allocate(u);
+          }
           if (type === "harvester") {
             u.carryCapacity =
               T.carryCapacity ?? PARAMS.ore.carryCapacity;
@@ -5370,13 +5444,15 @@
             u.autoHarvest = faction === "enemy";
             if (u.autoHarvest) initHarvesterCycle(u);
           }
-          // Every mesh of the unit is a pick target (shapes differ per type).
-          group.traverse((o) => {
-            if (o.isMesh) {
-              o.userData.unit = u;
-              tankBodies.push(o);
-            }
-          });
+          // Every mesh of the unit is a pick target (instanced tanks use hitbox).
+          if (!useInstancedTank) {
+            group.traverse((o) => {
+              if (o.isMesh) {
+                o.userData.unit = u;
+                tankBodies.push(o);
+              }
+            });
+          }
           units.push(u);
           return u;
         }
@@ -5705,6 +5781,7 @@
           }
           units.length = 0;
           tankBodies.length = 0;
+          tankInstancer?.reset();
           for (const k of Object.keys(groups)) delete groups[k];
           activeGroup = null;
         }
@@ -7042,15 +7119,15 @@
           closeReqPanel();
           closeStructPanel();
           raycaster.setFromCamera(screenToNDC(cx, cy), camera);
-          const hits = raycaster.intersectObjects(tankBodies, false);
+          const hits = raycaster.intersectObjects(unitPickTargets(), false);
           if (!additive) clearSelection();
           // Only our own units are selectable; ignore clicks on enemies.
           const hit = hits.find((h) => {
-            const u = h.object.userData.unit;
-            return u.faction === "player" && !u.dead;
+            const u = resolvePickUnit(h);
+            return u && u.faction === "player" && !u.dead;
           });
           if (hit) {
-            const u = hit.object.userData.unit;
+            const u = resolvePickUnit(hit);
             u.selected = additive ? !u.selected : true;
           }
           updateCountUI();
@@ -7493,13 +7570,13 @@
           placementGhost.visible = false;
           raycaster.setFromCamera(screenToNDC(cx, cy), camera);
           const eHit = raycaster
-            .intersectObjects(tankBodies, false)
+            .intersectObjects(unitPickTargets(), false)
             .find((h) => {
-              const u = h.object.userData.unit;
-              return u.faction === "enemy" && !u.dead;
+              const u = resolvePickUnit(h);
+              return u && u.faction === "enemy" && !u.dead;
             });
           if (eHit) {
-            const u = eHit.object.userData.unit;
+            const u = resolvePickUnit(eHit);
             hoverRing.material.color.copy(
               attackMovePending ? HOVER_ATTACK : HOVER_RED,
             );
@@ -7968,7 +8045,11 @@
           u.selected = false;
           u.attackTarget = null;
           u.path = null;
-          u.group.visible = false;
+          if (u.instancedTank && tankInstancer && u.tankSlot != null) {
+            tankInstancer.freeSlot(u.tankSlot);
+            u.tankSlot = null;
+          }
+          setUnitVisible(u, false);
           u.ring.visible = false;
           u.bar.visible = false;
           updateCountUI();
@@ -8438,7 +8519,7 @@
             const show = u.selected || u.hp < u.maxHp || u.attackTarget;
             u.bar.visible = show;
             if (show) {
-              const barLift = u.flying ? u.flyHeight + 3.4 : 2.9;
+              const barLift = u.flying ? u.flyHeight + 3.4 : u.type === "tank" ? 3.8 : 2.9;
               u.bar.position.set(u.pos.x, u.pos.y + barLift, u.pos.z);
               u.bar.lookAt(camera.position);
               u.bar.userData.fill.scale.x = Math.max(
@@ -8446,6 +8527,7 @@
                 BAR_W * Math.max(0, u.hp / u.maxHp),
               );
             }
+            if (u.instancedTank && tankInstancer) tankInstancer.syncUnit(u);
           }
         }
 
@@ -9612,7 +9694,7 @@
           });
           _slider(sec, PARAMS.camera, "distance", {
             label: "Distance",
-            min: 60,
+            min: 50,
             max: 1400,
             step: 5,
             onChange: () => {

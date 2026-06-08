@@ -137,7 +137,7 @@ function drawVignette(ctx, mini) {
 function drawCaptureNode(ctx, x, y, owner) {
   const col =
     owner === "player"
-      ? "#5ecf88"
+      ? "#58a8ff"
       : owner === "enemy"
         ? "#e85848"
         : "#a8a898";
@@ -233,10 +233,10 @@ function drawUnitBlip(ctx, x, y, u) {
   const isPlayer = u.faction === "player";
   ctx.fillStyle = isPlayer
     ? u.selected
-      ? "#f0fff0"
-      : "#62e862"
+      ? "#e8f4ff"
+      : "#58a8ff"
     : "#ff5850";
-  ctx.strokeStyle = isPlayer ? "rgba(0,40,0,0.65)" : "rgba(40,0,0,0.65)";
+  ctx.strokeStyle = isPlayer ? "rgba(20,40,90,0.7)" : "rgba(40,0,0,0.65)";
   ctx.lineWidth = 0.75;
   ctx.beginPath();
   ctx.moveTo(0, -size);
