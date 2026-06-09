@@ -671,8 +671,7 @@ export class Vehicle {
 
   setHeadlights(on) {
     HEADLIGHTS.enabled = !!on;
-    for (const l of this.headlights) l.visible = HEADLIGHTS.enabled;
-    for (const m of this.headlamps) m.visible = HEADLIGHTS.enabled;
+    this.applyHeadlightParams();
   }
 
   /** Re-sync the headlight rig after editing HEADLIGHTS params live. */
