@@ -123,21 +123,28 @@ function loadImageFromFile(file) {
 }
 
 /** Make a fresh slot descriptor with stable textures + uniforms. */
-function createSlot({ id, name, uvScale = 3.0 }) {
+function createSlot({
+  id,
+  name,
+  uvScale = 3.0,
+  normalStrength = 1.0,
+  aoStrength = 1.0,
+  roughStrength = 1.0,
+}) {
   return {
     id,
     name,
     paths: { albedo: null, normal: null, ao: null, rough: null },
     uvScale,
-    normalStrength: 1.0,
-    aoStrength: 1.0,
-    roughStrength: 1.0,
+    normalStrength,
+    aoStrength,
+    roughStrength,
     albedoTex: makeAlbedoCanvasTexture(160, 160, 160),
     ormTex: makeNeutralOrmDataTexture(),
     uUVScale: uniform(uvScale),
-    uNormalStr: uniform(1.0),
-    uAOStr: uniform(1.0),
-    uRoughStr: uniform(1.0),
+    uNormalStr: uniform(normalStrength),
+    uAOStr: uniform(aoStrength),
+    uRoughStr: uniform(roughStrength),
     uHasAlbedo: uniform(0),
     uHasNormal: uniform(0),
     uHasAO: uniform(0),
@@ -174,12 +181,27 @@ const DEFAULT_SLOT_PRESETS = [
   {
     id: "grass_005",
     name: "Grass 005",
-    uvScale: 3.0,
+    uvScale: 80.0,
     paths: {
       albedo: "/textures/pbr_materials/Grass005/Grass005_1K-JPG_Color.jpg",
       normal: "/textures/pbr_materials/Grass005/Grass005_1K-JPG_NormalGL.jpg",
       ao: "/textures/pbr_materials/Grass005/Grass005_1K-JPG_AmbientOcclusion.jpg",
       rough: "/textures/pbr_materials/Grass005/Grass005_1K-JPG_Roughness.jpg",
+    },
+  },
+  {
+    id: "aerial_grass_rock",
+    name: "Aerial Grass Rock",
+    uvScale: 40.0,
+    normalStrength: 0.5,
+    roughStrength: 0.0,
+    paths: {
+      albedo:
+        "/textures/pbr_materials/aerial-grass-rock/aerial_grass_rock_diff_2k.jpg",
+      normal:
+        "/textures/pbr_materials/aerial-grass-rock/aerial_grass_rock_nor_gl_2k.jpg",
+      rough:
+        "/textures/pbr_materials/aerial-grass-rock/aerial_grass_rock_rough_2k.jpg",
     },
   },
   {
@@ -213,7 +235,14 @@ const DEFAULT_SLOT_PRESETS = [
 export function createTextureLibrary() {
   /** @type {ReturnType<typeof createSlot>[]} */
   const slots = DEFAULT_SLOT_PRESETS.map((preset) => {
-    const slot = createSlot({ id: preset.id, name: preset.name, uvScale: preset.uvScale });
+    const slot = createSlot({
+      id: preset.id,
+      name: preset.name,
+      uvScale: preset.uvScale,
+      normalStrength: preset.normalStrength ?? 1.0,
+      aoStrength: preset.aoStrength ?? 1.0,
+      roughStrength: preset.roughStrength ?? 1.0,
+    });
     slot.paths = { ...preset.paths };
     return slot;
   });

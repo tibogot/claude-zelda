@@ -564,10 +564,16 @@ export function createToolState() {
       blendNoiseScale: 0.06,
       blendNoiseStr: 0.15,
       blendGroundScale: 1.0,
+      blendGroundOffsetX: 0.0,
+      blendGroundOffsetZ: 0.0,
       blendRockScale: 0.01,
       blendRockBrightness: 2.0,
       blendRockContrast: 1.1,
       blendTriplanarSharp: 4.0,
+    },
+    /** Cliff-blend paint mask brush (world XZ override onto placed cliff GLBs). */
+    cliffPaint: {
+      erase: false,
     },
     cliffSlots: [
       { name: "Cliff 1", loaded: false },

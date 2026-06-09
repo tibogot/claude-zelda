@@ -1614,6 +1614,7 @@
               <option value="revoGrass">Revo Grass (Y)</option>
               <option value="snow">Snow</option>
               <option value="cliffGrass">Cliff Grass</option>
+              <option value="cliffPaint">Cliff Paint</option>
               <option value="road">Road</option>
               <option value="fullRoad">Full Road</option>
               <option value="smartRoad">Smart Road</option>
@@ -2551,6 +2552,9 @@
         const cliffGrassPanel = document.getElementById("cliffgrass-panel");
         if (cliffGrassPanel)
           cliffGrassPanel.style.display = mode === "cliffGrass" ? "" : "none";
+        const cliffPaintPanel = document.getElementById("cliffpaint-panel");
+        if (cliffPaintPanel)
+          cliffPaintPanel.style.display = mode === "cliffPaint" ? "" : "none";
         const cliffsPanel = document.getElementById("cliffs-panel");
         if (cliffsPanel)
           cliffsPanel.style.display = mode === "cliffs" ? "" : "none";
@@ -3914,7 +3918,7 @@
           _slider(libEditor, slot, "uvScale", {
             label: "UV tile",
             min: 0.25,
-            max: 80,
+            max: 300,
             step: 0.25,
             onChange: () => lib.setSlotUvScale(slot.id, slot.uvScale),
           });
@@ -11134,6 +11138,49 @@
         return panel;
       }
 
+      // === Build custom Cliff Paint panel ===
+      function buildCliffPaintPanel(app) {
+        const panel = document.createElement("div");
+        panel.id = "cliffpaint-panel";
+        const cfg = app.config;
+        const ts = app.toolState;
+
+        const brushBody = _section(panel, "Brush");
+        _slider(brushBody, ts.brush, "radius", {
+          label: "Radius",
+          min: cfg.sculpt.brushMin,
+          max: cfg.sculpt.brushMax,
+          step: 0.5,
+        });
+        _slider(brushBody, ts.brush, "strength", {
+          label: "Strength",
+          min: cfg.sculpt.strengthMin,
+          max: cfg.sculpt.strengthMax,
+          step: 0.01,
+        });
+        _addBrushExtras(brushBody, ts);
+        _info(
+          brushBody,
+          "Paint",
+          "Click terrain under cliffs — Alt = erase. Overrides flat tops with active terrain ground.",
+        );
+        _toggle(brushBody, ts.cliffPaint, "erase", {
+          label: "Erase mode",
+        });
+
+        const body = _section(panel, "Cliff blend paint");
+        _button(body, {
+          title: "Fill cliff paint",
+          onClick: () => app.cliffPaintFill(),
+        });
+        _button(body, {
+          title: "Clear cliff paint",
+          onClick: () => app.cliffPaintClear(),
+        });
+
+        return panel;
+      }
+
       // === Build custom Cliff Grass panel ===
       function buildCliffGrassPanel(app) {
         const panel = document.createElement("div");
@@ -11265,6 +11312,11 @@
 
         // Blend Material
         const blendBody = _section(panel, "Blend Material", false);
+        _info(
+          blendBody,
+          "Flat tops",
+          "Use the same ground as Terrain appearance → Surface shading (TSL / image / tile).",
+        );
         const bc = () => app.cliffBlendChanged();
         _slider(blendBody, ts.cliffs, "blendRockScale", {
           label: "Rock UV Scale",
@@ -11322,12 +11374,38 @@
           step: 0.01,
           onChange: bc,
         });
-        _slider(blendBody, ts.cliffs, "blendGroundScale", {
-          label: "Ground UV Scale",
+        const groundUvBody = _section(blendBody, "Ground UV (flat tops)", false);
+        _slider(groundUvBody, ts.cliffs, "blendGroundScale", {
+          label: "Pattern scale",
           min: 0.1,
           max: 5,
-          step: 0.1,
+          step: 0.05,
           onChange: bc,
+          hint: "1.0 = same world sampling as terrain. Other values stretch/shrink vs terrain.",
+        });
+        _slider(groundUvBody, ts.cliffs, "blendGroundOffsetX", {
+          label: "Offset X (m)",
+          min: -200,
+          max: 200,
+          step: 0.5,
+          onChange: bc,
+        });
+        _slider(groundUvBody, ts.cliffs, "blendGroundOffsetZ", {
+          label: "Offset Z (m)",
+          min: -200,
+          max: 200,
+          step: 0.5,
+          onChange: bc,
+        });
+        _button(groundUvBody, {
+          title: "Reset ground UV (match terrain)",
+          onClick: () => {
+            ts.cliffs.blendGroundScale = 1.0;
+            ts.cliffs.blendGroundOffsetX = 0.0;
+            ts.cliffs.blendGroundOffsetZ = 0.0;
+            bc();
+            app.ui?.pane?.refresh?.();
+          },
         });
 
         _separator(panel);
@@ -14384,6 +14462,7 @@
           toolsTab.appendChild(buildAmbientFxPanel(app));
           toolsTab.appendChild(buildFleurPanel(app));
           toolsTab.appendChild(buildCliffGrassPanel(app));
+          toolsTab.appendChild(buildCliffPaintPanel(app));
           toolsTab.appendChild(buildCliffsPanel(app));
           toolsTab.appendChild(buildWaterPanel(app));
           toolsTab.appendChild(buildWaterfallPanel(app));

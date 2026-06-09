@@ -112,6 +112,9 @@ import { CliffInstancer } from "../core/cliffs/cliffInstancer.js";
 import { CliffSystem } from "../tools/cliffs/cliffSystem.js";
 import { CliffBvh } from "../core/cliffs/cliffBvh.js";
 import { createCliffInstancerBlendMaterial } from "../../cliffInstancerBlendMaterial.js";
+import { CliffPaintMask } from "../core/cliffs/cliffPaintMask.js";
+import { CliffPaintSystem } from "../tools/cliffs/cliffPaintSystem.js";
+import { getTileGridTexture } from "../../tileMaterial.js";
 import { PropStore } from "../core/props/propStore.js";
 import { PropInstancer } from "../core/props/propInstancer.js";
 import { PropSystem } from "../tools/props/propSystem.js";
@@ -893,7 +896,7 @@ export async function startV2App(opts = {}) {
     .then(() => {
       textureLibraryReady = true;
       invalidateSurfaceMaterials();
-      tryBuildCliffBlendMaterial();
+      rebuildCliffBlendMaterial();
     })
     .catch((err) => console.warn("TextureLibrary defaults failed:", err));
   textureLibrary.addOnChange(({ kind }) => {
@@ -1412,42 +1415,82 @@ export async function startV2App(opts = {}) {
   rebuildInteriorVolumes();
   let propUiCallbacks = {};
 
-  const dummyCliffPaintTex = (() => {
-    const t = new THREE.DataTexture(
-      new Uint8Array([0, 0, 0, 0]),
-      1,
-      1,
-      THREE.RGBAFormat,
-    );
-    t.needsUpdate = true;
-    return t;
-  })();
+  const cliffPaintMask = new CliffPaintMask(512);
+  const cliffPaintSystem = new CliffPaintSystem({
+    toolState,
+    mask: cliffPaintMask,
+    config,
+  });
 
-  function tryBuildCliffBlendMaterial() {
-    if (cliffBlendPack) return;
-    if (!textureLibraryReady) return;
-    const slot = textureLibrary.getSlot(toolState.textureSlots.cliffSlotId);
-    if (!slot) return;
+  function buildCliffBlendGroundDeps() {
+    const worldSize = config.world.size;
+    const surface = toolState.terrainSurface;
+    if (surface === "image" && textureLibraryReady) {
+      const groundSlot = textureLibrary.getSlot(
+        toolState.textureSlots.groundSlotId,
+      );
+      if (groundSlot) {
+        return { type: "image", groundSlot, worldSize };
+      }
+    }
+    if (surface === "tsl") {
+      return {
+        type: "tsl",
+        groundColorAtWorldXZ: sharedGroundBundle.groundColorAtWorldXZ,
+      };
+    }
+    const tileUniforms = tileTerrainMaterial._tileUniforms;
+    return {
+      type: "tile",
+      gridTex: getTileGridTexture(),
+      tileUniforms,
+    };
+  }
+
+  function syncCliffBlendPackUniforms() {
+    if (!cliffBlendPack) return;
     const c = toolState.cliffs;
-    cliffU.uRockScale.value = c.blendRockScale;
-    cliffU.uRockBrightness.value = c.blendRockBrightness;
-    cliffU.uRockContrast.value = c.blendRockContrast;
-    cliffU.uTriplanarSharp.value = c.blendTriplanarSharp;
-    cliffBlendPack = createCliffInstancerBlendMaterial(
-      config.world.size,
-      config.world.size * 0.5,
-      slot.albedoTex,
-      slot.ormTex,
-      cliffU,
-      dummyCliffPaintTex,
-    );
     cliffBlendPack.uCBSlopeLow.value = c.blendSlopeLow;
     cliffBlendPack.uCBSlopeHigh.value = c.blendSlopeHigh;
     cliffBlendPack.uCBNoiseScale.value = c.blendNoiseScale;
     cliffBlendPack.uCBNoiseStr.value = c.blendNoiseStr;
     cliffBlendPack.uCBGroundScale.value = c.blendGroundScale;
+    cliffBlendPack.uCBGroundOffsetX.value = c.blendGroundOffsetX ?? 0;
+    cliffBlendPack.uCBGroundOffsetZ.value = c.blendGroundOffsetZ ?? 0;
+    cliffU.uRockScale.value = c.blendRockScale;
+    cliffU.uRockBrightness.value = c.blendRockBrightness;
+    cliffU.uRockContrast.value = c.blendRockContrast;
+    cliffU.uTriplanarSharp.value = c.blendTriplanarSharp;
+  }
+
+  function disposeCliffBlendPack() {
+    if (!cliffBlendPack) return;
+    cliffBlendPack.material.dispose();
+    cliffBlendPack = null;
+  }
+
+  function rebuildCliffBlendMaterial() {
+    if (!textureLibraryReady) return;
+    const slot = textureLibrary.getSlot(toolState.textureSlots.cliffSlotId);
+    if (!slot) return;
+    syncCliffUniformsFromParams();
+    const c = toolState.cliffs;
+    cliffU.uRockScale.value = c.blendRockScale;
+    cliffU.uRockBrightness.value = c.blendRockBrightness;
+    cliffU.uRockContrast.value = c.blendRockContrast;
+    cliffU.uTriplanarSharp.value = c.blendTriplanarSharp;
+    disposeCliffBlendPack();
+    cliffBlendPack = createCliffInstancerBlendMaterial({
+      worldSize: config.world.size,
+      worldHalf: config.world.size * 0.5,
+      rockColorTex: slot.albedoTex,
+      rockDataTex: slot.ormTex,
+      cliffU,
+      cliffPaintTex: cliffPaintMask.texture,
+      groundDeps: buildCliffBlendGroundDeps(),
+    });
+    syncCliffBlendPackUniforms();
     cliffInstancer.setMaterial(cliffBlendPack.material);
-    console.log("[V2] Cliff blend material created");
   }
 
   function getWorldHeight(x, z) {
@@ -1988,6 +2031,8 @@ export async function startV2App(opts = {}) {
     _fleurClear;
   let _cliffGrassFill,
     _cliffGrassClear,
+    _cliffPaintFill,
+    _cliffPaintClear,
     _importCliffGlb,
     _removeCliffSlot,
     _deleteSelectedCliff,
@@ -2081,6 +2126,7 @@ export async function startV2App(opts = {}) {
     onRampCleared: () => syncRampMarker(),
     onTerrainSurfaceChanged: (_terrainSurfaceChanged = () => {
       applyTerrainSurfaceFromToolState();
+      rebuildCliffBlendMaterial();
       ui?.pane.refresh();
     }),
     onTslTerrainSync: (_tslTerrainSync = () => {
@@ -2102,11 +2148,13 @@ export async function startV2App(opts = {}) {
     }),
     onCliffSlotChanged: (_cliffTextureSlotChanged = () => {
       invalidateSurfaceMaterials();
+      rebuildCliffBlendMaterial();
     }),
     onGroundSlotChanged: (_groundTextureSlotChanged = () => {
       disposeImageTexBundle();
       if (toolState.terrainSurface === "image")
         applyTerrainSurfaceFromToolState();
+      rebuildCliffBlendMaterial();
     }),
     onPlaySpawnChanged: (_playSpawnChanged = () => {
       syncPlaySpawnMarker();
@@ -2472,6 +2520,12 @@ export async function startV2App(opts = {}) {
     onCliffGrassClear: (_cliffGrassClear = () => {
       grassManager.clearCliffDensity();
     }),
+    onCliffPaintFill: (_cliffPaintFill = () => {
+      cliffPaintMask.fillAll();
+    }),
+    onCliffPaintClear: (_cliffPaintClear = () => {
+      cliffPaintMask.clearAll();
+    }),
     onGrassSaveDensity: (_grassSaveDensity = () => {
       const data = grassManager.densityTex.image.data;
       const blob = new Blob([data.buffer], {
@@ -2546,7 +2600,7 @@ export async function startV2App(opts = {}) {
       slotIdx,
       preselectedFile = null,
     ) => {
-      tryBuildCliffBlendMaterial();
+      rebuildCliffBlendMaterial();
       const file = preselectedFile ?? (await openGlbPicker());
       if (!file) return;
       try {
@@ -2876,17 +2930,7 @@ export async function startV2App(opts = {}) {
       splineSystem.syncActiveKerbFromToolState();
     }),
     onCliffBlendChanged: (_cliffBlendChanged = () => {
-      if (!cliffBlendPack) return;
-      const c = toolState.cliffs;
-      cliffBlendPack.uCBSlopeLow.value = c.blendSlopeLow;
-      cliffBlendPack.uCBSlopeHigh.value = c.blendSlopeHigh;
-      cliffBlendPack.uCBNoiseScale.value = c.blendNoiseScale;
-      cliffBlendPack.uCBNoiseStr.value = c.blendNoiseStr;
-      cliffBlendPack.uCBGroundScale.value = c.blendGroundScale;
-      cliffU.uRockScale.value = c.blendRockScale;
-      cliffU.uRockBrightness.value = c.blendRockBrightness;
-      cliffU.uRockContrast.value = c.blendRockContrast;
-      cliffU.uTriplanarSharp.value = c.blendTriplanarSharp;
+      syncCliffBlendPackUniforms();
     }),
     onImportPropGlb: (_importPropGlb = async (preselectedFile = null) => {
       const file = preselectedFile ?? (await openGlbPicker());
@@ -3358,6 +3402,7 @@ export async function startV2App(opts = {}) {
       toolState._revoGrassMaskExportData = () =>
         revoGrassSystem.mask.exportData();
       toolState._snowMaskExportData = () => snowSystem.mask.exportData();
+      toolState._cliffPaintMaskExportData = () => cliffPaintMask.exportData();
       toolState.propMaterialOverrides = propTextureLibrary.snapshotOverrides();
       const buf = serializeProject({
         terrainStore,
@@ -3387,6 +3432,7 @@ export async function startV2App(opts = {}) {
       delete toolState._billboardGrassExportData;
       delete toolState._revoGrassMaskExportData;
       delete toolState._snowMaskExportData;
+      delete toolState._cliffPaintMaskExportData;
       const blob = new Blob([buf], { type: "application/octet-stream" });
       const ts = new Date().toISOString().replace(/[:.]/g, "-").slice(0, 19);
       downloadBlob(blob, `terrain-${ts}.v2terrain`);
@@ -3436,6 +3482,9 @@ export async function startV2App(opts = {}) {
         }
         if (project.settings?.snowMask) {
           snowSystem.mask.importData(project.settings.snowMask);
+        }
+        if (project.settings?.cliffPaintMask) {
+          cliffPaintMask.importData(project.settings.cliffPaintMask);
         }
         if (project.settings?.snow && toolState.snow.enabled) {
           await snowSystem.rebuild(toolState.snow);
@@ -4216,6 +4265,7 @@ export async function startV2App(opts = {}) {
       toolState.mode === "revoGrass" ||
       toolState.mode === "snow" ||
       toolState.mode === "cliffGrass" ||
+      toolState.mode === "cliffPaint" ||
       toolState.mode === "barrier" ||
       toolState.mode === "hole" ||
       toolState.mode === "cave" ||
@@ -4602,6 +4652,8 @@ export async function startV2App(opts = {}) {
       snowMaskPaintSystem.beginStroke(hit.point, event);
     } else if (toolState.mode === "cliffGrass") {
       cliffGrassPaintSystem.beginStroke(hit.point, event);
+    } else if (toolState.mode === "cliffPaint") {
+      cliffPaintSystem.beginStroke(hit.point, event);
     } else if (toolState.mode === "props") {
       propSystem.beginStroke(hit.point, event);
     } else if (toolState.mode === "barrier") {
@@ -4712,6 +4764,8 @@ export async function startV2App(opts = {}) {
       snowMaskPaintSystem.applyAt(hit.point, event);
     } else if (toolState.mode === "cliffGrass") {
       cliffGrassPaintSystem.applyAt(hit.point, event);
+    } else if (toolState.mode === "cliffPaint") {
+      cliffPaintSystem.applyAt(hit.point, event);
     } else if (toolState.mode === "props") {
       propSystem.applyAt(hit.point, event);
     } else if (toolState.mode === "barrier") {
@@ -4862,6 +4916,8 @@ export async function startV2App(opts = {}) {
       snowMaskPaintSystem.endStroke();
     } else if (toolState.mode === "cliffGrass") {
       cliffGrassPaintSystem.endStroke();
+    } else if (toolState.mode === "cliffPaint") {
+      cliffPaintSystem.endStroke();
     } else if (toolState.mode === "props") {
       propSystem.endStroke();
     } else if (toolState.mode === "barrier") {
@@ -4881,6 +4937,7 @@ export async function startV2App(opts = {}) {
     if (toolState.mode === "revoGrass") return revoGrassMaskPaintSystem;
     if (toolState.mode === "snow") return snowMaskPaintSystem;
     if (toolState.mode === "cliffGrass") return cliffGrassPaintSystem;
+    if (toolState.mode === "cliffPaint") return cliffPaintSystem;
     if (toolState.mode === "road") return roadSystem;
     if (toolState.mode === "fullRoad") return fullRoadSystem;
     if (toolState.mode === "smartRoad") return smartRoadSystem;
@@ -6109,6 +6166,12 @@ export async function startV2App(opts = {}) {
     },
     cliffBlendChanged() {
       _cliffBlendChanged();
+    },
+    cliffPaintFill() {
+      _cliffPaintFill();
+    },
+    cliffPaintClear() {
+      _cliffPaintClear();
     },
     waterChanged() {
       _waterChanged();

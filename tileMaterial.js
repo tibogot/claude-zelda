@@ -38,6 +38,11 @@ export function setGridTextureUrl(url) {
   gridTextureCache = null;
 }
 
+/** Shared grid.png used by tile terrain and cliff-blend flat tops. */
+export function getTileGridTexture() {
+  return getGridTexture();
+}
+
 function getGridTexture() {
   if (gridTextureCache) return gridTextureCache;
   const texLoader = new THREE.TextureLoader();
@@ -162,4 +167,32 @@ export function createTileMaterial(options = {}) {
   };
 
   return mat;
+}
+
+/**
+ * Tile grid colour at world XZ — matches flat terrain tops (normal ≈ up uses XZ projection).
+ * @param {THREE.Texture} gridTex
+ * @param {ReturnType<createTileMaterial>["_tileUniforms"]} uniforms
+ * @param {import("three/tsl").Node} worldXZ
+ */
+export function tileColorAtWorldXZ(gridTex, uniforms, worldXZ) {
+  const worldScale = mul(uniforms.textureScale, 0.00125);
+  const uvXZ = worldXZ.mul(worldScale);
+  const g1 = texture(gridTex, mul(uvXZ, 0.125)).r;
+  const g2 = texture(gridTex, mul(uvXZ, 1.25)).r;
+  const h = hash12(floor(mul(uvXZ, 1.25)));
+  const variationAmount = mul(uniforms.gradientIntensity, 0.2);
+  const baseShade = clamp(
+    add(
+      0.45,
+      remap(h, 0.0, 1.0, negate(variationAmount), variationAmount),
+      uniforms.gradientBias,
+    ),
+    0.0,
+    1.0,
+  );
+  const tileColour = mul(uniforms.tileColor, baseShade);
+  let gridColour = mix(tileColour, uniforms.gridColor, g2);
+  gridColour = mix(gridColour, uniforms.gridLineColor, g1);
+  return gridColour;
 }

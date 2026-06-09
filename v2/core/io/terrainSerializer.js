@@ -506,6 +506,7 @@ function extractSerializableSettings(toolState) {
     revoGrassMask: toolState._revoGrassMaskExportData?.() ?? null,
     snow: { ...toolState.snow },
     snowMask: toolState._snowMaskExportData?.() ?? null,
+    cliffPaintMask: toolState._cliffPaintMaskExportData?.() ?? null,
     cliffs: { ...toolState.cliffs },
     cliffInstances: toolState._cliffExportData?.() ?? null,
     props: { ...toolState.props },
