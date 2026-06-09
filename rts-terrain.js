@@ -1,5 +1,5 @@
 /**
- * RTS Lab terrain — organic FBM hills with slope-clamped ramps (grass / cliff PBR).
+ * RTS Lab terrain — organic FBM hills with slope-clamped ramps (aerial grass-rock / cliff PBR).
  * Exposes `createRtsTerrain()` → { mesh, getHeight, uniforms, dispose }.
  */
 import * as THREE from "three/webgpu";
@@ -9,11 +9,8 @@ import {
   vec2,
   vec3,
   uniform,
-  uv,
   positionWorld,
   normalWorld,
-  positionGeometry,
-  normalGeometry,
   texture,
   normalMap,
   color,
@@ -103,7 +100,7 @@ export const RTS_TERRAIN_DEFAULTS = {
   rampMaxGrade: 0.4,
   slopeClampPasses: 12,
   // ── Surface / shading (live uniforms) ──
-  grassScale: 0.016,
+  grassScale: 0.008,
   cliffScale: 0.0042,
   albedoMul: 0.96,
   cliffLow: 0.22,
@@ -164,13 +161,241 @@ function fbm(perlin, x, y, z, octaves, persistence, lacunarity) {
   return total / Math.max(1e-6, maxValue);
 }
 
-export async function createRtsTerrain(
-  size = RTS_MAP_SIZE,
-  segments = 288,
-  params = {},
-) {
+const ARRAY_RES = 1024;
+const PBR_PATH = "./textures/pbr_materials/";
+/** Shared PBR material — loaded once, geometry rebuilt separately. */
+let _terrainPbr = null;
+
+function buildLayerArray(maps, srgb) {
+  const count = maps.length;
+  const stride = ARRAY_RES * ARRAY_RES * 4;
+  const data = new Uint8Array(stride * count);
+  const canvas = document.createElement("canvas");
+  canvas.width = canvas.height = ARRAY_RES;
+  const ctx = canvas.getContext("2d", { willReadFrequently: true });
+  for (let i = 0; i < count; i++) {
+    const img = maps[i]?.image;
+    if (!img) continue;
+    ctx.clearRect(0, 0, ARRAY_RES, ARRAY_RES);
+    ctx.drawImage(img, 0, 0, ARRAY_RES, ARRAY_RES);
+    data.set(ctx.getImageData(0, 0, ARRAY_RES, ARRAY_RES).data, i * stride);
+  }
+  const tex = new THREE.DataArrayTexture(data, ARRAY_RES, ARRAY_RES, count);
+  tex.format = THREE.RGBAFormat;
+  tex.type = THREE.UnsignedByteType;
+  tex.wrapS = tex.wrapT = THREE.RepeatWrapping;
+  tex.minFilter = THREE.LinearMipMapLinearFilter;
+  tex.magFilter = THREE.LinearFilter;
+  tex.colorSpace = srgb ? THREE.SRGBColorSpace : THREE.LinearSRGBColorSpace;
+  tex.generateMipmaps = true;
+  tex.needsUpdate = true;
+  return tex;
+}
+
+function loadTerrainTex(loader, baseUrl, rel, srgb) {
+  return new Promise((resolve, reject) => {
+    loader.load(
+      new URL(rel, baseUrl).href,
+      (t) => {
+        t.wrapS = t.wrapT = THREE.RepeatWrapping;
+        t.colorSpace = srgb
+          ? THREE.SRGBColorSpace
+          : THREE.LinearSRGBColorSpace;
+        t.minFilter = THREE.LinearMipmapLinearFilter;
+        t.magFilter = THREE.LinearFilter;
+        t.anisotropy = 4;
+        resolve(t);
+      },
+      undefined,
+      reject,
+    );
+  });
+}
+
+async function ensureTerrainPbr() {
+  if (_terrainPbr) return _terrainPbr;
+
+  const baseUrl = import.meta.url;
+  const loader = new THREE.TextureLoader();
+  const loadTex = (rel, srgb) =>
+    loadTerrainTex(loader, baseUrl, rel, srgb);
+
+  const uniforms = {};
+  const allTextures = [];
+  let material;
+
+  try {
+    const grassRough = await loadTex(
+      `${PBR_PATH}aerial-grass-rock/aerial_grass_rock_rough_2k.jpg`,
+      false,
+    );
+    const grass = {
+      color: await loadTex(
+        `${PBR_PATH}aerial-grass-rock/aerial_grass_rock_diff_2k.jpg`,
+        true,
+      ),
+      normal: await loadTex(
+        `${PBR_PATH}aerial-grass-rock/aerial_grass_rock_nor_gl_2k.jpg`,
+        false,
+      ),
+      roughness: grassRough,
+      ao: grassRough,
+    };
+    const cliff = {
+      color: await loadTex(
+        `${PBR_PATH}cliff_rocks_07_2k/cliff_rocks_07_basecolor_2k.png`,
+        true,
+      ),
+      normal: await loadTex(
+        `${PBR_PATH}cliff_rocks_07_2k/cliff_rocks_07_normal_gl_2k.png`,
+        false,
+      ),
+      roughness: await loadTex(
+        `${PBR_PATH}cliff_rocks_07_2k/cliff_rocks_07_roughness_2k.png`,
+        false,
+      ),
+      ao: await loadTex(
+        `${PBR_PATH}cliff_rocks_07_2k/cliff_rocks_07_ambientocclusion_2k.png`,
+        false,
+      ),
+    };
+
+    const layers = [grass, cliff];
+    for (const m of layers) allTextures.push(...Object.values(m));
+
+    const colorArray = buildLayerArray(
+      layers.map((l) => l.color),
+      true,
+    );
+    const normalArray = buildLayerArray(
+      layers.map((l) => l.normal),
+      false,
+    );
+    const roughArray = buildLayerArray(
+      layers.map((l) => l.roughness),
+      false,
+    );
+    const aoArray = buildLayerArray(
+      layers.map((l) => l.ao),
+      false,
+    );
+    allTextures.push(colorArray, normalArray, roughArray, aoArray);
+
+    const L_GRASS = int(0);
+    const L_CLIFF = int(1);
+    const surf = pickSurf(RTS_TERRAIN_DEFAULTS);
+
+    const uGrassScale = uniform(surf.grassScale);
+    const uCliffScale = uniform(surf.cliffScale);
+    const uAlbedoMul = uniform(surf.albedoMul);
+    const uCliffLow = uniform(surf.cliffLow);
+    const uCliffHigh = uniform(surf.cliffHigh);
+    const uCliffPow = uniform(surf.cliffPow);
+    const uGrassJitter = uniform(surf.grassJitter);
+    const uDispStrength = uniform(surf.dispStrength);
+    const uDispCliffMul = uniform(surf.dispCliffMul);
+    const uDispUvScale = uniform(surf.dispUvScale);
+    const uNormalGrass = uniform(surf.normalGrass);
+    const uNormalCliff = uniform(surf.normalCliff);
+    const uEnvIntensity = uniform(surf.envIntensity);
+    const uMetalness = uniform(surf.metalness);
+
+    Object.assign(uniforms, {
+      grassScale: uGrassScale,
+      cliffScale: uCliffScale,
+      albedoMul: uAlbedoMul,
+      cliffLow: uCliffLow,
+      cliffHigh: uCliffHigh,
+      cliffPow: uCliffPow,
+      grassJitter: uGrassJitter,
+      dispStrength: uDispStrength,
+      dispCliffMul: uDispCliffMul,
+      dispUvScale: uDispUvScale,
+      normalGrass: uNormalGrass,
+      normalCliff: uNormalCliff,
+      envIntensity: uEnvIntensity,
+      metalness: uMetalness,
+    });
+
+    const layerWeights = () => {
+      const slope = sub(float(1), abs(normalWorld.y));
+      const jitter = fract(
+        mul(sin(dot(positionWorld.xz, vec2(127.1, 311.7))), 43758.5453),
+      );
+      const wCliff = pow(smoothstep(uCliffLow, uCliffHigh, slope), uCliffPow);
+      const wGrass = mul(
+        sub(float(1), wCliff),
+        add(sub(float(1), uGrassJitter), mul(jitter, uGrassJitter)),
+      );
+      const wSum = add(wGrass, wCliff);
+      return vec2(wGrass, wCliff).div(max(wSum, float(0.001)));
+    };
+
+    const layerRGB = (arr, layer, sc) =>
+      texture(arr, mul(positionWorld.xz, sc)).depth(layer).rgb;
+    const layerR = (arr, layer, sc) =>
+      texture(arr, mul(positionWorld.xz, sc)).depth(layer).r;
+
+    const gRGB = () => layerRGB(colorArray, L_GRASS, uGrassScale);
+    const cRGB = () => layerRGB(colorArray, L_CLIFF, uCliffScale);
+    const gR = () => layerR(roughArray, L_GRASS, uGrassScale);
+    const cR = () => layerR(roughArray, L_CLIFF, uCliffScale);
+    const gAo = () => layerR(aoArray, L_GRASS, uGrassScale);
+    const cAo = () => layerR(aoArray, L_CLIFF, uCliffScale);
+
+    material = new THREE.MeshStandardNodeMaterial({ side: THREE.FrontSide });
+    material.envMapIntensity = 0;
+    material.colorNode = (() => {
+      const lw = layerWeights();
+      return mul(add(mul(gRGB(), lw.x), mul(cRGB(), lw.y)), uAlbedoMul);
+    })();
+    material.roughnessNode = (() => {
+      const lw = layerWeights();
+      return clamp(
+        add(mul(gR(), lw.x), mul(cR(), lw.y)),
+        float(0.04),
+        float(1),
+      );
+    })();
+    material.aoNode = (() => {
+      const lw = layerWeights();
+      return clamp(
+        add(mul(gAo(), lw.x), mul(cAo(), lw.y)),
+        float(0.25),
+        float(1),
+      );
+    })();
+    material.normalNode = (() => {
+      const lw = layerWeights();
+      const nG = normalMap(
+        texture(normalArray, mul(positionWorld.xz, uGrassScale)).depth(L_GRASS),
+        vec2(uNormalGrass, uNormalGrass),
+      );
+      const nC = normalMap(
+        texture(normalArray, mul(positionWorld.xz, uCliffScale)).depth(L_CLIFF),
+        vec2(uNormalCliff, uNormalCliff),
+      );
+      return normalize(add(mul(nG, lw.x), mul(nC, lw.y)));
+    })();
+    // No positionNode displacement — shadow maps use mesh geometry; vertex
+    // displacement caused unit shadows to float above the visible surface.
+    material.metalnessNode = uMetalness;
+    material.color = new THREE.Color(0xffffff);
+  } catch (err) {
+    console.warn("[rts-terrain] PBR textures failed to load — matte fallback.", err);
+    material = new THREE.MeshStandardNodeMaterial({ side: THREE.FrontSide });
+    material.colorNode = color(0x4a5c3a);
+    material.roughnessNode = float(0.985);
+    material.metalnessNode = float(0);
+  }
+
+  _terrainPbr = { material, uniforms, allTextures };
+  return _terrainPbr;
+}
+
+/** Bake height samples + sampler (no GPU geometry allocation). */
+function bakeTerrainHeightfield(size, segments, params = {}) {
   const ts = pickShape({ ...RTS_TERRAIN_DEFAULTS, ...params });
-  const surf = pickSurf({ ...RTS_TERRAIN_DEFAULTS, ...params });
   const perlin = new ImprovedNoise(createSeededRandom(4242));
 
   function mountainRelief(x, z) {
@@ -280,27 +505,23 @@ export async function createRtsTerrain(
     height: pad.height ?? rawHeight(pad.x, pad.z),
   }));
 
-  function applyFlattenPadsToGrid() {
-    for (const pad of flattenPads) {
-      for (let zi = 0; zi <= seg; zi++) {
-        for (let xi = 0; xi <= seg; xi++) {
-          const { x, z } = gridWorld(xi, zi);
-          const dx = x - pad.x;
-          const dz = z - pad.z;
-          const r = pad.radius;
-          const d2 = dx * dx + dz * dz;
-          if (d2 >= r * r) continue;
-          const d = Math.sqrt(d2);
-          const t = d / r;
-          const w = 1 - t * t * (3 - 2 * t);
-          const i = gridIdx(xi, zi);
-          heights[i] = heights[i] * (1 - w) + pad.height * w;
-        }
+  for (const pad of flattenPads) {
+    for (let zi = 0; zi <= seg; zi++) {
+      for (let xi = 0; xi <= seg; xi++) {
+        const { x, z } = gridWorld(xi, zi);
+        const dx = x - pad.x;
+        const dz = z - pad.z;
+        const r = pad.radius;
+        const d2 = dx * dx + dz * dz;
+        if (d2 >= r * r) continue;
+        const d = Math.sqrt(d2);
+        const t = d / r;
+        const w = 1 - t * t * (3 - 2 * t);
+        const i = gridIdx(xi, zi);
+        heights[i] = heights[i] * (1 - w) + pad.height * w;
       }
     }
   }
-
-  applyFlattenPadsToGrid();
 
   function sampleHeightGrid(x, z) {
     const u = ((x + half) / size) * seg;
@@ -322,263 +543,115 @@ export async function createRtsTerrain(
     return hx0 * (1 - fz) + hx1 * fz;
   }
 
-  function getHeight(x, z) {
-    return sampleHeightGrid(x, z);
-  }
+  return {
+    heights,
+    seg,
+    vertsX,
+    getHeight: (x, z) => sampleHeightGrid(x, z),
+    shape: ts,
+  };
+}
 
-  const geo = new THREE.PlaneGeometry(size, size, seg, seg);
-  geo.rotateX(-Math.PI / 2);
-  const pos = geo.attributes.position;
-  for (let zi = 0; zi <= seg; zi++) {
-    for (let xi = 0; xi <= seg; xi++) {
-      const i = gridIdx(xi, zi);
-      const vi = zi * vertsX + xi;
-      pos.setY(vi, heights[i]);
-    }
+/** Update an existing plane heightfield in-place (keeps WebGPU buffers alive). */
+function applyHeightsToGeometry(geo, heights, seg, vertsX) {
+  const pos = geo?.attributes?.position;
+  const wantVerts = vertsX * vertsX;
+  if (!pos || pos.count !== wantVerts) return false;
+
+  const arr = pos.array;
+  for (let i = 0; i < wantVerts; i++) {
+    arr[i * 3 + 1] = heights[i];
   }
+  pos.setUsage(THREE.DynamicDrawUsage);
+  pos.needsUpdate = true;
   geo.computeVertexNormals();
-
-  const ARRAY_RES = 1024;
-  function buildLayerArray(maps, srgb) {
-    const count = maps.length;
-    const stride = ARRAY_RES * ARRAY_RES * 4;
-    const data = new Uint8Array(stride * count);
-    const canvas = document.createElement("canvas");
-    canvas.width = canvas.height = ARRAY_RES;
-    const ctx = canvas.getContext("2d", { willReadFrequently: true });
-    for (let i = 0; i < count; i++) {
-      const img = maps[i]?.image;
-      if (!img) continue;
-      ctx.clearRect(0, 0, ARRAY_RES, ARRAY_RES);
-      ctx.drawImage(img, 0, 0, ARRAY_RES, ARRAY_RES);
-      data.set(ctx.getImageData(0, 0, ARRAY_RES, ARRAY_RES).data, i * stride);
-    }
-    const tex = new THREE.DataArrayTexture(data, ARRAY_RES, ARRAY_RES, count);
-    tex.format = THREE.RGBAFormat;
-    tex.type = THREE.UnsignedByteType;
-    tex.wrapS = tex.wrapT = THREE.RepeatWrapping;
-    tex.minFilter = THREE.LinearMipMapLinearFilter;
-    tex.magFilter = THREE.LinearFilter;
-    tex.colorSpace = srgb ? THREE.SRGBColorSpace : THREE.LinearSRGBColorSpace;
-    tex.generateMipmaps = true;
-    tex.needsUpdate = true;
-    return tex;
+  const normal = geo.attributes.normal;
+  if (normal) {
+    normal.setUsage(THREE.DynamicDrawUsage);
+    normal.needsUpdate = true;
   }
+  geo.computeBoundingSphere();
+  geo.computeBoundingBox();
+  return true;
+}
 
-  const baseUrl = import.meta.url;
-  const loader = new THREE.TextureLoader();
-  const loadTex = (rel, srgb) =>
-    new Promise((resolve, reject) => {
-      loader.load(
-        new URL(rel, baseUrl).href,
-        (t) => {
-          t.wrapS = t.wrapT = THREE.RepeatWrapping;
-          t.colorSpace = srgb
-            ? THREE.SRGBColorSpace
-            : THREE.LinearSRGBColorSpace;
-          t.minFilter = THREE.LinearMipmapLinearFilter;
-          t.magFilter = THREE.LinearFilter;
-          t.anisotropy = 4;
-          resolve(t);
-        },
-        undefined,
-        reject,
-      );
-    });
+/** Bake heightfield mesh only (cheap compared to texture/material setup). */
+function buildTerrainHeightfield(size, segments, params = {}) {
+  const baked = bakeTerrainHeightfield(size, segments, params);
+  const geo = new THREE.PlaneGeometry(size, size, baked.seg, baked.seg);
+  geo.rotateX(-Math.PI / 2);
+  applyHeightsToGeometry(geo, baked.heights, baked.seg, baked.vertsX);
+  return {
+    geo,
+    getHeight: baked.getHeight,
+    shape: baked.shape,
+  };
+}
 
-  const P = "./textures/pbr_materials/";
-  let material;
-  const uniforms = {};
-  const allTextures = [];
-  try {
-    const setJpg = async (dir, base, withDisp) => {
-      const m = {
-        color: await loadTex(`${P}${dir}/${base}_Color.jpg`, true),
-        normal: await loadTex(`${P}${dir}/${base}_NormalGL.jpg`, false),
-        roughness: await loadTex(`${P}${dir}/${base}_Roughness.jpg`, false),
-        ao: await loadTex(`${P}${dir}/${base}_AmbientOcclusion.jpg`, false),
-      };
-      if (withDisp) {
-        m.displacement = await loadTex(
-          `${P}${dir}/${base}_Displacement.jpg`,
-          false,
-        );
-      }
-      return m;
-    };
-
-    const grass = await setJpg("Grass005", "Grass005_1K-JPG", false);
-    const cliff = {
-      color: await loadTex(
-        `${P}cliff_rocks_07_2k/cliff_rocks_07_basecolor_2k.png`,
-        true,
-      ),
-      normal: await loadTex(
-        `${P}cliff_rocks_07_2k/cliff_rocks_07_normal_gl_2k.png`,
-        false,
-      ),
-      roughness: await loadTex(
-        `${P}cliff_rocks_07_2k/cliff_rocks_07_roughness_2k.png`,
-        false,
-      ),
-      ao: await loadTex(
-        `${P}cliff_rocks_07_2k/cliff_rocks_07_ambientocclusion_2k.png`,
-        false,
-      ),
-      displacement: await loadTex(
-        `${P}cliff_rocks_07_2k/cliff_rocks_07_height_2k.png`,
-        false,
-      ),
-    };
-
-    const layers = [grass, cliff];
-    for (const m of layers) allTextures.push(...Object.values(m));
-
-    const colorArray = buildLayerArray(
-      layers.map((l) => l.color),
-      true,
-    );
-    const normalArray = buildLayerArray(
-      layers.map((l) => l.normal),
-      false,
-    );
-    const roughArray = buildLayerArray(
-      layers.map((l) => l.roughness),
-      false,
-    );
-    const aoArray = buildLayerArray(
-      layers.map((l) => l.ao),
-      false,
-    );
-    const dispArray = buildLayerArray([null, cliff.displacement], false);
-    allTextures.push(colorArray, normalArray, roughArray, aoArray, dispArray);
-
-    const L_GRASS = int(0);
-    const L_CLIFF = int(1);
-
-    const uGrassScale = uniform(surf.grassScale);
-    const uCliffScale = uniform(surf.cliffScale);
-    const uAlbedoMul = uniform(surf.albedoMul);
-    const uCliffLow = uniform(surf.cliffLow);
-    const uCliffHigh = uniform(surf.cliffHigh);
-    const uCliffPow = uniform(surf.cliffPow);
-    const uGrassJitter = uniform(surf.grassJitter);
-    const uDispStrength = uniform(surf.dispStrength);
-    const uDispCliffMul = uniform(surf.dispCliffMul);
-    const uDispUvScale = uniform(surf.dispUvScale);
-    const uNormalGrass = uniform(surf.normalGrass);
-    const uNormalCliff = uniform(surf.normalCliff);
-    const uEnvIntensity = uniform(surf.envIntensity);
-    const uMetalness = uniform(surf.metalness);
-
-    Object.assign(uniforms, {
-      grassScale: uGrassScale,
-      cliffScale: uCliffScale,
-      albedoMul: uAlbedoMul,
-      cliffLow: uCliffLow,
-      cliffHigh: uCliffHigh,
-      cliffPow: uCliffPow,
-      grassJitter: uGrassJitter,
-      dispStrength: uDispStrength,
-      dispCliffMul: uDispCliffMul,
-      dispUvScale: uDispUvScale,
-      normalGrass: uNormalGrass,
-      normalCliff: uNormalCliff,
-      envIntensity: uEnvIntensity,
-      metalness: uMetalness,
-    });
-
-    const layerWeights = () => {
-      const slope = sub(float(1), abs(normalWorld.y));
-      const jitter = fract(
-        mul(sin(dot(positionWorld.xz, vec2(127.1, 311.7))), 43758.5453),
-      );
-      const wCliff = pow(smoothstep(uCliffLow, uCliffHigh, slope), uCliffPow);
-      const wGrass = mul(
-        sub(float(1), wCliff),
-        add(sub(float(1), uGrassJitter), mul(jitter, uGrassJitter)),
-      );
-      const wSum = add(wGrass, wCliff);
-      return vec2(wGrass, wCliff).div(max(wSum, float(0.001)));
-    };
-
-    const layerRGB = (arr, layer, sc) =>
-      texture(arr, mul(positionWorld.xz, sc)).depth(layer).rgb;
-    const layerR = (arr, layer, sc) =>
-      texture(arr, mul(positionWorld.xz, sc)).depth(layer).r;
-
-    const gRGB = () => layerRGB(colorArray, L_GRASS, uGrassScale);
-    const cRGB = () => layerRGB(colorArray, L_CLIFF, uCliffScale);
-    const gR = () => layerR(roughArray, L_GRASS, uGrassScale);
-    const cR = () => layerR(roughArray, L_CLIFF, uCliffScale);
-    const gAo = () => layerR(aoArray, L_GRASS, uGrassScale);
-    const cAo = () => layerR(aoArray, L_CLIFF, uCliffScale);
-
-    material = new THREE.MeshStandardNodeMaterial({ side: THREE.FrontSide });
-    material.envMapIntensity = 0;
-    material.colorNode = (() => {
-      const lw = layerWeights();
-      return mul(add(mul(gRGB(), lw.x), mul(cRGB(), lw.y)), uAlbedoMul);
-    })();
-    material.roughnessNode = (() => {
-      const lw = layerWeights();
-      return clamp(
-        add(mul(gR(), lw.x), mul(cR(), lw.y)),
-        float(0.04),
-        float(1),
-      );
-    })();
-    material.aoNode = (() => {
-      const lw = layerWeights();
-      return clamp(
-        add(mul(gAo(), lw.x), mul(cAo(), lw.y)),
-        float(0.25),
-        float(1),
-      );
-    })();
-    material.normalNode = (() => {
-      const lw = layerWeights();
-      const nG = normalMap(
-        texture(normalArray, mul(positionWorld.xz, uGrassScale)).depth(L_GRASS),
-        vec2(uNormalGrass, uNormalGrass),
-      );
-      const nC = normalMap(
-        texture(normalArray, mul(positionWorld.xz, uCliffScale)).depth(L_CLIFF),
-        vec2(uNormalCliff, uNormalCliff),
-      );
-      return normalize(add(mul(nG, lw.x), mul(nC, lw.y)));
-    })();
-    material.positionNode = (() => {
-      const tu = mul(uv(), uDispUvScale);
-      const dC = texture(dispArray, tu).depth(L_CLIFF).x;
-      const slopeD = sub(float(1), abs(normalGeometry.y));
-      const wCliffD = pow(smoothstep(uCliffLow, uCliffHigh, slopeD), uCliffPow);
-      const lift = mul(mul(sub(dC, float(0.5)), wCliffD), uDispCliffMul);
-      return positionGeometry.add(
-        normalGeometry.normalize().mul(mul(lift, uDispStrength)),
-      );
-    })();
-    material.metalnessNode = uMetalness;
-    material.color = new THREE.Color(0xffffff);
-  } catch (err) {
-    console.warn("[rts-terrain] PBR textures failed to load — matte fallback.", err);
-    material = new THREE.MeshStandardNodeMaterial({ side: THREE.FrontSide });
-    material.colorNode = color(0x4a5c3a);
-    material.roughnessNode = float(0.985);
-    material.metalnessNode = float(0);
-  }
-
-  const mesh = new THREE.Mesh(geo, material);
+export async function createRtsTerrain(
+  size = RTS_MAP_SIZE,
+  segments = 288,
+  params = {},
+) {
+  const surf = pickSurf({ ...RTS_TERRAIN_DEFAULTS, ...params });
+  const pbr = await ensureTerrainPbr();
+  syncRtsTerrainUniforms(pbr.uniforms, params);
+  const { geo, getHeight, shape } = buildTerrainHeightfield(size, segments, params);
+  const mesh = new THREE.Mesh(geo, pbr.material);
   mesh.name = "RtsTerrain";
   mesh.receiveShadow = true;
-
-  function dispose() {
-    geo.dispose();
-    material.dispose();
-    for (const t of allTextures) t.dispose?.();
+  geo.attributes.position.setUsage(THREE.DynamicDrawUsage);
+  if (geo.attributes.normal) {
+    geo.attributes.normal.setUsage(THREE.DynamicDrawUsage);
   }
 
-  return { mesh, getHeight, uniforms, dispose, shape: ts, surf };
+  return {
+    mesh,
+    getHeight,
+    uniforms: pbr.uniforms,
+    dispose: () => geo.dispose(),
+    shape,
+    surf,
+  };
+}
+
+/** Re-bake heightfield onto an existing terrain mesh (keeps material + scene node). */
+export async function rebuildRtsTerrainHeight(
+  terrainData,
+  size = RTS_MAP_SIZE,
+  segments = 288,
+  params = {},
+  { beforeGeometrySwap } = {},
+) {
+  const pbr = await ensureTerrainPbr();
+  syncRtsTerrainUniforms(terrainData.uniforms ?? pbr.uniforms, params);
+  const baked = bakeTerrainHeightfield(size, segments, params);
+  const mesh = terrainData.mesh;
+  const geo = mesh.geometry;
+  const wantVerts = baked.vertsX * baked.vertsX;
+  const curVerts = geo?.attributes?.position?.count;
+
+  if (
+    curVerts === wantVerts &&
+    applyHeightsToGeometry(geo, baked.heights, baked.seg, baked.vertsX)
+  ) {
+    terrainData.getHeight = baked.getHeight;
+    terrainData.shape = baked.shape;
+    if (!terrainData.uniforms) terrainData.uniforms = pbr.uniforms;
+    return { inPlace: true };
+  }
+
+  const { geo: newGeo, getHeight, shape } = buildTerrainHeightfield(
+    size,
+    segments,
+    params,
+  );
+  if (beforeGeometrySwap) await beforeGeometrySwap();
+  mesh.geometry = newGeo;
+  terrainData.getHeight = getHeight;
+  terrainData.shape = shape;
+  if (!terrainData.uniforms) terrainData.uniforms = pbr.uniforms;
+  return { inPlace: false };
 }
 
 /** Push all surface uniform values from a params object. */

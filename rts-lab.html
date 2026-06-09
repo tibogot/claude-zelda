@@ -1867,6 +1867,7 @@
       import { CSMShadowNode } from "three/addons/csm/CSMShadowNode.js";
       import {
         createRtsTerrain,
+        rebuildRtsTerrainHeight,
         RTS_MAP_SIZE,
         RTS_TERRAIN_DEFAULTS,
         syncRtsTerrainUniforms,
@@ -1886,7 +1887,6 @@
       import { bakeRtsThumbnails } from "./rtsThumbnails.js";
       import { createRtsMinimap } from "./rtsMinimap.js";
       import { createStylizedExplosionSystem } from "./stylized-explosion.js";
-      import { RtsTankInstancer } from "./objects/rtsTankInstancer.js";
 
       const DIFFICULTY_PRESETS = {
         easy: {
@@ -1978,8 +1978,10 @@
           // Iso RTS pose — locked in RTS mode (orbit mode [C] to tune, then Capture).
           polarDeg: 50, // pitch from top-down (°) — slightly steeper for tactical feel
           azimuthDeg: 75, // yaw around map center (°)
-          distance: 220, // zoom distance from target
-          targetY: 0,
+          distance: 120, // zoom distance from target
+          targetY: 0, // height offset above terrain (when followTerrain)
+          followTerrain: true, // RTS: pivot tracks ground height while panning
+          terrainFollowSpeed: 10, // lerp rate when climbing hills (1/s)
           minDistance: 50,
           maxDistance: 1300,
           minPolarDeg: 25, // orbit-mode pitch limits only
@@ -1988,7 +1990,7 @@
           lockAngle: true, // RTS: freeze pitch + yaw; pan/zoom only
           zoomInRts: true,
         },
-        ground: { size: RTS_MAP_SIZE, segments: 576 },
+        ground: { size: RTS_MAP_SIZE, segments: 384 },
         // PBR terrain — heightfield + surface (see rts-terrain.js).
         terrain: { ...RTS_TERRAIN_DEFAULTS },
         // Army composition (per side; player also gets bulldozer). Per-unit stats
@@ -2446,9 +2448,26 @@
           };
         }
 
+        function cameraTargetGroundY(x, z) {
+          return terrainHeight(x, z) + PARAMS.camera.targetY;
+        }
+
+        function updateCameraGroundFollow(dt) {
+          if (cam.mode !== "rts" || !PARAMS.camera.followTerrain) return;
+          const wantY = cameraTargetGroundY(controls.target.x, controls.target.z);
+          const t = Math.min(1, dt * (PARAMS.camera.terrainFollowSpeed ?? 10));
+          const newY = THREE.MathUtils.lerp(controls.target.y, wantY, t);
+          const dy = newY - controls.target.y;
+          if (Math.abs(dy) < 0.0005) return;
+          controls.target.y = newY;
+          camera.position.y += dy;
+        }
+
         function syncCameraFromParams() {
           const C = PARAMS.camera;
-          controls.target.y = C.targetY;
+          controls.target.y = C.followTerrain
+            ? cameraTargetGroundY(controls.target.x, controls.target.z)
+            : C.targetY;
           _camOffset.setFromSphericalCoords(
             C.distance,
             THREE.MathUtils.degToRad(C.polarDeg),
@@ -2464,7 +2483,16 @@
           C.distance = Math.round(pose.distance * 10) / 10;
           C.polarDeg = Math.round(pose.polarDeg * 10) / 10;
           C.azimuthDeg = Math.round(pose.azimuthDeg * 10) / 10;
-          C.targetY = Math.round(pose.targetY * 100) / 100;
+          if (cam.mode === "rts" && C.followTerrain) {
+            C.targetY =
+              Math.round(
+                (pose.targetY -
+                  terrainHeight(controls.target.x, controls.target.z)) *
+                  100,
+              ) / 100;
+          } else {
+            C.targetY = Math.round(pose.targetY * 100) / 100;
+          }
         }
 
         function applyCamModeConstraints() {
@@ -2657,41 +2685,178 @@
 
         // ── GROUND (FBM hills + ramps, grass + cliff via rts-terrain.js) ──
         let rebuildTerrainInFlight = false;
-        async function rebuildTerrain(full = true) {
-          if (rebuildTerrainInFlight) return;
+        let terrainRebuildQueued = null;
+        let terrainFollowupTimer = 0;
+        /** While > 0 the animation loop is halted (WebGPU buffer safety). */
+        let renderSuspended = 0;
+        let frameLoop = null;
+
+        // ── TEMP DEBUG: trace any geometry/material disposed while the render
+        // loop is LIVE (renderSuspended === 0). That is exactly the condition
+        // that produces "Buffer used in submit while destroyed". Drag height
+        // scale, then copy the [[DISPOSE-WHILE-LIVE]] stack(s) from the console.
+        if (!window.__disposeTraceInstalled) {
+          window.__disposeTraceInstalled = true;
+          window.__renderIsLive = () => renderSuspended === 0;
+          window.__disposeLog = [];
+          const wrap = (Cls, label) => {
+            const orig = Cls.prototype.dispose;
+            if (!orig) return;
+            Cls.prototype.dispose = function (...args) {
+              if (renderSuspended === 0 && window.__disposeLog.length < 4000) {
+                window.__disposeLog.push({
+                  t: performance.now(),
+                  label,
+                  name: this.name || this.type || "",
+                  stack: (new Error().stack || "")
+                    .split("\n")
+                    .slice(2, 14)
+                    .map((l) => l.trim())
+                    .join("\n"),
+                });
+              }
+              return orig.apply(this, args);
+            };
+          };
+          wrap(THREE.BufferGeometry, "geometry");
+          wrap(THREE.Material, "material");
+        }
+
+        function scheduleTerrainShapeRebuild(full = false) {
+          rebuildTerrainShape(full);
+        }
+
+        async function waitGpuIdle() {
+          const queue = renderer?.backend?.device?.queue;
+          if (queue?.onSubmittedWorkDone) {
+            await queue.onSubmittedWorkDone();
+          }
+          await new Promise((r) => requestAnimationFrame(r));
+        }
+
+        async function withGpuSafeWork(fn) {
+          // Reference-counted: only the transition into suspension stops the
+          // loop, and only the call that brings the count back to 0 restarts
+          // it. Keying the restart to a per-call `stopLoop` flag is racy — if
+          // an outer call finishes before an inner overlapping one, it would
+          // restart the loop while the other is still disposing/swapping a
+          // geometry, submitting a destroyed buffer.
+          if (renderSuspended === 0) renderer.setAnimationLoop(null);
+          renderSuspended++;
+          try {
+            await waitGpuIdle();
+            await fn();
+            await waitGpuIdle();
+          } finally {
+            renderSuspended = Math.max(0, renderSuspended - 1);
+            if (renderSuspended === 0 && frameLoop) {
+              renderer.setAnimationLoop(frameLoop);
+            }
+          }
+        }
+
+        const pendingMeshDisposals = [];
+        let meshDisposalTimer = 0;
+        function disposeMeshGpuSafe(mesh) {
+          if (!mesh) return;
+          if (renderSuspended > 0) {
+            mesh.dispose?.();
+            return;
+          }
+          pendingMeshDisposals.push(mesh);
+          clearTimeout(meshDisposalTimer);
+          meshDisposalTimer = setTimeout(async () => {
+            if (!pendingMeshDisposals.length) return;
+            const batch = pendingMeshDisposals.splice(0);
+            await withGpuSafeWork(async () => {
+              for (const m of batch) m.dispose?.();
+            });
+          }, 0);
+        }
+
+        /** Re-bake heightfield mesh only — no nav overlay / forest disposal. */
+        async function rebuildTerrainMeshOnly() {
+          await withGpuSafeWork(async () => {
+            syncFlattenPads();
+            if (terrainData?.mesh) {
+              await rebuildRtsTerrainHeight(
+                terrainData,
+                PARAMS.ground.size,
+                PARAMS.ground.segments,
+                PARAMS.terrain,
+                { beforeGeometrySwap: waitGpuIdle },
+              );
+              terrainHeight = terrainData.getHeight;
+            } else {
+              terrainData = await createRtsTerrain(
+                PARAMS.ground.size,
+                PARAMS.ground.segments,
+                PARAMS.terrain,
+              );
+              terrainHeight = terrainData.getHeight;
+              scene.add(terrainData.mesh);
+            }
+            syncTerrainUniforms();
+            repositionWorldOnTerrain();
+            if (cam.mode === "rts") syncCameraFromParams();
+            if (csm?.mainFrustum) csm.updateFrustums();
+          });
+        }
+
+        function scheduleTerrainFollowup(full = false) {
+          clearTimeout(terrainFollowupTimer);
+          terrainFollowupTimer = setTimeout(async () => {
+            await withGpuSafeWork(async () => {
+              buildNavGrid();
+              buildGridDebug();
+              minimap?.rebuildTerrain?.();
+            });
+            if (full) resetMatch(true);
+            else scheduleForestRebuild();
+          }, 64);
+        }
+
+        async function rebuildTerrainShape(full = false) {
+          if (rebuildTerrainInFlight) {
+            terrainRebuildQueued = full;
+            return;
+          }
           rebuildTerrainInFlight = true;
           try {
-            syncFlattenPads();
-            if (terrainData) {
-              scene.remove(terrainData.mesh);
-              terrainData.dispose();
-            }
-            terrainData = await createRtsTerrain(
-              PARAMS.ground.size,
-              PARAMS.ground.segments,
-              PARAMS.terrain,
-            );
-            terrainHeight = terrainData.getHeight;
-            scene.add(terrainData.mesh);
-            syncTerrainUniforms();
-            for (const o of OBSTACLES) {
-              if (!o.mesh) continue;
-              const h = o.r * 1.5;
-              o.mesh.position.set(
-                o.x,
-                terrainHeight(o.x, o.z) + h * 0.5 - 0.4,
-                o.z,
-              );
-            }
-            buildBases();
-            attachBaseBars();
-            buildNavGrid();
-            buildGridDebug();
-            minimap?.rebuildTerrain?.();
-            if (full) resetMatch(true);
-            scheduleForestRebuild();
+            await rebuildTerrainMeshOnly();
+            scheduleTerrainFollowup(full);
           } finally {
             rebuildTerrainInFlight = false;
+            if (terrainRebuildQueued !== null) {
+              const q = terrainRebuildQueued;
+              terrainRebuildQueued = null;
+              rebuildTerrainShape(q);
+            }
+          }
+        }
+
+        async function rebuildTerrain(full = true) {
+          if (rebuildTerrainInFlight) {
+            terrainRebuildQueued = full;
+            return;
+          }
+          rebuildTerrainInFlight = true;
+          try {
+            await rebuildTerrainMeshOnly();
+            await withGpuSafeWork(async () => {
+              buildNavGrid();
+              buildGridDebug();
+              minimap?.rebuildTerrain?.();
+            });
+            if (full) resetMatch(true);
+            else scheduleForestRebuild();
+          } finally {
+            rebuildTerrainInFlight = false;
+            if (terrainRebuildQueued !== null) {
+              const q = terrainRebuildQueued;
+              terrainRebuildQueued = null;
+              rebuildTerrain(q);
+            }
           }
         }
 
@@ -2771,14 +2936,16 @@
 
         function scheduleForestRebuild() {
           clearTimeout(forestRebuildTimer);
-          forestRebuildTimer = setTimeout(() => {
+          forestRebuildTimer = setTimeout(async () => {
             if (!pineForest) return;
-            syncForestCfg();
-            pineForest.cfg = forestCfg;
-            pineForest.rebuildForest();
-            pineForest.applyShadowFlags();
-            pineForest.setEnabled(PARAMS.forest.enabled);
-            updateForestHud();
+            await withGpuSafeWork(async () => {
+              syncForestCfg();
+              pineForest.cfg = forestCfg;
+              pineForest.rebuildForest();
+              pineForest.applyShadowFlags();
+              pineForest.setEnabled(PARAMS.forest.enabled);
+              updateForestHud();
+            });
           }, 280);
         }
 
@@ -3188,13 +3355,17 @@
             .then(() => {
               if (!windmillRebuildPending) return;
               windmillRebuildPending = false;
-              buildBaseWindmills();
+              // GPU-safe: clearBaseWindmills() destroys the GLB geometry
+              // buffers. This runs in a promise callback — after any terrain
+              // rebuild has already resumed the render loop — so it must
+              // suspend the loop itself or it submits a destroyed buffer.
+              return withGpuSafeWork(() => buildBaseWindmills());
             })
             .catch((err) => console.warn("RTS windmill GLB load failed:", err));
         }
 
         preloadWindmillModel(PARAMS.windmills.modelPath)
-          .then(() => buildBaseWindmills())
+          .then(() => withGpuSafeWork(() => buildBaseWindmills()))
           .catch((err) => console.warn("RTS windmill GLB preload:", err));
 
         function playerWindmillIncome() {
@@ -4138,7 +4309,7 @@
           if (!PARAMS.fog.enabled) {
             for (const u of units) {
               if (!u.dead) {
-                setUnitVisible(u, true);
+                u.group.visible = true;
                 u.bar.visible = true;
               }
             }
@@ -4154,12 +4325,12 @@
           for (const u of units) {
             if (u.dead) continue;
             if (u.faction === "player") {
-              setUnitVisible(u, true);
+              u.group.visible = true;
               u.bar.visible = true;
               continue;
             }
             const vis = visibleToPlayer(u.pos.x, u.pos.z);
-            setUnitVisible(u, vis);
+            u.group.visible = vis;
             u.bar.visible = vis;
             if (!vis) u.ring.visible = false;
           }
@@ -4904,8 +5075,9 @@
         function buildGridDebug() {
           if (gridDebug) {
             scene.remove(gridDebug);
-            gridDebug.dispose?.();
+            const old = gridDebug;
             gridDebug = null;
+            disposeMeshGpuSafe(old);
           }
           if (!PARAMS.nav.showGrid || !nav.grid) return;
           let n = 0;
@@ -4943,37 +5115,6 @@
         const tankBodies = []; // raycast targets → userData.unit back-ref
         const unitsGroup = new THREE.Group();
         scene.add(unitsGroup);
-
-        let tankInstancer = null;
-        try {
-          tankInstancer = new RtsTankInstancer(unitsGroup, {
-            palette: FACTION_PALETTE,
-          });
-          await tankInstancer.init();
-          console.info("[rts] tank GLB instancer ready");
-        } catch (err) {
-          console.warn("[rts] tank instancer failed; using primitive tanks.", err);
-          tankInstancer = null;
-        }
-
-        function setUnitVisible(u, visible) {
-          u.group.visible = visible;
-          if (u.instancedTank && tankInstancer) {
-            tankInstancer.setUnitVisible(u, visible);
-          }
-        }
-
-        function resolvePickUnit(hit) {
-          if (!hit) return null;
-          if (
-            hit.object.userData?.tankInstancerHitbox &&
-            hit.instanceId != null &&
-            tankInstancer
-          ) {
-            return tankInstancer.getUnitAt(hit.instanceId);
-          }
-          return hit.object.userData?.unit ?? null;
-        }
 
         // Per-faction unit materials (palette defined with bases).
         const FACTIONS = {
@@ -5044,8 +5185,8 @@
               impactSize: 0.55,
               impactLife: 0.16,
               impactColor: 0xff8833,
-              muzzleFwd: 3.2,
-              muzzleUp: 1.35,
+              muzzleFwd: 1.9,
+              muzzleUp: 1.2,
             },
           },
           bulldozer: {
@@ -5222,8 +5363,6 @@
             );
             barrel.rotation.x = Math.PI / 2 - 0.5; // tilt muzzle upward
             add(barrel, 0, 1.5, 1.0);
-          } else if (type === "tank" && tankInstancer?.ready) {
-            return tankInstancer.buildPreviewMesh(faction);
           } else if (type === "helicopter") {
             add(new THREE.Mesh(new THREE.BoxGeometry(0.5, 0.45, 2.2), hullMat), 0, 0.5, 0);
             add(new THREE.Mesh(new THREE.BoxGeometry(0.9, 0.55, 1.2), hullMat), 0, 0.85, -0.2);
@@ -5249,7 +5388,8 @@
               barrelMat,
             );
             add(rocket, 0.42, 0.62, 0.75);
-          } else if (type === "tank") {
+          } else {
+            // Tank (default): boxy hull + turret + barrel.
             add(new THREE.Mesh(new THREE.BoxGeometry(2.2, 0.8, 3.0), hullMat), 0, 0.55, 0);
             add(new THREE.Mesh(new THREE.BoxGeometry(1.3, 0.6, 1.3), hullMat), 0, 1.15, -0.1);
             const barrel = new THREE.Mesh(
@@ -5258,9 +5398,6 @@
             );
             barrel.rotation.x = Math.PI / 2;
             add(barrel, 0, 1.2, 1.1);
-          } else {
-            // Unknown type — small placeholder.
-            add(new THREE.Mesh(new THREE.BoxGeometry(1, 1, 1), hullMat), 0, 0.5, 0);
           }
           return g;
         }
@@ -5370,26 +5507,13 @@
           return m;
         }
 
-        function unitPickTargets() {
-          if (tankInstancer?.ready) {
-            return tankBodies.concat(tankInstancer.getPickTargets());
-          }
-          return tankBodies;
-        }
-
         function spawnUnit(x, z, faction, type, heading) {
           const T = UNIT_TYPES[type];
           const face = heading ?? (faction === "enemy" ? Math.PI : 0);
-          const useInstancedTank = type === "tank" && tankInstancer?.ready;
-          const group = useInstancedTank
-            ? new THREE.Group()
-            : buildUnitMesh(faction, type);
+          const group = buildUnitMesh(faction, type);
           const ring = makeSelectionRing(); // added to ringsGroup, not the tank
           ring.scale.setScalar(T.ringScale); // ring sized to the unit
           unitsGroup.add(group);
-          const groundY = terrainHeight(x, z);
-          group.position.set(x, groundY, z);
-          group.rotation.y = face;
           let hp = T.hp;
           let maxHp = T.hp;
           if (faction === "player") {
@@ -5403,7 +5527,7 @@
             bar: makeHealthBar(faction),
             faction, // "player" | "enemy"
             type, // "scout" | "tank" | "artillery"
-            pos: new THREE.Vector3(x, groundY, z),
+            pos: new THREE.Vector3(x, terrainHeight(x, z), z),
             path: null, // array of {x,z} waypoints from A*
             attackMove: false, // path issued as attack-move (stop to fight)
             attackBase: false, // explicit siege order on enemy HQ
@@ -5431,12 +5555,7 @@
             autoHarvest: false,
             flying: !!T.flying,
             flyHeight: T.flying ? (PARAMS.helicopter?.flyHeight ?? 9) : 0,
-            instancedTank: useInstancedTank,
-            tankSlot: null,
           };
-          if (useInstancedTank) {
-            u.tankSlot = tankInstancer.allocate(u);
-          }
           if (type === "harvester") {
             u.carryCapacity =
               T.carryCapacity ?? PARAMS.ore.carryCapacity;
@@ -5444,15 +5563,13 @@
             u.autoHarvest = faction === "enemy";
             if (u.autoHarvest) initHarvesterCycle(u);
           }
-          // Every mesh of the unit is a pick target (instanced tanks use hitbox).
-          if (!useInstancedTank) {
-            group.traverse((o) => {
-              if (o.isMesh) {
-                o.userData.unit = u;
-                tankBodies.push(o);
-              }
-            });
-          }
+          // Every mesh of the unit is a pick target (shapes differ per type).
+          group.traverse((o) => {
+            if (o.isMesh) {
+              o.userData.unit = u;
+              tankBodies.push(o);
+            }
+          });
           units.push(u);
           return u;
         }
@@ -5781,7 +5898,6 @@
           }
           units.length = 0;
           tankBodies.length = 0;
-          tankInstancer?.reset();
           for (const k of Object.keys(groups)) delete groups[k];
           activeGroup = null;
         }
@@ -5999,6 +6115,40 @@
               w * Math.max(0, b.hp / b.maxHp),
             );
           }
+        }
+
+        /** Snap world props to heightfield after terrain mesh rebuild. */
+        function repositionWorldOnTerrain() {
+          for (const o of OBSTACLES) {
+            if (!o.mesh) continue;
+            const h = o.r * 1.5;
+            o.mesh.position.set(
+              o.x,
+              terrainHeight(o.x, o.z) + h * 0.5 - 0.4,
+              o.z,
+            );
+          }
+          buildBases();
+          attachBaseBars();
+          updateBases();
+          for (const node of CAPTURE_NODES) {
+            if (node.group) placeNodeGroup(node.group, node.x, node.z);
+          }
+          for (const d of ORE_DEPOSITS) {
+            if (d.group) d.group.position.y = terrainHeight(d.x, d.z);
+          }
+          for (const s of STRUCTURES) {
+            if (s.dead) continue;
+            s.pos.y = terrainHeight(s.x, s.z);
+            s.group.position.set(s.x, s.pos.y, s.z);
+          }
+          for (const u of units) {
+            if (u.dead) continue;
+            u.pos.y = terrainHeight(u.pos.x, u.pos.z) + (u.flyHeight ?? 0);
+            u.group.position.copy(u.pos);
+            if (u.ring?.visible) placeRing(u.ring, u.pos.x, u.pos.z);
+          }
+          scheduleWindmillRebuild();
         }
 
         const _turretFrom = new THREE.Vector3();
@@ -7119,15 +7269,15 @@
           closeReqPanel();
           closeStructPanel();
           raycaster.setFromCamera(screenToNDC(cx, cy), camera);
-          const hits = raycaster.intersectObjects(unitPickTargets(), false);
+          const hits = raycaster.intersectObjects(tankBodies, false);
           if (!additive) clearSelection();
           // Only our own units are selectable; ignore clicks on enemies.
           const hit = hits.find((h) => {
-            const u = resolvePickUnit(h);
-            return u && u.faction === "player" && !u.dead;
+            const u = h.object.userData.unit;
+            return u.faction === "player" && !u.dead;
           });
           if (hit) {
-            const u = resolvePickUnit(hit);
+            const u = hit.object.userData.unit;
             u.selected = additive ? !u.selected : true;
           }
           updateCountUI();
@@ -7570,13 +7720,13 @@
           placementGhost.visible = false;
           raycaster.setFromCamera(screenToNDC(cx, cy), camera);
           const eHit = raycaster
-            .intersectObjects(unitPickTargets(), false)
+            .intersectObjects(tankBodies, false)
             .find((h) => {
-              const u = resolvePickUnit(h);
-              return u && u.faction === "enemy" && !u.dead;
+              const u = h.object.userData.unit;
+              return u.faction === "enemy" && !u.dead;
             });
           if (eHit) {
-            const u = resolvePickUnit(eHit);
+            const u = eHit.object.userData.unit;
             hoverRing.material.color.copy(
               attackMovePending ? HOVER_ATTACK : HOVER_RED,
             );
@@ -8045,11 +8195,7 @@
           u.selected = false;
           u.attackTarget = null;
           u.path = null;
-          if (u.instancedTank && tankInstancer && u.tankSlot != null) {
-            tankInstancer.freeSlot(u.tankSlot);
-            u.tankSlot = null;
-          }
-          setUnitVisible(u, false);
+          u.group.visible = false;
           u.ring.visible = false;
           u.bar.visible = false;
           updateCountUI();
@@ -8519,7 +8665,7 @@
             const show = u.selected || u.hp < u.maxHp || u.attackTarget;
             u.bar.visible = show;
             if (show) {
-              const barLift = u.flying ? u.flyHeight + 3.4 : u.type === "tank" ? 3.8 : 2.9;
+              const barLift = u.flying ? u.flyHeight + 3.4 : 2.9;
               u.bar.position.set(u.pos.x, u.pos.y + barLift, u.pos.z);
               u.bar.lookAt(camera.position);
               u.bar.userData.fill.scale.x = Math.max(
@@ -8527,7 +8673,6 @@
                 BAR_W * Math.max(0, u.hp / u.maxHp),
               );
             }
-            if (u.instancedTank && tankInstancer) tankInstancer.syncUnit(u);
           }
         }
 
@@ -8572,7 +8717,10 @@
         let lastT = performance.now() / 1000;
         let forestAnimT = 0;
         let minimapFrame = 0;
-        renderer.setAnimationLoop(() => {
+        frameLoop = () => {
+          // Belt-and-suspenders: never render while GPU-safe work is in
+          // flight, even if a stray setAnimationLoop restart slips through.
+          if (renderSuspended > 0) return;
           const now = performance.now() / 1000;
           const dt = Math.min(now - lastT, 0.05);
           lastT = now;
@@ -8581,6 +8729,7 @@
           panCamera(dt);
           edgeScroll(dt);
           controls.update();
+          updateCameraGroundFollow(dt);
           if (pineForest && PARAMS.forest.enabled) {
             pineForest.updateTime(forestAnimT);
             pineForest.update(camera, forestCfg.lod);
@@ -8630,7 +8779,8 @@
 
           renderer.render(scene, camera);
           stats.update();
-        });
+        };
+        renderer.setAnimationLoop(frameLoop);
 
         window.addEventListener("resize", () => {
           camera.aspect = innerWidth / innerHeight;
@@ -8644,6 +8794,7 @@
           camera,
           syncTerrainUniforms,
           rebuildTerrain,
+          scheduleTerrainShapeRebuild,
           updateSun,
           rebuildSkyEnv,
           applyShadowSettings,
@@ -8771,6 +8922,54 @@
           sl.value = String(v);
           num.value = _fmt(v, step);
           onChange?.(v);
+        });
+        num.addEventListener("keydown", (e) => {
+          if (e.key === "Enter") num.blur();
+        });
+        num.addEventListener(
+          "wheel",
+          (e) => {
+            if (document.activeElement === num) e.preventDefault();
+          },
+          { passive: false },
+        );
+        parent.appendChild(row);
+        return row;
+      }
+      /** Range slider: live param preview on drag, GPU commit on release only. */
+      function _shapeSlider(parent, obj, key, opts) {
+        const { label, min, max, step = 0.01, onCommit } = opts;
+        const row = document.createElement("div");
+        row.className = "prop-row";
+        const cur = obj[key];
+        row.innerHTML = `<span class="prop-label">${label}</span><div class="prop-value"><div class="prop-slider-wrap"><input type="range" class="prop-slider" min="${min}" max="${max}" step="${step}" value="${cur}"><input type="number" class="prop-num-input" min="${min}" max="${max}" step="${step}" value="${_fmt(cur, step)}"></div></div>`;
+        const sl = row.querySelector(".prop-slider");
+        const num = row.querySelector(".prop-num-input");
+        const syncValue = (v) => {
+          obj[key] = v;
+          sl.value = String(v);
+          num.value = _fmt(v, step);
+        };
+        sl.addEventListener("input", () => {
+          syncValue(_clampSnap(parseFloat(sl.value), min, max, step));
+        });
+        sl.addEventListener("change", () => {
+          syncValue(_clampSnap(parseFloat(sl.value), min, max, step));
+          onCommit?.();
+        });
+        num.addEventListener("change", () => {
+          const raw = String(num.value).trim();
+          if (raw === "" || raw === "-" || raw === "." || raw === "-.") {
+            num.value = _fmt(obj[key], step);
+            return;
+          }
+          let v = parseFloat(raw);
+          if (!Number.isFinite(v)) {
+            num.value = _fmt(obj[key], step);
+            return;
+          }
+          syncValue(_clampSnap(v, min, max, step));
+          onCommit?.();
         });
         num.addEventListener("keydown", (e) => {
           if (e.key === "Enter") num.blur();
@@ -8947,6 +9146,7 @@
         camera,
         syncTerrainUniforms,
         rebuildTerrain,
+        scheduleTerrainShapeRebuild,
         updateSun,
         rebuildSkyEnv,
         applyShadowSettings,
@@ -9158,7 +9358,7 @@
             min: 120,
             max: 660,
             step: 4,
-            onChange: () => rebuildTerrain(false),
+            onChange: () => scheduleTerrainShapeRebuild(false),
           });
           _slider(sec, PARAMS.bases, "spawnOffset", {
             label: "Spawn offset",
@@ -9172,7 +9372,7 @@
             min: 18,
             max: 52,
             step: 2,
-            onChange: () => rebuildTerrain(false),
+            onChange: () => scheduleTerrainShapeRebuild(false),
           });
           _slider(sec, PARAMS.bases, "footprint", {
             label: "Nav block radius",
@@ -9702,13 +9902,25 @@
             },
           });
           _slider(sec, PARAMS.camera, "targetY", {
-            label: "Target height",
+            label: "Ground offset",
             min: -20,
             max: 80,
             step: 1,
             onChange: () => {
               if (getCamMode() === "rts") syncCameraFromParams();
             },
+          });
+          _toggle(sec, PARAMS.camera, "followTerrain", {
+            label: "Follow terrain",
+            onChange: () => {
+              if (getCamMode() === "rts") syncCameraFromParams();
+            },
+          });
+          _slider(sec, PARAMS.camera, "terrainFollowSpeed", {
+            label: "Terrain follow speed",
+            min: 2,
+            max: 24,
+            step: 1,
           });
           _slider(sec, PARAMS.camera, "minDistance", {
             label: "Min zoom",
@@ -10063,76 +10275,76 @@
         {
           const sec = _section(body, "Terrain", true);
           const onSurf = () => syncTerrainUniforms();
-          const onShape = () => rebuildTerrain(true);
+          const onShape = () => scheduleTerrainShapeRebuild(false);
 
           _button(sec, {
             title: "Rebuild terrain mesh",
             onClick: () => rebuildTerrain(true),
           });
-          _slider(sec, PARAMS.ground, "segments", {
+          _shapeSlider(sec, PARAMS.ground, "segments", {
             label: "Mesh segments",
             min: 64,
             max: 512,
             step: 16,
-            onChange: onShape,
+            onCommit: onShape,
           });
           _separator(sec);
 
-          _slider(sec, PARAMS.terrain, "heightScale", {
+          _shapeSlider(sec, PARAMS.terrain, "heightScale", {
             label: "Height scale",
             min: 16,
             max: 90,
             step: 1,
-            onChange: onShape,
+            onCommit: onShape,
           });
-          _slider(sec, PARAMS.terrain, "flatness", {
+          _shapeSlider(sec, PARAMS.terrain, "flatness", {
             label: "Flatness",
             min: 1.5,
             max: 5,
             step: 0.1,
-            onChange: onShape,
+            onCommit: onShape,
           });
-          _slider(sec, PARAMS.terrain, "fbmScale", {
+          _shapeSlider(sec, PARAMS.terrain, "fbmScale", {
             label: "Noise scale",
             min: 0.001,
             max: 0.012,
             step: 0.0002,
-            onChange: onShape,
+            onCommit: onShape,
           });
-          _slider(sec, PARAMS.terrain, "macroBlend", {
+          _shapeSlider(sec, PARAMS.terrain, "macroBlend", {
             label: "Macro blend",
             min: 0,
             max: 1,
             step: 0.02,
-            onChange: onShape,
+            onCommit: onShape,
           });
-          _slider(sec, PARAMS.terrain, "ridgeBoost", {
+          _shapeSlider(sec, PARAMS.terrain, "ridgeBoost", {
             label: "Ridge boost",
             min: 0,
             max: 0.06,
             step: 0.002,
-            onChange: onShape,
+            onCommit: onShape,
           });
-          _slider(sec, PARAMS.terrain, "mountainReliefMul", {
+          _shapeSlider(sec, PARAMS.terrain, "mountainReliefMul", {
             label: "Hill strength",
             min: 0,
             max: 0.5,
             step: 0.02,
-            onChange: onShape,
+            onCommit: onShape,
           });
-          _slider(sec, PARAMS.terrain, "rampMaxGrade", {
+          _shapeSlider(sec, PARAMS.terrain, "rampMaxGrade", {
             label: "Ramp max grade",
             min: 0.2,
             max: 0.7,
             step: 0.02,
-            onChange: onShape,
+            onCommit: onShape,
           });
-          _slider(sec, PARAMS.terrain, "slopeClampPasses", {
+          _shapeSlider(sec, PARAMS.terrain, "slopeClampPasses", {
             label: "Ramp smooth passes",
             min: 0,
             max: 20,
             step: 1,
-            onChange: onShape,
+            onCommit: onShape,
           });
           _separator(sec);
 
