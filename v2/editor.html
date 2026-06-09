@@ -2101,6 +2101,16 @@
       }
 
       const _liveSliders = [];
+      function refreshLiveSliders() {
+        for (const h of _liveSliders) {
+          if (
+            h._num === document.activeElement ||
+            h._sl === document.activeElement
+          )
+            continue;
+          h.refresh();
+        }
+      }
       function _slider(parent, obj, key, opts) {
         const { label, min, max, step = 0.01, curve, onChange, hint } = opts;
         const isLog = curve === "log" && min > 0 && max > min;
@@ -11934,6 +11944,7 @@
         // --- Sky ---
         const skyBody = _section(container, "Sky");
         const skyModeWidgets = [];
+        let lastSkyMode = ts.skyMode;
         _dropdown(skyBody, ts, "skyMode", {
           label: "Mode",
           options: {
@@ -11942,8 +11953,11 @@
             Procedural: "procedural",
           },
           onChange: () => {
-            app.applySkyMode(ts.skyMode);
+            const newMode = ts.skyMode;
+            app.applySkyMode(newMode, lastSkyMode);
+            lastSkyMode = newMode;
             syncSkyWidgets();
+            refreshLiveSliders();
             refreshTp();
           },
         });
@@ -13867,6 +13881,7 @@
           }
           case "sky": {
             const sk = _section(container, "Sky · Environment");
+            let inspectorLastSkyMode = ts.skyMode;
             _dropdown(sk, ts, "skyMode", {
               label: "Mode",
               options: {
@@ -13875,7 +13890,10 @@
                 Procedural: "procedural",
               },
               onChange: () => {
-                app.applySkyMode(ts.skyMode);
+                const newMode = ts.skyMode;
+                app.applySkyMode(newMode, inspectorLastSkyMode);
+                inspectorLastSkyMode = newMode;
+                refreshLiveSliders();
                 buildInspector(app, itemId);
               },
             });
@@ -14443,6 +14461,9 @@
             container: document.getElementById("viewport"),
             worldSize: opts.worldSize || 1600,
           });
+          if (app.ui) {
+            app.ui.refreshLiveSliders = refreshLiveSliders;
+          }
 
           // Build custom panels and insert into Tools tab
           const toolsTab = document.getElementById("tab-tools");

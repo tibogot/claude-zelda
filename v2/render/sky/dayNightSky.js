@@ -279,39 +279,46 @@ export function createDayNightSky() {
       odR.addAssign(hr);
       odM.addAssign(hm);
 
-      // Light march toward the sun (to the atmosphere top).
+      // Light march toward the sun for the optical depth (extinction to space).
+      // No early-out on going underground: clamp the sample altitude at the ground
+      // so the march stays continuous; the shadow itself is the smooth analytic
+      // terminator below (replaces the old hard lit/shadow flip + Break).
       const bl = dot(sp, sunDir);
       const discL = bl.mul(bl).sub(dot(sp, sp).sub(float(RT * RT)));
       const segL = bl.negate().add(sqrt(discL.max(0.0))).div(float(NL)).toVar();
       const tCurL = float(0.0).toVar();
       const odLR = float(0.0).toVar();
       const odLM = float(0.0).toVar();
-      const valid = float(1.0).toVar();
       Loop(NL, () => {
         const spl = sp.add(sunDir.mul(tCurL.add(segL.mul(0.5))));
-        const hl = length(spl).sub(float(RG));
-        If(hl.lessThan(0.0), () => { valid.assign(0.0); Break(); });
+        const hl = length(spl).sub(float(RG)).max(0.0); // clamp at ground
         odLR.addAssign(exp(hl.negate().div(uHr)).mul(segL));
         odLM.addAssign(exp(hl.negate().div(uHm)).mul(segL));
         tCurL.addAssign(segL);
       });
-      // Only lit samples (light ray that didn't dive underground) contribute.
-      If(valid.greaterThan(0.5), () => {
-        const tau = betaR.mul(odR.add(odLR)).add(betaM.mul(1.1).mul(odM.add(odLM)));
-        const att = vec3(exp(tau.x.negate()), exp(tau.y.negate()), exp(tau.z.negate()));
-        sumR.addAssign(att.mul(hr));
-        sumM.addAssign(att.mul(hm));
-        // Multiple-scatter fill: extinct only by the (reduced) VIEW path — the
-        // bounced light is local, so it isn't dimmed by the long path to the
-        // sun. This is what keeps the horizon bright where single-scatter dies.
-        const tauV = betaR.mul(odR).add(betaM.mul(1.1).mul(odM));
-        const attMS = vec3(
-          exp(tauV.x.mul(uMsExtinct).negate()),
-          exp(tauV.y.mul(uMsExtinct).negate()),
-          exp(tauV.z.mul(uMsExtinct).negate()),
-        );
-        sumMS.addAssign(attMS.mul(betaR.mul(hr).add(betaM.mul(hm))));
-      });
+
+      // Soft analytic ground shadow: `m` is the sun's height above THIS sample's
+      // geometric horizon (m = bl + sqrt(|sp|²−RG²)) — >0 lit, <0 shadowed, 0 at
+      // the tangent terminator. Continuous & branchless, so single- and
+      // multi-scatter fade gradually across twilight instead of snapping per
+      // sample (the old hard `valid`/Break did).
+      const m = bl.add(sqrt(dot(sp, sp).sub(float(RG * RG)).max(0.0)));
+      const litSoft = smoothstep(float(-9000.0), float(9000.0), m).toVar();
+
+      const tau = betaR.mul(odR.add(odLR)).add(betaM.mul(1.1).mul(odM.add(odLM)));
+      const att = vec3(exp(tau.x.negate()), exp(tau.y.negate()), exp(tau.z.negate()));
+      sumR.addAssign(att.mul(hr).mul(litSoft));
+      sumM.addAssign(att.mul(hm).mul(litSoft));
+      // Multiple-scatter fill: extinct only by the (reduced) VIEW path — the
+      // bounced light is local, so it isn't dimmed by the long path to the sun.
+      // (OFF by default now — msAmount=0; kept here for when it's dialed back up.)
+      const tauV = betaR.mul(odR).add(betaM.mul(1.1).mul(odM));
+      const attMS = vec3(
+        exp(tauV.x.mul(uMsExtinct).negate()),
+        exp(tauV.y.mul(uMsExtinct).negate()),
+        exp(tauV.z.mul(uMsExtinct).negate()),
+      );
+      sumMS.addAssign(attMS.mul(betaR.mul(hr).add(betaM.mul(hm))).mul(litSoft));
       tCur.addAssign(segLen);
     });
 

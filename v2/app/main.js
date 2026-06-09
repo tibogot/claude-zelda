@@ -454,16 +454,15 @@ export async function startV2App(opts = {}) {
   let _procEnvScene = null;
   let _procCubeRT = null;
   let _procCubeCam = null;
-  let _procEnvRT = null; // current PMREM RT (= scene.environment)
-  let _procEnvRTOld = null; // previous RT — disposed ONE cycle later (see below)
+  let _procEnvRT = null; // persistent PMREM RT (= scene.environment), reused each bake
   let _procEnvFace = -1; // -1 = idle, 0..5 = rendering that face
   let _procEnvIdle = 0; // seconds remaining before the next bake cycle
   let _procEnvNeeds = false; // a param/sun change requested a fresh bake
   // v2 has many scene.environment consumers (ocean reflection, every PBR
-  // material), so bakes are heavier than the lab and the swapped-out PMREM RT
-  // may still be referenced by in-flight GPU work. Bake less often than the lab
-  // (3 s vs 1.5 s) and DEFER disposing the old RT by a cycle to avoid a
-  // use-after-dispose device-loss ("external Instance reference no longer exists").
+  // material), so bakes are heavier than the lab. The PMREM RT is now REUSED
+  // across bakes (see convolveProcEnv) so there's no per-bake allocation churn or
+  // use-after-dispose device-loss ("external Instance reference no longer
+  // exists"); we still idle between bakes to keep the cost down.
   const PROC_ENV_IDLE = 3.0; // seconds between re-bake cycles
 
   const F = toolState.fog;
@@ -721,19 +720,19 @@ export async function startV2App(opts = {}) {
     renderer.setRenderTarget(prev);
   }
   function convolveProcEnv() {
-    const rt = pmremGenerator.fromCubemap(_procCubeRT.texture);
-    scene.environment = rt.texture;
-    // Defer disposal by one cycle: free the RT from TWO bakes ago, which has had
-    // a full cycle to stop being referenced by any in-flight GPU work.
-    if (_procEnvRTOld) _procEnvRTOld.dispose();
-    _procEnvRTOld = _procEnvRT;
-    _procEnvRT = rt;
+    // REUSE the same PMREM RT every bake by passing it back into fromCubemap
+    // (Three's own EnvironmentNode caches this exact way). The previous code
+    // allocated a brand-new RT each convolve and disposed an old one — that
+    // continuous allocate/destroy churn, while scene.environment is swapped and
+    // still referenced by many materials + in-flight GPU work, eventually freed a
+    // target the GPU was still using → "external Instance reference no longer
+    // exists" device loss when dragging the time-of-day slider. One stable RT =
+    // no churn, and its texture object never changes, so no consumer ever holds a
+    // disposed handle.
+    _procEnvRT = pmremGenerator.fromCubemap(_procCubeRT.texture, _procEnvRT);
+    scene.environment = _procEnvRT.texture;
   }
   function disposeProcEnvRT() {
-    if (_procEnvRTOld) {
-      _procEnvRTOld.dispose();
-      _procEnvRTOld = null;
-    }
     if (_procEnvRT) {
       _procEnvRT.dispose();
       _procEnvRT = null;
@@ -774,7 +773,20 @@ export async function startV2App(opts = {}) {
     }
   }
 
-  function applySkyMode(mode) {
+  function applySkyMode(mode, prevMode) {
+    // UI dropdowns set `skyMode` before onChange — pass `prevMode` from the caller.
+    const prev = prevMode !== undefined ? prevMode : toolState.skyMode;
+    let exposureChanged = false;
+    if (prev !== mode) {
+      toolState.skyExposureByMode[prev] = toolState.light.exposure;
+      const nextExposure =
+        toolState.skyExposureByMode[mode] ??
+        (mode === "procedural" ? 0.7 : 0.5);
+      if (toolState.light.exposure !== nextExposure) {
+        toolState.light.exposure = nextExposure;
+        exposureChanged = true;
+      }
+    }
     toolState.skyMode = mode;
     dayNightSky.mesh.visible = mode === "procedural";
     if (mode === "physical") {
@@ -821,6 +833,10 @@ export async function startV2App(opts = {}) {
       rebuildProceduralSkyEnv();
     }
     updateSunSky();
+    if (exposureChanged) {
+      ui?.refreshLiveSliders?.();
+      ui?.pane?.refresh?.();
+    }
   }
 
   function importHdr() {
@@ -4025,7 +4041,11 @@ export async function startV2App(opts = {}) {
   }
 
   updateSunSky();
-  rebuildSkyEnv();
+  // Apply the actual default sky mode at boot (was hardcoded to the physical
+  // rebuildSkyEnv()). applySkyMode dispatches per mode — for "procedural" it
+  // shows the dome and bakes its IBL; for "physical" it still calls
+  // rebuildSkyEnv() internally — so this is correct whatever the default is.
+  applySkyMode(toolState.skyMode);
 
   grassManager.init(globalHeightTex, sunDir, toolState.grass, {
     groundColorAtWorldXZ: sharedGroundBundle.groundColorAtWorldXZ,

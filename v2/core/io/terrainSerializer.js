@@ -430,6 +430,7 @@ function extractSerializableSettings(toolState) {
     autoCliff: { ...toolState.autoCliff },
     light: { ...toolState.light },
     skyMode: toolState.skyMode,
+    skyExposureByMode: { ...toolState.skyExposureByMode },
     physicalSky: { ...toolState.physicalSky },
     proceduralSky: { ...toolState.proceduralSky },
     volumetricCloudDayNight: { ...toolState.volumetricCloudDayNight },
@@ -587,6 +588,11 @@ export function applySettings(toolState, settings) {
   if (settings.autoCliff) Object.assign(toolState.autoCliff, settings.autoCliff);
   if (settings.light) Object.assign(toolState.light, settings.light);
   if (settings.skyMode) toolState.skyMode = settings.skyMode;
+  if (settings.skyExposureByMode) {
+    Object.assign(toolState.skyExposureByMode, settings.skyExposureByMode);
+  } else if (settings.light?.exposure != null && settings.skyMode) {
+    toolState.skyExposureByMode[settings.skyMode] = settings.light.exposure;
+  }
   if (settings.physicalSky) Object.assign(toolState.physicalSky, settings.physicalSky);
   if (settings.proceduralSky) Object.assign(toolState.proceduralSky, settings.proceduralSky);
   if (settings.volumetricCloudDayNight) Object.assign(toolState.volumetricCloudDayNight, settings.volumetricCloudDayNight);

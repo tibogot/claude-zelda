@@ -290,7 +290,7 @@ export const V2_CONFIG = {
     mie: 1.0,
     mieG: 0.76,
     atmoAltitude: 1500,
-    msAmount: 1.0,
+    msAmount: 0.0, // multi-scatter fill OFF by default (was the twilight band source)
     msExtinct: 0.3,
     // Sky-dome horizon haze height (lab PARAMS.fog.hazeHeight). Lower = the
     // haze hugs the waterline so the scattering band reads clearly above it.
