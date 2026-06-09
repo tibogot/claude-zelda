@@ -1,0 +1,533 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Grass Lab — Gemini baseline vs Hybrid (Revo skeleton + Gemini skin)</title>
+    <style>
+      * {
+        margin: 0;
+        padding: 0;
+        box-sizing: border-box;
+      }
+      body {
+        overflow: hidden;
+        background: #000;
+        font-family: "Segoe UI", system-ui, sans-serif;
+      }
+      canvas {
+        display: block;
+        width: 100vw;
+        height: 100vh;
+      }
+      #hud {
+        position: fixed;
+        top: 12px;
+        left: 12px;
+        z-index: 10;
+        font: 12px/1.6 "Cascadia Code", "Consolas", monospace;
+        color: #cde8b0;
+        background: rgba(0, 0, 0, 0.6);
+        padding: 10px 14px;
+        border-radius: 6px;
+        pointer-events: none;
+        user-select: none;
+        white-space: pre;
+      }
+      #hud b {
+        color: #fff;
+      }
+      #help {
+        position: fixed;
+        bottom: 12px;
+        left: 12px;
+        z-index: 10;
+        font: 11px/1.5 "Cascadia Code", "Consolas", monospace;
+        color: #9ab98a;
+        background: rgba(0, 0, 0, 0.55);
+        padding: 8px 12px;
+        border-radius: 6px;
+        pointer-events: none;
+        user-select: none;
+      }
+      #help span {
+        color: #e0f0c0;
+        font-weight: 600;
+      }
+    </style>
+    <script type="importmap">
+      {
+        "imports": {
+          "three": "https://cdn.jsdelivr.net/npm/three@0.183.1/build/three.webgpu.js",
+          "three/webgpu": "https://cdn.jsdelivr.net/npm/three@0.183.1/build/three.webgpu.js",
+          "three/tsl": "https://cdn.jsdelivr.net/npm/three@0.183.1/build/three.tsl.js",
+          "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.183.1/examples/jsm/"
+        }
+      }
+    </script>
+  </head>
+  <body>
+    <div id="hud">loading…</div>
+    <div id="help">
+      <span>1</span> Gemini grass &bull; <span>2</span> Hybrid grass &bull;
+      <span>0</span> none &bull; <span>WASD</span> move player &bull;
+      <span>Shift</span> sprint &bull; drag to orbit
+    </div>
+
+    <script type="module">
+      import * as THREE from "three";
+      import { OrbitControls } from "three/addons/controls/OrbitControls.js";
+      import { GrassManager } from "./v2/render/foliage/grassManager.js";
+      import { HybridGrassSystem } from "./grass-lab-hybrid.js";
+
+      // ════════════════════════════════════════════════════════════
+      // Renderer / scene / camera
+      // ════════════════════════════════════════════════════════════
+      const renderer = new THREE.WebGPURenderer({
+        antialias: true,
+        trackTimestamp: true, // GPU timestamp queries → vsync-independent perf
+      });
+      renderer.setSize(window.innerWidth, window.innerHeight);
+      renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+      renderer.toneMapping = THREE.ACESFilmicToneMapping;
+      renderer.toneMappingExposure = 1.0;
+      document.body.appendChild(renderer.domElement);
+      await renderer.init();
+
+      const scene = new THREE.Scene();
+      scene.background = new THREE.Color(0x88b4d8);
+      scene.fog = new THREE.Fog(0x88b4d8, 250, 600);
+
+      const camera = new THREE.PerspectiveCamera(
+        55,
+        window.innerWidth / window.innerHeight,
+        0.1,
+        2000,
+      );
+      camera.position.set(18, 14, 24);
+
+      const controls = new OrbitControls(camera, renderer.domElement);
+      controls.enableDamping = true;
+      controls.dampingFactor = 0.08;
+      controls.maxPolarAngle = Math.PI * 0.495;
+
+      // ── Lights ──
+      const sunDir = new THREE.Vector3(0.5, 0.8, 0.3).normalize();
+      const sun = new THREE.DirectionalLight(0xfff4e0, 3.2);
+      sun.position.copy(sunDir).multiplyScalar(200);
+      scene.add(sun);
+      scene.add(new THREE.HemisphereLight(0xbcd8f0, 0x56683f, 1.4));
+
+      // ════════════════════════════════════════════════════════════
+      // Terrain — CPU FBM heightfield + Float32 height texture
+      // (same convention as v2: uv = worldXZ / worldSize + 0.5)
+      // ════════════════════════════════════════════════════════════
+      const WORLD_SIZE = 600;
+      const TERRAIN_RES = 512;
+
+      function hash2(x, y) {
+        const s = Math.sin(x * 127.1 + y * 311.7) * 43758.5453;
+        return s - Math.floor(s);
+      }
+      function valueNoise(x, y) {
+        const xi = Math.floor(x);
+        const yi = Math.floor(y);
+        const xf = x - xi;
+        const yf = y - yi;
+        const u = xf * xf * (3 - 2 * xf);
+        const v = yf * yf * (3 - 2 * yf);
+        const a = hash2(xi, yi);
+        const b = hash2(xi + 1, yi);
+        const c = hash2(xi, yi + 1);
+        const d = hash2(xi + 1, yi + 1);
+        return a + (b - a) * u + (c - a) * v + (a - b - c + d) * u * v;
+      }
+      function fbm(x, y) {
+        let amp = 1;
+        let freq = 1;
+        let sum = 0;
+        let norm = 0;
+        for (let o = 0; o < 5; o++) {
+          sum += valueNoise(x * freq, y * freq) * amp;
+          norm += amp;
+          amp *= 0.5;
+          freq *= 2.1;
+        }
+        return sum / norm;
+      }
+      function heightAtNorm(u, v) {
+        // u, v in [0,1] — rolling hills, flatter near center for a "meadow"
+        const h = fbm(u * 6 + 13.7, v * 6 + 71.3) * 14 - 7;
+        const dx = u - 0.5;
+        const dy = v - 0.5;
+        const centerFlat = Math.min(1, Math.hypot(dx, dy) * 3.2);
+        return h * (0.25 + 0.75 * centerFlat * centerFlat);
+      }
+
+      // Height texture (RGBA float, .x = height) — matches v2 heightTex layout
+      const hData = new Float32Array(TERRAIN_RES * TERRAIN_RES * 4);
+      for (let iz = 0; iz < TERRAIN_RES; iz++) {
+        for (let ix = 0; ix < TERRAIN_RES; ix++) {
+          const h = heightAtNorm(
+            (ix + 0.5) / TERRAIN_RES,
+            (iz + 0.5) / TERRAIN_RES,
+          );
+          hData[(iz * TERRAIN_RES + ix) * 4] = h;
+        }
+      }
+      const heightTex = new THREE.DataTexture(
+        hData,
+        TERRAIN_RES,
+        TERRAIN_RES,
+        THREE.RGBAFormat,
+        THREE.FloatType,
+      );
+      heightTex.minFilter = THREE.LinearFilter;
+      heightTex.magFilter = THREE.LinearFilter;
+      heightTex.wrapS = heightTex.wrapT = THREE.ClampToEdgeWrapping;
+      heightTex.needsUpdate = true;
+
+      // CPU bilinear height sampling (player movement + terrain mesh)
+      function sampleHeight(wx, wz) {
+        const u = (wx / WORLD_SIZE + 0.5) * TERRAIN_RES - 0.5;
+        const v = (wz / WORLD_SIZE + 0.5) * TERRAIN_RES - 0.5;
+        const x0 = Math.max(0, Math.min(TERRAIN_RES - 1, Math.floor(u)));
+        const z0 = Math.max(0, Math.min(TERRAIN_RES - 1, Math.floor(v)));
+        const x1 = Math.min(TERRAIN_RES - 1, x0 + 1);
+        const z1 = Math.min(TERRAIN_RES - 1, z0 + 1);
+        const fx = u - x0;
+        const fz = v - z0;
+        const h00 = hData[(z0 * TERRAIN_RES + x0) * 4];
+        const h10 = hData[(z0 * TERRAIN_RES + x1) * 4];
+        const h01 = hData[(z1 * TERRAIN_RES + x0) * 4];
+        const h11 = hData[(z1 * TERRAIN_RES + x1) * 4];
+        return (
+          h00 * (1 - fx) * (1 - fz) +
+          h10 * fx * (1 - fz) +
+          h01 * (1 - fx) * fz +
+          h11 * fx * fz
+        );
+      }
+
+      // Terrain mesh — displace after rotation using world xz (orientation-proof)
+      const terrainGeo = new THREE.PlaneGeometry(
+        WORLD_SIZE,
+        WORLD_SIZE,
+        256,
+        256,
+      );
+      terrainGeo.rotateX(-Math.PI / 2);
+      {
+        const pos = terrainGeo.attributes.position;
+        for (let i = 0; i < pos.count; i++) {
+          pos.setY(i, sampleHeight(pos.getX(i), pos.getZ(i)));
+        }
+        pos.needsUpdate = true;
+        terrainGeo.computeVertexNormals();
+      }
+      const terrainMat = new THREE.MeshStandardNodeMaterial({
+        color: 0x3d5526,
+        roughness: 1.0,
+        metalness: 0,
+      });
+      const terrain = new THREE.Mesh(terrainGeo, terrainMat);
+      scene.add(terrain);
+
+      // ════════════════════════════════════════════════════════════
+      // Player marker — WASD-driven LOD/interaction focus
+      // ════════════════════════════════════════════════════════════
+      const marker = new THREE.Mesh(
+        new THREE.CapsuleGeometry(0.35, 1.0, 4, 12),
+        new THREE.MeshStandardNodeMaterial({ color: 0xd8503c, roughness: 0.6 }),
+      );
+      marker.position.set(0, sampleHeight(0, 0) + 0.85, 0);
+      scene.add(marker);
+      controls.target.copy(marker.position);
+
+      const keys = new Set();
+      window.addEventListener("keydown", (e) => keys.add(e.code));
+      window.addEventListener("keyup", (e) => keys.delete(e.code));
+
+      const _fwd = new THREE.Vector3();
+      const _right = new THREE.Vector3();
+      function updatePlayer(dt) {
+        const speed = keys.has("ShiftLeft") || keys.has("ShiftRight") ? 18 : 7;
+        _fwd.set(
+          controls.target.x - camera.position.x,
+          0,
+          controls.target.z - camera.position.z,
+        );
+        if (_fwd.lengthSq() < 1e-6) _fwd.set(0, 0, -1);
+        _fwd.normalize();
+        _right.set(-_fwd.z, 0, _fwd.x);
+        let mx = 0;
+        let mz = 0;
+        if (keys.has("KeyW")) mz += 1;
+        if (keys.has("KeyS")) mz -= 1;
+        if (keys.has("KeyD")) mx += 1;
+        if (keys.has("KeyA")) mx -= 1;
+        if (mx || mz) {
+          const move = _fwd
+            .multiplyScalar(mz)
+            .addScaledVector(_right, mx)
+            .normalize()
+            .multiplyScalar(speed * dt);
+          marker.position.x += move.x;
+          marker.position.z += move.z;
+          const half = WORLD_SIZE * 0.5 - 2;
+          marker.position.x = Math.max(-half, Math.min(half, marker.position.x));
+          marker.position.z = Math.max(-half, Math.min(half, marker.position.z));
+        }
+        marker.position.y =
+          sampleHeight(marker.position.x, marker.position.z) + 0.85;
+        // Camera follows the marker (keep orbit offset)
+        const dxT = marker.position.x - controls.target.x;
+        const dyT = marker.position.y - controls.target.y;
+        const dzT = marker.position.z - controls.target.z;
+        controls.target.set(marker.position.x, marker.position.y, marker.position.z);
+        camera.position.x += dxT;
+        camera.position.y += dyT;
+        camera.position.z += dzT;
+      }
+
+      // ════════════════════════════════════════════════════════════
+      // BASELINE — v2 Gemini grass via the real GrassManager
+      // (state mirrors v2 toolState.grass defaults, grass enabled)
+      // ════════════════════════════════════════════════════════════
+      const grassState = {
+        enabled: true,
+        bladeHeight: 1.0,
+        bladeWidth: 0.15,
+        tipTaperStart: 0.5,
+        bladeYSegments: 7,
+        grassCount: 1516,
+        fieldSize: 10,
+        grassDensity: 1.0,
+        windSpeed: 0.2,
+        windStrength: 1.4,
+        maxAngle: 1.4,
+        naturalLean: 0.9,
+        windAngle: 0,
+        windWaveScale: 0.12,
+        windGust: 0.3,
+        bendFocus: 0.5,
+        stiffness: 0.0,
+        clumpScale: 1.5,
+        clumpStrength: 0.7,
+        crossed: true,
+        bladeColor: "#2f6b1a", // lab-bright for debugging (v2 default: #0e300e)
+        tipColor: "#8cc63f", //                            (v2 default: #004d05)
+        skyBlend: 0.8,
+        cylindrical: 0.3,
+        viewThicken: 0.45,
+        aoBase: 0.25,
+        aoPower: 2.0,
+        colorVariation: false,
+        cvHueSpread: 0.08,
+        cvSatSpread: 0.3,
+        cvDryAmount: 0.15,
+        cvDryColor: "#8a7a3a",
+        bssIntensity: 1.2,
+        bssPower: 2.0,
+        bssColor: "#2d7a2d",
+        frontScatter: 0.3,
+        rimSSS: 0.25,
+        specV1Enabled: false,
+        specV1Intensity: 1.5,
+        specV1Color: "#ffffff",
+        specV1DirX: -1.0,
+        specV1DirY: 1.0,
+        specV1DirZ: 0.5,
+        specV1Power: 25.6,
+        specV2Enabled: false,
+        specV2Intensity: 1.0,
+        specV2Color: "#ffffff",
+        specV2DirX: -1.0,
+        specV2DirY: 0.45,
+        specV2DirZ: 1.0,
+        specV2NoiseScale: 3.0,
+        specV2NoiseStr: 0.6,
+        specV2Power: 12.0,
+        specV2TipBias: 0.5,
+        lodEnabled: true,
+        lodMidDistance: 40,
+        lodFarDistance: 80,
+        lodMaxDistance: 200,
+        lodFadeStart: 0.75,
+        lodMidPatchSize: 18,
+        lodMidSegments: 3,
+        lodMidGrassCount: 1500,
+        lodFarPatchSize: 28,
+        lodFarSegments: 1,
+        lodFarGrassCount: 1300,
+        lodFarBladeWidth: 0.45,
+        lodMegaMaxDistance: 400,
+        lodMegaPatchSize: 60,
+        lodMegaSegments: 1,
+        lodMegaGrassCount: 400,
+        lodMegaBladeWidth: 0.7,
+        lodDebug: false,
+        interactionRadius: 1.5,
+        interactionStrength: 0.7,
+        receiveShadow: false,
+        terrainTintEnabled: false,
+        terrainTintStrength: 0.5,
+        terrainTintAutoSource: true,
+        terrainTintManualMode: 1,
+        terrainTintRootBias: 0.35,
+        slopeEnabled: false,
+        slopeMin: 0.65,
+        slopeMax: 0.85,
+      };
+
+      const grassManager = new GrassManager({
+        scene,
+        camera,
+        config: { world: { size: WORLD_SIZE } },
+      });
+      grassManager.init(heightTex, sunDir, grassState);
+      grassManager.fillDensity(); // paint everywhere — worst-case stress baseline
+      grassManager.rebuildTerrainNormalTex(WORLD_SIZE);
+      grassManager.uniforms.uInteractionEnabled.value = 1;
+
+      // ════════════════════════════════════════════════════════════
+      // HYBRID — Revo skeleton + Gemini skin (compute SSBO, tiny VS)
+      // Three concentric rings ≈ Gemini's HIGH / FAR / MEGA coverage:
+      //   near 0–62m dense, mid 36–218m wider blades, far 175–400m fat blades
+      // ════════════════════════════════════════════════════════════
+      const hybridShared = {
+        scene,
+        renderer,
+        heightTex,
+        terrainNormalTex: grassManager.terrainNormalTex,
+        densityTex: grassManager.densityTex,
+        windTex: grassManager.windTex,
+        worldSize: WORLD_SIZE,
+        gp: grassState,
+      };
+      const hybridRings = [
+        new HybridGrassSystem({
+          ...hybridShared,
+          name: "HybridNear",
+          tileSize: 130,
+          bladesPerSide: 512, // 262k
+          outerR0: 36,
+          outerR1: 62,
+        }),
+        new HybridGrassSystem({
+          ...hybridShared,
+          name: "HybridMid",
+          tileSize: 440,
+          bladesPerSide: 448, // 200k
+          bladeWidth: 0.45,
+          segments: 2,
+          bladeHeightMul: 1.1,
+          innerR0: 36,
+          innerR1: 62,
+          outerR0: 180,
+          outerR1: 218,
+        }),
+        new HybridGrassSystem({
+          ...hybridShared,
+          name: "HybridFar",
+          tileSize: 800,
+          bladesPerSide: 384, // 147k
+          bladeWidth: 0.7,
+          segments: 1,
+          bladeHeightMul: 1.2,
+          innerR0: 175,
+          innerR1: 215,
+          outerR0: 360,
+          outerR1: 398,
+        }),
+      ];
+      const hybrid = {
+        setEnabled: (on) => hybridRings.forEach((r) => r.setEnabled(on)),
+        update: (anchor, cam) => hybridRings.forEach((r) => r.update(anchor, cam)),
+      };
+      for (const ring of hybridRings) {
+        ring.setSunDir(sunDir);
+        await ring.init(camera);
+      }
+
+      // ── System toggle ──
+      let activeSystem = 1; // 0 none, 1 gemini, 2 hybrid
+      function applySystem() {
+        grassState.enabled = activeSystem === 1;
+        if (hybrid) hybrid.setEnabled(activeSystem === 2);
+      }
+      window.addEventListener("keydown", (e) => {
+        if (e.code === "Digit1") activeSystem = 1;
+        else if (e.code === "Digit2") activeSystem = 2;
+        else if (e.code === "Digit0") activeSystem = 0;
+        else return;
+        applySystem();
+      });
+      applySystem();
+
+      // ════════════════════════════════════════════════════════════
+      // HUD + loop
+      // ════════════════════════════════════════════════════════════
+      const hud = document.getElementById("hud");
+      let frames = 0;
+      let hudT = performance.now();
+      let fps = 0;
+      let gpuRenderMs = 0;
+      let gpuComputeMs = 0;
+      const sysName = () =>
+        activeSystem === 1 ? "GEMINI (v2 baseline)" : activeSystem === 2 ? "HYBRID" : "none";
+
+      const timer = new THREE.Timer();
+      function tick() {
+        timer.update();
+        const dt = Math.min(timer.getDelta(), 0.05);
+        updatePlayer(dt);
+        controls.update();
+
+        if (activeSystem === 1) {
+          grassManager.uniforms.uPlayerPos.value.copy(marker.position);
+          grassManager.update(grassState, marker.position);
+        } else {
+          grassManager.update(grassState, marker.position); // keeps hide path
+        }
+        if (hybrid && activeSystem === 2) {
+          hybrid.update(marker.position, camera);
+        }
+
+        renderer.render(scene, camera);
+
+        frames++;
+        const now = performance.now();
+        if (now - hudT > 500) {
+          fps = (frames * 1000) / (now - hudT);
+          frames = 0;
+          hudT = now;
+          // Resolve GPU timestamps (vsync/throttle-independent ground truth)
+          Promise.all([
+            renderer.resolveTimestampsAsync(THREE.TimestampQuery.RENDER),
+            renderer.resolveTimestampsAsync(THREE.TimestampQuery.COMPUTE),
+          ])
+            .then(() => {
+              gpuRenderMs = renderer.info.render.timestamp ?? 0;
+              gpuComputeMs = renderer.info.compute.timestamp ?? 0;
+            })
+            .catch(() => {});
+          const info = renderer.info;
+          const calls = info?.render?.drawCalls ?? info?.render?.calls ?? "—";
+          const tris = info?.render?.triangles ?? "—";
+          hud.textContent =
+            `system   ${sysName()}\n` +
+            `fps      ${fps.toFixed(1)}\n` +
+            `gpu      ${gpuRenderMs.toFixed(2)} ms render + ${gpuComputeMs.toFixed(2)} ms compute\n` +
+            `draws    ${calls}\n` +
+            `tris     ${typeof tris === "number" ? tris.toLocaleString() : tris}\n` +
+            `player   ${marker.position.x.toFixed(0)}, ${marker.position.z.toFixed(0)}`;
+        }
+        requestAnimationFrame(tick);
+      }
+
+      await grassManager.precompile(renderer, camera);
+      tick();
+    </script>
+  </body>
+</html>
