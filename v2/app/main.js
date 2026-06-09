@@ -115,6 +115,7 @@ import { createCliffInstancerBlendMaterial } from "../../cliffInstancerBlendMate
 import { CliffPaintMask } from "../core/cliffs/cliffPaintMask.js";
 import { CliffPaintSystem } from "../tools/cliffs/cliffPaintSystem.js";
 import { getTileGridTexture } from "../../tileMaterial.js";
+import { createJumpRampGeometry } from "../core/props/jumpRampGeometry.js";
 import { PropStore } from "../core/props/propStore.js";
 import { PropInstancer } from "../core/props/propInstancer.js";
 import { PropSystem } from "../tools/props/propSystem.js";
@@ -3003,6 +3004,7 @@ export async function startV2App(opts = {}) {
         Plane: () => new THREE.PlaneGeometry(1, 1).rotateX(-Math.PI / 2),
         Cone: () => new THREE.ConeGeometry(0.5, 1, 32),
         Torus: () => new THREE.TorusGeometry(0.4, 0.15, 16, 32),
+        "Jump ramp": () => createJumpRampGeometry(),
       };
       const factory = defs[primitiveName];
       if (!factory) return;
