@@ -131,15 +131,15 @@ export function createToolState() {
       rockRoughMul: 1.5,
       triplanarSharp: 4.0,
     },
-    // exposure overridden to 0.7 here so a fresh boot (default skyMode below is
+    // exposure overridden to 1.0 here so a fresh boot (default skyMode below is
     // "procedural") starts at the procedural exposure — the init path applies the
     // sky mode without a prev→next swap, so it won't pull from skyExposureByMode.
-    light: { ...V2_CONFIG.light, exposure: 0.7 },
+    light: { ...V2_CONFIG.light, exposure: 1.0 },
     skyMode: "procedural",
     /** Tone-mapping exposure remembered per sky mode (applied on mode switch). */
     skyExposureByMode: {
       physical: 0.5,
-      procedural: 0.7,
+      procedural: 1.0,
       hdr: 0.5,
     },
     physicalSky: { ...V2_CONFIG.physicalSky },

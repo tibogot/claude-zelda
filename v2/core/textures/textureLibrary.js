@@ -182,6 +182,9 @@ const DEFAULT_SLOT_PRESETS = [
     id: "grass_005",
     name: "Grass 005",
     uvScale: 80.0,
+    normalStrength: 0.1,
+    aoStrength: 0.3,
+    roughStrength: 0.1,
     paths: {
       albedo: "/textures/pbr_materials/Grass005/Grass005_1K-JPG_Color.jpg",
       normal: "/textures/pbr_materials/Grass005/Grass005_1K-JPG_NormalGL.jpg",
@@ -207,7 +210,10 @@ const DEFAULT_SLOT_PRESETS = [
   {
     id: "ground_037",
     name: "Ground 037",
-    uvScale: 3.0,
+    uvScale: 100.0,
+    normalStrength: 0.2,
+    roughStrength: 0.1,
+    aoStrength: 1.0,
     paths: {
       albedo: "/textures/pbr_materials/Ground037/Ground037_1K-JPG_Color.jpg",
       normal: "/textures/pbr_materials/Ground037/Ground037_1K-JPG_NormalGL.jpg",
