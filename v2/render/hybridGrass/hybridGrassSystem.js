@@ -106,12 +106,63 @@ export function syncHybridGrassLod(rings, gp) {
   }
 }
 
+/**
+ * Rebuild blade geometry on all rings from the Gemini editor sliders —
+ * geometry-baked params (bladeWidth, segments, tipTaperStart) can't be
+ * uniforms. Mirrors Gemini's per-tier slider mapping: near/midThin use the
+ * main blade params, mid uses lodFar*, far uses lodMega*. Call from the
+ * grassRebuildGeos editor callback, same as GrassManager.rebuildGeometries.
+ */
+export function rebuildHybridGrassGeometries(rings, gp) {
+  for (const ring of rings) {
+    const n = ring.group.name;
+    if (n === "HybridNear" || n === "HybridCliffNear") {
+      ring.rebuildGeometry({
+        bladeWidth: gp.bladeWidth,
+        segments: gp.bladeYSegments,
+        taperStart: gp.tipTaperStart,
+        crossed: gp.crossed !== false,
+      });
+    } else if (n === "HybridMidThin") {
+      ring.rebuildGeometry({
+        bladeWidth: gp.bladeWidth,
+        segments: gp.lodMidSegments,
+        taperStart: gp.tipTaperStart,
+        crossed: gp.crossed !== false,
+      });
+    } else if (n === "HybridMid" || n === "HybridCliffMid") {
+      ring.rebuildGeometry({
+        bladeWidth: gp.lodFarBladeWidth ?? gp.bladeWidth,
+        segments: gp.lodFarSegments,
+        taperStart: gp.tipTaperStart,
+      });
+    } else if (n === "HybridFar") {
+      ring.rebuildGeometry({
+        bladeWidth: gp.lodMegaBladeWidth ?? gp.bladeWidth,
+        segments: gp.lodMegaSegments,
+        taperStart: gp.tipTaperStart,
+      });
+    }
+  }
+}
+
 function srgb(hex) {
   // ColorManagement already converts sRGB hex → linear working space in the
   // constructor; adding convertSRGBToLinear() here would gamma twice and
   // crush dark greens to near-black (matches Gemini's plain .set(hex)).
   return new THREE.Color(hex);
 }
+
+/** lodDebug tints per ring — Gemini's tier convention (HIGH green, MID
+ *  yellow, FAR blue, MEGA purple) + distinct colors for the cliff rings. */
+const LOD_DEBUG_TINTS = {
+  HybridNear: [0.2, 1.0, 0.2],
+  HybridMidThin: [1.0, 1.0, 0.2],
+  HybridMid: [0.2, 0.4, 1.0],
+  HybridFar: [0.85, 0.35, 1.0],
+  HybridCliffNear: [1.0, 0.5, 0.15],
+  HybridCliffMid: [0.15, 0.9, 0.9],
+};
 
 /**
  * Gemini-style crossed blade: the ribbon duplicated with aCross = 1; the VS
@@ -241,6 +292,8 @@ export class HybridGrassSystem {
       // blade / bend
       uBladeHeight: uniform((gp.bladeHeight ?? 1) * bladeHeightMul),
       uBendFocus: uniform(gp.bendFocus ?? 0.5),
+      uStiffness: uniform(gp.stiffness ?? 0),
+      uLodDebug: uniform(gp.lodDebug ? 1 : 0),
       uMaxAngle: uniform(gp.maxAngle ?? 1.4),
       uNaturalLean: uniform(gp.naturalLean ?? 0.9),
       // wind
@@ -356,12 +409,14 @@ export class HybridGrassSystem {
     this._crossFadeR1 = crossFadeR1;
 
     // ── Geometry (needed before compaction buffers for indexCount) ──
-    const segs = Math.max(1, Math.round(segments ?? gp.bladeYSegments ?? 7));
+    this._bladeWidth = bladeWidth ?? gp.bladeWidth ?? 0.15;
+    this._segments = Math.max(1, Math.round(segments ?? gp.bladeYSegments ?? 7));
+    this._taperStart = gp.tipTaperStart ?? 0.5;
     const geom = createCrossedBladeGeometry(
       1.0, // unit height — bladeH from SSBO scales it
-      bladeWidth ?? gp.bladeWidth ?? 0.15,
-      segs,
-      gp.tipTaperStart ?? 0.5,
+      this._bladeWidth,
+      this._segments,
+      this._taperStart,
       crossed,
     );
 
@@ -768,7 +823,14 @@ export class HybridGrassSystem {
         : float(1);
 
       const h = uv().y;
-      const curveWeight = pow(max(h, 1e-4), u.uBendFocus);
+      // Gemini's base stiffness: roots resist bending up to the stiffness
+      // fraction of the blade (eps guard — smoothstep(0,0,x) is undefined)
+      const baseStiff = smoothstep(
+        float(0),
+        max(u.uStiffness, float(1e-4)),
+        h,
+      );
+      const curveWeight = pow(max(h, 1e-4), u.uBendFocus).mul(baseStiff);
       const angle = totalForce.mul(curveWeight);
       const L = h.mul(bladeH);
       const arcX = sin(angle).mul(L);
@@ -909,7 +971,9 @@ export class HybridGrassSystem {
 
       // Lighting comes from the standard material pipeline (scene lights,
       // CSM shadows) — colorNode is pure albedo, exactly like Gemini.
-      return tintedVaried.mul(clumpShade).mul(shadeRand).mul(ao);
+      const finalAlbedo = tintedVaried.mul(clumpShade).mul(shadeRand).mul(ao);
+      const dbg = LOD_DEBUG_TINTS[this.group.name] ?? [1, 0, 1];
+      return mix(finalAlbedo, vec3(dbg[0], dbg[1], dbg[2]), u.uLodDebug);
     })();
 
     // ── EMISSIVE — SSS + dual specular (Gemini's emissiveNode, verbatim
@@ -1018,6 +1082,38 @@ export class HybridGrassSystem {
     this.u.uSunDir.value.copy(dir);
   }
 
+  /** Swap in new blade geometry (geometry-baked editor params: width,
+   *  segments, taper). Keeps the SAME indirect attribute — the compute
+   *  reset/cull nodes are bound to it — and just updates its indexCount. */
+  rebuildGeometry({ bladeWidth, segments, taperStart, crossed } = {}) {
+    if (!this.mesh) return;
+    this._bladeWidth = bladeWidth ?? this._bladeWidth;
+    if (segments != null) this._segments = Math.max(1, Math.round(segments));
+    this._taperStart = taperStart ?? this._taperStart;
+    // Only rings BUILT crossed can toggle the cross (the cross-fade shader
+    // path is baked at construction); single-ribbon rings stay single.
+    const useCross =
+      this._crossedAtBuild ?? (this._crossedAtBuild = this._crossed);
+    const wantCross = useCross && crossed !== false;
+    const geom = createCrossedBladeGeometry(
+      1.0,
+      this._bladeWidth,
+      this._segments,
+      this._taperStart,
+      wantCross,
+    );
+    this._indirectAttr.array[0] = geom.index.count;
+    this._indirectAttr.needsUpdate = true;
+    if (typeof geom.setIndirect === "function") {
+      geom.setIndirect(this._indirectAttr);
+    } else {
+      geom.indirect = this._indirectAttr;
+    }
+    const old = this.mesh.geometry;
+    this.mesh.geometry = geom;
+    old?.dispose();
+  }
+
   /** Live editor sync — same grassState (toolState.grass) shape v2's
    *  GrassManager.syncUniforms consumes, so the existing grass UI drives the
    *  hybrid directly. Geometry-baked params (bladeWidth, segments, counts)
@@ -1026,6 +1122,8 @@ export class HybridGrassSystem {
     const u = this.u;
     u.uBladeHeight.value = (gp.bladeHeight ?? 1) * this._bladeHeightMul;
     u.uBendFocus.value = gp.bendFocus ?? 0.5;
+    u.uStiffness.value = gp.stiffness ?? 0;
+    u.uLodDebug.value = gp.lodDebug ? 1 : 0;
     u.uMaxAngle.value = gp.maxAngle ?? 1.4;
     u.uNaturalLean.value = gp.naturalLean ?? 0.9;
     u.uWindSpeed.value = gp.windSpeed ?? 0.2;

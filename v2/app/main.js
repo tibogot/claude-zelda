@@ -95,6 +95,7 @@ import { GrassManager } from "../render/foliage/grassManager.js";
 import {
   HybridGrassSystem,
   syncHybridGrassLod,
+  rebuildHybridGrassGeometries,
 } from "../render/hybridGrass/hybridGrassSystem.js";
 import { RevoGrassSystem } from "../render/revoGrass/revoGrassSystem.js";
 import { SnowSystem } from "../render/snow/snowSystem.js";
@@ -2644,6 +2645,9 @@ export async function startV2App(opts = {}) {
     onGrassRebuildGeos: (_grassRebuildGeos = () => {
       grassManager.syncUniforms(toolState.grass, sunDir);
       grassManager.rebuildGeometries(toolState.grass);
+      if (hybridGrassRings) {
+        rebuildHybridGrassGeometries(hybridGrassRings, toolState.grass);
+      }
     }),
     onGrassFill: (_grassFill = () => {
       toolState.grass.enabled = true;

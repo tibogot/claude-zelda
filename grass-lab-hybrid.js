@@ -6,4 +6,5 @@
 export {
   HybridGrassSystem,
   syncHybridGrassLod,
+  rebuildHybridGrassGeometries,
 } from "./v2/render/hybridGrass/hybridGrassSystem.js";
