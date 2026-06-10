@@ -490,12 +490,9 @@ export class RevoGrassSystem {
     this._exclusionSource = "mask";
     this._initialized = false;
     this._enabled = false;
-    this._computeBusy = false;
     this._lastAnchor = new THREE.Vector3();
     this._anchorDelta = new THREE.Vector2();
     this._cameraMatrix = new THREE.Matrix4();
-    this._lastComputeMs = 0;
-    this._lastMovedMs = 0;
     this._playWindIntensity = 1;
     this._playWindAngleDeg = null;
   }
@@ -669,18 +666,20 @@ export class RevoGrassSystem {
       return;
 
     const u = this._uniforms;
+    // Effective wind intensity = slider (max-gust scale) × gust state machine
+    // (opts.gustMul, revo-realms WindManager cycle) × play-mode ambient wind.
+    let _intensityMul = opts.gustMul ?? 1;
     if (opts.playMode && rp.useGlobalWindInPlay !== false) {
-      u.uWindIntensity.value =
-        (rp.windIntensity ?? 1) * this._playWindIntensity;
+      _intensityMul *= this._playWindIntensity;
       if (this._playWindAngleDeg != null) {
         const wr = (this._playWindAngleDeg * Math.PI) / 180;
         u.uWindDir.value.set(Math.cos(wr), Math.sin(wr));
       }
     }
+    u.uWindIntensity.value = (rp.windIntensity ?? 1) * _intensityMul;
 
     const dx = anchorPos.x - this._lastAnchor.x;
     const dz = anchorPos.z - this._lastAnchor.z;
-    const moved = Math.abs(dx) + Math.abs(dz) > 0.02;
     this._anchorDelta.set(dx, dz);
     u.uAnchorDeltaXZ.value.copy(this._anchorDelta);
     u.uAnchorPosition.value.copy(anchorPos);
@@ -699,29 +698,12 @@ export class RevoGrassSystem {
 
     this._lastAnchor.copy(anchorPos);
 
-    /** Three-tier compute throttle: moving = 60 Hz for snappy trail/wind reaction,
-     *  active idle (<1 s since last move) = configured Hz (default 30), deep idle
-     *  (>1 s still) = 10 Hz. Wind frequencies are 1–2 Hz so 10 Hz looks identical
-     *  while saving a real chunk of compute on laptops / when AFK. */
-    const minInterval = Math.max(16, rp.computeMinIntervalMs ?? 33);
-    const now = performance.now();
-    if (moved) this._lastMovedMs = now;
-    const idleMs = now - this._lastMovedMs;
-    const sinceCompute = now - this._lastComputeMs;
-    const moveInterval = Math.min(16, minInterval);
-    const idleInterval = idleMs > 1000 ? Math.max(minInterval, 100) : minInterval;
-    const requiredInterval = moved ? moveInterval : idleInterval;
-    if (sinceCompute < requiredInterval) return;
-
-    if (this._computeBusy) return;
-    this._lastComputeMs = now;
-    this._computeBusy = true;
-    this._renderer
-      .computeAsync(this._ssbo.computeUpdate)
-      .catch((err) => console.error("[RevoGrass] compute failed:", err))
-      .finally(() => {
-        this._computeBusy = false;
-      });
+    // Per-frame SYNCHRONOUS compute, queued ahead of this frame's render.
+    // The old three-tier throttle + computeAsync busy-flag capped the wind
+    // sim at an effective 10–30 Hz (stepped/laggy motion — the original
+    // revo-realms computes every frame). Proven fix in the hybrid grass:
+    // same cadence as the renderer, ~0.1–0.4 ms even at Ultra density.
+    this._renderer.compute(this._ssbo.computeUpdate);
   }
 
   precompile(renderer, camera) {

@@ -416,8 +416,8 @@
   <body>
     <div id="lab-title">FX Lab</div>
     <div id="info">
-      <span id="backend">loading…</span> &bull;
-      WASD/Arrows move &bull; Space jump &bull; RMB drag (or F immersive) to look &bull;
+      <span id="backend">loading…</span> &bull; WASD/Arrows move &bull; Space
+      jump &bull; RMB drag (or F immersive) to look &bull;
       <span id="cammode">ORBIT</span> (Tab follow)
     </div>
     <div id="inspector">
@@ -456,9 +456,7 @@
         uv,
         vec2,
         vec3,
-        pow,
       } from "three/tsl";
-      import { voronoiF1Normalized } from "./tsl-noise.js";
       import { bloom } from "three/addons/tsl/display/BloomNode.js";
       import { OrbitControls } from "three/addons/controls/OrbitControls.js";
       import { SkyMesh } from "three/addons/objects/SkyMesh.js";
@@ -530,7 +528,7 @@
       // ── Mesh smoke preset (ported from zelda-smoke-mesh-showcase.html) ────
       const SMOKE_LOOK = {
         tiling: 0.45,
-        panSpeed: 0.10,
+        panSpeed: 0.1,
         holeDepth: 0.45,
         edgeNoise: 0.5,
         cutoff: 0.12,
@@ -575,55 +573,14 @@
         curlAmount: 0.6,
         curlScale: 0.8,
         curlSpeed: 0.8,
-        debugGeometry: false,
-        debugWireframe: false,
       };
-
-      // Procedural-only: remap raw F1 toward T_Voronoi01 response (baked + filtered PNG).
-      const SMOKE_TSL_RESPONSE_DEFAULTS = {
-        voroJitter: 0.85,
-        voroGain: 1.35,
-        voroPower: 1.6,
-        voroContrast: 1.2,
-        voroPivot: 0.5,
-        voroSoftLo: 0.0,
-        voroSoftHi: 0.93,
-      };
-
-      const SMOKE_TSL_LOOK = {
-        ...SMOKE_LOOK,
-        ...SMOKE_TSL_RESPONSE_DEFAULTS,
-      };
-
-      function remapVoronoiLikePng(raw, u) {
-        const gained = raw.mul(u.voroGain).clamp(0, 1);
-        const centered = gained.sub(u.voroPivot).mul(u.voroContrast).add(u.voroPivot);
-        const shaped = pow(centered.clamp(0, 1), u.voroPower);
-        return smoothstep(u.voroSoftLo, u.voroSoftHi, shaped);
-      }
 
       const smokeSmooth01 = (e0, e1, x) => {
         const t = Math.min(Math.max((x - e0) / (e1 - e0), 0), 1);
         return t * t * (3 - 2 * t);
       };
 
-      function triplanarVoronoiFromTexture(voroTex, p, off, bl) {
-        const sX = texture(voroTex, p.yz.add(off)).r;
-        const sY = texture(voroTex, p.xz.add(off)).r;
-        const sZ = texture(voroTex, p.xy.add(off)).r;
-        return sX.mul(bl.x).add(sY.mul(bl.y)).add(sZ.mul(bl.z));
-      }
-
-      function triplanarVoronoiFromProc(p, off, bl, u) {
-        const cell = (coord) =>
-          remapVoronoiLikePng(voronoiF1Normalized(coord, u.voroJitter), u);
-        const sX = cell(p.yz.add(off));
-        const sY = cell(p.xz.add(off));
-        const sZ = cell(p.xy.add(off));
-        return sX.mul(bl.x).add(sY.mul(bl.y)).add(sZ.mul(bl.z));
-      }
-
-      function buildMeshSmokeMaterial(sampleV, u) {
+      function buildMeshSmokeMaterial(voroTex, u) {
         const iSeed = attribute("iSeed", "float");
         const iLife = attribute("iLife", "float");
         const iCenter = attribute("iCenter", "vec3");
@@ -632,8 +589,13 @@
         const aN = normalLocal.abs();
         const bl = aN.div(aN.x.add(aN.y).add(aN.z).add(0.0001));
         const t = u.time.mul(u.panSpeed);
-        const off = vec2(iSeed, iSeed.mul(1.7)).add(vec2(t.mul(0.3), t.negate()));
-        const V = sampleV(p, off, bl);
+        const off = vec2(iSeed, iSeed.mul(1.7)).add(
+          vec2(t.mul(0.3), t.negate()),
+        );
+        const sX = texture(voroTex, p.yz.add(off)).r;
+        const sY = texture(voroTex, p.xz.add(off)).r;
+        const sZ = texture(voroTex, p.xy.add(off)).r;
+        const V = sX.mul(bl.x).add(sY.mul(bl.y)).add(sZ.mul(bl.z));
 
         const N = normalWorld.normalize();
         const viewDir = cameraPosition.sub(positionWorld).normalize();
@@ -667,10 +629,6 @@
         const shadowed = dot(toP, u.lightDir).negate().clamp(0, 1);
         const col = lit2.mul(float(1).sub(shadowed.mul(u.selfShadow)));
 
-        const debugCol = vec3(0.55, 0.72, 0.88);
-        const outCol = mix(col, debugCol, u.debugGeo);
-        const outAlpha = mix(alpha, float(1), u.debugGeo);
-
         const mat = new MeshBasicNodeMaterial({
           transparent: true,
           depthWrite: false,
@@ -678,54 +636,9 @@
           blending: THREE.NormalBlending,
           side: THREE.DoubleSide,
         });
-        mat.colorNode = outCol;
-        mat.opacityNode = outAlpha;
+        mat.colorNode = col;
+        mat.opacityNode = alpha;
         return mat;
-      }
-
-      function makeSmokeUniforms(look) {
-        return {
-          time: uniform(0),
-          tiling: uniform(look.tiling),
-          panSpeed: uniform(look.panSpeed),
-          holeDepth: uniform(look.holeDepth),
-          edgeNoise: uniform(look.edgeNoise),
-          cutoff: uniform(look.cutoff),
-          dissolveSoft: uniform(look.dissolveSoft),
-          erode: uniform(look.erode),
-          fadeIn: uniform(look.fadeIn),
-          opacity: uniform(look.opacity),
-          lightStrength: uniform(look.lightStrength),
-          rimStrength: uniform(look.rimStrength),
-          rimPow: uniform(look.rimPow),
-          posterize: uniform(look.posterize ? 1 : 0),
-          steps: uniform(look.steps),
-          colShadow: uniform(new THREE.Color(look.colShadow)),
-          colLit: uniform(new THREE.Color(look.colLit)),
-          colTop: uniform(new THREE.Color(look.colTop)),
-          heightTint: uniform(look.heightTint),
-          selfShadow: uniform(look.selfShadow),
-          voroShade: uniform(look.voronoiShade),
-          colTopY: uniform(look.rise * look.lifetime * 0.7),
-          lightDir: uniform(new THREE.Vector3(0.4, 1.0, 0.35).normalize()),
-          round: uniform(look.normalRound),
-          pivotMode: uniform(look.columnPivot ? 1 : 0),
-          pivot: uniform(new THREE.Vector3(0, 2, 0)),
-          debugGeo: uniform(0),
-        };
-      }
-
-      function makeSmokeShadowUniforms(look) {
-        return {
-          strength: uniform(look.shadowStrength),
-          soft: uniform(look.shadowSoft),
-          color: uniform(new THREE.Color(look.shadowColor)),
-        };
-      }
-
-      function applySmokeDebugMode(smokeMat, u, look) {
-        u.debugGeo.value = look.debugGeometry ? 1 : 0;
-        smokeMat.wireframe = !!look.debugWireframe;
       }
 
       function buildSmokeShadowMaterial(uShadow) {
@@ -748,8 +661,16 @@
 
       function makeBlobGeometry() {
         const a = new THREE.IcosahedronGeometry(1.0, 3);
-        const b = new THREE.IcosahedronGeometry(0.8, 3).translate(0.95, 0.45, 0.15);
-        const c = new THREE.IcosahedronGeometry(0.78, 3).translate(-0.7, 0.55, -0.35);
+        const b = new THREE.IcosahedronGeometry(0.8, 3).translate(
+          0.95,
+          0.45,
+          0.15,
+        );
+        const c = new THREE.IcosahedronGeometry(0.78, 3).translate(
+          -0.7,
+          0.55,
+          -0.35,
+        );
         const g = mergeGeometries([a, b, c]);
         g.deleteAttribute("uv");
         g.center();
@@ -767,11 +688,17 @@
           const geo = makeBlobGeometry();
           this.seedArr = new Float32Array(max);
           this.lifeArr = new Float32Array(max).fill(1);
-          geo.setAttribute("iSeed", new THREE.InstancedBufferAttribute(this.seedArr, 1));
+          geo.setAttribute(
+            "iSeed",
+            new THREE.InstancedBufferAttribute(this.seedArr, 1),
+          );
           this.lifeAttr = new THREE.InstancedBufferAttribute(this.lifeArr, 1);
           geo.setAttribute("iLife", this.lifeAttr);
           this.centerArr = new Float32Array(max * 3);
-          this.centerAttr = new THREE.InstancedBufferAttribute(this.centerArr, 3);
+          this.centerAttr = new THREE.InstancedBufferAttribute(
+            this.centerArr,
+            3,
+          );
           geo.setAttribute("iCenter", this.centerAttr);
 
           this.mesh = new THREE.InstancedMesh(geo, mat, max);
@@ -783,7 +710,10 @@
             const sgeo = new THREE.PlaneGeometry(1, 1);
             sgeo.deleteAttribute("normal");
             this.shadowArr = new Float32Array(max);
-            this.shadowAttr = new THREE.InstancedBufferAttribute(this.shadowArr, 1);
+            this.shadowAttr = new THREE.InstancedBufferAttribute(
+              this.shadowArr,
+              1,
+            );
             sgeo.setAttribute("iShadow", this.shadowAttr);
             this.shadowMesh = new THREE.InstancedMesh(sgeo, shadowMat, max);
             this.shadowMesh.frustumCulled = false;
@@ -942,75 +872,85 @@
         }
       }
 
-      async function createMeshSmokePresetCore(
-        { scene, floor, renderer, camera },
-        { look, useProcedural },
-      ) {
-        const u = makeSmokeUniforms(look);
-        const uShadow = makeSmokeShadowUniforms(look);
+      async function createMeshSmokePreset({ scene, floor, renderer, camera }) {
+        const u = {
+          time: uniform(0),
+          tiling: uniform(SMOKE_LOOK.tiling),
+          panSpeed: uniform(SMOKE_LOOK.panSpeed),
+          holeDepth: uniform(SMOKE_LOOK.holeDepth),
+          edgeNoise: uniform(SMOKE_LOOK.edgeNoise),
+          cutoff: uniform(SMOKE_LOOK.cutoff),
+          dissolveSoft: uniform(SMOKE_LOOK.dissolveSoft),
+          erode: uniform(SMOKE_LOOK.erode),
+          fadeIn: uniform(SMOKE_LOOK.fadeIn),
+          opacity: uniform(SMOKE_LOOK.opacity),
+          lightStrength: uniform(SMOKE_LOOK.lightStrength),
+          rimStrength: uniform(SMOKE_LOOK.rimStrength),
+          rimPow: uniform(SMOKE_LOOK.rimPow),
+          posterize: uniform(SMOKE_LOOK.posterize ? 1 : 0),
+          steps: uniform(SMOKE_LOOK.steps),
+          colShadow: uniform(new THREE.Color(SMOKE_LOOK.colShadow)),
+          colLit: uniform(new THREE.Color(SMOKE_LOOK.colLit)),
+          colTop: uniform(new THREE.Color(SMOKE_LOOK.colTop)),
+          heightTint: uniform(SMOKE_LOOK.heightTint),
+          selfShadow: uniform(SMOKE_LOOK.selfShadow),
+          voroShade: uniform(SMOKE_LOOK.voronoiShade),
+          colTopY: uniform(SMOKE_LOOK.rise * SMOKE_LOOK.lifetime * 0.7),
+          lightDir: uniform(new THREE.Vector3(0.4, 1.0, 0.35).normalize()),
+          round: uniform(SMOKE_LOOK.normalRound),
+          pivotMode: uniform(SMOKE_LOOK.columnPivot ? 1 : 0),
+          pivot: uniform(new THREE.Vector3(0, 2, 0)),
+        };
 
-        let voroTex = null;
-        let setVoronoiImage = null;
-        let resetVoronoi = null;
+        const uShadow = {
+          strength: uniform(SMOKE_LOOK.shadowStrength),
+          soft: uniform(SMOKE_LOOK.shadowSoft),
+          color: uniform(new THREE.Color(SMOKE_LOOK.shadowColor)),
+        };
 
-        if (useProcedural) {
-          u.voroJitter = uniform(look.voroJitter ?? 0.85);
-          u.voroGain = uniform(look.voroGain ?? 1.35);
-          u.voroPower = uniform(look.voroPower ?? 1.6);
-          u.voroContrast = uniform(look.voroContrast ?? 1.2);
-          u.voroPivot = uniform(look.voroPivot ?? 0.5);
-          u.voroSoftLo = uniform(look.voroSoftLo ?? 0.0);
-          u.voroSoftHi = uniform(look.voroSoftHi ?? 0.93);
-        } else {
-          voroTex = await new Promise((res) => {
-            new THREE.TextureLoader().load(VORO_URL, (tex) => {
-              tex.wrapS = tex.wrapT = THREE.RepeatWrapping;
-              tex.colorSpace = THREE.NoColorSpace;
-              res(tex);
-            });
+        const voroTex = await new Promise((res) => {
+          new THREE.TextureLoader().load(VORO_URL, (tex) => {
+            tex.wrapS = tex.wrapT = THREE.RepeatWrapping;
+            tex.colorSpace = THREE.NoColorSpace;
+            res(tex);
           });
+        });
 
-          setVoronoiImage = async (file, onStatus) => {
-            try {
-              const bmp = await createImageBitmap(file);
-              voroTex.image = bmp;
-              voroTex.wrapS = voroTex.wrapT = THREE.RepeatWrapping;
-              voroTex.colorSpace = THREE.NoColorSpace;
-              voroTex.needsUpdate = true;
-              if (voroTex.source) voroTex.source.needsUpdate = true;
-              onStatus?.(`✓ ${file.name} — ${bmp.width}×${bmp.height}`);
-            } catch (e) {
-              onStatus?.(`✗ failed: ${e.message}`);
-            }
-          };
-
-          resetVoronoi = (onStatus) => {
-            new THREE.TextureLoader().load(VORO_URL, (t) => {
-              voroTex.image = t.image;
-              voroTex.wrapS = voroTex.wrapT = THREE.RepeatWrapping;
-              voroTex.colorSpace = THREE.NoColorSpace;
-              voroTex.needsUpdate = true;
-              if (voroTex.source) voroTex.source.needsUpdate = true;
-              onStatus?.("default voronoi restored");
-            });
-          };
+        async function setVoronoiImage(file, onStatus) {
+          try {
+            const bmp = await createImageBitmap(file);
+            voroTex.image = bmp;
+            voroTex.wrapS = voroTex.wrapT = THREE.RepeatWrapping;
+            voroTex.colorSpace = THREE.NoColorSpace;
+            voroTex.needsUpdate = true;
+            if (voroTex.source) voroTex.source.needsUpdate = true;
+            onStatus?.(`✓ ${file.name} — ${bmp.width}×${bmp.height}`);
+          } catch (e) {
+            onStatus?.(`✗ failed: ${e.message}`);
+          }
         }
 
-        const sampleV = useProcedural
-          ? (p, off, bl) => triplanarVoronoiFromProc(p, off, bl, u)
-          : (p, off, bl) => triplanarVoronoiFromTexture(voroTex, p, off, bl);
+        function resetVoronoi(onStatus) {
+          new THREE.TextureLoader().load(VORO_URL, (t) => {
+            voroTex.image = t.image;
+            voroTex.wrapS = voroTex.wrapT = THREE.RepeatWrapping;
+            voroTex.colorSpace = THREE.NoColorSpace;
+            voroTex.needsUpdate = true;
+            if (voroTex.source) voroTex.source.needsUpdate = true;
+            onStatus?.("default voronoi restored");
+          });
+        }
 
-        const smokeMat = buildMeshSmokeMaterial(sampleV, u);
+        const smokeMat = buildMeshSmokeMaterial(voroTex, u);
         const shadowMat = buildSmokeShadowMaterial(uShadow);
-        const blobs = new BlobSystem(scene, smokeMat, shadowMat, look);
-        applySmokeDebugMode(smokeMat, u, look);
+        const blobs = new BlobSystem(scene, smokeMat, shadowMat, SMOKE_LOOK);
 
         function applyDepthMode(on) {
           smokeMat.depthWrite = on;
-          smokeMat.alphaTest = on ? look.alphaTest : 0;
+          smokeMat.alphaTest = on ? SMOKE_LOOK.alphaTest : 0;
           smokeMat.needsUpdate = true;
         }
-        applyDepthMode(look.depthSort);
+        applyDepthMode(SMOKE_LOOK.depthSort);
 
         const raycaster = new THREE.Raycaster();
         const pointer = new THREE.Vector2();
@@ -1019,7 +959,7 @@
           pointer.y = -(e.clientY / innerHeight) * 2 + 1;
         });
         window.addEventListener("click", (e) => {
-          if (!look.clickToPuff) return;
+          if (!SMOKE_LOOK.clickToPuff) return;
           if (e.target.closest("#inspector")) return;
           raycaster.setFromCamera(pointer, camera);
           const hit = raycaster.intersectObject(floor)[0];
@@ -1029,12 +969,22 @@
           }
         });
 
+        // ── FX module interface (called by the registry / frame loop) ──
+        // The smoke base follows the player; effects that should sit still
+        // would just ignore ctx.playerPos.
         function update(dt, ctx) {
           blobs.setBase(
-            new THREE.Vector3(ctx.playerPos.x, ctx.playerPos.y + 0.3, ctx.playerPos.z),
+            new THREE.Vector3(
+              ctx.playerPos.x,
+              ctx.playerPos.y + 0.3,
+              ctx.playerPos.z,
+            ),
           );
           u.time.value = ctx.timeMs * 0.001;
-          const colTopY = Math.max(look.rise * look.lifetime * 0.7, 0.001);
+          const colTopY = Math.max(
+            SMOKE_LOOK.rise * SMOKE_LOOK.lifetime * 0.7,
+            0.001,
+          );
           u.colTopY.value = colTopY;
           u.pivot.value.set(
             blobs.base.x,
@@ -1045,40 +995,20 @@
         }
         function setActive(on) {
           blobs.mesh.visible = on;
-          blobs.shadowMesh.visible = on && look.shadowOn;
-        }
-        function applyDebugMode() {
-          applySmokeDebugMode(smokeMat, u, look);
+          blobs.shadowMesh.visible = on && SMOKE_LOOK.shadowOn;
         }
 
         return {
-          look,
           u,
           uShadow,
           blobs,
           smokeMat,
           applyDepthMode,
-          applyDebugMode,
           setVoronoiImage,
           resetVoronoi,
           update,
           setActive,
-          useProcedural,
         };
-      }
-
-      async function createMeshSmokePreset(fxCtx) {
-        return createMeshSmokePresetCore(fxCtx, {
-          look: SMOKE_LOOK,
-          useProcedural: false,
-        });
-      }
-
-      async function createMeshSmokeTslPreset(fxCtx) {
-        return createMeshSmokePresetCore(fxCtx, {
-          look: SMOKE_TSL_LOOK,
-          useProcedural: true,
-        });
       }
 
       // ── Fire preset — warm ADDITIVE blobs, emissive colour ramp over life ─
@@ -1125,7 +1055,9 @@
         const aN = normalLocal.abs();
         const bl = aN.div(aN.x.add(aN.y).add(aN.z).add(0.0001));
         const t = u.time.mul(u.panSpeed);
-        const off = vec2(iSeed, iSeed.mul(1.7)).add(vec2(t.mul(0.3), t.negate()));
+        const off = vec2(iSeed, iSeed.mul(1.7)).add(
+          vec2(t.mul(0.3), t.negate()),
+        );
         const sX = texture(voroTex, p.yz.add(off)).r;
         const sY = texture(voroTex, p.xz.add(off)).r;
         const sZ = texture(voroTex, p.xy.add(off)).r;
@@ -1197,7 +1129,11 @@
 
         function update(dt, ctx) {
           blobs.setBase(
-            new THREE.Vector3(ctx.playerPos.x, ctx.playerPos.y + 0.3, ctx.playerPos.z),
+            new THREE.Vector3(
+              ctx.playerPos.x,
+              ctx.playerPos.y + 0.3,
+              ctx.playerPos.z,
+            ),
           );
           u.time.value = ctx.timeMs * 0.001;
           blobs.update(dt, ctx.timeMs, u);
@@ -1230,37 +1166,164 @@
         const { u, blobs } = handle;
 
         const shape = _section(body, "Voronoi (triplanar)", false);
-        _slider(shape, FIRE_LOOK, "tiling", { label: "Cell scale", min: 0.1, max: 1.5, step: 0.01, onChange: (v) => (u.tiling.value = v) });
-        _slider(shape, FIRE_LOOK, "panSpeed", { label: "Churn speed", min: 0, max: 1, step: 0.01, onChange: (v) => (u.panSpeed.value = v) });
-        _slider(shape, FIRE_LOOK, "holeDepth", { label: "Hole depth", min: 0, max: 1, step: 0.01, onChange: (v) => (u.holeDepth.value = v) });
-        _slider(shape, FIRE_LOOK, "edgeNoise", { label: "Edge irregularity", min: 0, max: 1.2, step: 0.01, onChange: (v) => (u.edgeNoise.value = v) });
+        _slider(shape, FIRE_LOOK, "tiling", {
+          label: "Cell scale",
+          min: 0.1,
+          max: 1.5,
+          step: 0.01,
+          onChange: (v) => (u.tiling.value = v),
+        });
+        _slider(shape, FIRE_LOOK, "panSpeed", {
+          label: "Churn speed",
+          min: 0,
+          max: 1,
+          step: 0.01,
+          onChange: (v) => (u.panSpeed.value = v),
+        });
+        _slider(shape, FIRE_LOOK, "holeDepth", {
+          label: "Hole depth",
+          min: 0,
+          max: 1,
+          step: 0.01,
+          onChange: (v) => (u.holeDepth.value = v),
+        });
+        _slider(shape, FIRE_LOOK, "edgeNoise", {
+          label: "Edge irregularity",
+          min: 0,
+          max: 1.2,
+          step: 0.01,
+          onChange: (v) => (u.edgeNoise.value = v),
+        });
 
         const diss = _section(body, "Erosion (fresnel edge)", false);
-        _slider(diss, FIRE_LOOK, "cutoff", { label: "Cutoff", min: 0, max: 0.7, step: 0.01, onChange: (v) => (u.cutoff.value = v) });
-        _slider(diss, FIRE_LOOK, "dissolveSoft", { label: "Edge softness", min: 0.02, max: 0.5, step: 0.01, onChange: (v) => (u.dissolveSoft.value = v) });
-        _slider(diss, FIRE_LOOK, "erode", { label: "Age erosion", min: 0, max: 1, step: 0.01, onChange: (v) => (u.erode.value = v) });
-        _slider(diss, FIRE_LOOK, "fadeIn", { label: "Grow-in", min: 0.02, max: 0.4, step: 0.01, onChange: (v) => (u.fadeIn.value = v) });
-        _slider(diss, FIRE_LOOK, "opacity", { label: "Opacity", min: 0.2, max: 1, step: 0.01, onChange: (v) => (u.opacity.value = v) });
+        _slider(diss, FIRE_LOOK, "cutoff", {
+          label: "Cutoff",
+          min: 0,
+          max: 0.7,
+          step: 0.01,
+          onChange: (v) => (u.cutoff.value = v),
+        });
+        _slider(diss, FIRE_LOOK, "dissolveSoft", {
+          label: "Edge softness",
+          min: 0.02,
+          max: 0.5,
+          step: 0.01,
+          onChange: (v) => (u.dissolveSoft.value = v),
+        });
+        _slider(diss, FIRE_LOOK, "erode", {
+          label: "Age erosion",
+          min: 0,
+          max: 1,
+          step: 0.01,
+          onChange: (v) => (u.erode.value = v),
+        });
+        _slider(diss, FIRE_LOOK, "fadeIn", {
+          label: "Grow-in",
+          min: 0.02,
+          max: 0.4,
+          step: 0.01,
+          onChange: (v) => (u.fadeIn.value = v),
+        });
+        _slider(diss, FIRE_LOOK, "opacity", {
+          label: "Opacity",
+          min: 0.2,
+          max: 1,
+          step: 0.01,
+          onChange: (v) => (u.opacity.value = v),
+        });
 
         const col = _section(body, "Fire color", true);
-        _color(col, FIRE_LOOK, "colHot", { label: "Hot (young)", onChange: (v) => u.colHot.value.set(v) });
-        _color(col, FIRE_LOOK, "colMid", { label: "Mid", onChange: (v) => u.colMid.value.set(v) });
-        _color(col, FIRE_LOOK, "colTip", { label: "Tip (old)", onChange: (v) => u.colTip.value.set(v) });
-        _slider(col, FIRE_LOOK, "midPoint", { label: "Mid point", min: 0.05, max: 0.95, step: 0.01, onChange: (v) => (u.midPoint.value = v) });
-        _slider(col, FIRE_LOOK, "intensity", { label: "Intensity (HDR)", min: 0.5, max: 5, step: 0.05, onChange: (v) => (u.intensity.value = v) });
+        _color(col, FIRE_LOOK, "colHot", {
+          label: "Hot (young)",
+          onChange: (v) => u.colHot.value.set(v),
+        });
+        _color(col, FIRE_LOOK, "colMid", {
+          label: "Mid",
+          onChange: (v) => u.colMid.value.set(v),
+        });
+        _color(col, FIRE_LOOK, "colTip", {
+          label: "Tip (old)",
+          onChange: (v) => u.colTip.value.set(v),
+        });
+        _slider(col, FIRE_LOOK, "midPoint", {
+          label: "Mid point",
+          min: 0.05,
+          max: 0.95,
+          step: 0.01,
+          onChange: (v) => (u.midPoint.value = v),
+        });
+        _slider(col, FIRE_LOOK, "intensity", {
+          label: "Intensity (HDR)",
+          min: 0.5,
+          max: 5,
+          step: 0.05,
+          onChange: (v) => (u.intensity.value = v),
+        });
 
         const sim = _section(body, "Simulation", false);
-        _toggle(sim, FIRE_LOOK, "clickToPuff", { label: "Click ground to puff" });
-        _slider(sim, FIRE_LOOK, "rise", { label: "Rise speed", min: 0.2, max: 6, step: 0.05 });
-        _slider(sim, FIRE_LOOK, "spread", { label: "Spread", min: 0, max: 2, step: 0.05 });
-        _slider(sim, FIRE_LOOK, "lifetime", { label: "Lifetime (s)", min: 0.4, max: 4, step: 0.05 });
-        _slider(sim, FIRE_LOOK, "rate", { label: "Emission rate", min: 1, max: 30, step: 1 });
-        _slider(sim, FIRE_LOOK, "sizeStart", { label: "Size start", min: 0.1, max: 1.5, step: 0.05 });
-        _slider(sim, FIRE_LOOK, "sizeEnd", { label: "Size end", min: 0.3, max: 3, step: 0.05 });
-        _slider(sim, FIRE_LOOK, "spin", { label: "Tumble", min: 0, max: 2, step: 0.05 });
-        _slider(sim, FIRE_LOOK, "curlAmount", { label: "Curl amount", min: 0, max: 2, step: 0.05 });
-        _slider(sim, FIRE_LOOK, "curlScale", { label: "Curl waves", min: 0.1, max: 2, step: 0.05 });
-        _slider(sim, FIRE_LOOK, "curlSpeed", { label: "Curl speed", min: 0, max: 3, step: 0.05 });
+        _toggle(sim, FIRE_LOOK, "clickToPuff", {
+          label: "Click ground to puff",
+        });
+        _slider(sim, FIRE_LOOK, "rise", {
+          label: "Rise speed",
+          min: 0.2,
+          max: 6,
+          step: 0.05,
+        });
+        _slider(sim, FIRE_LOOK, "spread", {
+          label: "Spread",
+          min: 0,
+          max: 2,
+          step: 0.05,
+        });
+        _slider(sim, FIRE_LOOK, "lifetime", {
+          label: "Lifetime (s)",
+          min: 0.4,
+          max: 4,
+          step: 0.05,
+        });
+        _slider(sim, FIRE_LOOK, "rate", {
+          label: "Emission rate",
+          min: 1,
+          max: 30,
+          step: 1,
+        });
+        _slider(sim, FIRE_LOOK, "sizeStart", {
+          label: "Size start",
+          min: 0.1,
+          max: 1.5,
+          step: 0.05,
+        });
+        _slider(sim, FIRE_LOOK, "sizeEnd", {
+          label: "Size end",
+          min: 0.3,
+          max: 3,
+          step: 0.05,
+        });
+        _slider(sim, FIRE_LOOK, "spin", {
+          label: "Tumble",
+          min: 0,
+          max: 2,
+          step: 0.05,
+        });
+        _slider(sim, FIRE_LOOK, "curlAmount", {
+          label: "Curl amount",
+          min: 0,
+          max: 2,
+          step: 0.05,
+        });
+        _slider(sim, FIRE_LOOK, "curlScale", {
+          label: "Curl waves",
+          min: 0.1,
+          max: 2,
+          step: 0.05,
+        });
+        _slider(sim, FIRE_LOOK, "curlSpeed", {
+          label: "Curl speed",
+          min: 0,
+          max: 3,
+          step: 0.05,
+        });
 
         const act = _section(body, "Actions", false);
         _button(act, { title: "Puff burst", onClick: () => blobs.burst(12) });
@@ -1320,11 +1383,6 @@
           create: createMeshSmokePreset,
           buildInspector: buildMeshSmokeInspector,
         },
-        meshSmokeTsl: {
-          label: "Mesh Smoke (TSL Voronoi)",
-          create: createMeshSmokeTslPreset,
-          buildInspector: buildMeshSmokeTslInspector,
-        },
         fire: {
           label: "Fire",
           create: createFirePreset,
@@ -1332,7 +1390,11 @@
         },
       };
 
-      function sunDirectionFromAngles(azDeg, elDeg, target = new THREE.Vector3()) {
+      function sunDirectionFromAngles(
+        azDeg,
+        elDeg,
+        target = new THREE.Vector3(),
+      ) {
         const az = THREE.MathUtils.degToRad(azDeg);
         const el = THREE.MathUtils.degToRad(elDeg);
         return target
@@ -1502,7 +1564,8 @@
         let fxInspectorContainer = null;
         async function activateFX(key) {
           if (activeFX) activeFX.setActive(false);
-          if (!fxHandles[key]) fxHandles[key] = await FX_REGISTRY[key].create(fxCtx);
+          if (!fxHandles[key])
+            fxHandles[key] = await FX_REGISTRY[key].create(fxCtx);
           activeFX = fxHandles[key];
           activeKey = key;
           activeFX.setActive(true);
@@ -1530,11 +1593,7 @@
 
         // playerPos.y stores the ground surface under the capsule (foot).
         // The mesh sits half a capsule above that — matches v2 convention.
-        const playerPos = new THREE.Vector3(
-          0,
-          sampleHeight(0, 0),
-          0,
-        );
+        const playerPos = new THREE.Vector3(0, sampleHeight(0, 0), 0);
         const capsuleBase = CAP_R + CAP_H * 0.5;
 
         const state = {
@@ -1582,7 +1641,10 @@
           if (!state.immersive && !rmbLook) return;
           state.camYaw -= e.movementX * CAM_SENS_X;
           state.camPitch += e.movementY * CAM_SENS_Y;
-          state.camPitch = Math.max(0.05, Math.min(Math.PI * 0.45, state.camPitch));
+          state.camPitch = Math.max(
+            0.05,
+            Math.min(Math.PI * 0.45, state.camPitch),
+          );
         });
 
         const cammodeEl = document.getElementById("cammode");
@@ -1912,146 +1974,69 @@
         return row;
       }
 
-      function buildMeshSmokeInspector(body, { handle, scene, controls, camera }) {
+      function buildMeshSmokeInspector(
+        body,
+        { handle, scene, controls, camera },
+      ) {
         const {
           u,
           uShadow,
           blobs,
           applyDepthMode,
-          applyDebugMode,
           setVoronoiImage,
           resetVoronoi,
-          look,
-          useProcedural,
         } = handle;
 
-        const dbg = _section(body, "Debug (blob geometry)", true);
-        _toggle(dbg, look, "debugGeometry", {
-          label: "Solid mesh (no erosion)",
-          onChange: () => applyDebugMode?.(),
+        const tex = _section(body, "Particle texture", false);
+        const texStatus = document.createElement("div");
+        texStatus.style.cssText =
+          "font-size:10px;color:var(--text-dim);margin:4px 0 6px;min-height:13px;";
+        texStatus.textContent = "grayscale image (red channel is read)";
+        const fileRow = document.createElement("div");
+        fileRow.className = "prop-row";
+        fileRow.innerHTML =
+          '<span class="prop-label">Texture</span><div class="prop-value"><input type="file" accept="image/*" style="width:100%;font-size:11px;color:var(--text-dim)"></div>';
+        const fileInp = fileRow.querySelector("input");
+        fileInp.addEventListener("change", () => {
+          const f = fileInp.files?.[0];
+          if (f)
+            setVoronoiImage(f, (s) => {
+              texStatus.textContent = s;
+            });
         });
-        _toggle(dbg, look, "debugWireframe", {
-          label: "Wireframe overlay",
-          onChange: () => applyDebugMode?.(),
+        tex.appendChild(fileRow);
+        tex.appendChild(texStatus);
+        _button(tex, {
+          title: "Reset to default",
+          onClick: () =>
+            resetVoronoi((s) => {
+              texStatus.textContent = s;
+            }),
         });
-
-        if (!useProcedural && setVoronoiImage && resetVoronoi) {
-          const tex = _section(body, "Particle texture", false);
-          const texStatus = document.createElement("div");
-          texStatus.style.cssText =
-            "font-size:10px;color:var(--text-dim);margin:4px 0 6px;min-height:13px;";
-          texStatus.textContent = "grayscale image (red channel is read)";
-          const fileRow = document.createElement("div");
-          fileRow.className = "prop-row";
-          fileRow.innerHTML =
-            '<span class="prop-label">Texture</span><div class="prop-value"><input type="file" accept="image/*" style="width:100%;font-size:11px;color:var(--text-dim)"></div>';
-          const fileInp = fileRow.querySelector("input");
-          fileInp.addEventListener("change", () => {
-            const f = fileInp.files?.[0];
-            if (f) setVoronoiImage(f, (s) => { texStatus.textContent = s; });
-          });
-          tex.appendChild(fileRow);
-          tex.appendChild(texStatus);
-          _button(tex, {
-            title: "Reset to default",
-            onClick: () => resetVoronoi((s) => { texStatus.textContent = s; }),
-          });
-        } else if (useProcedural) {
-          const proc = _section(body, "Voronoi source", false);
-          const hint = document.createElement("div");
-          hint.style.cssText =
-            "font-size:10px;color:var(--text-dim);line-height:1.45;margin-bottom:6px;";
-          hint.textContent =
-            "Procedural TSL Voronoi F1 + PNG response remap. Erosion sliders should land near Mesh Smoke defaults.";
-          proc.appendChild(hint);
-
-          const rsp = _section(body, "PNG response match", false);
-          const syncResponse = (key, v) => {
-            if (u[key]) u[key].value = v;
-          };
-          _slider(rsp, look, "voroGain", {
-            label: "Gain",
-            min: 0.5,
-            max: 3,
-            step: 0.05,
-            onChange: (v) => syncResponse("voroGain", v),
-          });
-          _slider(rsp, look, "voroPower", {
-            label: "Power (curve)",
-            min: 0.4,
-            max: 3,
-            step: 0.05,
-            onChange: (v) => syncResponse("voroPower", v),
-          });
-          _slider(rsp, look, "voroContrast", {
-            label: "Contrast",
-            min: 0.5,
-            max: 2.5,
-            step: 0.05,
-            onChange: (v) => syncResponse("voroContrast", v),
-          });
-          _slider(rsp, look, "voroPivot", {
-            label: "Pivot",
-            min: 0,
-            max: 1,
-            step: 0.01,
-            onChange: (v) => syncResponse("voroPivot", v),
-          });
-          _slider(rsp, look, "voroSoftLo", {
-            label: "Soft floor",
-            min: -0.1,
-            max: 0.5,
-            step: 0.01,
-            onChange: (v) => syncResponse("voroSoftLo", v),
-          });
-          _slider(rsp, look, "voroSoftHi", {
-            label: "Soft ceiling",
-            min: 0.5,
-            max: 1.1,
-            step: 0.01,
-            onChange: (v) => syncResponse("voroSoftHi", v),
-          });
-          _slider(rsp, look, "voroJitter", {
-            label: "Cell jitter",
-            min: 0,
-            max: 1,
-            step: 0.01,
-            onChange: (v) => syncResponse("voroJitter", v),
-          });
-          _button(rsp, {
-            title: "Reset response defaults",
-            onClick: () => {
-              for (const [k, v] of Object.entries(SMOKE_TSL_RESPONSE_DEFAULTS)) {
-                look[k] = v;
-                syncResponse(k, v);
-              }
-            },
-          });
-        }
 
         const shape = _section(body, "Voronoi (triplanar)", false);
-        _slider(shape, look, "tiling", {
+        _slider(shape, SMOKE_LOOK, "tiling", {
           label: "Cell scale",
           min: 0.1,
           max: 1.5,
           step: 0.01,
           onChange: (v) => (u.tiling.value = v),
         });
-        _slider(shape, look, "panSpeed", {
+        _slider(shape, SMOKE_LOOK, "panSpeed", {
           label: "Churn speed",
           min: 0,
           max: 0.5,
           step: 0.01,
           onChange: (v) => (u.panSpeed.value = v),
         });
-        _slider(shape, look, "holeDepth", {
+        _slider(shape, SMOKE_LOOK, "holeDepth", {
           label: "Hole depth",
           min: 0,
           max: 1,
           step: 0.01,
           onChange: (v) => (u.holeDepth.value = v),
         });
-        _slider(shape, look, "edgeNoise", {
+        _slider(shape, SMOKE_LOOK, "edgeNoise", {
           label: "Edge irregularity",
           min: 0,
           max: 1.2,
@@ -2060,35 +2045,35 @@
         });
 
         const diss = _section(body, "Erosion (fresnel edge)", false);
-        _slider(diss, look, "cutoff", {
+        _slider(diss, SMOKE_LOOK, "cutoff", {
           label: "Cutoff",
           min: 0,
           max: 0.7,
           step: 0.01,
           onChange: (v) => (u.cutoff.value = v),
         });
-        _slider(diss, look, "dissolveSoft", {
+        _slider(diss, SMOKE_LOOK, "dissolveSoft", {
           label: "Edge softness",
           min: 0.02,
           max: 0.5,
           step: 0.01,
           onChange: (v) => (u.dissolveSoft.value = v),
         });
-        _slider(diss, look, "erode", {
+        _slider(diss, SMOKE_LOOK, "erode", {
           label: "Age erosion",
           min: 0,
           max: 1,
           step: 0.01,
           onChange: (v) => (u.erode.value = v),
         });
-        _slider(diss, look, "fadeIn", {
+        _slider(diss, SMOKE_LOOK, "fadeIn", {
           label: "Grow-in",
           min: 0.02,
           max: 0.4,
           step: 0.01,
           onChange: (v) => (u.fadeIn.value = v),
         });
-        _slider(diss, look, "opacity", {
+        _slider(diss, SMOKE_LOOK, "opacity", {
           label: "Opacity",
           min: 0.2,
           max: 1,
@@ -2097,190 +2082,190 @@
         });
 
         const cel = _section(body, "Shading (real normals)", false);
-        _slider(cel, look, "lightStrength", {
+        _slider(cel, SMOKE_LOOK, "lightStrength", {
           label: "Light contrast",
           min: 0,
           max: 1,
           step: 0.01,
           onChange: (v) => (u.lightStrength.value = v),
         });
-        _slider(cel, look, "rimStrength", {
+        _slider(cel, SMOKE_LOOK, "rimStrength", {
           label: "Rim light",
           min: 0,
           max: 1,
           step: 0.01,
           onChange: (v) => (u.rimStrength.value = v),
         });
-        _slider(cel, look, "rimPow", {
+        _slider(cel, SMOKE_LOOK, "rimPow", {
           label: "Rim tightness",
           min: 1,
           max: 8,
           step: 0.1,
           onChange: (v) => (u.rimPow.value = v),
         });
-        _toggle(cel, look, "posterize", {
+        _toggle(cel, SMOKE_LOOK, "posterize", {
           label: "Posterize bands",
           onChange: (v) => (u.posterize.value = v ? 1 : 0),
         });
-        _slider(cel, look, "steps", {
+        _slider(cel, SMOKE_LOOK, "steps", {
           label: "Band count",
           min: 2,
           max: 8,
           step: 1,
           onChange: (v) => (u.steps.value = v),
         });
-        _color(cel, look, "colShadow", {
+        _color(cel, SMOKE_LOOK, "colShadow", {
           label: "Shadow color",
           onChange: (v) => u.colShadow.value.set(v),
         });
-        _color(cel, look, "colLit", {
+        _color(cel, SMOKE_LOOK, "colLit", {
           label: "Lit color",
           onChange: (v) => u.colLit.value.set(v),
         });
-        _color(cel, look, "colTop", {
+        _color(cel, SMOKE_LOOK, "colTop", {
           label: "Top color",
           onChange: (v) => u.colTop.value.set(v),
         });
-        _slider(cel, look, "heightTint", {
+        _slider(cel, SMOKE_LOOK, "heightTint", {
           label: "Height tint",
           min: 0,
           max: 1,
           step: 0.01,
           onChange: (v) => (u.heightTint.value = v),
         });
-        _slider(cel, look, "selfShadow", {
+        _slider(cel, SMOKE_LOOK, "selfShadow", {
           label: "Self-shadow",
           min: 0,
           max: 1,
           step: 0.01,
           onChange: (v) => (u.selfShadow.value = v),
         });
-        _slider(cel, look, "voronoiShade", {
+        _slider(cel, SMOKE_LOOK, "voronoiShade", {
           label: "Voronoi shading",
           min: 0,
           max: 1,
           step: 0.01,
           onChange: (v) => (u.voroShade.value = v),
         });
-        _color(cel, look, "bgColor", {
+        _color(cel, SMOKE_LOOK, "bgColor", {
           label: "Background",
           onChange: (v) => scene.background?.set?.(v),
         });
 
         const nrm = _section(body, "Rounded normals (lighting)", false);
-        _slider(nrm, look, "normalRound", {
+        _slider(nrm, SMOKE_LOOK, "normalRound", {
           label: "Rounding",
           min: 0,
           max: 1,
           step: 0.01,
           onChange: (v) => (u.round.value = v),
         });
-        _toggle(nrm, look, "columnPivot", {
+        _toggle(nrm, SMOKE_LOOK, "columnPivot", {
           label: "Column pivot (vs per-blob)",
           onChange: (v) => (u.pivotMode.value = v ? 1 : 0),
         });
 
         const sh = _section(body, "Ground shadow", false);
-        _toggle(sh, look, "shadowOn", { label: "Enable" });
-        _slider(sh, look, "shadowStrength", {
+        _toggle(sh, SMOKE_LOOK, "shadowOn", { label: "Enable" });
+        _slider(sh, SMOKE_LOOK, "shadowStrength", {
           label: "Strength",
           min: 0,
           max: 1,
           step: 0.01,
           onChange: (v) => (uShadow.strength.value = v),
         });
-        _slider(sh, look, "shadowSize", {
+        _slider(sh, SMOKE_LOOK, "shadowSize", {
           label: "Size",
           min: 0.4,
           max: 3,
           step: 0.05,
         });
-        _slider(sh, look, "shadowSoft", {
+        _slider(sh, SMOKE_LOOK, "shadowSoft", {
           label: "Softness",
           min: 0,
           max: 0.9,
           step: 0.01,
           onChange: (v) => (uShadow.soft.value = v),
         });
-        _color(sh, look, "shadowColor", {
+        _color(sh, SMOKE_LOOK, "shadowColor", {
           label: "Color",
           onChange: (v) => uShadow.color.value.set(v),
         });
 
         const dep = _section(body, "Depth / sorting", false);
-        _toggle(dep, look, "depthSort", {
+        _toggle(dep, SMOKE_LOOK, "depthSort", {
           label: "Occlude (fix show-through)",
           onChange: (v) => applyDepthMode(v),
         });
-        _slider(dep, look, "alphaTest", {
+        _slider(dep, SMOKE_LOOK, "alphaTest", {
           label: "Edge clip",
           min: 0,
           max: 0.6,
           step: 0.01,
           onChange: (v) => {
-            if (look.depthSort) applyDepthMode(true);
+            if (SMOKE_LOOK.depthSort) applyDepthMode(true);
           },
         });
 
         const sim = _section(body, "Simulation", false);
-        _toggle(sim, look, "clickToPuff", {
+        _toggle(sim, SMOKE_LOOK, "clickToPuff", {
           label: "Click ground to puff",
         });
-        _slider(sim, look, "rise", {
+        _slider(sim, SMOKE_LOOK, "rise", {
           label: "Rise speed",
           min: 0.2,
           max: 4,
           step: 0.05,
         });
-        _slider(sim, look, "spread", {
+        _slider(sim, SMOKE_LOOK, "spread", {
           label: "Spread",
           min: 0,
           max: 2,
           step: 0.05,
         });
-        _slider(sim, look, "lifetime", {
+        _slider(sim, SMOKE_LOOK, "lifetime", {
           label: "Lifetime (s)",
           min: 1,
           max: 6,
           step: 0.1,
         });
-        _slider(sim, look, "rate", {
+        _slider(sim, SMOKE_LOOK, "rate", {
           label: "Emission rate",
           min: 1,
           max: 20,
           step: 1,
         });
-        _slider(sim, look, "sizeStart", {
+        _slider(sim, SMOKE_LOOK, "sizeStart", {
           label: "Size start",
           min: 0.1,
           max: 1.5,
           step: 0.05,
         });
-        _slider(sim, look, "sizeEnd", {
+        _slider(sim, SMOKE_LOOK, "sizeEnd", {
           label: "Size end",
           min: 0.5,
           max: 3,
           step: 0.05,
         });
-        _slider(sim, look, "spin", {
+        _slider(sim, SMOKE_LOOK, "spin", {
           label: "Tumble",
           min: 0,
           max: 2,
           step: 0.05,
         });
-        _slider(sim, look, "curlAmount", {
+        _slider(sim, SMOKE_LOOK, "curlAmount", {
           label: "Curl amount",
           min: 0,
           max: 2,
           step: 0.05,
         });
-        _slider(sim, look, "curlScale", {
+        _slider(sim, SMOKE_LOOK, "curlScale", {
           label: "Curl waves",
           min: 0.1,
           max: 2,
           step: 0.05,
         });
-        _slider(sim, look, "curlSpeed", {
+        _slider(sim, SMOKE_LOOK, "curlSpeed", {
           label: "Curl speed",
           min: 0,
           max: 3,
@@ -2302,10 +2287,6 @@
         });
       }
 
-      function buildMeshSmokeTslInspector(body, ctx) {
-        buildMeshSmokeInspector(body, ctx);
-      }
-
       // === Build inspector panel ===
       function buildInspector({
         camera,
@@ -2320,10 +2301,12 @@
         const body = document.getElementById("inspector-body");
 
         // Toggle show/hide.
-        document.getElementById("inspector-toggle").addEventListener("click", (e) => {
-          const hidden = document.body.classList.toggle("inspector-hidden");
-          e.target.textContent = hidden ? "Show" : "Hide";
-        });
+        document
+          .getElementById("inspector-toggle")
+          .addEventListener("click", (e) => {
+            const hidden = document.body.classList.toggle("inspector-hidden");
+            e.target.textContent = hidden ? "Show" : "Hide";
+          });
 
         // ── Drag-to-resize the inspector panel ──
         // Width persists in localStorage so it survives reloads. Double-
@@ -2362,17 +2345,13 @@
             dragging = false;
             document.body.classList.remove("inspector-resizing");
             handle.releasePointerCapture?.(e.pointerId);
-            const w = parseFloat(
-              getComputedStyle(inspectorEl).width || "300",
-            );
+            const w = parseFloat(getComputedStyle(inspectorEl).width || "300");
             if (Number.isFinite(w)) localStorage.setItem(KEY, String(w));
           };
           window.addEventListener("pointerup", stopDrag);
           window.addEventListener("pointercancel", stopDrag);
           handle.addEventListener("dblclick", () => {
-            document.documentElement.style.removeProperty(
-              "--inspector-width",
-            );
+            document.documentElement.style.removeProperty("--inspector-width");
             localStorage.removeItem(KEY);
           });
         }
@@ -2588,8 +2567,7 @@
         {
           const sec = _section(body, "Ground", true);
           const U = floorMat._tileUniforms;
-          const toLinear = (hex) =>
-            new THREE.Color(hex).convertSRGBToLinear();
+          const toLinear = (hex) => new THREE.Color(hex).convertSRGBToLinear();
 
           _color(sec, PARAMS.tile, "tileColor", {
             label: "Tile color",

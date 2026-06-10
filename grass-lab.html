@@ -91,6 +91,7 @@
         syncHybridGrassLod,
         rebuildHybridGrassGeometries,
       } from "./grass-lab-hybrid.js";
+      import { WindGustManager } from "./v2/core/wind/windGust.js";
 
       // ════════════════════════════════════════════════════════════
       // Renderer / scene / camera
@@ -555,6 +556,7 @@
       const sysName = () =>
         activeSystem === 1 ? "GEMINI (v2 baseline)" : activeSystem === 2 ? "HYBRID" : "none";
 
+      const windGust = new WindGustManager();
       const timer = new THREE.Timer();
       function tick() {
         renderer.info.reset();
@@ -565,16 +567,24 @@
 
         // Live param sync each frame — edit __lab.grassState in the console
         // and BOTH systems react, exactly like v2's editor controls will.
+        // Shared gust cycle (revo-realms WindManager rhythm) for both.
+        const gustI = windGust.update();
+        const gustMul = 0.45 + 0.55 * gustI;
         if (activeSystem === 1) {
           grassManager.syncUniforms(grassState, sunDir);
           grassManager.uniforms.uPlayerPos.value.copy(marker.position);
+          grassManager.uniforms.uWindStrength.value =
+            (grassState.windStrength ?? 1.4) * gustMul;
           grassManager.update(grassState, marker.position);
         } else {
           grassManager.update(grassState, marker.position); // keeps hide path
         }
         if (hybrid && activeSystem === 2) {
           syncHybridGrassLod(hybridRings, grassState);
-          for (const ring of hybridRings) ring.syncFromState(grassState, sunDir);
+          for (const ring of hybridRings) {
+            ring.syncFromState(grassState, sunDir);
+            ring.u.uWindStrength.value *= gustMul; // gust cycle
+          }
           hybrid.update(marker.position, camera);
         }
 

@@ -98,6 +98,7 @@ import {
   syncHybridGrassLod,
   rebuildHybridGrassGeometries,
 } from "../render/hybridGrass/hybridGrassSystem.js";
+import { WindGustManager } from "../core/wind/windGust.js";
 import { RevoGrassSystem } from "../render/revoGrass/revoGrassSystem.js";
 import { SnowSystem } from "../render/snow/snowSystem.js";
 import { GrassPaintSystem } from "../tools/foliage/grassPaintSystem.js";
@@ -1445,6 +1446,10 @@ export async function startV2App(opts = {}) {
   }
 
   const revoGrassSystem = new RevoGrassSystem({ scene, config });
+  /** Shared gust cycle (revo-realms WindManager port) — one weather rhythm
+   *  drives Gemini, Hybrid and Revo grass so the whole world breathes
+   *  together: ambient calm → gust ramps → holds → decays. */
+  const windGust = new WindGustManager();
   const snowSystem = new SnowSystem({ scene, config });
   const grassPaintSystem = new GrassPaintSystem({
     toolState,
@@ -5850,8 +5855,16 @@ export async function startV2App(opts = {}) {
     billboardGrassRenderer.updateTime(now * 0.001);
     const _pFoliage = performance.now();
     frameProbe.t.foliage += _pFoliage - _pProps;
+    // Shared gust cycle: intensity in [0.1..1]. Revo consumes it directly
+    // (its shader has the mix(strength, 1.5, intensity) ramp); Gemini/Hybrid
+    // get it as a wind-strength multiplier with a calm floor so ambient
+    // grass still sways gently between gusts.
+    const _gustI = windGust.update();
+    const _gustStrengthMul = 0.45 + 0.55 * _gustI;
     if (grassManager.uniforms) {
       grassManager.uniforms.uPlayerPos.value.copy(focusPos);
+      grassManager.uniforms.uWindStrength.value =
+        (toolState.grass.windStrength ?? 1.4) * _gustStrengthMul;
     }
     const _gpGrass = toolState.grass;
     const _hybridGrassOn =
@@ -5882,6 +5895,7 @@ export async function startV2App(opts = {}) {
         ring.setEnabled(_ringOn);
         if (_ringOn) {
           ring.syncFromState(_gpGrass, _hybridSun);
+          ring.u.uWindStrength.value *= _gustStrengthMul; // gust cycle
           ring.update(focusPos, camera);
         }
       }
@@ -5895,6 +5909,7 @@ export async function startV2App(opts = {}) {
       });
       revoGrassSystem.update(toolState.revoGrass, focusPos, camera, {
         playMode: playMode.active,
+        gustMul: _gustI,
       });
     }
     const _pGrass = performance.now();
