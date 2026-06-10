@@ -383,24 +383,19 @@ export function createDayNightSky() {
     const analyticDay = mix(uHorizonDay, uZenithDay, tGrad);
     const nightCol = mix(uHorizonNight, uZenithNight, tGrad);
 
-    // ── Sky base: physical OR analytic — branched, not mixed. A uniform mix()
-    //    would evaluate the Nishita raymarch for every pixel even with scatter
-    //    off; uScatterMix is a 0/1 toggle, so branch and pay only one path. ──
-    const skyCol = vec3(0.0).toVar();
-    If(uScatterMix.greaterThan(0.5), () => {
-      // PHYSICAL sky: Nishita scattering ADDED over the dark night gradient,
-      // so the blue overpowers it by day and twilight self-fades at night.
-      skyCol.assign(nightCol.add(atmosphere(dir, uSunDir)));
-    }).Else(() => {
-      // ANALYTIC sky: crossfade day↔night + warm sunset wash (the old look).
-      const analyticSky = mix(nightCol, analyticDay, dayF).toVar();
-      const sunAmt = max(dot(dir, uSunDir), float(0.0));
-      const horizonBand = smoothstep(0.4, 0.0, abs(up));
-      const sunset = twilightF.mul(horizonBand)
-        .mul(mix(float(0.25), float(1.0), sunAmt));
-      analyticSky.assign(mix(analyticSky, uSunsetColor, clamp(sunset.mul(0.8), 0.0, 1.0)));
-      skyCol.assign(analyticSky);
-    });
+    // ── ANALYTIC sky: crossfade day↔night + warm sunset wash (the old look) ──
+    const analyticSky = mix(nightCol, analyticDay, dayF).toVar();
+    const sunAmt = max(dot(dir, uSunDir), float(0.0));
+    const horizonBand = smoothstep(0.4, 0.0, abs(up));
+    const sunset = twilightF.mul(horizonBand)
+      .mul(mix(float(0.25), float(1.0), sunAmt));
+    analyticSky.assign(mix(analyticSky, uSunsetColor, clamp(sunset.mul(0.8), 0.0, 1.0)));
+
+    // ── PHYSICAL sky: Nishita scattering ADDED over the dark night gradient,
+    //    so the blue overpowers it by day and twilight self-fades at night. ──
+    const physicalSky = nightCol.add(atmosphere(dir, uSunDir));
+
+    const skyCol = mix(analyticSky, physicalSky, uScatterMix).toVar();
 
     // Ground hemisphere (below the horizon line).
     const groundMix = smoothstep(0.0, -0.04, up);
@@ -435,10 +430,8 @@ export function createDayNightSky() {
       });
     });
 
-    // Stars (above the horizon; gated so the day sky never evaluates them).
-    If(nightF.greaterThan(0.02), () => {
-      skyCol.addAssign(starField(dir).mul(nightF).mul(aboveHorizon));
-    });
+    // Stars (above the horizon, night only).
+    skyCol.addAssign(starField(dir).mul(nightF).mul(aboveHorizon));
 
     // Shooting stars (gated to night so day pays nothing).
     If(uMeteorEnabled.greaterThan(0.5).and(nightF.greaterThan(0.02)), () => {
@@ -509,14 +502,11 @@ export function createDayNightSky() {
   material.colorNode = skyColorNode();
   material.side = THREE.BackSide;
   material.depthWrite = false;
-  // depthTest ON + drawn AFTER the opaques: terrain/ocean already wrote depth,
-  // so early-Z kills the per-pixel atmosphere raymarch everywhere the sky is
-  // occluded — the dome only pays for visible sky pixels.
-  material.depthTest = true;
+  material.depthTest = false;
   material.fog = false;
 
   const mesh = new THREE.Mesh(new THREE.SphereGeometry(SKY_RADIUS, 32, 16), material);
-  mesh.renderOrder = 10; // after the default-order opaques (before transparents)
+  mesh.renderOrder = -2;
   mesh.frustumCulled = false;
   mesh.name = "DayNightSkyDome";
 

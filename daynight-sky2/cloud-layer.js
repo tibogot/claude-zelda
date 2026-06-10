@@ -101,81 +101,18 @@ function bakeNoiseVolume(size, opt) {
   return tex;
 }
 
-/**
- * Tileable inverted-Worley FBM volume — bright round "bubble" cells. Eroding
- * cloud edges with this carves rounded scallops (cumulus cauliflower billow)
- * instead of the smoky fraying the Perlin detail gives. Tiles for free: the
- * feature-point lattice wraps modulo the cell count per octave.
- */
-function bakeWorleyVolume(size, { octaves = 3, baseCells = 4, seed = 31 } = {}) {
-  const rand = seededRandom(seed >>> 0);
-  const acc = new Float32Array(size * size * size);
-  let amp = 1, ampSum = 0, cells = baseCells;
-  for (let o = 0; o < octaves; o++) {
-    const pts = new Float32Array(cells * cells * cells * 3);
-    for (let i = 0; i < pts.length; i++) pts[i] = rand();
-    let idx = 0;
-    for (let z = 0; z < size; z++) {
-      const pz = (z / size) * cells;
-      const cz = Math.floor(pz);
-      for (let y = 0; y < size; y++) {
-        const py = (y / size) * cells;
-        const cy = Math.floor(py);
-        for (let x = 0; x < size; x++) {
-          const px = (x / size) * cells;
-          const cx = Math.floor(px);
-          // F1 (squared) over the 27 wrapped neighbor cells.
-          let minD2 = 4;
-          for (let dz = -1; dz <= 1; dz++) {
-            const wz = (cz + dz + cells) % cells;
-            for (let dy = -1; dy <= 1; dy++) {
-              const wy = (cy + dy + cells) % cells;
-              for (let dx = -1; dx <= 1; dx++) {
-                const wx = (cx + dx + cells) % cells;
-                const pi = ((wz * cells + wy) * cells + wx) * 3;
-                const fx = cx + dx + pts[pi] - px;
-                const fy = cy + dy + pts[pi + 1] - py;
-                const fz = cz + dz + pts[pi + 2] - pz;
-                const d2 = fx * fx + fy * fy + fz * fz;
-                if (d2 < minD2) minD2 = d2;
-              }
-            }
-          }
-          // Invert: bubble centers bright, cell borders dark.
-          acc[idx++] += (1 - Math.min(1, Math.sqrt(minD2))) * amp;
-        }
-      }
-    }
-    ampSum += amp; amp *= 0.5; cells *= 2;
-  }
-  const data = new Uint8Array(acc.length);
-  for (let i = 0; i < acc.length; i++) data[i] = (acc[i] / ampSum) * 255;
-  const tex = new THREE.Data3DTexture(data, size, size, size);
-  tex.format = THREE.RedFormat;
-  tex.minFilter = THREE.LinearFilter;
-  tex.magFilter = THREE.LinearFilter;
-  tex.wrapS = tex.wrapT = tex.wrapR = THREE.RepeatWrapping;
-  tex.unpackAlignment = 1;
-  tex.needsUpdate = true;
-  return tex;
-}
-
 export function createCloudLayer({ camera }) {
   const volumeTexture = bakeNoiseVolume(96, {
     noiseScale: 3.5, octaves: 5, persistence: 0.5,
     lacunarity: 3.0, intensity: 1.0, seed: 137,
   });
   const volTex = texture3D(volumeTexture, null, 0);
-  // Worley detail volume for the A/B "billow" erosion mode (see sampleDensity).
-  const worleyTexture = bakeWorleyVolume(64, { octaves: 3, baseCells: 4, seed: 31 });
-  const worleyTex = texture3D(worleyTexture, null, 0);
 
   // ── Uniforms ─────────────────────────────────────────────────────────────
   const uBase = uniform(1800);
   const uThickness = uniform(1100);
   const uScale = uniform(0.0009);
   const uDetailMul = uniform(4.0);
-  const uDetailWorley = uniform(0); // 0 = Perlin detail (smoky), 1 = Worley (billow)
   const uCovLow = uniform(0.35);
   const uCovHigh = uniform(0.62);
   const uErode = uniform(0.35);
@@ -245,6 +182,8 @@ export function createCloudLayer({ camera }) {
   });
   sceneRT.depthTexture = new THREE.DepthTexture(1, 1);
   const depthSampler = texture(sceneRT.depthTexture);
+  // +1 for conventional depth (far = 1), -1 for reversed depth (far = 0).
+  const uDepthSign = uniform(1);
   // Env-bake mode: render the cloud dome into a reflection cubemap. Skips the
   // screen-depth occlusion (no scene geometry in the bake) and marches cheaper.
   const uEnvMode = uniform(0);
@@ -265,39 +204,10 @@ export function createCloudLayer({ camera }) {
     const baseN = volTex.sample(coord).r;
     const shaped = smoothstep(uCovLow, uCovHigh, baseN).mul(grad).toVar();
 
-    // Higher-frequency detail erodes the edges. Uniform branch (A/B dropdown):
-    // Perlin = the base volume resampled at detailMul → smoky/wispy fraying;
-    // Worley = inverted-cell bubbles → erosion carves rounded scallops, the
-    // cumulus "cauliflower" billow. Same fetch count either way.
-    const detailCoord = coord.mul(uDetailMul).add(uWind.mul(2.0));
-    const detailN = float(0.0).toVar();
-    If(uDetailWorley.greaterThan(0.5), () => {
-      detailN.assign(worleyTex.sample(detailCoord).r);
-    }).Else(() => {
-      detailN.assign(volTex.sample(detailCoord).r);
-    });
-    // Remap erosion (Horizon-style): SUBTRACT the detail from the density and
-    // renormalize, so the iso-surface itself moves — detail carves real shape
-    // out of the edges. (The old `shaped *= 1-erode·(1-detail)` only attenuated
-    // density, which extinction saturated away → silhouette never changed.)
-    const erodeAmt = detailN.oneMinus().mul(uErode);
-    shaped.assign(
-      shaped.sub(erodeAmt).max(0.0).div(erodeAmt.oneMinus().max(0.05)),
-    );
-    return shaped.mul(uDensityMul);
-  });
-
-  // Cheap density for the light march + god-ray silhouette: skips the detail-
-  // erosion fetch (halves the texture reads in the hottest inner loop). The
-  // 0.5·erode factor removes the MEAN density erosion takes out, so optical
-  // depth stays calibrated with the full-detail view samples.
-  const sampleDensityCheap = Fn(([p]) => {
-    const radial = length(p.sub(planetCenter()));
-    const h = radial.sub(uPlanetRadius.add(uBase)).div(uThickness).clamp(0.0, 1.0);
-    const grad = smoothstep(0.0, uBaseSoft, h).mul(smoothstep(1.0, uTopSoft, h));
-    const baseN = volTex.sample(p.mul(uScale).add(uWind)).r;
-    return smoothstep(uCovLow, uCovHigh, baseN).mul(grad)
-      .mul(uErode.mul(0.5).oneMinus()).mul(uDensityMul);
+    // Higher-frequency detail erodes the edges into wisps.
+    const detailN = volTex.sample(coord.mul(uDetailMul).add(uWind.mul(2.0))).r;
+    shaped.subAssign(detailN.oneMinus().mul(uErode).mul(shaped));
+    return shaped.max(0.0).mul(uDensityMul);
   });
 
   const HG = Fn(([g, mu]) => {
@@ -317,7 +227,7 @@ export function createCloudLayer({ camera }) {
     Loop(MAX_LIGHT_STEPS, ({ i }) => {
       If(float(i).greaterThanEqual(uLightSteps), () => Break());
       const lp = p.add(uLightDir.mul(stepLen.mul(float(i).add(1.0))));
-      tau.addAssign(sampleDensityCheap(lp));
+      tau.addAssign(sampleDensity(lp));
     });
     return tau.mul(stepLen); // optical depth toward the light (octaves re-extinct it)
   });
@@ -369,22 +279,6 @@ export function createCloudLayer({ camera }) {
       tFar.assign(min(tFar, tGround));
     });
     tFar.assign(min(tFar, uMaxDist));
-
-    // Scene-depth occlusion, hoisted OUT of the march loop: clip(t) = c0 + t·cd
-    // is LINEAR in t, so "where does the ray's depth cross the scene depth" has
-    // a closed form. Clamping tFar here replaces the old per-step project-and-
-    // compare (a mat4 mul per sample), and pixels fully covered by geometry now
-    // skip the march entirely (tFar < tNear → invalid). tHit ≤ 0 = no crossing
-    // in front of the camera (e.g. sky pixels) → no clamp. Convention-agnostic:
-    // it solves with the camera's actual matrices (works for reversed depth too).
-    If(uEnvMode.lessThan(0.5), () => {
-      const sceneDepth = depthSampler.sample(screenUV).r;
-      const c0 = cameraProjectionMatrix.mul(cameraViewMatrix.mul(vec4(cameraPosition, 1.0)));
-      const cd = cameraProjectionMatrix.mul(cameraViewMatrix.mul(vec4(rayDir, 0.0)));
-      const tHit = sceneDepth.mul(c0.w).sub(c0.z)
-        .div(cd.z.sub(sceneDepth.mul(cd.w)));
-      If(tHit.greaterThan(0.0), () => { tFar.assign(min(tFar, tHit)); });
-    });
     const valid = discOut.greaterThan(0.0).and(tFar.greaterThan(tNear));
 
     const mu = dot(rayDir, normalize(uLightDir));
@@ -394,6 +288,9 @@ export function createCloudLayer({ camera }) {
     const ph1 = phaseAt(mu, ecc1);
     const ph2 = phaseAt(mu, ecc1.mul(uMsEccentricity));
     const jitter = fract(sin(dot(screenUV, vec2(12.9898, 78.233))).mul(43758.5453));
+
+    // Scene depth for occlusion (NDC-space compare, reversed-depth agnostic).
+    const sceneDepth = depthSampler.sample(screenUV).r;
 
     const transmittance = vec3(1.0).toVar();
     const scattered = vec3(0.0).toVar();
@@ -412,6 +309,10 @@ export function createCloudLayer({ camera }) {
         If(travel.greaterThanEqual(tFar), () => Break());
         If(transmittance.r.lessThan(0.01), () => Break());
         const p = cameraPosition.add(rayDir.mul(travel));
+        // Stop where world geometry is in front of this sample (skip in env bake).
+        const clip = cameraProjectionMatrix.mul(cameraViewMatrix.mul(vec4(p, 1.0)));
+        const sampleDepth = clip.z.div(clip.w);
+        If(isEnv.not().and(sampleDepth.sub(sceneDepth).mul(uDepthSign).greaterThan(0.0)), () => Break());
         const density = sampleDensity(p).toVar();
         const isEmpty = density.lessThan(uEmptyThreshold);
         const advance = isEmpty.select(baseStep.mul(uEmptyStepMul), baseStep);
@@ -501,7 +402,7 @@ export function createCloudLayer({ camera }) {
         If(transmittance.lessThan(0.02), () => Break());
         const t = tNear.add(float(i).add(jitter).add(0.5).mul(stepLen));
         const p = cameraPosition.add(rayDir.mul(t));
-        const density = sampleDensityCheap(p);
+        const density = sampleDensity(p);
         If(density.greaterThan(0.01), () => {
           transmittance.mulAssign(exp(density.mul(stepLen).mul(uOpacity).negate()));
         });
@@ -668,7 +569,6 @@ export function createCloudLayer({ camera }) {
     uThickness.value = P.thickness;
     uScale.value = P.scale;
     uDetailMul.value = P.detailMul;
-    uDetailWorley.value = P.detailNoise ?? 0;
     uErode.value = P.erode;
     uDensityMul.value = P.densityMul;
     uSteps.value = P.steps;
@@ -717,6 +617,7 @@ export function createCloudLayer({ camera }) {
    */
   function render(renderer, scene, camera, renderOpts = {}) {
     ensureSize(renderer);
+    uDepthSign.value = camera.reversedDepth ? -1 : 1;
 
     const prevMask = camera.layers.mask;
     const prevClear = renderer.getClearColor(new THREE.Color());
@@ -780,7 +681,6 @@ export function createCloudLayer({ camera }) {
     mesh.geometry.dispose();
     material.dispose();
     volumeTexture.dispose();
-    worleyTexture.dispose();
     sceneRT.dispose();
     cloudRT.dispose();
     compositeRT.dispose();
@@ -828,7 +728,6 @@ export const CLOUD_DEFAULTS = {
   thickness: 1400,
   scale: 0.00015,
   detailMul: 4.0,
-  detailNoise: 0, // 0 = Perlin (smoky, the old look), 1 = Worley (billow)
   coverage: 0.4,
   softness: 0.12,
   erode: 0.15,

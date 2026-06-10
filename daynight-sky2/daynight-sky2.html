@@ -5,66 +5,270 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>Day ↔ Night Sky + Volumetric Cloud Layer · WebGPU + TSL</title>
     <style>
-      * { margin: 0; padding: 0; box-sizing: border-box; }
-      body { background: #04060a; overflow: hidden; font-family: system-ui, sans-serif; }
-      canvas { display: block; width: 100vw; height: 100vh; }
+      * {
+        margin: 0;
+        padding: 0;
+        box-sizing: border-box;
+      }
+      body {
+        background: #04060a;
+        overflow: hidden;
+        font-family: system-ui, sans-serif;
+      }
+      canvas {
+        display: block;
+        width: 100vw;
+        height: 100vh;
+      }
       /* ── Custom UI (ported from v2/editor.html) ── */
       :root {
-        --bg-panel:#2a2a2a; --bg-item:#333; --bg-hover:#3a3a3a; --bg-input:#1e1e1e;
-        --border:#3c3c3c; --border-light:#4a4a4a; --text:#ccc; --text-dim:#888;
-        --accent:#4a9eff; --font:"Segoe UI",system-ui,sans-serif;
-        --font-mono:"Cascadia Code","Consolas",monospace; --radius:4px;
+        --bg-panel: #2a2a2a;
+        --bg-item: #333;
+        --bg-hover: #3a3a3a;
+        --bg-input: #1e1e1e;
+        --border: #3c3c3c;
+        --border-light: #4a4a4a;
+        --text: #ccc;
+        --text-dim: #888;
+        --accent: #4a9eff;
+        --font: "Segoe UI", system-ui, sans-serif;
+        --font-mono: "Cascadia Code", "Consolas", monospace;
+        --radius: 4px;
       }
-      #ui-panel { position:fixed; top:0; right:0; width:var(--ui-width,340px);
-        min-width:240px; max-width:70vw; height:100vh; overflow:hidden; z-index:30;
-        display:flex; flex-direction:column; background:var(--bg-panel);
-        border-left:1px solid var(--border); font-family:var(--font); color:var(--text);
-        box-shadow:-2px 0 10px rgba(0,0,0,.3); }
-      #ui-body { flex:1; overflow-y:auto; overflow-x:hidden; }
+      #ui-panel {
+        position: fixed;
+        top: 0;
+        right: 0;
+        width: var(--ui-width, 340px);
+        min-width: 240px;
+        max-width: 70vw;
+        height: 100vh;
+        overflow: hidden;
+        z-index: 30;
+        display: flex;
+        flex-direction: column;
+        background: var(--bg-panel);
+        border-left: 1px solid var(--border);
+        font-family: var(--font);
+        color: var(--text);
+        box-shadow: -2px 0 10px rgba(0, 0, 0, 0.3);
+      }
+      #ui-body {
+        flex: 1;
+        overflow-y: auto;
+        overflow-x: hidden;
+      }
       /* Drag-to-resize strip straddling the panel's left edge. */
-      #ui-resize-handle { position:fixed; top:0; right:var(--ui-width,340px); margin-right:-4px;
-        width:8px; height:100vh; cursor:ew-resize; z-index:31; background:transparent; transition:background .15s; }
-      #ui-resize-handle:hover, body.ui-resizing #ui-resize-handle { background:var(--accent); opacity:.6; }
-      body.ui-resizing { cursor:ew-resize; user-select:none; }
-      #ui-panel .ui-title { flex-shrink:0; padding:9px 12px; font-size:12px; font-weight:700;
-        letter-spacing:.5px; border-bottom:1px solid var(--border); background:var(--bg-item); }
-      .inspector-section { border-bottom:1px solid var(--border); }
-      .section-header { display:flex; align-items:center; gap:6px; padding:6px 12px;
-        cursor:pointer; font-size:11px; font-weight:600; text-transform:uppercase;
-        letter-spacing:.4px; color:var(--text-dim); }
-      .section-header:hover { background:var(--bg-hover); }
-      .section-header .section-arrow { width:14px; height:14px; transition:transform .15s; flex-shrink:0; }
-      .section-header.collapsed .section-arrow { transform:rotate(-90deg); }
-      .section-body { padding:6px 12px 10px; }
-      .section-body.hidden { display:none; }
-      .prop-row { display:flex; align-items:center; gap:8px; padding:3px 0; min-height:26px; }
-      .prop-label { width:96px; min-width:96px; font-size:11px; color:var(--text-dim); text-align:right; padding-right:4px; }
-      .prop-value { flex:1; display:flex; gap:4px; align-items:center; }
-      .prop-color-wrap { display:flex; align-items:center; gap:6px; flex:1; }
-      .prop-color { width:22px; height:22px; border-radius:var(--radius); border:1px solid var(--border);
-        cursor:pointer; flex-shrink:0; padding:0; -webkit-appearance:none; appearance:none; }
-      .prop-color::-webkit-color-swatch-wrapper { padding:0; }
-      .prop-color::-webkit-color-swatch { border:none; border-radius:2px; }
-      .prop-slider-wrap { flex:1; display:flex; align-items:center; gap:6px; min-width:0; }
-      .prop-num-input { width:64px; height:22px; flex-shrink:0; box-sizing:border-box; background:var(--bg-input);
-        border:1px solid var(--border); border-radius:var(--radius); padding:0 5px; color:var(--text);
-        font-size:11px; font-family:var(--font-mono); text-align:right; outline:none; }
-      .prop-num-input:focus { border-color:var(--accent); }
-      .prop-num-input::-webkit-outer-spin-button,.prop-num-input::-webkit-inner-spin-button { -webkit-appearance:none; margin:0; }
-      .prop-num-input[type=number] { appearance:textfield; -moz-appearance:textfield; }
-      .prop-slider { flex:1; min-width:0; height:4px; -webkit-appearance:none; appearance:none; background:var(--bg-input); border-radius:2px; outline:none; }
-      .prop-slider::-webkit-slider-thumb { -webkit-appearance:none; width:12px; height:12px; border-radius:50%; background:var(--accent); cursor:pointer; }
-      .prop-dropdown { flex:1; height:22px; background:var(--bg-input); border:1px solid var(--border); border-radius:var(--radius);
-        padding:0 6px; color:var(--text); font-size:12px; font-family:var(--font); outline:none; cursor:pointer; }
-      .prop-toggle { width:14px; height:14px; border:1px solid var(--border-light); border-radius:3px; background:var(--bg-input);
-        cursor:pointer; display:flex; align-items:center; justify-content:center; flex-shrink:0; padding:0; color:transparent; }
-      .prop-toggle.checked { background:var(--accent); border-color:var(--accent); color:#fff; }
-      .prop-toggle svg { width:10px; height:10px; }
+      #ui-resize-handle {
+        position: fixed;
+        top: 0;
+        right: var(--ui-width, 340px);
+        margin-right: -4px;
+        width: 8px;
+        height: 100vh;
+        cursor: ew-resize;
+        z-index: 31;
+        background: transparent;
+        transition: background 0.15s;
+      }
+      #ui-resize-handle:hover,
+      body.ui-resizing #ui-resize-handle {
+        background: var(--accent);
+        opacity: 0.6;
+      }
+      body.ui-resizing {
+        cursor: ew-resize;
+        user-select: none;
+      }
+      #ui-panel .ui-title {
+        flex-shrink: 0;
+        padding: 9px 12px;
+        font-size: 12px;
+        font-weight: 700;
+        letter-spacing: 0.5px;
+        border-bottom: 1px solid var(--border);
+        background: var(--bg-item);
+      }
+      .inspector-section {
+        border-bottom: 1px solid var(--border);
+      }
+      .section-header {
+        display: flex;
+        align-items: center;
+        gap: 6px;
+        padding: 6px 12px;
+        cursor: pointer;
+        font-size: 11px;
+        font-weight: 600;
+        text-transform: uppercase;
+        letter-spacing: 0.4px;
+        color: var(--text-dim);
+      }
+      .section-header:hover {
+        background: var(--bg-hover);
+      }
+      .section-header .section-arrow {
+        width: 14px;
+        height: 14px;
+        transition: transform 0.15s;
+        flex-shrink: 0;
+      }
+      .section-header.collapsed .section-arrow {
+        transform: rotate(-90deg);
+      }
+      .section-body {
+        padding: 6px 12px 10px;
+      }
+      .section-body.hidden {
+        display: none;
+      }
+      .prop-row {
+        display: flex;
+        align-items: center;
+        gap: 8px;
+        padding: 3px 0;
+        min-height: 26px;
+      }
+      .prop-label {
+        width: 96px;
+        min-width: 96px;
+        font-size: 11px;
+        color: var(--text-dim);
+        text-align: right;
+        padding-right: 4px;
+      }
+      .prop-value {
+        flex: 1;
+        display: flex;
+        gap: 4px;
+        align-items: center;
+      }
+      .prop-color-wrap {
+        display: flex;
+        align-items: center;
+        gap: 6px;
+        flex: 1;
+      }
+      .prop-color {
+        width: 22px;
+        height: 22px;
+        border-radius: var(--radius);
+        border: 1px solid var(--border);
+        cursor: pointer;
+        flex-shrink: 0;
+        padding: 0;
+        -webkit-appearance: none;
+        appearance: none;
+      }
+      .prop-color::-webkit-color-swatch-wrapper {
+        padding: 0;
+      }
+      .prop-color::-webkit-color-swatch {
+        border: none;
+        border-radius: 2px;
+      }
+      .prop-slider-wrap {
+        flex: 1;
+        display: flex;
+        align-items: center;
+        gap: 6px;
+        min-width: 0;
+      }
+      .prop-num-input {
+        width: 64px;
+        height: 22px;
+        flex-shrink: 0;
+        box-sizing: border-box;
+        background: var(--bg-input);
+        border: 1px solid var(--border);
+        border-radius: var(--radius);
+        padding: 0 5px;
+        color: var(--text);
+        font-size: 11px;
+        font-family: var(--font-mono);
+        text-align: right;
+        outline: none;
+      }
+      .prop-num-input:focus {
+        border-color: var(--accent);
+      }
+      .prop-num-input::-webkit-outer-spin-button,
+      .prop-num-input::-webkit-inner-spin-button {
+        -webkit-appearance: none;
+        margin: 0;
+      }
+      .prop-num-input[type="number"] {
+        appearance: textfield;
+        -moz-appearance: textfield;
+      }
+      .prop-slider {
+        flex: 1;
+        min-width: 0;
+        height: 4px;
+        -webkit-appearance: none;
+        appearance: none;
+        background: var(--bg-input);
+        border-radius: 2px;
+        outline: none;
+      }
+      .prop-slider::-webkit-slider-thumb {
+        -webkit-appearance: none;
+        width: 12px;
+        height: 12px;
+        border-radius: 50%;
+        background: var(--accent);
+        cursor: pointer;
+      }
+      .prop-dropdown {
+        flex: 1;
+        height: 22px;
+        background: var(--bg-input);
+        border: 1px solid var(--border);
+        border-radius: var(--radius);
+        padding: 0 6px;
+        color: var(--text);
+        font-size: 12px;
+        font-family: var(--font);
+        outline: none;
+        cursor: pointer;
+      }
+      .prop-toggle {
+        width: 14px;
+        height: 14px;
+        border: 1px solid var(--border-light);
+        border-radius: 3px;
+        background: var(--bg-input);
+        cursor: pointer;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        flex-shrink: 0;
+        padding: 0;
+        color: transparent;
+      }
+      .prop-toggle.checked {
+        background: var(--accent);
+        border-color: var(--accent);
+        color: #fff;
+      }
+      .prop-toggle svg {
+        width: 10px;
+        height: 10px;
+      }
       #hud {
-        position: fixed; bottom: 8px; left: 8px; z-index: 25;
-        color: #cfe0ff; font: 12px/1.4 ui-monospace, monospace;
-        background: rgba(8, 14, 26, 0.55); padding: 6px 9px; border-radius: 6px;
-        pointer-events: none; white-space: pre;
+        position: fixed;
+        bottom: 8px;
+        left: 8px;
+        z-index: 25;
+        color: #cfe0ff;
+        font:
+          12px/1.4 ui-monospace,
+          monospace;
+        background: rgba(8, 14, 26, 0.55);
+        padding: 6px 9px;
+        border-radius: 6px;
+        pointer-events: none;
+        white-space: pre;
       }
     </style>
     <script type="importmap">
@@ -86,14 +290,29 @@
       import { OrbitControls } from "three/addons/controls/OrbitControls.js";
       import Stats from "stats-gl";
       import { createDayNightSky, SKY_DEFAULTS } from "./daynight-sky.js";
-      import { createCloudLayer, CLOUD_DEFAULTS, GOD_RAYS_DEFAULTS } from "./cloud-layer.js";
-      import { createTerrain } from "./daynight-terrain.js";
-      import { createOcean } from "./daynight-ocean.js";
-      import { OCEAN_DEFAULTS } from "./ocean-shader.js";
-      import { createLensFlare, LENS_FLARE_DEFAULTS } from "./daynight-lensflare.js";
       import {
-        fog, densityFogFactor, uniform, mix, pow, dot, clamp, normalize,
-        positionWorld, cameraPosition,
+        createCloudLayer,
+        CLOUD_DEFAULTS,
+        GOD_RAYS_DEFAULTS,
+      } from "./cloud-layer.js";
+      import { createTerrain } from "./daynight-terrain.js";
+      import { createOcean } from "../daynight-ocean.js";
+      import { OCEAN_DEFAULTS } from "../ocean-shader.js";
+      import {
+        createLensFlare,
+        LENS_FLARE_DEFAULTS,
+      } from "../daynight-lensflare.js";
+      import {
+        fog,
+        densityFogFactor,
+        uniform,
+        mix,
+        pow,
+        dot,
+        clamp,
+        normalize,
+        positionWorld,
+        cameraPosition,
       } from "three/tsl";
 
       const smoothstep = (e0, e1, x) => {
@@ -103,9 +322,9 @@
 
       // ── PARAMS ───────────────────────────────────────────────────────────
       const PARAMS = {
-        timeOfDay: 9.5,      // 0..24
+        timeOfDay: 9.5, // 0..24
         autoAdvance: false,
-        daySpeed: 0.5,       // hours per second
+        daySpeed: 0.5, // hours per second
         exposure: 1.0,
         env: {
           sunIntensity: 3.2,
@@ -130,14 +349,25 @@
         lensFlare: { ...LENS_FLARE_DEFAULTS },
         shadows: { enabled: true, normalBias: 3, bias: -0.0005 },
         ocean: {
-          enabled: true, waterY: 80, seaState: "Breezy",
-          waveHeight: 1.8, choppiness: 1.5, reflectClouds: true,
-          dispFadeStart: 600, dispFadeEnd: 4000,
+          enabled: true,
+          waterY: 80,
+          seaState: "Breezy",
+          waveHeight: 1.8,
+          choppiness: 1.5,
+          reflectClouds: true,
+          dispFadeStart: 600,
+          dispFadeEnd: 4000,
         },
         terrain: {
-          grassScale: 0.05, rockScale: 0.0025, snowScale: 0.018,
-          dispStrength: 0, albedoMul: 0.94,
-          snowStart: 158, snowEnd: 268, cliffLow: 0.12, cliffHigh: 0.36,
+          grassScale: 0.05,
+          rockScale: 0.0025,
+          snowScale: 0.018,
+          dispStrength: 0,
+          albedoMul: 0.94,
+          snowStart: 158,
+          snowEnd: 268,
+          cliffLow: 0.12,
+          cliffHigh: 0.36,
         },
         // Full ocean look/shaping set (defaults from OCEAN_DEFAULTS, driven via syncParams).
         oceanFx: { ...OCEAN_DEFAULTS },
@@ -149,10 +379,46 @@
       // ocean goes from glassy to storming with one pick. Higher whitecap
       // threshold = MORE foam (foam triggers on less-folded crests).
       const SEA_STATES = {
-        Calm:   { waveHeight: 0.7, normalStrength: 0.9, fftChoppiness: 0.7, wcThreshold: 0.50, wcIntensity: 0.6,  wcBrightness: 1.05, wcContrast: 1.40, wcNoiseScale: 0.32 },
-        Breezy: { waveHeight: 1.8, normalStrength: 1.3, fftChoppiness: 1.3, wcThreshold: 0.66, wcIntensity: 1.0,  wcBrightness: 1.15, wcContrast: 1.55, wcNoiseScale: 0.38 },
-        Choppy: { waveHeight: 2.7, normalStrength: 1.8, fftChoppiness: 1.9, wcThreshold: 0.78, wcIntensity: 1.25, wcBrightness: 1.25, wcContrast: 1.70, wcNoiseScale: 0.44 },
-        Stormy: { waveHeight: 3.5, normalStrength: 2.2, fftChoppiness: 2.4, wcThreshold: 0.88, wcIntensity: 1.5,  wcBrightness: 1.35, wcContrast: 1.90, wcNoiseScale: 0.52 },
+        Calm: {
+          waveHeight: 0.7,
+          normalStrength: 0.9,
+          fftChoppiness: 0.7,
+          wcThreshold: 0.5,
+          wcIntensity: 0.6,
+          wcBrightness: 1.05,
+          wcContrast: 1.4,
+          wcNoiseScale: 0.32,
+        },
+        Breezy: {
+          waveHeight: 1.8,
+          normalStrength: 1.3,
+          fftChoppiness: 1.3,
+          wcThreshold: 0.66,
+          wcIntensity: 1.0,
+          wcBrightness: 1.15,
+          wcContrast: 1.55,
+          wcNoiseScale: 0.38,
+        },
+        Choppy: {
+          waveHeight: 2.7,
+          normalStrength: 1.8,
+          fftChoppiness: 1.9,
+          wcThreshold: 0.78,
+          wcIntensity: 1.25,
+          wcBrightness: 1.25,
+          wcContrast: 1.7,
+          wcNoiseScale: 0.44,
+        },
+        Stormy: {
+          waveHeight: 3.5,
+          normalStrength: 2.2,
+          fftChoppiness: 2.4,
+          wcThreshold: 0.88,
+          wcIntensity: 1.5,
+          wcBrightness: 1.35,
+          wcContrast: 1.9,
+          wcNoiseScale: 0.52,
+        },
       };
 
       // ── Celestial driver: time-of-day → sun/moon directions + light ────────
@@ -200,15 +466,22 @@
         _dayHorizon.set(PARAMS.sky.horizonDay);
         _nightHorizon.set(PARAMS.sky.horizonNight);
         _ambColor.copy(_nightHorizon).lerp(_dayHorizon, dayF);
-        const ambIntensity = THREE.MathUtils.lerp(0.12, 0.55, dayF) + moonInt * 0.25;
+        const ambIntensity =
+          THREE.MathUtils.lerp(0.12, 0.55, dayF) + moonInt * 0.25;
 
         return { sunUp, dayF, lightDir, lightIntensity, moonInt, ambIntensity };
       }
 
       // ── Custom UI helpers (ported from v2/editor.html) ─────────────────────
-      const _checkSvg = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12"></polyline></svg>';
-      const _arrowSvg = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="section-arrow"><polyline points="6 9 12 15 18 9"></polyline></svg>';
-      const _hu = (k) => k.replace(/([A-Z])/g, " $1").replace(/^./, (c) => c.toUpperCase()).trim();
+      const _checkSvg =
+        '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12"></polyline></svg>';
+      const _arrowSvg =
+        '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="section-arrow"><polyline points="6 9 12 15 18 9"></polyline></svg>';
+      const _hu = (k) =>
+        k
+          .replace(/([A-Z])/g, " $1")
+          .replace(/^./, (c) => c.toUpperCase())
+          .trim();
       function _fmt(v, step) {
         if (step >= 1) return String(Math.round(v));
         const d = Math.max(0, -Math.floor(Math.log10(step)));
@@ -234,7 +507,9 @@
           hdr.classList.toggle("collapsed");
           body.classList.toggle("hidden");
         });
-        sec.appendChild(hdr); sec.appendChild(body); parent.appendChild(sec);
+        sec.appendChild(hdr);
+        sec.appendChild(body);
+        parent.appendChild(sec);
         return body;
       }
       function _slider(parent, obj, key, opts) {
@@ -251,18 +526,33 @@
         });
         const commit = () => {
           const raw = String(num.value).trim();
-          if (raw === "" || raw === "-" || raw === ".") { num.value = _fmt(obj[key], step); return; }
+          if (raw === "" || raw === "-" || raw === ".") {
+            num.value = _fmt(obj[key], step);
+            return;
+          }
           let v = parseFloat(raw);
-          if (!Number.isFinite(v)) { num.value = _fmt(obj[key], step); return; }
+          if (!Number.isFinite(v)) {
+            num.value = _fmt(obj[key], step);
+            return;
+          }
           v = _clampSnap(v, min, max, step);
-          obj[key] = v; sl.value = String(v); num.value = _fmt(v, step); onChange?.();
+          obj[key] = v;
+          sl.value = String(v);
+          num.value = _fmt(v, step);
+          onChange?.();
         };
         num.addEventListener("change", commit);
-        num.addEventListener("keydown", (e) => { if (e.key === "Enter") num.blur(); });
+        num.addEventListener("keydown", (e) => {
+          if (e.key === "Enter") num.blur();
+        });
         parent.appendChild(row);
         return {
-          _sl: sl, _num: num,
-          refresh() { sl.value = String(obj[key]); num.value = _fmt(obj[key], step); },
+          _sl: sl,
+          _num: num,
+          refresh() {
+            sl.value = String(obj[key]);
+            num.value = _fmt(obj[key], step);
+          },
         };
       }
       function _color(parent, obj, key, opts) {
@@ -271,7 +561,10 @@
         row.className = "prop-row";
         row.innerHTML = `<span class="prop-label">${label}</span><div class="prop-value"><div class="prop-color-wrap"><input type="color" class="prop-color" value="${obj[key]}"></div></div>`;
         const inp = row.querySelector(".prop-color");
-        inp.addEventListener("input", () => { obj[key] = inp.value; onChange?.(); });
+        inp.addEventListener("input", () => {
+          obj[key] = inp.value;
+          onChange?.();
+        });
         parent.appendChild(row);
       }
       function _toggle(parent, obj, key, opts) {
@@ -326,7 +619,10 @@
 
         const scene = new THREE.Scene();
         const camera = new THREE.PerspectiveCamera(
-          55, window.innerWidth / window.innerHeight, 0.1, 30000,
+          55,
+          window.innerWidth / window.innerHeight,
+          0.1,
+          30000,
         );
         camera.position.set(-640, 360, 1040);
         const controls = new OrbitControls(camera, renderer.domElement);
@@ -360,15 +656,26 @@
         // fades to a cool haze away from the sun and a warm haze toward it.
         const uHazeEnabled = uniform(1);
         const uHazeDensity = uniform(PARAMS.fog.density);
-        const uHazeAway = uniform(new THREE.Color(PARAMS.fog.color).convertSRGBToLinear());
-        const uHazeSun = uniform(new THREE.Color(PARAMS.fog.sunTint).convertSRGBToLinear());
+        const uHazeAway = uniform(
+          new THREE.Color(PARAMS.fog.color).convertSRGBToLinear(),
+        );
+        const uHazeSun = uniform(
+          new THREE.Color(PARAMS.fog.sunTint).convertSRGBToLinear(),
+        );
         const uHazePow = uniform(PARAMS.fog.tintPow);
         const uHazeSunDir = uniform(new THREE.Vector3(0, 1, 0));
         const uHazeSunStrength = uniform(1); // fades the warm sun tint out at night
         const _hazeView = normalize(positionWorld.sub(cameraPosition));
         const _hazeSunAmt = clamp(dot(_hazeView, uHazeSunDir), 0, 1);
-        const _hazeColor = mix(uHazeAway, uHazeSun, pow(_hazeSunAmt, uHazePow).mul(uHazeSunStrength));
-        scene.fogNode = fog(_hazeColor, densityFogFactor(uHazeDensity).mul(uHazeEnabled));
+        const _hazeColor = mix(
+          uHazeAway,
+          uHazeSun,
+          pow(_hazeSunAmt, uHazePow).mul(uHazeSunStrength),
+        );
+        scene.fogNode = fog(
+          _hazeColor,
+          densityFogFactor(uHazeDensity).mul(uHazeEnabled),
+        );
 
         // ── Clouds ───────────────────────────────────────────────────────────
         const clouds = createCloudLayer({ camera });
@@ -389,7 +696,10 @@
 
         // ── Ocean (reuses the shared, unedited ocean modules) ────────────────
         const ocean = await createOcean({
-          renderer, terrainSize: 8000, heightRes: 512, getHeight: terrain.getHeight,
+          renderer,
+          terrainSize: 8000,
+          heightRes: 512,
+          getHeight: terrain.getHeight,
           seaLevel: PARAMS.ocean.waterY,
         });
         scene.add(ocean.group);
@@ -416,12 +726,15 @@
         cloudEnvClone.layers.set(0); // the cube cameras render layer 0
         envScene.add(cloudEnvClone);
 
-        const cubeRT = new THREE.CubeRenderTarget(128, { type: THREE.HalfFloatType });
+        const cubeRT = new THREE.CubeRenderTarget(128, {
+          type: THREE.HalfFloatType,
+        });
         const cubeCam = new THREE.CubeCamera(0.1, 20000, cubeRT);
         cubeCam.updateMatrixWorld(true);
 
         function renderEnvFace(face) {
-          const withClouds = PARAMS.ocean.reflectClouds && PARAMS.clouds.enabled;
+          const withClouds =
+            PARAMS.ocean.reflectClouds && PARAMS.clouds.enabled;
           cloudEnvClone.visible = withClouds;
           if (withClouds) clouds.setEnvMode(true); // skip depth occlusion, cheaper march
           renderer.setRenderTarget(cubeRT, face);
@@ -439,11 +752,14 @@
         try {
           for (let f = 0; f < 6; f++) renderEnvFace(f);
           convolveEnv();
-        } catch (e) { window.__envErr = e?.stack || ("" + e); console.error("ENV BAKE FAILED:", e); }
+        } catch (e) {
+          window.__envErr = e?.stack || "" + e;
+          console.error("ENV BAKE FAILED:", e);
+        }
 
         // Amortized re-bake: one face/frame, convolve on completion, then idle.
-        const ENV_IDLE = 1.5;   // seconds between full re-bakes
-        let _envFace = -1;      // -1 = idle, 0..5 = rendering that face
+        const ENV_IDLE = 1.5; // seconds between full re-bakes
+        let _envFace = -1; // -1 = idle, 0..5 = rendering that face
         let _envIdle = ENV_IDLE;
         function updateEnvBake(dt) {
           if (!PARAMS.ocean.enabled) return;
@@ -454,7 +770,11 @@
           }
           renderEnvFace(_envFace);
           _envFace++;
-          if (_envFace >= 6) { convolveEnv(); _envFace = -1; _envIdle = ENV_IDLE; }
+          if (_envFace >= 6) {
+            convolveEnv();
+            _envFace = -1;
+            _envIdle = ENV_IDLE;
+          }
         }
 
         // ── Character + follow camera ────────────────────────────────────────
@@ -464,13 +784,24 @@
         // the capsule's delta, so mouse-orbit and wheel-zoom still work — you
         // just orbit around the walking character instead of the world origin.
         const charMat = new THREE.MeshStandardNodeMaterial({
-          color: 0xff5a3c, roughness: 0.55, metalness: 0.0,
+          color: 0xff5a3c,
+          roughness: 0.55,
+          metalness: 0.0,
         });
         let charMesh = null;
         function buildCharacter() {
-          if (charMesh) { scene.remove(charMesh); charMesh.geometry.dispose(); }
-          const r = PARAMS.character.radius, h = PARAMS.character.height;
-          const geo = new THREE.CapsuleGeometry(r, Math.max(0.1, h - 2 * r), 8, 16);
+          if (charMesh) {
+            scene.remove(charMesh);
+            charMesh.geometry.dispose();
+          }
+          const r = PARAMS.character.radius,
+            h = PARAMS.character.height;
+          const geo = new THREE.CapsuleGeometry(
+            r,
+            Math.max(0.1, h - 2 * r),
+            8,
+            16,
+          );
           charMesh = new THREE.Mesh(geo, charMat);
           charMesh.castShadow = true;
           charMesh.visible = PARAMS.character.mode;
@@ -493,25 +824,38 @@
         // Keyboard state (ignored while typing in the UI).
         const keys = {};
         const MOVE_CODES = new Set([
-          "KeyW", "KeyA", "KeyS", "KeyD",
-          "ArrowUp", "ArrowDown", "ArrowLeft", "ArrowRight",
+          "KeyW",
+          "KeyA",
+          "KeyS",
+          "KeyD",
+          "ArrowUp",
+          "ArrowDown",
+          "ArrowLeft",
+          "ArrowRight",
         ]);
         addEventListener("keydown", (e) => {
           const t = document.activeElement;
           if (t && (t.tagName === "INPUT" || t.tagName === "TEXTAREA")) return;
           keys[e.code] = true;
-          if (PARAMS.character.mode && (MOVE_CODES.has(e.code) || e.code.startsWith("Shift")))
+          if (
+            PARAMS.character.mode &&
+            (MOVE_CODES.has(e.code) || e.code.startsWith("Shift"))
+          )
             e.preventDefault();
         });
-        addEventListener("keyup", (e) => { keys[e.code] = false; });
+        addEventListener("keyup", (e) => {
+          keys[e.code] = false;
+        });
 
         // Saved orbit pose so toggling back restores the free-fly view.
         const _savedCam = new THREE.Vector3();
         const _savedTarget = new THREE.Vector3();
         let _wasCharMode = false;
         const HALF = 1600 / 2 - 4; // keep the capsule on the terrain tile
-        const _fwd = new THREE.Vector3(), _right = new THREE.Vector3();
-        const _mv = new THREE.Vector3(), _up = new THREE.Vector3(0, 1, 0);
+        const _fwd = new THREE.Vector3(),
+          _right = new THREE.Vector3();
+        const _mv = new THREE.Vector3(),
+          _up = new THREE.Vector3(0, 1, 0);
 
         function updateCamera(dt) {
           const mode = PARAMS.character.mode;
@@ -524,7 +868,11 @@
             controls.minDistance = 3;
             controls.maxDistance = 120;
             const h = PARAMS.character.height;
-            camera.position.set(charPos.x, charPos.y + h * 1.2, charPos.z + h * 3.5);
+            camera.position.set(
+              charPos.x,
+              charPos.y + h * 1.2,
+              charPos.z + h * 3.5,
+            );
             controls.target.set(charPos.x, charPos.y + h * 0.3, charPos.z);
             _prevChar.copy(charPos);
             controls.update();
@@ -540,10 +888,14 @@
           }
           _wasCharMode = mode;
 
-          if (!mode) { controls.update(); return; }
+          if (!mode) {
+            controls.update();
+            return;
+          }
 
           // ── Walk: camera-relative horizontal movement ──
-          camera.getWorldDirection(_fwd); _fwd.y = 0;
+          camera.getWorldDirection(_fwd);
+          _fwd.y = 0;
           if (_fwd.lengthSq() < 1e-6) _fwd.set(0, 0, -1);
           _fwd.normalize();
           _right.crossVectors(_fwd, _up).normalize();
@@ -554,21 +906,26 @@
           if (keys.KeyA || keys.ArrowLeft) _mv.sub(_right);
           if (_mv.lengthSq() > 0) {
             _mv.normalize();
-            const sprint = (keys.ShiftLeft || keys.ShiftRight) ? 2.6 : 1;
+            const sprint = keys.ShiftLeft || keys.ShiftRight ? 2.6 : 1;
             const d = PARAMS.character.speed * sprint * dt;
             charPos.x = Math.max(-HALF, Math.min(HALF, charPos.x + _mv.x * d));
             charPos.z = Math.max(-HALF, Math.min(HALF, charPos.z + _mv.z * d));
             charMesh.rotation.y = Math.atan2(_mv.x, _mv.z);
           }
           // Stick to the ground (or water surface at the shore).
-          charPos.y = groundAt(charPos.x, charPos.z) + PARAMS.character.height * 0.5;
+          charPos.y =
+            groundAt(charPos.x, charPos.z) + PARAMS.character.height * 0.5;
           charMesh.position.copy(charPos);
 
           // Follow: translate camera by the capsule's delta, glue target to it.
           camera.position.x += charPos.x - _prevChar.x;
           camera.position.y += charPos.y - _prevChar.y;
           camera.position.z += charPos.z - _prevChar.z;
-          controls.target.set(charPos.x, charPos.y + PARAMS.character.height * 0.3, charPos.z);
+          controls.target.set(
+            charPos.x,
+            charPos.y + PARAMS.character.height * 0.3,
+            charPos.z,
+          );
           _prevChar.copy(charPos);
           controls.update();
         }
@@ -586,9 +943,13 @@
           handle.title = "Drag to resize · double-click to reset";
           document.body.appendChild(handle);
           const UIKEY = "daynightUiWidth";
-          const clampW = (w) => Math.max(240, Math.min(window.innerWidth * 0.7, w));
+          const clampW = (w) =>
+            Math.max(240, Math.min(window.innerWidth * 0.7, w));
           const applyW = (w) =>
-            document.documentElement.style.setProperty("--ui-width", clampW(w) + "px");
+            document.documentElement.style.setProperty(
+              "--ui-width",
+              clampW(w) + "px",
+            );
           const savedW = parseFloat(localStorage.getItem(UIKEY));
           if (Number.isFinite(savedW)) applyW(savedW);
           let dragging = false;
@@ -617,10 +978,14 @@
           });
         }
         // Shorthands: slider / color / toggle / dropdown.
-        const sl = (b, o, k, min, max, step, label) => _slider(b, o, k, { label: label ?? _hu(k), min, max, step });
-        const col = (b, o, k, label) => _color(b, o, k, { label: label ?? _hu(k) });
-        const tg = (b, o, k, label) => _toggle(b, o, k, { label: label ?? _hu(k) });
-        const dd = (b, o, k, options, label) => _dropdown(b, o, k, { label: label ?? _hu(k), options });
+        const sl = (b, o, k, min, max, step, label) =>
+          _slider(b, o, k, { label: label ?? _hu(k), min, max, step });
+        const col = (b, o, k, label) =>
+          _color(b, o, k, { label: label ?? _hu(k) });
+        const tg = (b, o, k, label) =>
+          _toggle(b, o, k, { label: label ?? _hu(k) });
+        const dd = (b, o, k, options, label) =>
+          _dropdown(b, o, k, { label: label ?? _hu(k), options });
 
         const uiBody = document.createElement("div");
         uiBody.id = "ui-body";
@@ -633,10 +998,30 @@
         sl(s, PARAMS, "exposure", 0.2, 2.5, 0.01);
 
         s = _section(uiBody, "Camera / character");
-        _toggle(s, PARAMS.character, "mode", { label: "Character cam (WASD/arrows)" });
+        _toggle(s, PARAMS.character, "mode", {
+          label: "Character cam (WASD/arrows)",
+        });
         sl(s, PARAMS.character, "speed", 10, 300, 5, "Walk speed");
-        _slider(s, PARAMS.character, "height", { label: "Capsule height", min: 2, max: 30, step: 0.5, onChange: () => { buildCharacter(); placeCharacter(charPos.x, charPos.z); } });
-        _slider(s, PARAMS.character, "radius", { label: "Capsule radius", min: 0.4, max: 6, step: 0.1, onChange: () => { buildCharacter(); placeCharacter(charPos.x, charPos.z); } });
+        _slider(s, PARAMS.character, "height", {
+          label: "Capsule height",
+          min: 2,
+          max: 30,
+          step: 0.5,
+          onChange: () => {
+            buildCharacter();
+            placeCharacter(charPos.x, charPos.z);
+          },
+        });
+        _slider(s, PARAMS.character, "radius", {
+          label: "Capsule radius",
+          min: 0.4,
+          max: 6,
+          step: 0.1,
+          onChange: () => {
+            buildCharacter();
+            placeCharacter(charPos.x, charPos.z);
+          },
+        });
 
         s = _section(uiBody, "Sun / moon energy");
         sl(s, PARAMS.env, "sunIntensity", 0, 6, 0.1);
@@ -669,12 +1054,32 @@
         // Sea-state preset picker — applies a coherent wave + whitecap set.
         _dropdown(s, PARAMS.ocean, "seaState", {
           label: "Sea state",
-          options: { Calm: "Calm", Breezy: "Breezy", Choppy: "Choppy", Stormy: "Stormy" },
+          options: {
+            Calm: "Calm",
+            Breezy: "Breezy",
+            Choppy: "Choppy",
+            Stormy: "Stormy",
+          },
           onChange: () => applySeaState(PARAMS.ocean.seaState),
         });
         sl(s, PARAMS.ocean, "waterY", -200, 200, 1, "Sea level Y");
-        oceanSliders.waveHeight = sl(s, PARAMS.ocean, "waveHeight", 0.2, 3.5, 0.05, "Wave height");
-        oceanSliders.choppiness = sl(s, PARAMS.ocean, "choppiness", 0.5, 3, 0.05);
+        oceanSliders.waveHeight = sl(
+          s,
+          PARAMS.ocean,
+          "waveHeight",
+          0.2,
+          3.5,
+          0.05,
+          "Wave height",
+        );
+        oceanSliders.choppiness = sl(
+          s,
+          PARAMS.ocean,
+          "choppiness",
+          0.5,
+          3,
+          0.05,
+        );
         sl(s, PARAMS.ocean, "dispFadeStart", 0, 2000, 10, "Wave fade start");
         sl(s, PARAMS.ocean, "dispFadeEnd", 100, 6000, 50, "Wave fade end");
         tg(s, PARAMS.ocean, "reflectClouds", "Reflect clouds");
@@ -712,7 +1117,15 @@
 
           sub = _section(s, "Waves (FFT)", false);
           tg(sub, fx, "fftEnabled", "FFT enabled");
-          oceanSliders.fftChoppiness = sl(sub, fx, "fftChoppiness", 0, 3, 0.05, "Choppiness (foam)");
+          oceanSliders.fftChoppiness = sl(
+            sub,
+            fx,
+            "fftChoppiness",
+            0,
+            3,
+            0.05,
+            "Choppiness (foam)",
+          );
           sl(sub, fx, "fftRippleAmp", 0, 2, 0.05, "Ripple amp");
           sl(sub, fx, "gerstnerBlend", 0, 1, 0.01, "Gerstner blend");
 
@@ -730,15 +1143,55 @@
 
           sub = _section(s, "Whitecaps", false);
           tg(sub, fx, "whitecapEnabled", "Enabled");
-          oceanSliders.whitecapIntensity = sl(sub, fx, "whitecapIntensity", 0, 3, 0.05, "Intensity");
-          oceanSliders.whitecapThreshold = sl(sub, fx, "whitecapThreshold", 0, 1, 0.01, "Threshold");
+          oceanSliders.whitecapIntensity = sl(
+            sub,
+            fx,
+            "whitecapIntensity",
+            0,
+            3,
+            0.05,
+            "Intensity",
+          );
+          oceanSliders.whitecapThreshold = sl(
+            sub,
+            fx,
+            "whitecapThreshold",
+            0,
+            1,
+            0.01,
+            "Threshold",
+          );
           sl(sub, fx, "whitecapSoftness", 0, 1, 0.01, "Softness");
-          oceanSliders.whitecapNoiseScale = sl(sub, fx, "whitecapNoiseScale", 0, 2, 0.01, "Noise scale");
+          oceanSliders.whitecapNoiseScale = sl(
+            sub,
+            fx,
+            "whitecapNoiseScale",
+            0,
+            2,
+            0.01,
+            "Noise scale",
+          );
           sl(sub, fx, "whitecapNoiseSpeed", 0, 2, 0.01, "Noise speed");
           sl(sub, fx, "whitecapWarpStrength", 0, 2, 0.01, "Warp strength");
           sl(sub, fx, "whitecapWarpScale", 0, 1, 0.01, "Warp scale");
-          oceanSliders.whitecapContrast = sl(sub, fx, "whitecapContrast", 0, 4, 0.05, "Contrast");
-          oceanSliders.whitecapBrightness = sl(sub, fx, "whitecapBrightness", 0, 3, 0.05, "Brightness");
+          oceanSliders.whitecapContrast = sl(
+            sub,
+            fx,
+            "whitecapContrast",
+            0,
+            4,
+            0.05,
+            "Contrast",
+          );
+          oceanSliders.whitecapBrightness = sl(
+            sub,
+            fx,
+            "whitecapBrightness",
+            0,
+            3,
+            0.05,
+            "Brightness",
+          );
           sl(sub, fx, "whitecapProcThreshold", 0, 1, 0.01, "Proc threshold");
           sl(sub, fx, "whitecapProcSoftness", 0, 1, 0.01, "Proc softness");
 
@@ -799,11 +1252,11 @@
         function applySeaState(name) {
           const p = SEA_STATES[name];
           if (!p) return;
-          PARAMS.ocean.waveHeight = p.waveHeight;   // → fftSwellAmp
+          PARAMS.ocean.waveHeight = p.waveHeight; // → fftSwellAmp
           PARAMS.ocean.choppiness = p.normalStrength; // → fftNormalStrength
           const fx = PARAMS.oceanFx;
-          fx.fftChoppiness = p.fftChoppiness;       // real whitecap driver (folding)
-          fx.whitecapThreshold = p.wcThreshold;     // higher = more foam coverage
+          fx.fftChoppiness = p.fftChoppiness; // real whitecap driver (folding)
+          fx.whitecapThreshold = p.wcThreshold; // higher = more foam coverage
           fx.whitecapIntensity = p.wcIntensity;
           fx.whitecapBrightness = p.wcBrightness;
           fx.whitecapContrast = p.wcContrast;
@@ -865,7 +1318,17 @@
         sl(s, PARAMS.sky, "msExtinct", 0.05, 1, 0.01, "MS energy keep");
 
         s = _section(uiBody, "Sky colors", false);
-        for (const k of ["zenithDay", "horizonDay", "zenithNight", "horizonNight", "sunsetColor", "groundColor", "sunColor", "moonColor"]) col(s, PARAMS.sky, k);
+        for (const k of [
+          "zenithDay",
+          "horizonDay",
+          "zenithNight",
+          "horizonNight",
+          "sunsetColor",
+          "groundColor",
+          "sunColor",
+          "moonColor",
+        ])
+          col(s, PARAMS.sky, k);
         sl(s, PARAMS.sky, "sunSizeDeg", 0.3, 6, 0.1);
         sl(s, PARAMS.sky, "sunGlowStrength", 0, 2, 0.01);
         sl(s, PARAMS.sky, "moonGlowStrength", 0, 2, 0.01);
@@ -925,12 +1388,17 @@
         sl(s, PARAMS.clouds, "densityMul", 0.5, 16, 0.1);
         sl(s, PARAMS.clouds, "erode", 0, 1, 0.01);
         sl(s, PARAMS.clouds, "detailMul", 1, 8, 0.1);
-        dd(s, PARAMS.clouds, "detailNoise", { "Perlin (smoky)": 0, "Worley (billow)": 1 }, "Detail noise");
         sl(s, PARAMS.clouds, "base", 600, 4000, 10);
         sl(s, PARAMS.clouds, "thickness", 200, 2500, 10);
         sl(s, PARAMS.clouds, "planetRadius", 15000, 400000, 1000);
         sl(s, PARAMS.clouds, "scale", 0.00005, 0.002, 0.00001);
-        dd(s, PARAMS.clouds, "bufferScale", { "Half (fast)": 0.5, "¾": 0.75, "Full (sharp)": 1.0 }, "Resolution");
+        dd(
+          s,
+          PARAMS.clouds,
+          "bufferScale",
+          { "Half (fast)": 0.5, "¾": 0.75, "Full (sharp)": 1.0 },
+          "Resolution",
+        );
         sl(s, PARAMS.clouds, "steps", 16, 128, 1);
         sl(s, PARAMS.clouds, "lightSteps", 2, 8, 1);
         sl(s, PARAMS.clouds, "emptySkip", 1, 4, 0.1, "Empty-space skip");
@@ -939,11 +1407,27 @@
         sl(s, PARAMS.clouds, "powder", 0, 1, 0.01);
         sl(s, PARAMS.clouds, "msAmount", 0, 1.5, 0.05, "★ Multi-scatter");
         sl(s, PARAMS.clouds, "msExtinction", 0.1, 0.9, 0.05, "MS light depth");
-        sl(s, PARAMS.clouds, "msEccentricity", 0.1, 0.9, 0.05, "MS phase broad");
+        sl(
+          s,
+          PARAMS.clouds,
+          "msEccentricity",
+          0.1,
+          0.9,
+          0.05,
+          "MS phase broad",
+        );
         sl(s, PARAMS.clouds, "windSpeed", 0, 0.2, 0.001);
         sl(s, PARAMS.clouds, "windDeg", 0, 360, 1);
         tg(s, PARAMS.clouds, "aerialEnabled", "Aerial perspective");
-        sl(s, PARAMS.clouds, "aerialDensity", 0.00002, 0.0006, 0.00001, "Aerial density");
+        sl(
+          s,
+          PARAMS.clouds,
+          "aerialDensity",
+          0.00002,
+          0.0006,
+          0.00001,
+          "Aerial density",
+        );
         sl(s, PARAMS.clouds, "aerialAmount", 0, 1, 0.05, "Aerial amount");
 
         // ── Loop ──────────────────────────────────────────────────────────
@@ -966,7 +1450,10 @@
 
           if (PARAMS.autoAdvance) {
             PARAMS.timeOfDay = (PARAMS.timeOfDay + PARAMS.daySpeed * dt) % 24;
-            if (document.activeElement !== timeSlider._sl && document.activeElement !== timeSlider._num)
+            if (
+              document.activeElement !== timeSlider._sl &&
+              document.activeElement !== timeSlider._num
+            )
               timeSlider.refresh();
           }
           renderer.toneMappingExposure = PARAMS.exposure;
@@ -1001,8 +1488,11 @@
           uHazeSunStrength.value = smoothstep(-0.1, 0.05, L.sunUp);
 
           const frame = {
-            time: elapsed, dt,
-            sunDir: _sunDir, moonDir: _moonDir, camera,
+            time: elapsed,
+            dt,
+            sunDir: _sunDir,
+            moonDir: _moonDir,
+            camera,
             lightDir: L.lightDir,
             lightColor: _lightColor,
             lightIntensity: Math.max(L.lightIntensity, 0.15),
