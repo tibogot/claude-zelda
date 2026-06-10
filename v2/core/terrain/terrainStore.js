@@ -504,6 +504,121 @@ export class TerrainStore {
     }
   }
 
+  /**
+   * Lower-only carve along a pre-sampled polyline (tunnel-mouth trenches).
+   * `pts` carry the desired floor Y in `.y`. Terrain inside `halfW` of the
+   * polyline is pulled DOWN to that target (never raised); between `halfW`
+   * and `margin` the pull blends out smoothly. Same chunk-write + shared-edge
+   * propagation scheme as `flattenUnderRoad`, so no post-pass stitching is
+   * needed. Fills `dirtyChunks` with per-chunk dirty rects.
+   */
+  lowerTerrainAlongPoints(pts, halfW, margin, dirtyChunks) {
+    if (!Array.isArray(pts) || pts.length < 2) return;
+    const res = this.config.world.dataResolution;
+    const stride = res + 1;
+    const cs = this.config.world.chunkSize;
+    const step = cs / res;
+    const half = this.config.world.size * 0.5;
+    const maxC = getChunkCountPerAxis(this.config) - 1;
+
+    const minWX = Math.min(...pts.map((p) => p.x)) - margin;
+    const maxWX = Math.max(...pts.map((p) => p.x)) + margin;
+    const minWZ = Math.min(...pts.map((p) => p.z)) - margin;
+    const maxWZ = Math.max(...pts.map((p) => p.z)) + margin;
+
+    const minCX = Math.max(0, Math.floor((minWX + half) / cs));
+    const maxCX = Math.min(maxC, Math.floor((maxWX + half) / cs));
+    const minCZ = Math.max(0, Math.floor((minWZ + half) / cs));
+    const maxCZ = Math.min(maxC, Math.floor((maxWZ + half) / cs));
+
+    const markDirty = (key, ix, iz) => {
+      const e = dirtyChunks.get(key);
+      if (!e) dirtyChunks.set(key, { minIx: ix, maxIx: ix, minIz: iz, maxIz: iz });
+      else {
+        if (ix < e.minIx) e.minIx = ix;
+        if (ix > e.maxIx) e.maxIx = ix;
+        if (iz < e.minIz) e.minIz = iz;
+        if (iz > e.maxIz) e.maxIz = iz;
+      }
+    };
+
+    for (let cz = minCZ; cz <= maxCZ; cz++) {
+      for (let cx = minCX; cx <= maxCX; cx++) {
+        const heights = this.ensureChunkData(cx, cz);
+        const chunkMinX = chunkMinWorldX(cx, this.config);
+        const chunkMinZ = chunkMinWorldZ(cz, this.config);
+
+        const lMinX = Math.max(0, Math.floor((minWX - chunkMinX) / step));
+        const lMaxX = Math.min(res, Math.ceil((maxWX - chunkMinX) / step));
+        const lMinZ = Math.max(0, Math.floor((minWZ - chunkMinZ) / step));
+        const lMaxZ = Math.min(res, Math.ceil((maxWZ - chunkMinZ) / step));
+        if (lMinX > lMaxX || lMinZ > lMaxZ) continue;
+
+        for (let iz = lMinZ; iz <= lMaxZ; iz++) {
+          const wz = chunkMinZ + iz * step;
+          for (let ix = lMinX; ix <= lMaxX; ix++) {
+            const wx = chunkMinX + ix * step;
+
+            let bestDist = Infinity;
+            let bestY = 0;
+            for (let k = 0; k < pts.length - 1; k++) {
+              const ax = pts[k].x, az = pts[k].z;
+              const bx = pts[k + 1].x, bz = pts[k + 1].z;
+              const dx = bx - ax, dz = bz - az;
+              const lenSq = dx * dx + dz * dz;
+              let t = 0;
+              if (lenSq > 1e-8) {
+                t = ((wx - ax) * dx + (wz - az) * dz) / lenSq;
+                t = Math.max(0, Math.min(1, t));
+              }
+              const px = ax + t * dx, pz = az + t * dz;
+              const ex = wx - px, ez = wz - pz;
+              const d = Math.sqrt(ex * ex + ez * ez);
+              if (d < bestDist) {
+                bestDist = d;
+                bestY = pts[k].y * (1 - t) + pts[k + 1].y * t;
+              }
+            }
+            if (bestDist > margin) continue;
+
+            const idx = iz * stride + ix;
+            const current = heights[idx];
+            let next;
+            if (bestDist <= halfW) {
+              next = Math.min(current, bestY);
+            } else {
+              let blend = 1 - (bestDist - halfW) / (margin - halfW);
+              blend = blend * blend * (3 - 2 * blend);
+              next = Math.min(current, current + (bestY - current) * blend);
+            }
+            if (next === current) continue;
+            heights[idx] = next;
+            markDirty(chunkKey(cx, cz), ix, iz);
+
+            const onL = ix === 0, onR = ix === res;
+            const onT = iz === 0, onB = iz === res;
+            if (onL && cx > 0) {
+              this.ensureChunkData(cx - 1, cz)[iz * stride + res] = next;
+              markDirty(chunkKey(cx - 1, cz), res, iz);
+            }
+            if (onR && cx < maxC) {
+              this.ensureChunkData(cx + 1, cz)[iz * stride + 0] = next;
+              markDirty(chunkKey(cx + 1, cz), 0, iz);
+            }
+            if (onT && cz > 0) {
+              this.ensureChunkData(cx, cz - 1)[res * stride + ix] = next;
+              markDirty(chunkKey(cx, cz - 1), ix, res);
+            }
+            if (onB && cz < maxC) {
+              this.ensureChunkData(cx, cz + 1)[0 * stride + ix] = next;
+              markDirty(chunkKey(cx, cz + 1), ix, 0);
+            }
+          }
+        }
+      }
+    }
+  }
+
   sampleNeighborhood(wx, wz, radius) {
     const taps = [
       [0, 0],

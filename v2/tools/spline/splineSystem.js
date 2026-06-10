@@ -1378,12 +1378,78 @@ export class SplineSystem {
     return true;
   }
 
+  /**
+   * Public API — create a tunnel from explicit points (used by tunnel mode).
+   * Rides the exact same record shape as `_createTunnelFromCurrentSpline`, so
+   * serialization, BVH collision (`forEachMeshInstance`) and interior lighting
+   * all pick it up with no extra plumbing. Returns the tunnel record.
+   */
+  addTunnel({
+    points,
+    radius = 6,
+    radialSegs = 20,
+    pathSegs = 220,
+    color = "#6c727a",
+    outerColor = "#cc2222",
+    innerColor = "#2a2a32",
+    capStart = false,
+    capEnd = false,
+    closed = false,
+  }) {
+    if (!Array.isArray(points) || points.length < 2) return null;
+    const tunnel = {
+      points: points.map((p) => ({ x: p.x, y: p.y, z: p.z })),
+      closed: !!closed,
+      radius: Math.max(0.5, radius),
+      radialSegs: Math.max(6, radialSegs | 0),
+      pathSegs: Math.max(40, pathSegs | 0),
+      color,
+      outerColor,
+      innerColor,
+      capStart: !!capStart,
+      capEnd: !!capEnd,
+      mesh: null,
+      collisionMesh: null,
+    };
+    this._buildTunnelMesh(tunnel);
+    this.tunnels.push(tunnel);
+    this.onVolumesChange();
+    return tunnel;
+  }
+
+  /** Public API — remove a tunnel record previously returned by `addTunnel`. */
+  removeTunnel(tunnel) {
+    const idx = this.tunnels.indexOf(tunnel);
+    if (idx < 0) return false;
+    if (tunnel.mesh) {
+      this._disposeTunnelRoot(tunnel.mesh);
+      tunnel.mesh = null;
+      tunnel.collisionMesh = null;
+    }
+    this.tunnels.splice(idx, 1);
+    this.onVolumesChange();
+    return true;
+  }
+
+  _disposeTunnelRoot(root) {
+    if (!root) return;
+    this.scene.remove(root);
+    const geos = new Set();
+    root.traverse((obj) => {
+      if (obj.geometry) geos.add(obj.geometry);
+      if (obj.material) {
+        const mats = Array.isArray(obj.material) ? obj.material : [obj.material];
+        for (const m of mats) m.dispose();
+      }
+    });
+    for (const g of geos) g.dispose();
+  }
+
   _buildTunnelMesh(tunnel) {
     if (tunnel.mesh) {
-      this.scene.remove(tunnel.mesh);
-      tunnel.mesh.geometry.dispose();
-      tunnel.mesh.material.dispose();
+      this._disposeTunnelRoot(tunnel.mesh);
       tunnel.mesh = null;
+      tunnel.collisionMesh = null;
     }
     const curve = new THREE.CatmullRomCurve3(
       tunnel.points.map((p) => new THREE.Vector3(p.x, p.y, p.z)),
@@ -1398,21 +1464,42 @@ export class SplineSystem {
       tunnel.radius,
       tunnel.closed,
     );
-    const mat = new THREE.MeshStandardMaterial({
-      color: tunnel.color ?? "#6c727a",
-      roughness: 0.88,
-      metalness: 0.04,
-      side: THREE.DoubleSide,
+    // Two single-sided shells sharing one open-ended tube — avoids DoubleSide
+    // z-fighting (the "shader flicker") and keeps the mouth rings hollow.
+    const outerMat = new THREE.MeshStandardMaterial({
+      color: tunnel.outerColor ?? tunnel.color ?? "#cc2222",
+      roughness: 0.82,
+      metalness: 0.03,
+      side: THREE.FrontSide,
+      depthWrite: true,
+      depthTest: true,
+      polygonOffset: true,
+      polygonOffsetFactor: 1,
+      polygonOffsetUnits: 1,
     });
-    const mesh = new THREE.Mesh(geo, mat);
-    mesh.castShadow = true;
-    mesh.receiveShadow = true;
-    mesh.renderOrder = 2;
-    tunnel.mesh = mesh;
-    this.scene.add(mesh);
+    const innerMat = new THREE.MeshStandardMaterial({
+      color: tunnel.innerColor ?? "#2a2a32",
+      roughness: 0.96,
+      metalness: 0,
+      side: THREE.BackSide,
+      depthWrite: true,
+      depthTest: true,
+    });
+    const outerMesh = new THREE.Mesh(geo, outerMat);
+    const innerMesh = new THREE.Mesh(geo, innerMat);
+    outerMesh.castShadow = true;
+    outerMesh.receiveShadow = true;
+    innerMesh.receiveShadow = true;
 
-    // No separate collision geometry needed - car sweep fix allows entering tunnels now.
-    // The visual mesh is used directly for BVH collision.
+    const group = new THREE.Group();
+    group.renderOrder = 3;
+    group.add(outerMesh);
+    group.add(innerMesh);
+    tunnel.mesh = group;
+    tunnel.collisionMesh = outerMesh;
+    this.scene.add(group);
+
+    // One collision shell — same geometry the car/player BVH already used.
   }
 
   bakePlacement() {
@@ -1707,6 +1794,8 @@ export class SplineSystem {
         radialSegs: t.radialSegs,
         pathSegs: t.pathSegs,
         color: t.color ?? "#6c727a",
+        outerColor: t.outerColor ?? t.color ?? "#cc2222",
+        innerColor: t.innerColor ?? "#2a2a32",
         capStart: !!t.capStart,
         capEnd: !!t.capEnd,
       })),
@@ -1803,9 +1892,12 @@ export class SplineSystem {
         radialSegs: Math.max(6, t.radialSegs ?? 20),
         pathSegs: Math.max(40, t.pathSegs ?? 220),
         color: t.color ?? "#6c727a",
+        outerColor: t.outerColor ?? t.color ?? "#cc2222",
+        innerColor: t.innerColor ?? "#2a2a32",
         capStart: !!t.capStart,
         capEnd: !!t.capEnd,
         mesh: null,
+        collisionMesh: null,
       };
       this._buildTunnelMesh(tunnel);
       this.tunnels.push(tunnel);
@@ -1931,10 +2023,9 @@ export class SplineSystem {
   clearTunnels() {
     for (const t of this.tunnels) {
       if (t.mesh) {
-        this.scene.remove(t.mesh);
-        t.mesh.geometry.dispose();
-        t.mesh.material.dispose();
+        this._disposeTunnelRoot(t.mesh);
         t.mesh = null;
+        t.collisionMesh = null;
       }
     }
     this.tunnels.length = 0;
@@ -1982,11 +2073,10 @@ export class SplineSystem {
    */
   forEachMeshInstance(cb) {
     for (const t of this.tunnels) {
-      const mesh = t.mesh;
-      if (!mesh || !mesh.geometry) continue;
-      mesh.updateMatrixWorld(true);
-      // Use visual mesh directly for collision (car sweep fix allows entering now).
-      cb(mesh.geometry, mesh.matrixWorld);
+      const col = t.collisionMesh;
+      if (!col?.geometry) continue;
+      col.updateMatrixWorld(true);
+      cb(col.geometry, col.matrixWorld);
     }
     for (const g of this.guardrails) {
       if (!g.group) continue;

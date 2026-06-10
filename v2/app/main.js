@@ -168,6 +168,7 @@ import { CaveStore } from "../core/cave/caveStore.js";
 import { InteriorVolumeRegistry } from "../render/lighting/interiorVolumeRegistry.js";
 import { createInteriorLightingNodes } from "../render/lighting/interiorLightingTsl.js";
 import { CaveSystem } from "../tools/cave/caveSystem.js";
+import { TunnelSystem } from "../tools/tunnel/tunnelSystem.js";
 import {
   createFleurSystem,
   FLEUR_PRESETS,
@@ -1584,6 +1585,25 @@ export async function startV2App(opts = {}) {
   }
   caveStore.onChange(() => rebuildInteriorVolumes());
   rebuildInteriorVolumes();
+
+  // Tunnel mode — composite macro over splineSystem (tube) + terrainStore
+  // (mouth trenches) + holeStore (terrain membrane punch-out). One click-flow
+  // creates a tunnel that is open, walkable and drivable through a mountain.
+  const tunnelSystem = new TunnelSystem({
+    scene,
+    toolState,
+    config,
+    terrainStore,
+    holeStore,
+    chunkStream,
+    splineSystem,
+    // Reuse the sculpt pipeline's height-change fanout (heightTex, trees,
+    // foliage, grass, actor snap — including the actorSystem wrapper added
+    // later) by deferring to whatever sculptSystem.onHeightsChanged is at
+    // call time.
+    onHeightsChanged: () => sculptSystem.onHeightsChanged(),
+    onRebakeBvh: () => rebakePlayerBvh(),
+  });
   let propUiCallbacks = {};
 
   const cliffPaintMask = new CliffPaintMask(512);
@@ -2108,6 +2128,7 @@ export async function startV2App(opts = {}) {
     splineSystem.handleGroup.visible =
       toolState.mode === "spline" && toolState.spline.showHandles;
     if (toolState.mode !== "spline") splineSystem.clearPreview();
+    if (toolState.mode !== "tunnel") tunnelSystem.cancelDraft();
     if (toolState.mode !== "splineRoad") splineRoadSystem.dragging = false;
     splineRoadSystem.syncVisibility();
     if (toolState.mode === "ambientfx") {
@@ -4796,6 +4817,16 @@ export async function startV2App(opts = {}) {
       }
       return;
     }
+    if (toolState.mode === "tunnel" && event.button === 0) {
+      // LEFT-click = add a tunnel centerline point (entrance face → exit face).
+      event.preventDefault();
+      const hit = pickTerrain(event);
+      if (hit) {
+        tunnelSystem.addDraftPoint(hit.point);
+        ui?.pane.refresh();
+      }
+      return;
+    }
     if (event.button !== 0 || !isBrushMode()) return;
     const hit = pickTerrain(event);
     if (toolState.mode === "sculpt" && toolState.sculptMode === "ramp") {
@@ -5132,6 +5163,7 @@ export async function startV2App(opts = {}) {
     if (toolState.mode === "barrier") return barrierSystem;
     if (toolState.mode === "hole") return holeSystem;
     if (toolState.mode === "cave") return caveSystem;
+    if (toolState.mode === "tunnel") return tunnelSystem;
     return sculptSystem;
   }
 
@@ -5194,6 +5226,27 @@ export async function startV2App(opts = {}) {
     } else if (event.code === "Delete" && toolState.mode === "spline") {
       event.preventDefault();
       splineSystem.deleteSelected();
+      ui?.pane.refresh();
+    } else if (
+      (event.code === "Enter" || event.code === "NumpadEnter") &&
+      toolState.mode === "tunnel" &&
+      event.target?.tagName !== "INPUT" &&
+      event.target?.tagName !== "TEXTAREA"
+    ) {
+      event.preventDefault();
+      if (tunnelSystem.createFromDraft()) ui?.pane.refresh();
+    } else if (
+      event.code === "Backspace" &&
+      toolState.mode === "tunnel" &&
+      event.target?.tagName !== "INPUT" &&
+      event.target?.tagName !== "TEXTAREA"
+    ) {
+      event.preventDefault();
+      tunnelSystem.removeLastDraftPoint();
+      ui?.pane.refresh();
+    } else if (event.code === "Escape" && toolState.mode === "tunnel") {
+      event.preventDefault();
+      tunnelSystem.cancelDraft();
       ui?.pane.refresh();
     } else if (
       event.code === "KeyR" &&
@@ -6072,6 +6125,7 @@ export async function startV2App(opts = {}) {
     dialogueRunner,
     listDialogueGraphIds,
     caveStore,
+    tunnelSystem,
     propUiCallbacks,
     setMode(mode, opts = {}) {
       if (mode === "play") {
@@ -6976,6 +7030,7 @@ export async function startV2App(opts = {}) {
       holeOverlay.dispose();
       caveSystem.dispose();
       caveStore.dispose();
+      tunnelSystem.dispose();
       brushDomeGeom.dispose();
       brushDomeFillMat.dispose();
       brushDomeEdgesGeom.dispose();

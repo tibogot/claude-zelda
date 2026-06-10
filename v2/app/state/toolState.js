@@ -628,6 +628,34 @@ export function createToolState() {
       opening: 4,
       ceilingOffset: 0.5,
     },
+    /**
+     * Tunnel mode — composite tool: click points on terrain (entrance face →
+     * exit face), Create builds the tube AND stages both mouths: approach
+     * trench carved into the terrain, terrain "membrane" hole-punched out of
+     * the tube interior, BVH rebaked. Tube floor sits `mouthLift` above the
+     * clicked points.
+     */
+    tunnel: {
+      radius: 6,
+      mouthLift: 0.2,
+      /** How far the tube extends out of the face past the clicked point (m). */
+      mouthExtend: 6,
+      /** Trench carve distance along the curve inward from each tube end (m). */
+      carveLength: 12,
+      /** Trench half-width = radius × this. */
+      trenchWidthFactor: 1.15,
+      /** Trench floor below the tube floor (m). */
+      trenchDepth: 0.4,
+      /** Vertical slack for the membrane hole band (m). */
+      membraneMargin: 0.9,
+      radialSegs: 24,
+      pathSegs: 220,
+      color: "#6c727a",
+      outerColor: "#cc2222",
+      innerColor: "#2a2a32",
+      /** Extra hole radius beyond tube R at each mouth disc (m). */
+      mouthPortalMargin: 1.25,
+    },
     ambientFx: {
       erase: false,
       effectType: "butterflies",

@@ -2931,6 +2931,11 @@ export class PlayMode {
 
     // Ground query — BVH along the probe ray + terrain height at ray origin XZ.
     // Negative distance (surface above origin) is kept so bottom-out can recover.
+    // EXCEPT when the origin is deeply below the surface (> ~1.25m): that means
+    // the car is inside a tunnel/cave under solid terrain, and the heightfield
+    // above must not masquerade as ground — the BVH (tunnel floor) is the only
+    // valid surface there. Shallow negatives stay so clip-through recovery works.
+    const VVV_UNDER_TERRAIN_CUTOFF = -1.25;
     const groundQuery = (ox, oy, oz, dx, dy, dz, maxDist) => {
       let best = null;
 
@@ -2943,7 +2948,7 @@ export class PlayMode {
         const terrainY = getTH(ox, oz);
         if (isFinite(terrainY)) {
           const vertDist = oy - terrainY;
-          if (vertDist <= maxDist) {
+          if (vertDist <= maxDist && vertDist >= VVV_UNDER_TERRAIN_CUTOFF) {
             const terrainHit = {
               distance: Math.max(vertDist, -1.0),
               point: { x: ox, y: terrainY, z: oz },

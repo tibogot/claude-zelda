@@ -142,6 +142,58 @@ export class HoleStore {
     return touched;
   }
 
+  /**
+   * Paint the hole mask over an arbitrary world-space region. `weightFn(wx, wz)`
+   * is evaluated at every texel center inside the bounds and returns 0..1
+   * (0 = leave texel untouched, 1 = fully punched). Used by tunnel mode to
+   * discard the thin terrain "membrane" strip where the heightfield surface
+   * crosses a tube mouth. Additive like a full-strength stroke. Returns the
+   * set of touched chunk keys — caller is responsible for marking terrain
+   * chunk meshes dirty.
+   */
+  paintHoleRegion(minX, minZ, maxX, maxZ, weightFn) {
+    const res = this.resolution;
+    const cs = this.config.world.chunkSize;
+    const pxSize = cs / res;
+    const touched = new Set();
+
+    for (const { cx, cz } of this.getChunkIndicesInBounds(minX, minZ, maxX, maxZ)) {
+      const entry = this.ensureChunk(cx, cz);
+      const minWX = chunkMinWorldX(cx, this.config);
+      const minWZ = chunkMinWorldZ(cz, this.config);
+
+      const pxMinX = Math.max(0, Math.floor((minX - minWX) / pxSize));
+      const pxMaxX = Math.min(res - 1, Math.ceil((maxX - minWX) / pxSize));
+      const pxMinZ = Math.max(0, Math.floor((minZ - minWZ) / pxSize));
+      const pxMaxZ = Math.min(res - 1, Math.ceil((maxZ - minWZ) / pxSize));
+
+      let anyTouched = false;
+      const data = entry.data;
+
+      for (let pz = pxMinZ; pz <= pxMaxZ; pz++) {
+        const wz = minWZ + (pz + 0.5) * pxSize;
+        for (let px = pxMinX; px <= pxMaxX; px++) {
+          const wx = minWX + (px + 0.5) * pxSize;
+          const w = weightFn(wx, wz);
+          if (w <= 0) continue;
+          const idx = (pz * res + px) * 4;
+          const v = Math.min(255, Math.max(data[idx], Math.round(w * 255)));
+          if (v === data[idx]) continue;
+          data[idx] = v;
+          data[idx + 3] = v;
+          anyTouched = true;
+        }
+      }
+
+      if (anyTouched) {
+        entry.tex.needsUpdate = true;
+        entry.hasAnyHole = computeHasAnyHole(entry.data);
+        touched.add(chunkKey(cx, cz));
+      }
+    }
+    return touched;
+  }
+
   restoreFromSnapshot(snapshotMap) {
     for (const [key, data] of snapshotMap) {
       let entry = this.chunks.get(key);

@@ -1632,6 +1632,7 @@
               <option value="barrier">Barrier (B)</option>
               <option value="hole">Hole</option>
               <option value="cave">Cave</option>
+              <option value="tunnel">Tunnel</option>
               <option value="playSpawn">Play Spawn (Z)</option>
               <option value="play">Play (F)</option>
             </select>
@@ -2551,6 +2552,9 @@
         if (holePanel) holePanel.style.display = mode === "hole" ? "" : "none";
         const cavePanel = document.getElementById("cave-panel");
         if (cavePanel) cavePanel.style.display = mode === "cave" ? "" : "none";
+        const tunnelPanel = document.getElementById("tunnel-panel");
+        if (tunnelPanel)
+          tunnelPanel.style.display = mode === "tunnel" ? "" : "none";
         const barrierPanel = document.getElementById("barrier-panel");
         if (barrierPanel)
           barrierPanel.style.display = mode === "barrier" ? "" : "none";
@@ -6228,6 +6232,109 @@
           title: "Clear all caves",
           onClick: () => app.caveClear(),
         });
+
+        return panel;
+      }
+
+      // === Build custom Tunnel panel ===
+      function buildTunnelPanel(app) {
+        const panel = document.createElement("div");
+        panel.id = "tunnel-panel";
+        const ts = app.toolState;
+        const sys = app.tunnelSystem;
+
+        const info = _section(panel, "Tunnel (through mountains)");
+        const hint = document.createElement("div");
+        hint.style.cssText = "font-size:11px;color:#aaa;padding:4px 4px 8px;";
+        hint.textContent =
+          "Click the entrance spot, then the exit (more clicks = curved path). " +
+          "Create carves the approach trenches, opens the terrain inside the " +
+          "tube and rebakes collision — the tunnel is immediately walkable and " +
+          "drivable. Enter = create, Backspace = remove last point, Esc = cancel.";
+        info.appendChild(hint);
+
+        const draftInfo = _info(info, "Draft points", "0");
+        const builtInfo = _info(
+          info,
+          "Tunnels",
+          `${app.splineSystem?.tunnels?.length ?? 0}`,
+        );
+        setInterval(() => {
+          draftInfo.update(`${sys?.draftCount ?? 0}`);
+          builtInfo.update(`${app.splineSystem?.tunnels?.length ?? 0}`);
+        }, 400);
+
+        const size = _section(panel, "Tube");
+        _slider(size, ts.tunnel, "radius", {
+          label: "Radius",
+          min: 2,
+          max: 16,
+          step: 0.5,
+        });
+        _slider(size, ts.tunnel, "mouthExtend", {
+          label: "Mouth overhang",
+          min: 0,
+          max: 20,
+          step: 0.5,
+        });
+        _slider(size, ts.tunnel, "mouthLift", {
+          label: "Floor lift at click",
+          min: 0,
+          max: 2,
+          step: 0.05,
+        });
+
+        const carve = _section(panel, "Entrance carve");
+        _slider(carve, ts.tunnel, "carveLength", {
+          label: "Trench length",
+          min: 0,
+          max: 40,
+          step: 1,
+        });
+        _slider(carve, ts.tunnel, "trenchWidthFactor", {
+          label: "Trench width ×R",
+          min: 1,
+          max: 2,
+          step: 0.05,
+        });
+        _slider(carve, ts.tunnel, "trenchDepth", {
+          label: "Trench depth",
+          min: 0,
+          max: 2,
+          step: 0.1,
+        });
+        _slider(carve, ts.tunnel, "membraneMargin", {
+          label: "Opening slack",
+          min: 0,
+          max: 3,
+          step: 0.1,
+        });
+        _slider(carve, ts.tunnel, "mouthPortalMargin", {
+          label: "Mouth hole +R",
+          min: 0,
+          max: 4,
+          step: 0.1,
+        });
+
+        _separator(panel);
+        _button(panel, {
+          title: "Create tunnel (Enter)",
+          onClick: () => sys?.createFromDraft(),
+        });
+        _button(panel, {
+          title: "Remove last point (Backspace)",
+          onClick: () => sys?.removeLastDraftPoint(),
+        });
+        _button(panel, {
+          title: "Cancel draft (Esc)",
+          onClick: () => sys?.cancelDraft(),
+        });
+        _separator(panel);
+        _button(panel, {
+          title: "Undo tunnel (terrain + hole + tube)",
+          onClick: () => sys?.undo(),
+        });
+        _button(panel, { title: "Redo", onClick: () => sys?.redo() });
 
         return panel;
       }
@@ -14586,6 +14693,7 @@
           toolsTab.appendChild(buildSplineRoadPanel(app));
           toolsTab.appendChild(buildHolePanel(app));
           toolsTab.appendChild(buildCavePanel(app));
+          toolsTab.appendChild(buildTunnelPanel(app));
           toolsTab.appendChild(buildBarrierPanel(app));
           toolsTab.appendChild(buildAmbientFxPanel(app));
           toolsTab.appendChild(buildFleurPanel(app));
