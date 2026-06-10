@@ -179,6 +179,8 @@ export const OCEAN_DEFAULTS = {
   jonswapGamma:       3.3,
   windSpreadPow:      8,
   fftSeed:            1337,
+  /** Whitecap foam recovery rate (lower = foam lingers longer). */
+  fftFoamDecay:       0.4,
 
   // ── Whitecap foam (Jacobian break mask × Voronoi/FBM detail) ───────────────
   whitecapEnabled:    true,
@@ -363,8 +365,16 @@ export function createOceanShader({ heightTex, terrainSize, fft = null, envMap =
   u.fftSwellAmp       = uniform(OCEAN_DEFAULTS.fftSwellAmp);
   u.fftRippleAmp      = uniform(OCEAN_DEFAULTS.fftRippleAmp);
   u.fftNormalStrength = uniform(OCEAN_DEFAULTS.fftNormalStrength);
-  u.fftSwellTile      = uniform(fft ? fft.swell.tileSize : 512);
-  u.fftRippleTile     = uniform(fft ? fft.ripple.tileSize : 48);
+
+  // Cascade list (2 = zelda swell+ripple, 3 = horvath/Poseidon). Tile sizes are
+  // fixed per sim build, so they're compile-time constants here. The look-amp
+  // uniforms map to the first/last cascade (historical double-scale parity);
+  // middle cascades of a 3+ set ride at 1.
+  const fftCascades = fft ? fft.cascades : [];
+  const ampForCascade = (i) =>
+    i === 0 ? u.fftSwellAmp
+      : i === fftCascades.length - 1 ? u.fftRippleAmp
+        : float(1);
 
   // Whitecaps + SSS
   u.whitecapEnabled   = uniform(OCEAN_DEFAULTS.whitecapEnabled ? 1 : 0);
@@ -552,24 +562,36 @@ export function createOceanShader({ heightTex, terrainSize, fft = null, envMap =
     return vec3(disp.x.mul(xzMask), disp.y.mul(yMask), disp.z.mul(xzMask));
   }
 
-  /** Tileable FFT displacement sample (dx, height, dz). */
+  // FFT maps are rgba16f storage textures with RepeatWrapping — sample with the
+  // RAW (unwrapped) uv so screen-space derivatives stay continuous across tile
+  // seams (fract() would break mip selection there).
+  /** Tileable FFT displacement sample (dx, height, dz). Vertex stage → no
+   *  implicit derivatives, so the mip level is pinned to 0. */
   function fftDispAt(xz, ampScale) {
-    if (!fft) return vec3(0);
-    const uvS = fract(xz.div(u.fftSwellTile));
-    const uvR = fract(xz.div(u.fftRippleTile));
-    const dS = fft.swell.dispNode(uvS).xyz.mul(u.fftSwellAmp);
-    const dR = fft.ripple.dispNode(uvR).xyz.mul(u.fftRippleAmp);
-    return dS.add(dR).mul(ampScale).mul(u.fftEnabled);
+    if (!fftCascades.length) return vec3(0);
+    let sum = vec3(0);
+    fftCascades.forEach((c, i) => {
+      const d = texture(c.dispTex, xz.div(c.tileSize)).level(0).xyz;
+      sum = sum.add(d.mul(ampForCascade(i)));
+    });
+    return sum.mul(ampScale).mul(u.fftEnabled);
   }
 
-  /** FFT height-field gradient → normal tilt (x/z). */
+  /** FFT surface slope → normal tilt (x/z). Fragment stage — trilinear automip
+   *  keeps far water calm instead of aliasing. Fold-aware (Poseidon/gasgiant):
+   *  slope = dDy/dx ÷ (1 + chop·dDx/dx), so pinched crests tilt correctly. */
   function fftSlopeAt(xz, ampScale) {
-    if (!fft) return vec2(0);
-    const uvS = fract(xz.div(u.fftSwellTile));
-    const uvR = fract(xz.div(u.fftRippleTile));
-    const gS = fft.swell.gradNode(uvS).xy.mul(u.fftSwellAmp);
-    const gR = fft.ripple.gradNode(uvR).xy.mul(u.fftRippleAmp);
-    return gS.add(gR).mul(u.fftNormalStrength).mul(ampScale).mul(u.fftEnabled);
+    if (!fftCascades.length) return vec2(0);
+    let sum = vec2(0);
+    fftCascades.forEach((c, i) => {
+      const d = texture(c.derivTex, xz.div(c.tileSize));
+      const g = vec2(
+        d.x.div(float(1).add(d.z)),
+        d.y.div(float(1).add(d.w)),
+      );
+      sum = sum.add(g.mul(ampForCascade(i)));
+    });
+    return sum.mul(u.fftNormalStrength).mul(ampScale).mul(u.fftEnabled);
   }
 
   /** Jacobian whitecap factor from FFT displacement textures. */
@@ -592,12 +614,16 @@ export function createOceanShader({ heightTex, terrainSize, fft = null, envMap =
   }
 
   function fftWhitecapAt(xz, ampScale) {
-    if (!fft) return float(0);
-    const uvS = fract(xz.div(u.fftSwellTile));
-    const uvR = fract(xz.div(u.fftRippleTile));
-    const jS = fft.swell.dispNode(uvS).w;
-    const jR = fft.ripple.dispNode(uvR).w;
-    const jMin = min(jS, jR);
+    if (!fftCascades.length) return float(0);
+    // w = accumulated turbulence (snaps down on a Jacobian fold, recovers at
+    // fftFoamDecay) — whitecaps linger and dissipate instead of flickering.
+    // With 3+ cascades the finest is skipped (constant speckle — Poseidon).
+    const foamCascades = fftCascades.length > 2
+      ? fftCascades.slice(0, -1) : fftCascades;
+    let jMin = texture(foamCascades[0].dispTex, xz.div(foamCascades[0].tileSize)).w;
+    for (const c of foamCascades.slice(1)) {
+      jMin = min(jMin, texture(c.dispTex, xz.div(c.tileSize)).w);
+    }
     const lo = u.whitecapThreshold.sub(u.whitecapSoftness);
     const breaking = float(1).sub(smoothstep(lo, u.whitecapThreshold, jMin));
     // Gate the expensive Worley noise: only breaking crests (and only where
@@ -884,10 +910,16 @@ export function createOceanShader({ heightTex, terrainSize, fft = null, envMap =
   });
 
   // ── Build material ─────────────────────────────────────────────────────────
+  // The "see-through" depth look is faked from the heightmap ramp, so at
+  // opacity 1 (the normal case) the surface is visually opaque — render it in
+  // the OPAQUE pass with depth writes. Early-Z then culls the ocean behind
+  // islands AND stops the seabed terrain being shaded just to be painted over
+  // (the transparent/depthWrite:false path paid both, full-screen). syncParams
+  // flips to the transparent pass only when the user lowers opacity.
   const fragOut = oceanFrag();
   const material = new MeshBasicNodeMaterial({
-    transparent: true,
-    depthWrite:  false,
+    transparent: false,
+    depthWrite:  true,
     side:        THREE.DoubleSide,
     colorNode:   fragOut.rgb,
     opacityNode: fragOut.a,
@@ -986,7 +1018,15 @@ export function createOceanShader({ heightTex, terrainSize, fft = null, envMap =
     if (p.underwaterSkyBoost != null) u.underwaterSkyBoost.value = p.underwaterSkyBoost;
     if (p.underwaterMurk     != null) u.underwaterMurk.value = p.underwaterMurk;
 
-    if (p.opacity != null) u.opacity.value = p.opacity;
+    if (p.opacity != null) {
+      u.opacity.value = p.opacity;
+      const wantTransparent = p.opacity < 0.999;
+      if (material.transparent !== wantTransparent) {
+        material.transparent = wantTransparent;
+        material.depthWrite = !wantTransparent;
+        material.needsUpdate = true;
+      }
+    }
 
     if (p.foamEnabled         != null) u.foamEnabled.value         = p.foamEnabled ? 1 : 0;
     if (p.foamColor           != null) c(p.foamColor, u.foamColor.value);

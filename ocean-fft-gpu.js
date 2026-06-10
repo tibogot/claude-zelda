@@ -1,37 +1,44 @@
 /**
  * ocean-fft-gpu.js — GPU compute Tessendorf FFT ocean (JONSWAP + Phillips)
  *
- * Same two-cascade model as ocean-fft.js, but the per-frame IFFT runs entirely
- * on the GPU via TSL compute shaders, so the main thread is free. The spectrum
- * (h0, conj(h0(-k)), ω, k̂) and a bit-reversal table are precomputed on the CPU
- * into read-only storage buffers; only the time evolution + IFFT + assemble run
- * each frame on the GPU.
+ * Same two-cascade spectrum as ocean-fft.js (CPU bake, same seeds — the CPU sim
+ * stays the buoyancy sampler and must keep matching), but the per-frame IFFT
+ * runs entirely on the GPU via TSL compute shaders.
  *
- * PACKING: the three real output fields (height, x-displacement, z-displacement)
- * share one FFT structure (same k-grid → same twiddles/indices), so they're
- * processed together in a single butterfly pipeline: (h, dx) ride in one vec4
- * buffer (xy = h complex, zw = dx complex) and dz in a vec2 buffer. One IFFT2
- * pipeline therefore transforms all three fields at once — ~38 GPU dispatches
- * per frame instead of ~100 (each renderer.compute is a separate submit, so
- * dispatch count is what matters for perf).
+ * ARCHITECTURE (Poseidon / gasgiant FFT-Ocean pattern):
+ *  - Butterfly-table Stockham/Cooley-Tukey IFFT: a CPU-precomputed table holds
+ *    (twiddle.re, twiddle.im, indexA, indexB) per step, so every step is a
+ *    self-contained kernel with the step index baked in (no uniform pokes
+ *    between dispatches).
+ *  - 8 real fields ride on 4 complex IFFTs per cascade (A + i·B packing):
+ *    DxDz, DyDxz (h + dDz/dx), DyxDyz (height gradient), DxxDzz. Derivatives
+ *    are ANALYTIC (ik·h spectra) — no finite-difference pass.
+ *  - Batched dispatch: renderer.compute() accepts an array, so each butterfly
+ *    step submits ONCE for all cascades × fields. Per update:
+ *    1 (time-evolve) + 2·log2(N) (butterfly) + 1 (assemble) ≈ 16 submits
+ *    (was ~38 with the uniform-staged pipeline).
+ *  - No (-1)^(x+y) permute pass: our spectrum bake is DC-at-index-0 (standard
+ *    layout), so the butterfly network's plain inverse DFT is already correct.
+ *    (Poseidon needs the permute only because its spectrum is centered.)
+ *  - Assemble writes two rgba16f STORAGE TEXTURES per cascade (RepeatWrapping;
+ *    mips regenerated explicitly per update — three's compute path doesn't):
+ *      displacement = (chop·Dx, h, chop·Dz, turbulence)
+ *      derivatives  = (dDy/dx, dDy/dz, chop·dDx/dx, chop·dDz/dz)
+ *    The surface shader samples them with hardware (tri)linear filtering —
+ *    no more manual bilinear over storage buffers.
+ *  - Temporal foam: per-texel turbulence snaps down when the displacement
+ *    Jacobian folds (breaking crest) and recovers at `fftFoamDecay`, so
+ *    whitecaps linger and dissipate instead of flickering.
  *
- * Algorithm: bit-reverse reorder → log2(N) radix-2 Cooley-Tukey row stages →
- * reorder → log2(N) column stages (ping-ponging two work buffer sets), then an
- * assemble pass computes gradients (finite difference) + the Jacobian whitecap
- * factor into `spatialBuf` (dx, h, dz, J) and `gradBuf` (dhdx, dhdz).
- *
- * Output is consumed by ocean-shader.js through `dispNode(uv)` / `gradNode(uv)`
- * (manual bilinear over the storage buffers, uv in [0,1], wrapping).
- *
- * NOTE: this is the *rendering* source. CPU-side queries (boat buoyancy) still
- * use ocean-fft.js — keep their spectra/params in sync for the boat to sit on
- * the visible surface.
+ * NOTE: amplitude (uAmp) and choppiness (uChop) are baked into the textures at
+ * assemble time; ocean-shader.js multiplies by fftSwellAmp/fftRippleAmp again
+ * (historical double-scale — kept for look parity with the tuned params).
  */
 
 import * as THREE from "three";
 import {
-  Fn, uniform, float, int, uint, vec2, vec4, If,
-  instancedArray, storage, instanceIndex, floor, cos, sin,
+  Fn, uniform, float, int, uint, uvec2, vec2, vec4,
+  instancedArray, storage, instanceIndex, cos, sin, min, max, textureStore,
 } from "three/tsl";
 
 const GRAVITY = 9.81;
@@ -48,6 +55,46 @@ export const OCEAN_FFT_GPU_DEFAULTS = {
   jonswapGamma: 3.3,
   windSpreadPow: 8,
   rippleCutoff: 1.2,
+  /** Foam recovery rate (lower = whitecaps linger longer). */
+  fftFoamDecay: 0.4,
+  /**
+   * "zelda"   — the original two-cascade JONSWAP+Phillips spectrum (default;
+   *             stays in sync with the CPU buoyancy sampler in ocean-fft.js).
+   * "horvath" — Poseidon/gasgiant open-ocean spectrum: Horvath 2015 JONSWAP
+   *             (fetch-based α/ωp) × TMA depth correction × Donelan-Banner
+   *             spreading, local wind-sea + swell components, over
+   *             `HORVATH_DEFAULTS.lengthScales` cascades with disjoint
+   *             wavenumber bands. NOTE: no CPU mirror — boat buoyancy is wrong
+   *             in this mode.
+   */
+  spectrumMode: "zelda",
+};
+
+/** Horvath-mode defaults — values match the Poseidon repo (params.js). */
+export const HORVATH_DEFAULTS = {
+  lengthScales: [250, 17, 5],
+  boundaryFactor: 6,
+  depth: 500,
+  local: {
+    scale: 1.0,
+    windSpeed: 16.0,
+    windDirection: 45,
+    fetch: 100000,
+    spreadBlend: 1.0,
+    swell: 0.2,
+    peakEnhancement: 3.3,
+    shortWavesFade: 0.02,
+  },
+  swell: {
+    scale: 0.8,
+    windSpeed: 2.0,
+    windDirection: 70,
+    fetch: 300000,
+    spreadBlend: 1.0,
+    swell: 1.0,
+    peakEnhancement: 3.3,
+    shortWavesFade: 0.01,
+  },
 };
 
 // ─── Spectrum math (mirror of ocean-fft.js — kept local so this module is
@@ -104,25 +151,131 @@ function phillipsSpectrum(kx, kz, windSpeed, windDir, L, cutoff) {
   return (A * Math.exp(-1 / (kLen * L) ** 2)) / kLen ** 4 * dir;
 }
 
-function bitReverseTable(n) {
-  const bits = Math.log2(n) | 0;
-  const rev = new Int32Array(n);
-  for (let i = 0; i < n; i++) {
-    let r = 0;
-    for (let b = 0; b < bits; b++) r |= ((i >> b) & 1) << (bits - 1 - b);
-    rev[i] = r;
+// ─── Horvath 2015 spectrum (exact JS port of Poseidon/gasgiant spectrum.js) ──
+// JONSWAP with fetch-based α/ωp × TMA depth correction × Donelan-Banner
+// directional spreading × short-wave fade, summed over a local wind-sea set
+// and a swell set. Returns the per-texel h0 AMPLITUDE (Poseidon calibration:
+// sqrt(2·S·D·|dω/dk| / k · Δk²)) — multiply by the complex Gaussian noise.
+function hvFrequency(k, g, depth) {
+  return Math.sqrt(g * k * Math.tanh(Math.min(k * depth, 20)));
+}
+function hvFrequencyDerivative(k, g, depth) {
+  const th = Math.tanh(Math.min(k * depth, 20));
+  const ch = Math.cosh(Math.min(k * depth, 20));
+  return (g * ((depth * k) / (ch * ch) + th)) / hvFrequency(k, g, depth) / 2;
+}
+function hvNormalisationFactor(s) {
+  const s2 = s * s, s3 = s2 * s, s4 = s3 * s;
+  if (s < 5) return -0.000564 * s4 + 0.00776 * s3 - 0.044 * s2 + 0.192 * s + 0.163;
+  return -4.8e-8 * s4 + 1.07e-5 * s3 - 9.53e-4 * s2 + 5.9e-2 * s + 3.93e-1;
+}
+function hvCosine2s(theta, s) {
+  return hvNormalisationFactor(s) * Math.abs(Math.cos(theta * 0.5)) ** (s * 2);
+}
+function hvSpreadPower(omega, peakOmega) {
+  const r = omega / peakOmega;
+  return omega > peakOmega
+    ? 9.77 * Math.abs(r) ** -2.5
+    : 6.97 * Math.abs(r) ** 5;
+}
+function hvDirectionSpectrum(theta, omega, p) {
+  const s = hvSpreadPower(omega, p.peakOmega)
+    + 16 * Math.tanh(Math.min(omega / p.peakOmega, 20)) * p.swell * p.swell;
+  const base = Math.cos(theta) ** 2 * (2 / Math.PI);
+  return base + (hvCosine2s(theta - p.angle, s) - base) * p.spreadBlend;
+}
+function hvTmaCorrection(omega, g, depth) {
+  const omegaH = omega * Math.sqrt(depth / g);
+  if (omegaH <= 1) return 0.5 * omegaH * omegaH;
+  if (omegaH < 2) { const t = 2 - omegaH; return 1 - 0.5 * t * t; }
+  return 1;
+}
+function hvJonswap(omega, g, depth, p) {
+  const sigma = omega <= p.peakOmega ? 0.07 : 0.09;
+  const dw = omega - p.peakOmega;
+  const r = Math.exp(-(dw * dw) / (2 * sigma * sigma * p.peakOmega * p.peakOmega));
+  return p.scale
+    * hvTmaCorrection(omega, g, depth)
+    * p.alpha * g * g
+    * omega ** -5
+    * Math.exp(-1.25 * (p.peakOmega / omega) ** 4)
+    * p.gamma ** r;
+}
+function hvShortWavesFade(kLen, p) {
+  return Math.exp(-p.shortWavesFade * p.shortWavesFade * kLen * kLen);
+}
+/** Derived per-set params (Poseidon fillSet). */
+function hvParamSet(d, g) {
+  return {
+    scale: d.scale,
+    angle: (d.windDirection * Math.PI) / 180,
+    spreadBlend: d.spreadBlend,
+    swell: Math.min(Math.max(d.swell, 0.01), 1),
+    alpha: 0.076 * Math.pow((g * d.fetch) / (d.windSpeed * d.windSpeed), -0.22),
+    peakOmega: 22 * Math.pow((d.windSpeed * d.fetch) / (g * g), -0.33),
+    gamma: d.peakEnhancement,
+    shortWavesFade: d.shortWavesFade,
+  };
+}
+/** h0 amplitude at (kx, kz) for one cascade band [cutLow, cutHigh]. */
+function horvathAmplitude(kx, kz, deltaK, cutLow, cutHigh, hv) {
+  const kLen = Math.hypot(kx, kz);
+  if (kLen < cutLow || kLen > cutHigh) return 0;
+  const g = GRAVITY;
+  const kSafe = Math.max(kLen, cutLow);
+  const theta = Math.atan2(kz, kx + 1e-9);
+  const omega = hvFrequency(kSafe, g, hv.depth);
+  const dOmega = hvFrequencyDerivative(kSafe, g, hv.depth);
+  const spectrum =
+    hvJonswap(omega, g, hv.depth, hv._local)
+      * hvDirectionSpectrum(theta, omega, hv._local)
+      * hvShortWavesFade(kSafe, hv._local)
+    + hvJonswap(omega, g, hv.depth, hv._swell)
+      * hvDirectionSpectrum(theta, omega, hv._swell)
+      * hvShortWavesFade(kSafe, hv._swell);
+  return Math.sqrt(((spectrum * 2 * Math.abs(dOmega)) / kSafe) * deltaK * deltaK);
+}
+
+// ─── Butterfly table (gasgiant/FFT-Ocean via Poseidon, MIT) ──────────────────
+// For each step and output column: (twiddle.re, twiddle.im, inputA, inputB).
+// Forward twiddles; the kernels conjugate them for the inverse transform.
+function fillButterfly(array, N) {
+  const logN = Math.log2(N);
+  for (let step = 0; step < logN; step++) {
+    const b = N >> (step + 1);
+    for (let j = 0; j < N / 2; j++) {
+      const i = (2 * b * Math.floor(j / b) + (j % b)) % N;
+      const X = Math.floor(j / b) * b;
+      const twRe = Math.cos((2 * Math.PI * X) / N);
+      const twIm = -Math.sin((2 * Math.PI * X) / N);
+      const put = (col, re, im) => {
+        const o = (step * N + col) * 4;
+        array[o] = re; array[o + 1] = im; array[o + 2] = i; array[o + 3] = i + b;
+      };
+      put(j, twRe, twIm);
+      put(j + N / 2, -twRe, -twIm);
+    }
   }
-  return rev;
 }
 
 // ─── TSL helpers ─────────────────────────────────────────────────────────────
 const cMul = Fn(([a, b]) =>
   vec2(a.x.mul(b.x).sub(a.y.mul(b.y)), a.x.mul(b.y).add(a.y.mul(b.x))),
 );
-// Two complex values packed in a vec4 (xy, zw), both multiplied by one twiddle.
-const cMul4 = Fn(([a, tw]) =>
-  vec4(cMul(a.xy, tw), cMul(a.zw, tw)),
-);
+
+// rgba16f storage texture: filterable (bilinear) AND storage-capable, tiling
+// via RepeatWrapping, mipmapped after each compute write.
+function makeMapTexture(N, label) {
+  const tex = new THREE.StorageTexture(N, N);
+  tex.name = label;
+  tex.type = THREE.HalfFloatType;
+  tex.wrapS = THREE.RepeatWrapping;
+  tex.wrapT = THREE.RepeatWrapping;
+  tex.magFilter = THREE.LinearFilter;
+  tex.minFilter = THREE.LinearMipmapLinearFilter;
+  tex.generateMipmaps = true;
+  return tex;
+}
 
 /**
  * @param {object} opts
@@ -141,200 +294,160 @@ export function createOceanFFTGPUSimulation(opts = {}) {
   let gamma = cfg.jonswapGamma;
   let spreadPow = cfg.windSpreadPow;
 
-  // Shared work buffers. (h, dx) ride together in the vec4 set; dz in the vec2
-  // set. One IFFT pipeline transforms all three fields at once.
-  const Ahd = instancedArray(COUNT, "vec4");
-  const Bhd = instancedArray(COUNT, "vec4");
-  const Az = instancedArray(COUNT, "vec2");
-  const Bz = instancedArray(COUNT, "vec2");
-  const revAttr = new THREE.StorageInstancedBufferAttribute(bitReverseTable(N), 1);
-  const revBuf = storage(revAttr, "int", N);
-
   const uTime = uniform(0);
-  const uStageM = uniform(2); // current butterfly block size
+  const uDt = uniform(1 / 30);
+  const uFoamDecay = uniform(cfg.fftFoamDecay);
+  let lastSimTime = -1;
 
-  const idxRC = () => {
-    const i = instanceIndex;
-    return { idx: i, c: i.mod(N), r: i.div(N) };
-  };
+  // Shared butterfly table (twiddles + pair indices per step).
+  const bfAttr = new THREE.StorageInstancedBufferAttribute(
+    new Float32Array(LOG2N * N * 4), 4,
+  );
+  fillButterfly(bfAttr.array, N);
+  const bfBuf = storage(bfAttr, "vec4", LOG2N * N);
 
-  // Bit-reversal reorder along rows / columns (A → B for both buffer sets).
-  const reorderRows = Fn(() => {
-    const { idx, c, r } = idxRC();
-    const src = r.mul(N).add(uint(revBuf.element(c)));
-    Bhd.element(idx).assign(Ahd.element(src));
-    Bz.element(idx).assign(Az.element(src));
-  })().compute(COUNT);
-
-  const reorderCols = Fn(() => {
-    const { idx, c, r } = idxRC();
-    const src = uint(revBuf.element(r)).mul(N).add(c);
-    Bhd.element(idx).assign(Ahd.element(src));
-    Bz.element(idx).assign(Az.element(src));
-  })().compute(COUNT);
-
-  // One radix-2 Cooley-Tukey stage. `axis` 0 = rows (along c), 1 = cols (along r).
-  function makeStage(srcHd, srcZ, dstHd, dstZ, axis) {
+  // One butterfly step along rows (axis 0) or columns (axis 1). The step index
+  // is baked into the kernel, so independent fields can share one submit.
+  function makeStep(src, dst, s, axis) {
     return Fn(() => {
-      const { idx, c, r } = idxRC();
-      const pos = float(axis === 0 ? c : r);
-      const mf = float(uStageM);
-      const half = mf.mul(0.5);
-      const blockStart = floor(pos.div(mf)).mul(mf);
-      const jj = pos.sub(blockStart);
-      const outHd = vec4(0).toVar();
-      const outZ = vec2(0).toVar();
-      If(jj.lessThan(half), () => {
-        const pIdx = axis === 0
-          ? r.mul(N).add(uint(int(pos.add(half))))
-          : uint(int(pos.add(half))).mul(N).add(c);
-        const ang = float(TWO_PI).mul(jj).div(mf);
-        const tw = vec2(cos(ang), sin(ang));
-        outHd.assign(srcHd.element(idx).add(cMul4(tw, srcHd.element(pIdx))));
-        outZ.assign(srcZ.element(idx).add(cMul(tw, srcZ.element(pIdx))));
-      }).Else(() => {
-        const pIdx = axis === 0
-          ? r.mul(N).add(uint(int(pos.sub(half))))
-          : uint(int(pos.sub(half))).mul(N).add(c);
-        const j2 = jj.sub(half);
-        const ang = float(TWO_PI).mul(j2).div(mf);
-        const tw = vec2(cos(ang), sin(ang));
-        outHd.assign(srcHd.element(pIdx).sub(cMul4(tw, srcHd.element(idx))));
-        outZ.assign(srcZ.element(pIdx).sub(cMul(tw, srcZ.element(idx))));
-      });
-      dstHd.element(idx).assign(outHd);
-      dstZ.element(idx).assign(outZ);
+      const id = instanceIndex;
+      const x = id.mod(uint(N));
+      const y = id.div(uint(N));
+      const line = axis === 0 ? x : y;
+      const data = bfBuf.element(uint(s * N).add(line));
+      const tw = vec2(data.x, data.y.negate()); // conjugate → inverse
+      const a = axis === 0
+        ? src.element(y.mul(N).add(uint(int(data.z))))
+        : src.element(uint(int(data.z)).mul(N).add(x));
+      const b = axis === 0
+        ? src.element(y.mul(N).add(uint(int(data.w))))
+        : src.element(uint(int(data.w)).mul(N).add(x));
+      dst.element(id).assign(a.add(cMul(tw, b)));
     })().compute(COUNT);
   }
 
-  const rowAB = makeStage(Ahd, Az, Bhd, Bz, 0);
-  const rowBA = makeStage(Bhd, Bz, Ahd, Az, 0);
-  const colAB = makeStage(Ahd, Az, Bhd, Bz, 1);
-  const colBA = makeStage(Bhd, Bz, Ahd, Az, 1);
-
-  // Full 2D inverse FFT on the A buffer set; result returns to A (LOG2N odd).
-  function runIFFT2() {
-    renderer.compute(reorderRows); // A -> B
-    let toA = true;
-    for (let s = 1; s <= LOG2N; s++) {
-      uStageM.value = 1 << s;
-      renderer.compute(toA ? rowBA : rowAB);
-      toA = !toA;
+  // Full 2D inverse-FFT kernel chain for one complex field: 2·log2(N) steps
+  // ping-ponging field ↔ scratch. 2·log2(N) is even, so the result lands back
+  // in `field`. Returns kernels ordered by global step index.
+  function buildFieldFFT(field, scratch) {
+    const steps = [];
+    for (let t = 0; t < LOG2N * 2; t++) {
+      const axis = t < LOG2N ? 0 : 1;
+      const s = axis === 0 ? t : t - LOG2N;
+      const src = t % 2 === 0 ? field : scratch;
+      const dst = t % 2 === 0 ? scratch : field;
+      steps.push(makeStep(src, dst, s, axis));
     }
-    renderer.compute(reorderCols); // A -> B
-    toA = true;
-    for (let s = 1; s <= LOG2N; s++) {
-      uStageM.value = 1 << s;
-      renderer.compute(toA ? colBA : colAB);
-      toA = !toA;
-    }
-    // result in A
+    return steps;
   }
 
   // ── Per-cascade state + kernels ──────────────────────────────────────────
-  function makeCascade({ tileSize, label, choppinessScale }) {
-    const h0Attr = new THREE.StorageInstancedBufferAttribute(new Float32Array(COUNT * 2), 2);
-    const h0mAttr = new THREE.StorageInstancedBufferAttribute(new Float32Array(COUNT * 2), 2);
-    const komAttr = new THREE.StorageInstancedBufferAttribute(new Float32Array(COUNT * 4), 4); // omega, kxN, kzN, _
-
-    const h0Buf = storage(h0Attr, "vec2", COUNT);
-    const h0mBuf = storage(h0mAttr, "vec2", COUNT);
+  // `norm` rescales the raw butterfly output in assemble. The zelda calibration
+  // (sqrt(P/2)·tile/8) was tuned WITH 1/N²; the Horvath amplitude
+  // (sqrt(2·S·D·|dω/dk|/k·Δk²)) is calibrated for the UNNORMALIZED Tessendorf
+  // synthesis sum (Poseidon's fft.js: "no 1/N² scaling") → norm = 1.
+  function makeCascade({ tileSize, label, choppinessScale, norm = invN2 }) {
+    // CPU-baked spectrum: h0 = (h0(k), conj(h0(-k))), kom = (kx, 1/|k|, kz, ω).
+    const h0Attr = new THREE.StorageInstancedBufferAttribute(new Float32Array(COUNT * 4), 4);
+    const komAttr = new THREE.StorageInstancedBufferAttribute(new Float32Array(COUNT * 4), 4);
+    const h0Buf = storage(h0Attr, "vec4", COUNT);
     const komBuf = storage(komAttr, "vec4", COUNT);
 
-    const spatialBuf = instancedArray(COUNT, "vec4"); // dx, h, dz, J
-    const gradBuf = instancedArray(COUNT, "vec2");     // dhdx, dhdz
+    // Packed time-dependent spectra — the four complex IFFT inputs (8 real
+    // fields). Each gets its own scratch so all steps can share one submit.
+    const fields = {
+      DxDz: instancedArray(COUNT, "vec2"),   // (Dx, Dz)
+      DyDxz: instancedArray(COUNT, "vec2"),  // (h, dDz/dx)
+      DyxDyz: instancedArray(COUNT, "vec2"), // (dDy/dx, dDy/dz)
+      DxxDzz: instancedArray(COUNT, "vec2"), // (dDx/dx, dDz/dz)
+    };
+    const fieldFFTs = Object.values(fields).map((f) =>
+      buildFieldFFT(f, instancedArray(COUNT, "vec2")),
+    );
+
+    // Sampled output maps + persistent foam turbulence.
+    const dispTex = makeMapTexture(N, `oceanDisp_${label}`);
+    const derivTex = makeMapTexture(N, `oceanDeriv_${label}`);
+    const turbBuf = instancedArray(COUNT, "float");
+    turbBuf.value.array.fill(1.0); // start un-foamed (flat Jacobian)
+    turbBuf.value.needsUpdate = true;
 
     const uAmp = uniform(1);
     const uChop = uniform(cfg.choppiness * choppinessScale);
+
+    // Time-evolve the spectrum and build the 4 packed complex spectra.
+    // Sign convention: Poseidon/gasgiant verbatim — disp = +i·k̂·h with negated
+    // second derivatives. Through this IFFT that PINCHES crests for λ > 0
+    // (the −i packing we used historically rounds crests = anti-chop).
+    // NOTE: the CPU buoyancy sim (ocean-fft.js) still uses the old sign for
+    // horizontal displacement — re-sync it before reviving the boat.
+    const timeDep = Fn(() => {
+      const idx = instanceIndex;
+      const kom = komBuf.element(idx); // (kx, 1/|k|, kz, omega)
+      const kx = kom.x, invK = kom.y, kz = kom.z;
+      const phase = kom.w.mul(uTime);
+      const ex = vec2(cos(phase), sin(phase));
+      const h0v = h0Buf.element(idx);
+      const h = cMul(h0v.xy, ex).add(cMul(h0v.zw, vec2(ex.x, ex.y.negate())));
+      const ih = vec2(h.y.negate(), h.x); // i·h
+
+      const dispX = ih.mul(kx).mul(invK);
+      const dispZ = ih.mul(kz).mul(invK);
+      const dispYdx = ih.mul(kx);
+      const dispYdz = ih.mul(kz);
+      const dispXdx = h.mul(kx).mul(kx).mul(invK).negate();
+      const dispZdz = h.mul(kz).mul(kz).mul(invK).negate();
+      const dispZdx = h.mul(kx).mul(kz).mul(invK).negate();
+
+      fields.DxDz.element(idx).assign(vec2(dispX.x.sub(dispZ.y), dispX.y.add(dispZ.x)));
+      fields.DyDxz.element(idx).assign(vec2(h.x.sub(dispZdx.y), h.y.add(dispZdx.x)));
+      fields.DyxDyz.element(idx).assign(vec2(dispYdx.x.sub(dispYdz.y), dispYdx.y.add(dispYdz.x)));
+      fields.DxxDzz.element(idx).assign(vec2(dispXdx.x.sub(dispZdz.y), dispXdx.y.add(dispZdz.x)));
+    })().compute(COUNT);
+
+    // Normalise (stages don't divide by N²), scale, fold the Jacobian foam
+    // accumulator, and pack everything into the two sampled maps.
+    const assemble = Fn(() => {
+      const idx = instanceIndex;
+      const coord = uvec2(idx.mod(uint(N)), idx.div(uint(N)));
+      const s = float(norm).mul(uAmp);
+      const dxz = fields.DxDz.element(idx).mul(s);   // (Dx, Dz)
+      const hxz = fields.DyDxz.element(idx).mul(s);  // (h, dDz/dx)
+      const dyd = fields.DyxDyz.element(idx).mul(s); // (dDy/dx, dDy/dz)
+      const dd = fields.DxxDzz.element(idx).mul(s);  // (dDx/dx, dDz/dz)
+
+      const jxx = float(1).add(uChop.mul(dd.x));
+      const jzz = float(1).add(uChop.mul(dd.y));
+      const jxz = uChop.mul(hxz.y);
+      const J = jxx.mul(jzz).sub(jxz.mul(jxz));
+
+      // Snap down on a fold (foam appears with the crash), then recover slowly
+      // toward 1 so whitecaps linger and dissipate instead of flickering.
+      const prev = turbBuf.element(idx);
+      const turb = min(J, prev.add(uDt.mul(uFoamDecay).div(max(J, float(0.5)))));
+      turbBuf.element(idx).assign(turb);
+
+      textureStore(dispTex, coord,
+        vec4(dxz.x.mul(uChop), hxz.x, dxz.y.mul(uChop), turb)).toWriteOnly();
+      textureStore(derivTex, coord,
+        vec4(dyd.x, dyd.y, dd.x.mul(uChop), dd.y.mul(uChop))).toWriteOnly();
+    })().compute(COUNT);
 
     const cascade = {
       tileSize, label,
       amp: 1,
       choppiness: cfg.choppiness * choppinessScale,
-      h0Attr, h0mAttr, komAttr, uAmp, uChop,
-      spatialBuf, gradBuf,
+      h0Attr, komAttr, uAmp, uChop,
+      dispTex, derivTex,
+      timeDep, assemble, fieldFFTs,
     };
 
-    // Time-evolve the spectrum and write all three packed fields into A.
-    const evalAll = Fn(() => {
-      const idx = instanceIndex;
-      const kom = komBuf.element(idx);
-      const omega = kom.x, kxN = kom.y, kzN = kom.z;
-      const ang = omega.mul(uTime);
-      const cw = cos(ang), sw = sin(ang);
-      const ePos = cMul(h0Buf.element(idx), vec2(cw, sw));
-      const eNeg = cMul(h0mBuf.element(idx), vec2(cw, sw.negate()));
-      const ht = ePos.add(eNeg);                       // complex height spectrum
-      // horizontal displacement spectrum = -i·k̂·chop·ht  →  chop·k̂·(ht.y, -ht.x)
-      const base = vec2(ht.y, ht.x.negate()).mul(uChop);
-      Ahd.element(idx).assign(vec4(ht, base.mul(kxN))); // xy = h, zw = dx
-      Az.element(idx).assign(base.mul(kzN));            // dz
-    })().compute(COUNT);
-
-    // Real parts of the IFFT (in A) → spatialBuf (dx, h, dz). w (Jacobian) is
-    // written by `assemble`. Stages don't normalise, so divide by N².
-    const storeAll = Fn(() => {
-      const idx = instanceIndex;
-      const hd = Ahd.element(idx);
-      const dz = Az.element(idx).x;
-      const s = float(invN2).mul(uAmp);
-      spatialBuf.element(idx).assign(vec4(
-        hd.z.mul(s), // dx (real of zw)
-        hd.x.mul(s), // h  (real of xy)
-        dz.mul(s),   // dz
-        float(0),
-      ));
-    })().compute(COUNT);
-
-    // Finite-difference gradients + Jacobian from spatialBuf neighbours.
-    const cell = tileSize / N;
-    const assemble = Fn(() => {
-      const { idx, c, r } = idxRC();
-      const ip = c.add(1).mod(N);
-      const im = c.add(N - 1).mod(N);
-      const jp = r.add(1).mod(N);
-      const jm = r.add(N - 1).mod(N);
-      const sR = (rr, cc) => spatialBuf.element(rr.mul(N).add(cc));
-      const dhdx = sR(r, ip).y.sub(sR(r, im).y).div(2 * cell);
-      const dhdz = sR(jp, c).y.sub(sR(jm, c).y).div(2 * cell);
-      const dDxdx = sR(r, ip).x.sub(sR(r, im).x).div(2 * cell);
-      const dDxdz = sR(jp, c).x.sub(sR(jm, c).x).div(2 * cell);
-      const dDzdx = sR(r, ip).z.sub(sR(r, im).z).div(2 * cell);
-      const dDzdz = sR(jp, c).z.sub(sR(jm, c).z).div(2 * cell);
-      const J = float(1).add(dDxdx).mul(float(1).add(dDzdz)).sub(dDxdz.mul(dDzdx));
-      spatialBuf.element(idx).w.assign(J);
-      gradBuf.element(idx).assign(vec2(dhdx, dhdz));
-    })().compute(COUNT);
-
-    cascade.evalAll = evalAll;
-    cascade.storeAll = storeAll;
-    cascade.assemble = assemble;
-
-    // Bilinear sample nodes (uv in [0,1], wrapping) for the surface shader.
-    const sampleBuf = (buf, uvNode) => {
-      const f = uvNode.mul(N);
-      const i0 = floor(f);
-      const fr = f.sub(i0);
-      const x0 = uint(i0.x).mod(N);
-      const y0 = uint(i0.y).mod(N);
-      const x1 = x0.add(1).mod(N);
-      const y1 = y0.add(1).mod(N);
-      const v00 = buf.element(y0.mul(N).add(x0));
-      const v10 = buf.element(y0.mul(N).add(x1));
-      const v01 = buf.element(y1.mul(N).add(x0));
-      const v11 = buf.element(y1.mul(N).add(x1));
-      const a = v00.add(v10.sub(v00).mul(fr.x));
-      const b = v01.add(v11.sub(v01).mul(fr.x));
-      return a.add(b.sub(a).mul(fr.y));
-    };
-    cascade.dispNode = (uvNode) => sampleBuf(spatialBuf, uvNode);
-    cascade.gradNode = (uvNode) => sampleBuf(gradBuf, uvNode);
-
-    // CPU-side spectrum bake into the storage attributes.
-    cascade.bakeSpectrum = (spectrumFn, seed) => {
+    // CPU-side spectrum bake into the storage attributes. `ampFn(kx,kz)` is the
+    // h0 AMPLITUDE; `omegaFn(k)` the dispersion (deep-water default).
+    cascade.bakeSpectrum = (ampFn, seed, omegaFn) => {
       const rng = mulberry32(seed >>> 0);
-      const h0 = h0Attr.array, h0m = h0mAttr.array, kom = komAttr.array;
-      h0.fill(0); h0m.fill(0); kom.fill(0);
+      const h0 = h0Attr.array, kom = komAttr.array;
+      h0.fill(0); kom.fill(0);
       for (let j = 0; j < N; j++) {
         for (let i = 0; i < N; i++) {
           const kx = (TWO_PI * kIndex(i, N)) / tileSize;
@@ -342,91 +455,247 @@ export function createOceanFFTGPUSimulation(opts = {}) {
           const idx = j * N + i;
           const kLen = Math.hypot(kx, kz);
           if (kLen > 1e-6) {
-            kom[idx * 4] = Math.sqrt(GRAVITY * kLen);
-            kom[idx * 4 + 1] = kx / kLen;
-            kom[idx * 4 + 2] = kz / kLen;
+            kom[idx * 4] = kx;
+            kom[idx * 4 + 1] = 1 / kLen;
+            kom[idx * 4 + 2] = kz;
+            kom[idx * 4 + 3] = omegaFn ? omegaFn(kLen) : Math.sqrt(GRAVITY * kLen);
           }
-          const P = spectrumFn(kx, kz);
-          if (P <= 0) continue;
+          const A = ampFn(kx, kz);
+          if (A <= 0) continue;
           const [gr, gi] = gaussianPair(rng);
-          const scale = Math.sqrt(P * 0.5) * (tileSize / 8);
-          h0[idx * 2] = gr * scale;
-          h0[idx * 2 + 1] = gi * scale;
+          h0[idx * 4] = gr * A;
+          h0[idx * 4 + 1] = gi * A;
         }
       }
+      // zw = conj(h0(-k)) — mirror pass after all h0 values exist.
       for (let j = 0; j < N; j++) {
         for (let i = 0; i < N; i++) {
           const oi = (N - i) % N, oj = (N - j) % N;
           const idx = j * N + i, oidx = oj * N + oi;
-          h0m[idx * 2] = h0[oidx * 2];
-          h0m[idx * 2 + 1] = -h0[oidx * 2 + 1];
+          h0[idx * 4 + 2] = h0[oidx * 4];
+          h0[idx * 4 + 3] = -h0[oidx * 4 + 1];
         }
       }
-      h0[0] = h0[1] = 0;
-      h0m[0] = h0m[1] = 0;
+      h0[0] = h0[1] = h0[2] = h0[3] = 0;
       h0Attr.needsUpdate = true;
-      h0mAttr.needsUpdate = true;
       komAttr.needsUpdate = true;
     };
 
     return cascade;
   }
 
-  const swell = makeCascade({ tileSize: cfg.swellTile, label: "swell", choppinessScale: 1 });
-  const ripple = makeCascade({ tileSize: cfg.rippleTile, label: "ripple", choppinessScale: 0.85 });
-  swell.amp = cfg.swellAmp; swell.uAmp.value = cfg.swellAmp;
-  ripple.amp = cfg.rippleAmp; ripple.uAmp.value = cfg.rippleAmp;
+  // ── Cascade set — mode-dependent ─────────────────────────────────────────
+  const mode = cfg.spectrumMode ?? "zelda";
+  // Horvath state (mutable so the wind sliders can re-derive the param sets).
+  const hv = structuredClone({ ...HORVATH_DEFAULTS, ...(cfg.horvath || {}) });
+  const deriveHv = () => {
+    hv._local = hvParamSet(hv.local, GRAVITY);
+    hv._swell = hvParamSet(hv.swell, GRAVITY);
+  };
+  deriveHv();
+
+  let cascades;
+  if (mode === "horvath") {
+    // Disjoint wavenumber bands (Poseidon): hand-off between cascade i-1 and i
+    // at 2π/L_i × boundaryFactor. Amplitude comes entirely from the spectrum
+    // (uAmp stays 1); one shared choppiness.
+    cascades = hv.lengthScales.map((L, i) =>
+      makeCascade({ tileSize: L, label: `c${i}`, choppinessScale: 1, norm: 1 }),
+    );
+  } else {
+    const sw = makeCascade({ tileSize: cfg.swellTile, label: "swell", choppinessScale: 1 });
+    const ri = makeCascade({ tileSize: cfg.rippleTile, label: "ripple", choppinessScale: 0.85 });
+    sw.amp = cfg.swellAmp; sw.uAmp.value = cfg.swellAmp;
+    ri.amp = cfg.rippleAmp; ri.uAmp.value = cfg.rippleAmp;
+    cascades = [sw, ri];
+  }
+  // Back-compat aliases (ocean-shader / hosts historically address these two).
+  const swell = cascades[0];
+  const ripple = cascades[cascades.length - 1];
+
+  // ── Batched dispatch groups: one renderer.compute() per step for ALL
+  //    cascades × fields (each compute() is a separate submit — the barrier).
+  const timeDepGroup = cascades.map((c) => c.timeDep);
+  const assembleGroup = cascades.map((c) => c.assemble);
+  const stepGroups = [];
+  for (let t = 0; t < LOG2N * 2; t++) {
+    const group = [];
+    for (const c of cascades) for (const f of c.fieldFFTs) group.push(f[t]);
+    stepGroups.push(group);
+  }
 
   function rebuildSpectra(seed = 1337) {
-    swell.bakeSpectrum(
-      (kx, kz) => jonswapSpectrum(kx, kz, windSpeed, windDirRad, gamma, spreadPow),
+    if (mode === "horvath") {
+      deriveHv();
+      const boundary = (i) => ((2 * Math.PI) / hv.lengthScales[i]) * hv.boundaryFactor;
+      const last = cascades.length - 1;
+      const omegaFn = (k) => hvFrequency(k, GRAVITY, hv.depth);
+      cascades.forEach((c, i) => {
+        const cutLow = i === 0 ? 1e-4 : boundary(i);
+        const cutHigh = i === last ? 9999 : boundary(i + 1);
+        const deltaK = (2 * Math.PI) / c.tileSize;
+        c.bakeSpectrum(
+          (kx, kz) => horvathAmplitude(kx, kz, deltaK, cutLow, cutHigh, hv),
+          seed + i * 4099,
+          omegaFn,
+        );
+      });
+      return;
+    }
+    // zelda mode — amplitude = sqrt(P/2)·(tile/8), exactly the historical bake
+    // (and the CPU buoyancy sampler's calibration in ocean-fft.js).
+    cascades[0].bakeSpectrum(
+      (kx, kz) => {
+        const P = jonswapSpectrum(kx, kz, windSpeed, windDirRad, gamma, spreadPow);
+        return P <= 0 ? 0 : Math.sqrt(P * 0.5) * (cascades[0].tileSize / 8);
+      },
       seed,
     );
-    ripple.bakeSpectrum(
-      (kx, kz) => phillipsSpectrum(kx, kz, windSpeed, windDirRad, cfg.rippleTile, cfg.rippleCutoff),
+    cascades[1].bakeSpectrum(
+      (kx, kz) => {
+        const P = phillipsSpectrum(kx, kz, windSpeed, windDirRad, cfg.rippleTile, cfg.rippleCutoff);
+        return P <= 0 ? 0 : Math.sqrt(P * 0.5) * (cascades[1].tileSize / 8);
+      },
       seed + 4099,
     );
   }
   rebuildSpectra(cfg.seed ?? 1337);
 
-  function simulateCascade(cascade, time) {
-    uTime.value = time;
-    renderer.compute(cascade.evalAll);
-    runIFFT2();
-    renderer.compute(cascade.storeAll);
-    renderer.compute(cascade.assemble);
-  }
-
   return {
     swell,
     ripple,
-    cascades: [swell, ripple],
+    cascades,
+    spectrumMode: mode,
     isGPU: true,
 
-    /** Run the FFT compute for this frame. */
+    /** Run the FFT compute for this frame (1 + 2·log2(N) + 1 submits). */
     update(time) {
-      simulateCascade(swell, time);
-      simulateCascade(ripple, time);
+      uTime.value = time;
+      // Foam accumulation timestep = actual sim interval (the host throttles).
+      uDt.value = lastSimTime >= 0
+        ? Math.min(Math.max(time - lastSimTime, 0), 0.25)
+        : 1 / 30;
+      lastSimTime = time;
+      renderer.compute(timeDepGroup);
+      for (const group of stepGroups) renderer.compute(group);
+      renderer.compute(assembleGroup);
+      // three does NOT regenerate storage-texture mips after compute writes —
+      // fill the chain explicitly or far fragments sample empty (black) mips.
+      // Runs at the throttled sim rate, not per rendered frame.
+      for (const c of cascades) {
+        renderer.backend.generateMipmaps(c.dispTex);
+        renderer.backend.generateMipmaps(c.derivTex);
+      }
     },
 
     syncParams(p) {
       if (!p) return;
       let rebuild = false;
-      if (p.windSpeed != null) { windSpeed = p.windSpeed; rebuild = true; }
-      if (p.windAngleDeg != null) { windDirRad = p.windAngleDeg * (Math.PI / 180); rebuild = true; }
-      if (p.jonswapGamma != null) { gamma = p.jonswapGamma; rebuild = true; }
-      if (p.windSpreadPow != null) { spreadPow = p.windSpreadPow; rebuild = true; }
-      if (p.fftSwellAmp != null) { swell.amp = p.fftSwellAmp; swell.uAmp.value = p.fftSwellAmp; }
-      if (p.fftRippleAmp != null) { ripple.amp = p.fftRippleAmp; ripple.uAmp.value = p.fftRippleAmp; }
-      if (p.fftChoppiness != null) {
-        swell.choppiness = p.fftChoppiness; swell.uChop.value = p.fftChoppiness;
-        ripple.choppiness = p.fftChoppiness * 0.85; ripple.uChop.value = p.fftChoppiness * 0.85;
+      if (p.windSpeed != null) {
+        windSpeed = p.windSpeed;
+        hv.local.windSpeed = p.windSpeed; // horvath: wind slider drives the local sea
+        rebuild = true;
       }
+      if (p.windAngleDeg != null) {
+        windDirRad = p.windAngleDeg * (Math.PI / 180);
+        hv.local.windDirection = p.windAngleDeg;
+        rebuild = true;
+      }
+      if (p.jonswapGamma != null) { gamma = p.jonswapGamma; hv.local.peakEnhancement = p.jonswapGamma; rebuild = true; }
+      if (p.windSpreadPow != null) { spreadPow = p.windSpreadPow; rebuild = true; }
+      if (mode === "zelda") {
+        if (p.fftSwellAmp != null) { swell.amp = p.fftSwellAmp; swell.uAmp.value = p.fftSwellAmp; }
+        if (p.fftRippleAmp != null) { ripple.amp = p.fftRippleAmp; ripple.uAmp.value = p.fftRippleAmp; }
+      }
+      if (p.fftChoppiness != null) {
+        cascades.forEach((c, i) => {
+          // zelda keeps the historical 0.85 ripple scale; horvath = uniform λ.
+          const scale = mode === "zelda" && i === cascades.length - 1 ? 0.85 : 1;
+          c.choppiness = p.fftChoppiness * scale;
+          c.uChop.value = p.fftChoppiness * scale;
+        });
+      }
+      if (p.fftFoamDecay != null) uFoamDecay.value = p.fftFoamDecay;
       if (p.fftSeed != null) rebuildSpectra(p.fftSeed | 0);
       else if (rebuild) rebuildSpectra(p.seed ?? 1337);
     },
 
     rebuildSpectra,
-    dispose() {},
+    dispose() {
+      for (const c of cascades) {
+        c.dispTex.dispose();
+        c.derivTex.dispose();
+      }
+    },
   };
+}
+
+/**
+ * Isolation test for the butterfly IFFT with our DC-at-index-0 spectrum layout
+ * (no permute pass). Inverse-transforms two known spectra and compares against
+ * the analytic spatial result. Dev-only — call from the lab via ?fftcheck=1.
+ * @returns {Promise<{pass: boolean, err1: number, err2: number}>}
+ */
+export async function validateOceanFFTGPU(renderer, N = 128) {
+  const LOG2N = Math.log2(N) | 0;
+  const COUNT = N * N;
+  const bfAttr = new THREE.StorageInstancedBufferAttribute(
+    new Float32Array(LOG2N * N * 4), 4,
+  );
+  fillButterfly(bfAttr.array, N);
+  const bfBuf = storage(bfAttr, "vec4", LOG2N * N);
+
+  async function ifftOf(fill) {
+    const field = instancedArray(COUNT, "vec2");
+    const scratch = instancedArray(COUNT, "vec2");
+    const steps = [];
+    for (let t = 0; t < LOG2N * 2; t++) {
+      const axis = t < LOG2N ? 0 : 1;
+      const s = axis === 0 ? t : t - LOG2N;
+      const src = t % 2 === 0 ? field : scratch;
+      const dst = t % 2 === 0 ? scratch : field;
+      steps.push(Fn(() => {
+        const id = instanceIndex;
+        const x = id.mod(uint(N));
+        const y = id.div(uint(N));
+        const line = axis === 0 ? x : y;
+        const data = bfBuf.element(uint(s * N).add(line));
+        const tw = vec2(data.x, data.y.negate());
+        const a = axis === 0
+          ? src.element(y.mul(N).add(uint(int(data.z))))
+          : src.element(uint(int(data.z)).mul(N).add(x));
+        const b = axis === 0
+          ? src.element(y.mul(N).add(uint(int(data.w))))
+          : src.element(uint(int(data.w)).mul(N).add(x));
+        dst.element(id).assign(a.add(cMul(tw, b)));
+      })().compute(COUNT));
+    }
+    fill(field.value.array);
+    field.value.needsUpdate = true;
+    for (const s of steps) await renderer.computeAsync(s);
+    return new Float32Array(await renderer.getArrayBufferAsync(field.value));
+  }
+
+  // Test 1: impulse at DC (0,0) -> constant (1, 0) everywhere.
+  const r1 = await ifftOf((a) => { a.fill(0); a[0] = 1; });
+  let err1 = 0;
+  for (let i = 0; i < COUNT; i++) {
+    err1 = Math.max(err1, Math.abs(r1[i * 2] - 1), Math.abs(r1[i * 2 + 1]));
+  }
+
+  // Test 2: impulse at k=(1,0) -> ( cos(2πx/N), sin(2πx/N) ).
+  const r2 = await ifftOf((a) => { a.fill(0); a[2] = 1; });
+  let err2 = 0;
+  for (let y = 0; y < N; y++) {
+    for (let x = 0; x < N; x++) {
+      const o = (y * N + x) * 2;
+      err2 = Math.max(
+        err2,
+        Math.abs(r2[o] - Math.cos((2 * Math.PI * x) / N)),
+        Math.abs(r2[o + 1] - Math.sin((2 * Math.PI * x) / N)),
+      );
+    }
+  }
+
+  return { pass: err1 < 1e-3 && err2 < 1e-3, err1, err2 };
 }

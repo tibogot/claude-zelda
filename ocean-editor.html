@@ -63,7 +63,7 @@
       import Stats from "stats-gl";
       import { createOceanShader, OCEAN_DEFAULTS } from "./ocean-shader.js";
       import { createOceanFFTSimulation, OCEAN_FFT_DEFAULTS, sampleOceanSurface } from "./ocean-fft.js";
-      import { createOceanFFTGPUSimulation, OCEAN_FFT_GPU_DEFAULTS } from "./ocean-fft-gpu.js";
+      import { createOceanFFTGPUSimulation, OCEAN_FFT_GPU_DEFAULTS, validateOceanFFTGPU } from "./ocean-fft-gpu.js";
       import { OceanBoatPhysics, DEFAULT_BOAT_HULL } from "./ocean-buoyancy.js";
       import {
         uniform as tUniform, float as tF, vec2 as tV2, positionWorld,
@@ -459,6 +459,8 @@
           ...structuredClone(OCEAN_DEFAULTS),
           /** GPU FFT compute rate (Hz) — decoupled from render fps. */
           fftUpdateHz: 30,
+          /** "zelda" (default 2-cascade) | "horvath" (Poseidon 3-cascade). */
+          spectrumMode: "zelda",
           // sky / light
           exposure: 0.95,
           sunAzimuth: 38,
@@ -560,6 +562,16 @@
           fog.density = params.fogDensity * (1 - uwT) + params.uwFogDensity * uwT;
           uwOverlay.style.background = params.uwTint;
           uwOverlay.style.opacity = (uwT * params.uwTintMax).toFixed(3);
+          // Backface culling: DoubleSide only matters when the surface can be
+          // seen from below. The margin keeps crests above sea level safe.
+          if (ocean) {
+            const wantSide = camera.position.y > SEA_LEVEL + 6
+              ? THREE.FrontSide : THREE.DoubleSide;
+            if (ocean.material.side !== wantSide) {
+              ocean.material.side = wantSide;
+              ocean.material.needsUpdate = true;
+            }
+          }
         }
 
         function applySky() {
@@ -830,6 +842,7 @@
               seed: params.seed,
               windAngleDeg: params.windAngleDeg,
               ...OCEAN_FFT_GPU_DEFAULTS,
+              spectrumMode: params.spectrumMode,
             });
             fftGpu.update(0); // bake frame 0 so the surface isn't flat before the first tick
           }
@@ -855,8 +868,97 @@
         rebuildWorld();
         syncUnderwater();
 
+        // Dev gate: ?fftcheck=1 — isolation-test the butterfly IFFT against
+        // analytic results (impulse spectra) and log the max error.
+        if (new URLSearchParams(location.search).has("fftcheck")) {
+          validateOceanFFTGPU(renderer).then(
+            (r) => console.log("[ocean] FFT validation:", r),
+            (e) => console.error("[ocean] FFT validation failed:", e),
+          );
+        }
+
+        // Dev handle for console-driven inspection (camera moves, param pokes).
+        // Not used by the lab itself.
+        window.__oceanLab = {
+          camera, controls, params, renderer, scene, syncOceanParams,
+          get ocean() { return ocean; },
+          get fftGpu() { return fftGpu; },
+        };
+
         // ── Tweakpane ─────────────────────────────────────────────────────────
         const pane = new Pane({ title: "Ocean Lab" });
+
+        // ── Look presets ──────────────────────────────────────────────────────
+        // "Poseidon open ocean" = the owenyuwono/poseidon repo look: Horvath
+        // 3-cascade spectrum (250/17/5 m), dark open-ocean body, teal crest SSS,
+        // full Schlick fresnel, accumulated foam, sun-glitter path. Switching
+        // recreates the FFT sim (cascade count changes the shader).
+        // NOTE: boat buoyancy has no CPU mirror in horvath mode — boat disabled.
+        const POSEIDON_LOOK = {
+          spectrumMode: "horvath",
+          // spectrum (repo params.js: local wind sea 16 m/s @ 45°, λ 1.3)
+          windSpeed: 16, windAngleDeg: 45, jonswapGamma: 3.3,
+          fftEnabled: true, fftSwellAmp: 1.0, fftRippleAmp: 1.0,
+          fftChoppiness: 1.3, fftNormalStrength: 0.9, fftFoamDecay: 0.4,
+          waveEnabled: false, gerstnerBlend: 0,
+          // water body. Repo's base = deep 0x071a26 mixed with 12% scatter
+          // teal (their `body` floor) — pre-mixed here since our ramp differs.
+          deepColor: "#0b2832", midColor: "#0e3340", shoreColor: "#2e8f8f",
+          highlightColor: "#9fb8cc",
+          depthAbsorb: 0.35, openOceanDepth: 60,
+          // Schlick-ish fresnel. Our shader ADDS the sky reflection (repo
+          // mixes), so cap below 1 or grazing water over-brightens.
+          fresnelExp: 5.0, fresnelMax: 0.85, fresnelSky: 0.05,
+          envReflectEnabled: true, envReflectIntensity: 0.85,
+          envRoughnessCalm: 0.02, envRoughnessRipple: 0.18,
+          // teal SSS on sunlit crests
+          sssEnabled: true, sssIntensity: 1.0, sssColor: "#2e8f8f",
+          // sun glitter path
+          glintColor: "#fff1dc", glintIntensity: 0.5, glintPower: 500,
+          // accumulated-Jacobian whitecaps. Repo mapping: foam ramps in from
+          // turb≈0.32 and saturates near 0 (saturate((0.4−turb)·2.5) →
+          // smoothstep(0.2,0.9)). Our ramp = [threshold−softness, threshold].
+          whitecapEnabled: true, whitecapIntensity: 0.85,
+          whitecapThreshold: 0.32, whitecapSoftness: 0.28,
+          whitecapContrast: 1.15, whitecapBrightness: 0.9,
+          whitecapProcThreshold: 0.22, whitecapProcSoftness: 0.3,
+          foamColor: "#dce7ea",
+          // big 250 m swells must stay visible far out
+          dispFadeStart: 300, dispFadeEnd: 3000,
+          // Repo uses a 0.44 m UNIFORM 900² mesh over 400 m — the stormy shape
+          // lives in the 17 m cascade and needs ≤4 m cells to exist
+          // geometrically. Densify the clipmap so chop survives to ~500 m
+          // (~10 rings ≈ 250k tris; this preset trades perf for the look).
+          levels: 7, gridM: 128, baseCell: 0.5, horizonScale: 6,
+          surfNormalStrength: 0.06,
+          horizonFadeEnabled: true, horizonUseSky: true,
+          // sun like the repo (azimuth 135, elevation 28) + its hazy distance fog
+          sunAzimuth: 135, sunElevation: 28,
+          fogDensity: 0.0012,
+          opacity: 1.0,
+          boatEnabled: false,
+        };
+        // Snapshot of the lab's tuned defaults for every key the preset touches,
+        // so "Zelda lagoon" restores the original look exactly.
+        const ZELDA_LOOK = Object.fromEntries(
+          Object.keys(POSEIDON_LOOK).map((k) => [k, structuredClone(params[k])]),
+        );
+
+        function applyLookPreset(preset) {
+          Object.assign(params, structuredClone(preset));
+          // Cascade count / spectrum change → rebuild sim + shader + clipmap.
+          if (fftGpu) { fftGpu.dispose(); fftGpu = null; }
+          rebuildWorld();
+          bakeSkyEnv(); // sun moved → re-bake env PMREM (reflections + glitter)
+          syncOceanParams();
+          pane.refresh();
+        }
+
+        const fLook = pane.addFolder({ title: "Look presets", expanded: true });
+        fLook.addButton({ title: "Zelda lagoon (default)" })
+          .on("click", () => applyLookPreset(ZELDA_LOOK));
+        fLook.addButton({ title: "Poseidon open ocean" })
+          .on("click", () => applyLookPreset(POSEIDON_LOOK));
 
         const fMap = pane.addFolder({ title: "Map" });
         fMap.addBinding(params, "preset", { options: Object.fromEntries(Object.keys(MAP_PRESETS).map((k) => [k, k])) })
@@ -918,6 +1020,7 @@
         fFFT.addBinding(params, "fftChoppiness", { min: 0.2, max: 2.5, step: 0.05 }).on("change", sync);
         fFFT.addBinding(params, "fftNormalStrength", { min: 0, max: 2.5, step: 0.05 }).on("change", sync);
         fFFT.addBinding(params, "fftSeed", { min: 1, max: 99999, step: 1 }).on("change", sync);
+        fFFT.addBinding(params, "fftFoamDecay", { min: 0.05, max: 2, step: 0.05, label: "foam decay" }).on("change", sync);
         fFFT.addBinding(params, "fftUpdateHz", { min: 5, max: 60, step: 5, label: "sim rate (hz)" });
 
         const fWhite = pane.addFolder({ title: "Whitecaps (Worley)", expanded: false });
