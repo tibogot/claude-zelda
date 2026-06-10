@@ -696,7 +696,12 @@ export class HybridGrassSystem {
     this._assignNodes(mat, u, { bufPos, bufA, bufB, bufC, compactBuf });
     this.material = mat;
 
-    this.mesh = new THREE.InstancedMesh(geom, mat, this.count);
+    // Plain Mesh, NOT InstancedMesh: the instance count comes from the
+    // GPU-written indirect buffer and all per-blade data lives in SSBOs
+    // (indexed by the instanceIndex builtin). InstancedMesh would allocate a
+    // count×64B identity instanceMatrix (~70 MB across all rings, GPU+CPU)
+    // and inject a useless per-vertex matrix fetch+multiply.
+    this.mesh = new THREE.Mesh(geom, mat);
     this.mesh.frustumCulled = false;
     this.mesh.castShadow = false;
     this.mesh.receiveShadow = gp.receiveShadow !== false;
