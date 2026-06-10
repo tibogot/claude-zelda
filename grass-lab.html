@@ -72,9 +72,8 @@
     <div id="help">
       <span>1</span> Gemini grass &bull; <span>2</span> Hybrid grass &bull;
       <span>0</span> none &bull; <span>WASD</span> move player &bull;
-      <span>Shift</span> sprint &bull; <span>[ ]</span> hybrid brightness &bull;
-      <span>I</span> interaction mode &bull; <span>T</span> terrain tint &bull;
-      drag to orbit
+      <span>Shift</span> sprint &bull; <span>I</span> interaction mode &bull;
+      <span>T</span> terrain tint &bull; drag to orbit
     </div>
 
     <script type="module">
@@ -87,7 +86,10 @@
       } from "three/tsl";
       import { OrbitControls } from "three/addons/controls/OrbitControls.js";
       import { GrassManager } from "./v2/render/foliage/grassManager.js";
-      import { HybridGrassSystem } from "./grass-lab-hybrid.js";
+      import {
+        HybridGrassSystem,
+        syncHybridGrassLod,
+      } from "./grass-lab-hybrid.js";
 
       // ════════════════════════════════════════════════════════════
       // Renderer / scene / camera
@@ -442,6 +444,7 @@
         terrainNormalTex: grassManager.terrainNormalTex,
         densityTex: grassManager.densityTex,
         windTex: grassManager.windTex,
+        specNoiseTex: grassManager.specNoiseTex,
         worldSize: WORLD_SIZE,
         gp: grassState,
         groundColorAtWorldXZ,
@@ -457,20 +460,39 @@
         }),
         new HybridGrassSystem({
           ...hybridShared,
+          // Gemini MID tier equivalent: thin crossed blades, full material,
+          // 40–88m — without it the thin-grass look ends too close.
+          name: "HybridMidThin",
+          tileSize: 180,
+          bladesPerSide: 384, // 147k ≈ 4.6/m² (Gemini MID density)
+          segments: 3,
+          innerR0: 36,
+          innerR1: 56,
+          outerR0: 70,
+          outerR1: 88,
+          crossFadeR0: 70,
+          crossFadeR1: 88,
+        }),
+        new HybridGrassSystem({
+          ...hybridShared,
           name: "HybridMid",
+          normalMode: "flat",
+          crossed: false,
           tileSize: 440,
-          bladesPerSide: 448, // 200k
+          bladesPerSide: 576, // 332k ≈ Gemini FAR density
           bladeWidth: 0.45,
           segments: 2,
           bladeHeightMul: 1.1,
-          innerR0: 36,
-          innerR1: 62,
+          innerR0: 64,
+          innerR1: 88,
           outerR0: 180,
           outerR1: 218,
         }),
         new HybridGrassSystem({
           ...hybridShared,
           name: "HybridFar",
+          normalMode: "flat",
+          crossed: false,
           tileSize: 800,
           bladesPerSide: 384, // 147k
           bladeWidth: 0.7,
@@ -486,30 +508,8 @@
         setEnabled: (on) => hybridRings.forEach((r) => r.setEnabled(on)),
         update: (anchor, cam) => hybridRings.forEach((r) => r.update(anchor, cam)),
       };
-      // Mirror the ACTUAL scene lights into the hybrid's manual rig so both
-      // systems render identical tones (standard material ≈ albedo/π · E).
-      // hybridLightMul is live-tunable with [ and ] to match Gemini by eye.
-      let hybridLightMul = 1.25;
-      const _sunLin = new THREE.Color(0xfff4e0).multiplyScalar(3.2 / Math.PI);
-      const _skyAmbLin = new THREE.Color(0xbcd8f0).multiplyScalar(1.4 / Math.PI);
-      const _groundAmbLin = new THREE.Color(0x56683f).multiplyScalar(1.4 / Math.PI);
-      function applyHybridLight() {
-        for (const ring of hybridRings) {
-          ring.u.uSunCol.value.copy(_sunLin).multiplyScalar(hybridLightMul);
-          ring.u.uSkyAmb.value.copy(_skyAmbLin).multiplyScalar(hybridLightMul);
-          ring.u.uGroundAmb.value
-            .copy(_groundAmbLin)
-            .multiplyScalar(hybridLightMul);
-        }
-      }
-      applyHybridLight();
-      window.addEventListener("keydown", (e) => {
-        if (e.code === "BracketLeft") hybridLightMul = Math.max(0.2, hybridLightMul * 0.95);
-        else if (e.code === "BracketRight") hybridLightMul = Math.min(4, hybridLightMul * 1.05);
-        else return;
-        applyHybridLight();
-        console.log(`[grass-lab] hybridLightMul = ${hybridLightMul.toFixed(3)}`);
-      });
+      // Hybrid now uses MeshStandardNodeMaterial like Gemini — both systems
+      // are lit by the same scene lights, so no manual calibration needed.
       for (const ring of hybridRings) {
         ring.setSunDir(sunDir);
         await ring.init(camera);
@@ -572,6 +572,7 @@
           grassManager.update(grassState, marker.position); // keeps hide path
         }
         if (hybrid && activeSystem === 2) {
+          syncHybridGrassLod(hybridRings, grassState);
           for (const ring of hybridRings) ring.syncFromState(grassState, sunDir);
           hybrid.update(marker.position, camera);
         }

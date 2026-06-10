@@ -92,6 +92,10 @@ import {
   loadFullPresetFromUrl,
 } from "../core/foliage/presetLoader.js";
 import { GrassManager } from "../render/foliage/grassManager.js";
+import {
+  HybridGrassSystem,
+  syncHybridGrassLod,
+} from "../render/hybridGrass/hybridGrassSystem.js";
 import { RevoGrassSystem } from "../render/revoGrass/revoGrassSystem.js";
 import { SnowSystem } from "../render/snow/snowSystem.js";
 import { GrassPaintSystem } from "../tools/foliage/grassPaintSystem.js";
@@ -1289,6 +1293,128 @@ export async function startV2App(opts = {}) {
   ).catch(() => {});
 
   const grassManager = new GrassManager({ scene, camera, config });
+
+  /** Hybrid GPU grass (toolState.grass.renderMode === "hybrid") — lazy:
+   *  ~600k instances + SSBOs allocate only on first switch to hybrid.
+   *  Same module as grass-lab.html; ring params proven there. Reads the
+   *  SAME densityTex / terrainNormalTex / heightTex as Gemini, so paint
+   *  tools, fill/clear and serialization work unchanged. */
+  let hybridGrassRings = null;
+  let _hybridGrassBuilding = false;
+  async function ensureHybridGrassBuilt() {
+    if (hybridGrassRings || _hybridGrassBuilding) return;
+    _hybridGrassBuilding = true;
+    try {
+      const shared = {
+        scene,
+        renderer,
+        heightTex: globalHeightTex,
+        terrainNormalTex: grassManager.terrainNormalTex,
+        densityTex: grassManager.densityTex,
+        windTex: grassManager.windTex,
+        specNoiseTex: grassManager.specNoiseTex,
+        worldSize: config.world.size,
+        gp: toolState.grass,
+        groundColorAtWorldXZ: sharedGroundBundle.groundColorAtWorldXZ,
+      };
+      const rings = [
+        new HybridGrassSystem({
+          ...shared,
+          name: "HybridNear",
+          tileSize: 130,
+          bladesPerSide: 512,
+          outerR0: 36,
+          outerR1: 62,
+        }),
+        new HybridGrassSystem({
+          ...shared,
+          // Gemini MID tier equivalent: thin crossed blades, full material,
+          // 40–88m — without it the thin-grass look ends too close.
+          name: "HybridMidThin",
+          tileSize: 180,
+          bladesPerSide: 384, // 147k ≈ 4.6/m² (Gemini MID density)
+          segments: 3,
+          innerR0: 36,
+          innerR1: 56,
+          outerR0: 70,
+          outerR1: 88,
+          crossFadeR0: 70,
+          crossFadeR1: 88,
+        }),
+        new HybridGrassSystem({
+          ...shared,
+          name: "HybridMid",
+          normalMode: "flat",
+          crossed: false,
+          tileSize: 440,
+          bladesPerSide: 576, // 332k ≈ Gemini FAR tier density (1.7/m²)
+          bladeWidth: 0.45,
+          segments: 2,
+          bladeHeightMul: 1.1,
+          innerR0: 64,
+          innerR1: 88,
+          outerR0: 180,
+          outerR1: 218,
+        }),
+        new HybridGrassSystem({
+          ...shared,
+          name: "HybridFar",
+          normalMode: "flat",
+          crossed: false,
+          tileSize: 800,
+          bladesPerSide: 384,
+          bladeWidth: 0.7,
+          segments: 1,
+          bladeHeightMul: 1.2,
+          innerR0: 175,
+          innerR1: 215,
+          outerR0: 360,
+          outerR1: 398,
+        }),
+        // Cliff grass rings — sample the cliff surface textures instead of
+        // terrain; enable-gated on grassManager._hasCliffData in the loop.
+        new HybridGrassSystem({
+          ...shared,
+          name: "HybridCliffNear",
+          tileSize: 130,
+          bladesPerSide: 384,
+          outerR0: 36,
+          outerR1: 62,
+          cliffMode: true,
+          cliffHeightTex: grassManager.cliffHeightTex,
+          cliffDensityTex: grassManager.cliffDensityTex,
+        }),
+        new HybridGrassSystem({
+          ...shared,
+          name: "HybridCliffMid",
+          normalMode: "flat",
+          crossed: false,
+          tileSize: 440,
+          bladesPerSide: 320,
+          bladeWidth: 0.45,
+          segments: 2,
+          bladeHeightMul: 1.1,
+          innerR0: 36,
+          innerR1: 62,
+          outerR0: 180,
+          outerR1: 218,
+          cliffMode: true,
+          cliffHeightTex: grassManager.cliffHeightTex,
+          cliffDensityTex: grassManager.cliffDensityTex,
+        }),
+      ];
+      for (const ring of rings) {
+        if (ring.group.name.startsWith("HybridCliff")) ring.isCliff = true;
+      }
+      for (const ring of rings) await ring.init(camera);
+      hybridGrassRings = rings;
+    } catch (err) {
+      console.error("[HybridGrass] build failed:", err);
+    } finally {
+      _hybridGrassBuilding = false;
+    }
+  }
+
   const revoGrassSystem = new RevoGrassSystem({ scene, config });
   const snowSystem = new SnowSystem({ scene, config });
   const grassPaintSystem = new GrassPaintSystem({
@@ -5643,10 +5769,39 @@ export async function startV2App(opts = {}) {
     if (grassManager.uniforms) {
       grassManager.uniforms.uPlayerPos.value.copy(focusPos);
     }
-    grassManager.update(
-      toolState.grass,
-      playMode.active ? playMode.playerPos : null,
-    );
+    const _gpGrass = toolState.grass;
+    const _hybridGrassOn =
+      _gpGrass.renderMode === "hybrid" && _gpGrass.enabled;
+    if (_hybridGrassOn) {
+      // Hybrid renderer active: hide Gemini's patch meshes without touching
+      // the persisted enabled flag (mutate-restore, zero alloc).
+      const _prevGrassEnabled = _gpGrass.enabled;
+      _gpGrass.enabled = false;
+      grassManager.update(
+        _gpGrass,
+        playMode.active ? playMode.playerPos : null,
+      );
+      _gpGrass.enabled = _prevGrassEnabled;
+      if (!hybridGrassRings) ensureHybridGrassBuilt(); // async, self-guarded
+    } else {
+      grassManager.update(
+        _gpGrass,
+        playMode.active ? playMode.playerPos : null,
+      );
+    }
+    if (hybridGrassRings) {
+      const _hybridSun = grassManager.uniforms?.uSunDir?.value ?? sunDir;
+      if (_hybridGrassOn) syncHybridGrassLod(hybridGrassRings, _gpGrass);
+      for (const ring of hybridGrassRings) {
+        const _ringOn =
+          _hybridGrassOn && (!ring.isCliff || grassManager._hasCliffData);
+        ring.setEnabled(_ringOn);
+        if (_ringOn) {
+          ring.syncFromState(_gpGrass, _hybridSun);
+          ring.update(focusPos, camera);
+        }
+      }
+    }
     if (toolState.revoGrass.enabled) {
       const afxWind = toolState.ambientFx;
       revoGrassSystem.setPlayWind({

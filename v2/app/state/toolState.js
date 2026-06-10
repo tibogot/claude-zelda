@@ -1536,6 +1536,10 @@ export function createToolState() {
       lodDebug: false,
       interactionRadius: 1.5,
       interactionStrength: 0.7,
+      // Renderer backend: "gemini" = patch meshes (default), "hybrid" =
+      // GPU-driven compute+indirect rings (proven in grass-lab.html, ~3× GPU)
+      renderMode: "gemini",
+      interactionMode: 0, // hybrid only: 0 = agitation, 1 = radial parting
       receiveShadow: true,
       terrainTintEnabled: false,
       terrainTintStrength: 0.5,
