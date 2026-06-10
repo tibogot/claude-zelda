@@ -445,12 +445,17 @@ export const V2_CONFIG = {
     maxSlots: 8,
     maxInstancesPerMesh: 4096,
   },
-  /** WebGPU TSL fog — same defaults as `splatmap-chunks.html` PARAMS.fog. */
+  /** WebGPU TSL fog. */
   fog: {
+    // Analytic half-space height fog (Crytek/Wenzel): density profile
+    // a·exp(−falloff·(y − height)) integrated along the camera→fragment ray.
+    // `density` = extinction/m at the base height; `falloff` = 1/m vertical
+    // decay (≈ 1/falloff m layer thickness).
     height: {
       enabled: false,
       color: "#a8c4e0",
-      density: 0.05,
+      density: 0.015,
+      falloff: 0.05,
       height: 30.0,
     },
     distance: {

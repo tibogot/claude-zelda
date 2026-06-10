@@ -15,7 +15,8 @@ import {
   mix,
   clamp,
   fog,
-  exponentialHeightFogFactor,
+  length,
+  select,
   densityFogFactor,
   attribute,
 } from "three/tsl";
@@ -477,6 +478,7 @@ export async function startV2App(opts = {}) {
     new THREE.Color(F.height.color).convertSRGBToLinear(),
   );
   const uHFogDensity = uniform(F.height.density);
+  const uHFogFalloff = uniform(F.height.falloff ?? 0.05);
   const uHFogHeight = uniform(F.height.height);
   const uDFogEnabled = uniform(F.distance.enabled ? 1 : 0);
   // Distance-fog "away" color (the color seen perpendicular to / away from the
@@ -492,9 +494,33 @@ export async function startV2App(opts = {}) {
   const uDFogTintPow = uniform(F.distance.tintPow ?? 2.0);
   const uDFogSunStrength = uniform(0); // fades the warm tint out at night
   const uDFogDensity = uniform(F.distance.density);
-  const _hFactor = exponentialHeightFogFactor(uHFogDensity, uHFogHeight).mul(
-    uHFogEnabled,
+  // Analytic half-space height fog (Crytek/Wenzel) — replaces three's
+  // exponentialHeightFogFactor, whose (density·depth·viewZ)² exponent made the
+  // sliders hyper-sensitive and ignored the camera height / ray path. Here the
+  // exponential density profile a·exp(−b·(y − base)) is integrated along the
+  // camera→fragment ray: τ = a·exp(−b·(camY−base))·dist·g(k), k = b·dist·rayY,
+  // g(k) = (1−e⁻ᵏ)/k. Correct inside, above, and through the layer; soft top.
+  const _hfVec = positionWorld.sub(cameraPosition);
+  const _hfDist = length(_hfVec);
+  const _hfRayY = _hfVec.y.div(_hfDist.max(1e-4));
+  const _hfK = uHFogFalloff.mul(_hfDist).mul(_hfRayY);
+  // g(k) → 1 as k → 0 (horizontal rays); the inner select keeps the divisor
+  // non-zero so neither branch can NaN (WGSL select evaluates both sides).
+  const _hfFlat = _hfK.abs().lessThan(1e-4);
+  const _hfG = select(
+    _hfFlat,
+    float(1),
+    _hfK.negate().exp().oneMinus().div(select(_hfFlat, float(1), _hfK)),
   );
+  // Camera-height term, exponent clamped so a camera far below the base
+  // height can't overflow f32 exp() to inf (factor just saturates to 1).
+  const _hfCamTerm = uHFogFalloff
+    .mul(cameraPosition.y.sub(uHFogHeight))
+    .negate()
+    .min(50)
+    .exp();
+  const _hfTau = uHFogDensity.mul(_hfCamTerm).mul(_hfDist).mul(_hfG);
+  const _hFactor = _hfTau.negate().exp().oneMinus().mul(uHFogEnabled);
   const _dFactor = densityFogFactor(uDFogDensity).mul(uDFogEnabled);
   const interiorRegistry = new InteriorVolumeRegistry();
   const interiorNodes = createInteriorLightingNodes(interiorRegistry);
@@ -527,6 +553,7 @@ export async function startV2App(opts = {}) {
     uHFogEnabled.value = F.height.enabled ? 1 : 0;
     uHFogColor.value.set(F.height.color).convertSRGBToLinear();
     uHFogDensity.value = F.height.density;
+    uHFogFalloff.value = F.height.falloff ?? 0.05;
     uHFogHeight.value = F.height.height;
     uDFogEnabled.value = F.distance.enabled ? 1 : 0;
     uDFogColor.value.set(F.distance.color).convertSRGBToLinear();
