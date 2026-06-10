@@ -11,6 +11,11 @@
 import * as THREE from "three";
 
 const MAX_LEAVES_PER_CHUNK = 65536;
+// Expand the chunk cull AABB so canopies overhanging the chunk edge don't pop.
+const CULL_MARGIN = 12;
+// LOD hysteresis band (±10%) so chunks sitting on a tier boundary can't flip
+// tiers every frame while the orbit camera damps.
+const LOD_HYST = 0.1;
 
 export class FoliageLodRenderer {
   constructor(scene, config) {
@@ -221,7 +226,9 @@ export class FoliageLodRenderer {
       }
     }
 
-    entry = { gen, slots: new Map() };
+    // Carry the LOD tier across rebuilds so painting into a chunk doesn't
+    // reset its hysteresis state (-1 = unset, pick fresh from raw thresholds).
+    entry = { gen, slots: new Map(), tier: entry ? entry.tier : -1 };
 
     const slotsInChunk = new Set();
     for (const t of trees) slotsInChunk.add(t.slotIdx);
@@ -256,6 +263,7 @@ export class FoliageLodRenderer {
     const lod0D = lodCfg.lod0Distance ?? 80;
     const lod1D = lodCfg.lod1Distance ?? 200;
     const fadeD = lodCfg.fadeOutDistance ?? 600;
+    const th = [lod0D, lod1D, fadeD];
 
     const activeChunks = new Set();
 
@@ -268,8 +276,8 @@ export class FoliageLodRenderer {
       const cz = +key.substring(sep + 1);
       const minX = -half + cx * chunkSize;
       const minZ = -half + cz * chunkSize;
-      this._box.min.set(minX, -100, minZ);
-      this._box.max.set(minX + chunkSize, 600, minZ + chunkSize);
+      this._box.min.set(minX - CULL_MARGIN, -100, minZ - CULL_MARGIN);
+      this._box.max.set(minX + chunkSize + CULL_MARGIN, 600, minZ + chunkSize + CULL_MARGIN);
 
       if (!this._frustum.intersectsBox(this._box)) {
         const entry = this._chunkMeshes.get(key);
@@ -292,24 +300,21 @@ export class FoliageLodRenderer {
       const dz = chunkCZ - camZ;
       const dist = Math.sqrt(dx * dx + dz * dz);
 
+      // Tier with hysteresis: 0=lod0, 1=lod1, 2=lod2, 3=hidden.
+      // Demote (further tier) past threshold*(1+H); promote back under *(1-H).
+      let tier = entry.tier;
+      if (tier < 0) {
+        tier = dist > fadeD ? 3 : dist > lod1D ? 2 : dist > lod0D ? 1 : 0;
+      } else {
+        while (tier < 3 && dist > th[tier] * (1 + LOD_HYST)) tier++;
+        while (tier > 0 && dist < th[tier - 1] * (1 - LOD_HYST)) tier--;
+      }
+      entry.tier = tier;
+
       for (const [, se] of entry.slots) {
-        if (dist > fadeD) {
-          if (se.lod0) se.lod0.visible = false;
-          if (se.lod1) se.lod1.visible = false;
-          if (se.lod2) se.lod2.visible = false;
-        } else if (dist > lod1D) {
-          if (se.lod0) se.lod0.visible = false;
-          if (se.lod1) se.lod1.visible = false;
-          if (se.lod2) se.lod2.visible = true;
-        } else if (dist > lod0D) {
-          if (se.lod0) se.lod0.visible = false;
-          if (se.lod1) se.lod1.visible = true;
-          if (se.lod2) se.lod2.visible = false;
-        } else {
-          if (se.lod0) se.lod0.visible = true;
-          if (se.lod1) se.lod1.visible = false;
-          if (se.lod2) se.lod2.visible = false;
-        }
+        if (se.lod0) se.lod0.visible = tier === 0;
+        if (se.lod1) se.lod1.visible = tier === 1;
+        if (se.lod2) se.lod2.visible = tier === 2;
       }
     }
 

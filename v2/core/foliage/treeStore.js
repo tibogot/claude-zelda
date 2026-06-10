@@ -32,6 +32,11 @@ export class TreeStore {
     return this._gen.get(key) ?? 0;
   }
 
+  /** Store-wide generation — bumped on any mutation. Lets renderers early-out when nothing changed. */
+  get globalGen() {
+    return this._globalGen;
+  }
+
   addTree(wx, wz, y, rotY, scale, slotIdx) {
     const { cx, cz } = worldToChunkIndex(wx, wz, this.config);
     const key = chunkKey(cx, cz);

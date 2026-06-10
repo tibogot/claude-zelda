@@ -26,7 +26,9 @@ export class TerrainMesher {
     const mesh = new THREE.Mesh(geometry, material);
     mesh.receiveShadow = true;
     mesh.castShadow = false;
-    mesh.frustumCulled = false;
+    // Bounding spheres are recomputed on every rebuild/remesh (incl. skirt
+    // verts), so per-chunk frustum culling is safe and cuts off-screen draws.
+    mesh.frustumCulled = true;
     mesh.userData.chunk = { cx, cz, segments };
     installTerrainSkirtSafeRaycast(mesh);
     mesh.position.set(
