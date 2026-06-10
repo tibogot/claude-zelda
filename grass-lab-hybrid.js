@@ -596,9 +596,11 @@ export class HybridGrassSystem {
         .mul(shadeRand)
         .mul(ao);
 
-      // ── Manual lighting: half-lambert sun + hemisphere ambient ──
-      const ndl = dot(N, u.uSunDir).mul(0.5).add(0.5);
-      const sunTerm = u.uSunCol.mul(ndl.mul(ndl));
+      // ── Manual lighting: plain lambert sun + hemisphere ambient ──
+      // (matches MeshStandardNodeMaterial's diffuse response so the hybrid
+      // renders the same tones as Gemini under the same scene lights)
+      const ndl = max(dot(N, u.uSunDir), float(0));
+      const sunTerm = u.uSunCol.mul(ndl);
       const hemiT = N.y.mul(0.5).add(0.5);
       const ambient = mix(u.uGroundAmb, u.uSkyAmb, hemiT);
 

@@ -61,7 +61,8 @@
           "three": "https://cdn.jsdelivr.net/npm/three@0.183.1/build/three.webgpu.js",
           "three/webgpu": "https://cdn.jsdelivr.net/npm/three@0.183.1/build/three.webgpu.js",
           "three/tsl": "https://cdn.jsdelivr.net/npm/three@0.183.1/build/three.tsl.js",
-          "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.183.1/examples/jsm/"
+          "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.183.1/examples/jsm/",
+          "stats-gl": "https://cdn.jsdelivr.net/npm/stats-gl/dist/main.js"
         }
       }
     </script>
@@ -71,11 +72,13 @@
     <div id="help">
       <span>1</span> Gemini grass &bull; <span>2</span> Hybrid grass &bull;
       <span>0</span> none &bull; <span>WASD</span> move player &bull;
-      <span>Shift</span> sprint &bull; drag to orbit
+      <span>Shift</span> sprint &bull; <span>[ ]</span> hybrid brightness &bull;
+      drag to orbit
     </div>
 
     <script type="module">
       import * as THREE from "three";
+      import Stats from "stats-gl";
       import { OrbitControls } from "three/addons/controls/OrbitControls.js";
       import { GrassManager } from "./v2/render/foliage/grassManager.js";
       import { HybridGrassSystem } from "./grass-lab-hybrid.js";
@@ -92,6 +95,24 @@
       renderer.toneMapping = THREE.ACESFilmicToneMapping;
       renderer.toneMappingExposure = 1.0;
       document.body.appendChild(renderer.domElement);
+
+      // FPS / CPU / GPU stats overlay — same rig as v2/editor (stats-gl reads
+      // real WebGPU timestamps; DRAW/KTRI panels read renderer.info).
+      const stats = new Stats({ trackGPU: true, trackCPT: true });
+      await stats.init(renderer);
+      stats.dom.style.top = "auto";
+      stats.dom.style.bottom = "44px";
+      stats.dom.style.left = "8px";
+      stats.dom.style.height = "48px";
+      document.body.appendChild(stats.dom);
+      const drawPanel = stats.addPanel(new Stats.Panel("DRAW", "#f0f", "#202"));
+      const triPanel = stats.addPanel(new Stats.Panel("KTRI", "#f90", "#210"));
+      let _statMaxDraw = 1;
+      let _statMaxTri = 1;
+      // Manual once-per-frame reset (top of tick) so totals cover the whole
+      // frame even with multiple passes — same convention as v2/editor.
+      renderer.info.autoReset = false;
+
       await renderer.init();
 
       const scene = new THREE.Scene();
@@ -445,6 +466,30 @@
         setEnabled: (on) => hybridRings.forEach((r) => r.setEnabled(on)),
         update: (anchor, cam) => hybridRings.forEach((r) => r.update(anchor, cam)),
       };
+      // Mirror the ACTUAL scene lights into the hybrid's manual rig so both
+      // systems render identical tones (standard material ≈ albedo/π · E).
+      // hybridLightMul is live-tunable with [ and ] to match Gemini by eye.
+      let hybridLightMul = 1.25;
+      const _sunLin = new THREE.Color(0xfff4e0).multiplyScalar(3.2 / Math.PI);
+      const _skyAmbLin = new THREE.Color(0xbcd8f0).multiplyScalar(1.4 / Math.PI);
+      const _groundAmbLin = new THREE.Color(0x56683f).multiplyScalar(1.4 / Math.PI);
+      function applyHybridLight() {
+        for (const ring of hybridRings) {
+          ring.u.uSunCol.value.copy(_sunLin).multiplyScalar(hybridLightMul);
+          ring.u.uSkyAmb.value.copy(_skyAmbLin).multiplyScalar(hybridLightMul);
+          ring.u.uGroundAmb.value
+            .copy(_groundAmbLin)
+            .multiplyScalar(hybridLightMul);
+        }
+      }
+      applyHybridLight();
+      window.addEventListener("keydown", (e) => {
+        if (e.code === "BracketLeft") hybridLightMul = Math.max(0.2, hybridLightMul * 0.95);
+        else if (e.code === "BracketRight") hybridLightMul = Math.min(4, hybridLightMul * 1.05);
+        else return;
+        applyHybridLight();
+        console.log(`[grass-lab] hybridLightMul = ${hybridLightMul.toFixed(3)}`);
+      });
       for (const ring of hybridRings) {
         ring.setSunDir(sunDir);
         await ring.init(camera);
@@ -479,6 +524,7 @@
 
       const timer = new THREE.Timer();
       function tick() {
+        renderer.info.reset();
         timer.update();
         const dt = Math.min(timer.getDelta(), 0.05);
         updatePlayer(dt);
@@ -496,22 +542,31 @@
 
         renderer.render(scene, camera);
 
+        // Drain GPU timestamp pools every frame (feeds stats-gl's GPU/CPT
+        // panels AND our HUD readings). Fire-and-forget, like v2/editor.
+        renderer.resolveTimestampsAsync(THREE.TimestampQuery.RENDER);
+        renderer.resolveTimestampsAsync(THREE.TimestampQuery.COMPUTE);
+
+        // Custom counter panels (why-is-it-slow companions to the timings)
+        const ri = renderer.info.render;
+        const statDraws = ri.drawCalls ?? ri.calls ?? 0;
+        const statKtris = (ri.triangles ?? 0) / 1000;
+        _statMaxDraw = Math.max(_statMaxDraw, statDraws);
+        _statMaxTri = Math.max(_statMaxTri, statKtris);
+        drawPanel.update(statDraws, _statMaxDraw, 0);
+        drawPanel.updateGraph(statDraws, _statMaxDraw);
+        triPanel.update(statKtris, _statMaxTri, 0);
+        triPanel.updateGraph(statKtris, _statMaxTri);
+        stats.update();
+
         frames++;
         const now = performance.now();
         if (now - hudT > 500) {
           fps = (frames * 1000) / (now - hudT);
           frames = 0;
           hudT = now;
-          // Resolve GPU timestamps (vsync/throttle-independent ground truth)
-          Promise.all([
-            renderer.resolveTimestampsAsync(THREE.TimestampQuery.RENDER),
-            renderer.resolveTimestampsAsync(THREE.TimestampQuery.COMPUTE),
-          ])
-            .then(() => {
-              gpuRenderMs = renderer.info.render.timestamp ?? 0;
-              gpuComputeMs = renderer.info.compute.timestamp ?? 0;
-            })
-            .catch(() => {});
+          gpuRenderMs = renderer.info.render.timestamp ?? 0;
+          gpuComputeMs = renderer.info.compute.timestamp ?? 0;
           const info = renderer.info;
           const calls = info?.render?.drawCalls ?? info?.render?.calls ?? "—";
           const tris = info?.render?.triangles ?? "—";
@@ -525,6 +580,9 @@
         }
         requestAnimationFrame(tick);
       }
+
+      // Scripted-test handles (automation / debugging)
+      window.__lab = { camera, controls, marker, grassState, renderer, hybridRings };
 
       await grassManager.precompile(renderer, camera);
       tick();
