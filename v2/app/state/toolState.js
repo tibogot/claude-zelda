@@ -1482,8 +1482,8 @@ export function createToolState() {
       clumpScale: 1.5,
       clumpStrength: 0.7,
       crossed: true,
-      bladeColor: "#0e300e",
-      tipColor: "#004d05",
+      bladeColor: "#2f6b1a", // grass-lab calibrated (was #0e300e — too dark, gradient barely read)
+      tipColor: "#8cc63f", //  grass-lab calibrated (was #004d05)
       skyBlend: 0.8,
       cylindrical: 0.3,
       viewThicken: 0.45,
