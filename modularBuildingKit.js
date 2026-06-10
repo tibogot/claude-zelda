@@ -173,7 +173,7 @@ export const MODULE_CATALOG = [
   {
     id: "roof_tile",
     label: "Tile roof",
-    hint: "Pantile waves",
+    hint: "Barrel tiles",
     category: "cap",
     swatch: "#c06030",
     build: buildRoofTile,
@@ -324,7 +324,7 @@ function buildRoofGable() {
   return g;
 }
 
-/** Pantile roof — open half-cylinder barrels across X, courses step in Z. */
+/** Barrel-tile roof — thick half-cylinders lying flat, barrel along X, overlapping courses along Z. */
 function buildRoofTile() {
   const g = new THREE.Group();
   g.name = "mod_roof_tile";
@@ -332,33 +332,55 @@ function buildRoofTile() {
 
   const tileMat = mat("terracotta", 0xe06830, { roughness: 0.9 });
 
-  const waveCount = 8;
-  const radius = MOD / (2 * waveCount);
-  const tileDepth = 0.5;
-  const courseStepZ = tileDepth * 0.62;
-  const courseCount = Math.ceil(MOD / courseStepZ);
-  const courseLiftY = 0.018;
+  const radius = 0.17;
+  const tileWidthZ = radius * 2;
+  const tileRunX = 0.58;
+  const tileGapX = 0.03;
+  const courseStepZ = tileWidthZ * 0.48;
+  const courseLiftY = radius * 0.32;
 
-  /** Open half-cylinder shell (no end caps → less z-fighting between courses). */
-  function halfPipeGeometry(r, depth) {
-    const geo = new THREE.CylinderGeometry(r, r, depth, 28, 1, true, 0, Math.PI);
-    geo.rotateX(-Math.PI / 2);
-    geo.translate(0, r, 0);
+  /**
+   * Solid semicircle extruded along X — flat side down, dome up, open barrel ends.
+   * (No circular end caps like a closed pipe; ends are the natural semicircle cut faces.)
+   */
+  function barrelTileGeometry(r, runX) {
+    const shape = new THREE.Shape();
+    shape.moveTo(-r, 0);
+    shape.absarc(0, 0, r, Math.PI, 0, true);
+    shape.lineTo(-r, 0);
+
+    const geo = new THREE.ExtrudeGeometry(shape, {
+      depth: runX,
+      bevelEnabled: false,
+      curveSegments: 22,
+    });
+    geo.rotateY(-Math.PI / 2);
+    geo.translate(-runX * 0.5, 0, 0);
     return geo;
   }
 
-  const tileGeo = halfPipeGeometry(radius, tileDepth);
+  const tileGeo = barrelTileGeometry(radius, tileRunX);
   const parts = [];
-  const startX = -MOD * 0.5 + radius;
 
-  for (let iz = 0; iz < courseCount; iz++) {
-    for (let ix = 0; ix < waveCount; ix++) {
+  const tilesPerCourse = Math.max(1, Math.ceil((MOD + tileGapX) / (tileRunX + tileGapX)));
+  const xSpan = tilesPerCourse * tileRunX + (tilesPerCourse - 1) * tileGapX;
+  const xStart = -xSpan * 0.5 + tileRunX * 0.5;
+  const courseCount = Math.ceil((MOD + tileWidthZ * 0.2) / courseStepZ);
+  const zStart = -MOD * 0.5 + radius;
+
+  for (let row = 0; row < courseCount; row++) {
+    const stagger = (row & 1) * (tileRunX + tileGapX) * 0.5;
+    const cols = tilesPerCourse + (row & 1);
+    for (let col = 0; col < cols; col++) {
+      const x = xStart + stagger + col * (tileRunX + tileGapX);
+      if (x + tileRunX * 0.5 < -MOD * 0.5 - 0.02 || x - tileRunX * 0.5 > MOD * 0.5 + 0.02) {
+        continue;
+      }
+      const z = zStart + row * courseStepZ;
+      if (z - radius > MOD * 0.5 + 0.02) continue;
+
       const tile = new THREE.Mesh(tileGeo, tileMat);
-      tile.position.set(
-        startX + ix * radius * 2,
-        base + iz * courseLiftY,
-        -MOD * 0.5 + tileDepth * 0.5 + iz * courseStepZ,
-      );
+      tile.position.set(x, base + row * courseLiftY, z);
       parts.push(tile);
     }
   }
