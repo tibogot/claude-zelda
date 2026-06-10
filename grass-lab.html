@@ -73,12 +73,18 @@
       <span>1</span> Gemini grass &bull; <span>2</span> Hybrid grass &bull;
       <span>0</span> none &bull; <span>WASD</span> move player &bull;
       <span>Shift</span> sprint &bull; <span>[ ]</span> hybrid brightness &bull;
+      <span>I</span> interaction mode &bull; <span>T</span> terrain tint &bull;
       drag to orbit
     </div>
 
     <script type="module">
       import * as THREE from "three";
       import Stats from "stats-gl";
+      import {
+        texture as tslTexture,
+        vec3 as tslVec3,
+        mix as tslMix,
+      } from "three/tsl";
       import { OrbitControls } from "three/addons/controls/OrbitControls.js";
       import { GrassManager } from "./v2/render/foliage/grassManager.js";
       import { HybridGrassSystem } from "./grass-lab-hybrid.js";
@@ -390,6 +396,8 @@
         lodDebug: false,
         interactionRadius: 1.5,
         interactionStrength: 0.7,
+        interactionMode: 0, // hybrid only: 0 = agitation (preferred), 1 = radial parting
+
         receiveShadow: false,
         terrainTintEnabled: false,
         terrainTintStrength: 0.5,
@@ -416,6 +424,17 @@
       // Three concentric rings ≈ Gemini's HIGH / FAR / MEGA coverage:
       //   near 0–62m dense, mid 36–218m wider blades, far 175–400m fat blades
       // ════════════════════════════════════════════════════════════
+      // Procedural ground color for the tint's "proc" mode — low-freq patches
+      // from the wind texture (stand-in for v2's splatmap ground bundle).
+      const groundColorAtWorldXZ = (xz) => {
+        const n = tslTexture(grassManager.windTex, xz.mul(0.004)).y;
+        return tslMix(
+          tslVec3(0.05, 0.1, 0.03), // deep green
+          tslVec3(0.16, 0.14, 0.06), // dry brown
+          n,
+        );
+      };
+
       const hybridShared = {
         scene,
         renderer,
@@ -425,6 +444,7 @@
         windTex: grassManager.windTex,
         worldSize: WORLD_SIZE,
         gp: grassState,
+        groundColorAtWorldXZ,
       };
       const hybridRings = [
         new HybridGrassSystem({
@@ -505,7 +525,19 @@
         if (e.code === "Digit1") activeSystem = 1;
         else if (e.code === "Digit2") activeSystem = 2;
         else if (e.code === "Digit0") activeSystem = 0;
-        else return;
+        else if (e.code === "KeyI") {
+          grassState.interactionMode = grassState.interactionMode ? 0 : 1;
+          console.log(
+            `[grass-lab] interactionMode = ${grassState.interactionMode ? "radial parting (Gemini-style)" : "agitation"}`,
+          );
+          return;
+        } else if (e.code === "KeyT") {
+          grassState.terrainTintEnabled = !grassState.terrainTintEnabled;
+          console.log(
+            `[grass-lab] terrainTint = ${grassState.terrainTintEnabled ? "ON (proc)" : "off"}`,
+          );
+          return;
+        } else return;
         applySystem();
       });
       applySystem();
@@ -530,13 +562,17 @@
         updatePlayer(dt);
         controls.update();
 
+        // Live param sync each frame — edit __lab.grassState in the console
+        // and BOTH systems react, exactly like v2's editor controls will.
         if (activeSystem === 1) {
+          grassManager.syncUniforms(grassState, sunDir);
           grassManager.uniforms.uPlayerPos.value.copy(marker.position);
           grassManager.update(grassState, marker.position);
         } else {
           grassManager.update(grassState, marker.position); // keeps hide path
         }
         if (hybrid && activeSystem === 2) {
+          for (const ring of hybridRings) ring.syncFromState(grassState, sunDir);
           hybrid.update(marker.position, camera);
         }
 

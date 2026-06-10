@@ -131,6 +131,8 @@ export class HybridGrassSystem {
     outerR1 = null,
     pMin = 0,
     name = "HybridGrass",
+    groundColorAtWorldXZ = null, // TSL fn (xz)=>vec3 — terrain tint "proc" mode
+    tintTex = null, //              texture — terrain tint "img" mode
   }) {
     this.renderer = renderer;
     this.group = new THREE.Group();
@@ -199,11 +201,29 @@ export class HybridGrassSystem {
       uSunCol: uniform(srgb("#fff4e0").multiplyScalar(2.1)),
       uSkyAmb: uniform(srgb("#bcd8f0").multiplyScalar(0.85)),
       uGroundAmb: uniform(srgb("#56683f").multiplyScalar(0.55)),
-      // interaction
+      // slope rejection (terrain normal .y window, like Gemini)
+      uSlopeEnabled: uniform(gp.slopeEnabled ? 1 : 0),
+      uSlopeMin: uniform(gp.slopeMin ?? 0.65),
+      uSlopeMax: uniform(gp.slopeMax ?? 0.85),
+      // terrain tint (Gemini: 0 off / 1 proc / 2 img)
+      uTerrainTintMode: uniform(0),
+      uTerrainTintStrength: uniform(gp.terrainTintStrength ?? 0.5),
+      uTerrainTintRootBias: uniform(gp.terrainTintRootBias ?? 0.35),
+      // interaction — mode 0 = agitation (bend along own yaw),
+      //               mode 1 = radial parting (Gemini Rodrigues feel)
       uPlayerPos: uniform(new THREE.Vector3()),
       uInteractionRadius: uniform(gp.interactionRadius ?? 1.5),
       uInteractionStrength: uniform(gp.interactionStrength ?? 0.7),
+      uInteractionMode: uniform(gp.interactionMode ?? 0),
     });
+    this._bladeHeightMul = bladeHeightMul;
+    this._groundColorAtWorldXZ = groundColorAtWorldXZ ?? ((_xz) => vec3(1, 1, 1));
+    if (!tintTex) {
+      const d = new Uint8Array([255, 255, 255, 255]);
+      tintTex = new THREE.DataTexture(d, 1, 1, THREE.RGBAFormat);
+      tintTex.needsUpdate = true;
+    }
+    this._tintTex = tintTex;
 
     // ── Geometry (needed before compaction buffers for indexCount) ──
     const segs = Math.max(1, Math.round(segments ?? gp.bladeYSegments ?? 7));
@@ -322,7 +342,16 @@ export class HybridGrassSystem {
         u.uOuterR1.mul(u.uOuterR1),
         distSqA,
       );
-      const pKeep = pIn.mul(mix(float(1), u.uPMin, tOut));
+      // Slope rejection: Gemini fades blades on steep terrain (normal.y below
+      // the slopeMin..slopeMax window). Compaction needs a binary keep, so the
+      // fade becomes a keep-probability — same look, stochastic thinning.
+      const slopeProb = mix(
+        float(1),
+        smoothstep(u.uSlopeMin, u.uSlopeMax, tN.y),
+        u.uSlopeEnabled,
+      );
+
+      const pKeep = pIn.mul(mix(float(1), u.uPMin, tOut)).mul(slopeProb);
       const stochasticKeep = step(hash(instanceIndex.add(31337)), pKeep);
       const frustumVis = computeFrustumVisibility(
         worldPos,
@@ -416,13 +445,21 @@ export class HybridGrassSystem {
           .mul(u.uWindStrength)
           .mul(room.div(u.uMaxAngle));
 
-        // ── Player interaction: push blades away (flatten toward player dir) ──
+        // ── Player interaction ──
+        // mode 0 "agitation": force added to the blade's own-yaw bend.
+        // mode 1 "radial parting": world-space push vector away from the
+        // player, applied as a tilt in the VS — Gemini's Rodrigues feel,
+        // computed once per blade instead of per vertex.
         const toBlade = worldXZ.sub(vec2(u.uPlayerPos.x, u.uPlayerPos.z));
         const pDist = length(toBlade);
         const pFall = float(1).sub(
           smoothstep(float(0.5), u.uInteractionRadius, pDist),
         );
-        const pushForce = pFall.mul(u.uInteractionStrength).mul(1.4);
+        const pushAmt = pFall.mul(u.uInteractionStrength);
+        const pushForce = pushAmt
+          .mul(1.4)
+          .mul(float(1).sub(u.uInteractionMode));
+        const pushDirW = toBlade.div(max(pDist, float(0.001)));
 
         // ── Gemini-style scalar bend force, temporally smoothed ──
         // Bend happens along the blade's own yaw (rotated in the VS), exactly
@@ -440,14 +477,15 @@ export class HybridGrassSystem {
         const newZRoll = prevZRoll.add(targetZRoll.sub(prevZRoll).mul(kF));
         p.w.assign(newZRoll);
 
-        a.x.assign(float(1));
+        // a.x / b.w carry the radial push vector (zero in agitation mode)
+        a.x.assign(pushDirW.x.mul(pushAmt).mul(u.uInteractionMode));
         a.y.assign(newForce);
         a.z.assign(newZRoll);
 
         b.x.assign(bladeH);
         b.y.assign(yaw);
         b.z.assign(clumpShade);
-        b.w.assign(mix(float(0.75), float(1.0), h1));
+        b.w.assign(pushDirW.y.mul(pushAmt).mul(u.uInteractionMode));
 
         c.x.assign(h4);
         c.y.assign(h5);
@@ -508,7 +546,9 @@ export class HybridGrassSystem {
       const bladeH = b.x;
       const yaw = b.y;
 
-      vData.assign(vec4(b.z, b.w, c.x, c.y));
+      // shadeRand recomputed from hash — its old slot (b.w) carries push Z
+      const shadeRand = mix(float(0.75), float(1.0), hash(bladeIdx.add(8521)));
+      vData.assign(vec4(b.z, shadeRand, c.x, c.y));
 
       // Gemini bend: arc along local X, whole blade (incl. cross ribbon at
       // +90°) rotated by yaw. FrontSide culling makes the field read coherent.
@@ -544,7 +584,21 @@ export class HybridGrassSystem {
         arcZ.add(positionLocal.z),
       );
       const pRot = rotY(crossedYaw, pArc);
-      const pYaw = vec3(pRot.x.add(swayX), pRot.y, pRot.z.add(swayZ));
+
+      // Radial parting (interaction mode 1): world-space tilt away from the
+      // player, tip-weighted, with a slight press-down so blades read as
+      // rotated rather than sheared. Zero vector in agitation mode.
+      const pushX = a.x;
+      const pushZ = b.w;
+      const pushMag = abs(pushX).add(abs(pushZ));
+      const pressDown = float(1).sub(
+        clamp(pushMag.mul(h).mul(0.45), float(0), float(0.55)),
+      );
+      const pYaw = vec3(
+        pRot.x.add(swayX).add(pushX.mul(hh).mul(1.3)),
+        pRot.y.mul(pressDown),
+        pRot.z.add(swayZ).add(pushZ.mul(hh).mul(1.3)),
+      );
 
       // Normal: flat blade normal fanned cylindrically, blended to terrain
       const spread = uv()
@@ -591,7 +645,38 @@ export class HybridGrassSystem {
         float(1.0).sub(hPct).mul(0.5).add(0.5),
       );
       const dryCol = mix(satCol, u.uCvDryCol, dryBlend);
-      const albedo = mix(baseCol, dryCol, u.uColorVar)
+      const variedCol = mix(baseCol, dryCol, u.uColorVar);
+
+      // ── Terrain tint (Gemini): match grass to ground hue without
+      // multiplicative crush (dark×dark → black). Mode 1 = procedural ground
+      // color fn, mode 2 = image texture. Root-biased so tips keep identity.
+      const procTint = this._groundColorAtWorldXZ(vWorld.xz);
+      const tintUv = vWorld.xz.div(u.uTerrainSize).add(0.5);
+      const imgTint = texture(this._tintTex, tintUv).rgb;
+      const isImgMode = step(float(1.49), u.uTerrainTintMode);
+      const isProcMode = step(float(0.49), u.uTerrainTintMode).mul(
+        float(1).sub(isImgMode),
+      );
+      const tintRgb = procTint.mul(isProcMode).add(imgTint.mul(isImgMode));
+      const hasMode = isProcMode.add(isImgMode);
+      const rootW = mix(float(1), float(1).sub(hPct), u.uTerrainTintRootBias);
+      const tintAmt = clamp(
+        u.uTerrainTintStrength.mul(rootW).mul(hasMode),
+        float(0),
+        float(1),
+      );
+      const lumW = vec3(0.299, 0.587, 0.114);
+      const lumB = max(dot(variedCol, lumW), float(0.02));
+      const lumT = max(dot(tintRgb, lumW), float(0.1));
+      const tintMatched = clamp(
+        tintRgb.mul(lumB.div(lumT)),
+        float(0),
+        float(2.5),
+      );
+      const tintMixed = mix(tintMatched, tintRgb, float(0.45));
+      const tintedVaried = mix(variedCol, tintMixed, tintAmt);
+
+      const albedo = tintedVaried
         .mul(clumpShade)
         .mul(shadeRand)
         .mul(ao);
@@ -637,6 +722,59 @@ export class HybridGrassSystem {
 
   setSunDir(dir) {
     this.u.uSunDir.value.copy(dir);
+  }
+
+  /** Live editor sync — same grassState (toolState.grass) shape v2's
+   *  GrassManager.syncUniforms consumes, so the existing grass UI drives the
+   *  hybrid directly. Geometry-baked params (bladeWidth, segments, counts)
+   *  still need a rebuild and are intentionally not handled here. */
+  syncFromState(gp, sunDir) {
+    const u = this.u;
+    u.uBladeHeight.value = (gp.bladeHeight ?? 1) * this._bladeHeightMul;
+    u.uBendFocus.value = gp.bendFocus ?? 0.5;
+    u.uMaxAngle.value = gp.maxAngle ?? 1.4;
+    u.uNaturalLean.value = gp.naturalLean ?? 0.9;
+    u.uWindSpeed.value = gp.windSpeed ?? 0.2;
+    u.uWindStrength.value = gp.windStrength ?? 1.4;
+    u.uWindGust.value = gp.windGust ?? 0.3;
+    u.uWindWaveScale.value = gp.windWaveScale ?? 0.12;
+    const wr = ((gp.windAngle ?? 0) * Math.PI) / 180;
+    u.uWindDir.value.set(Math.cos(wr), Math.sin(wr));
+    u.uClumpScale.value = gp.clumpScale ?? 1.5;
+    u.uClumpStrength.value = gp.clumpStrength ?? 0.7;
+    u.uGrassDensity.value = gp.grassDensity ?? 1;
+    u.uBladeCol.value.copy(srgb(gp.bladeColor ?? "#0e300e"));
+    u.uTipCol.value.copy(srgb(gp.tipColor ?? "#004d05"));
+    u.uAoBase.value = gp.aoBase ?? 0.25;
+    u.uAoPower.value = gp.aoPower ?? 2;
+    u.uColorVar.value = gp.colorVariation ? 1 : 0;
+    u.uCvHueSpread.value = gp.cvHueSpread ?? 0.08;
+    u.uCvSatSpread.value = gp.cvSatSpread ?? 0.3;
+    u.uCvDryAmount.value = gp.cvDryAmount ?? 0.15;
+    u.uCvDryCol.value.copy(srgb(gp.cvDryColor ?? "#8a7a3a"));
+    u.uSkyBlend.value = gp.skyBlend ?? 0.8;
+    u.uCylindrical.value = gp.cylindrical ?? 0.3;
+    u.uBssCol.value.copy(srgb(gp.bssColor ?? "#2d7a2d"));
+    u.uBssIntensity.value = gp.bssIntensity ?? 1.2;
+    u.uBssPower.value = gp.bssPower ?? 2;
+    u.uRimSSS.value = gp.rimSSS ?? 0.25;
+    u.uSlopeEnabled.value = gp.slopeEnabled ? 1 : 0;
+    u.uSlopeMin.value = gp.slopeMin ?? 0.65;
+    u.uSlopeMax.value = gp.slopeMax ?? 0.85;
+    // terrain tint mode resolution — same logic as v2 GrassManager.syncUniforms
+    if (gp.terrainTintEnabled) {
+      u.uTerrainTintMode.value = gp.terrainTintAutoSource
+        ? 1
+        : Math.max(0, Math.min(2, gp.terrainTintManualMode | 0));
+    } else {
+      u.uTerrainTintMode.value = 0;
+    }
+    u.uTerrainTintStrength.value = gp.terrainTintStrength ?? 0.5;
+    u.uTerrainTintRootBias.value = gp.terrainTintRootBias ?? 0.35;
+    u.uInteractionRadius.value = gp.interactionRadius ?? 1.5;
+    u.uInteractionStrength.value = gp.interactionStrength ?? 0.7;
+    u.uInteractionMode.value = gp.interactionMode ?? 0;
+    if (sunDir) u.uSunDir.value.copy(sunDir);
   }
 
   update(anchorPos, camera) {
