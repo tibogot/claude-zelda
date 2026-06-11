@@ -24,6 +24,8 @@ import {
   dot,
   sin,
   fract,
+  floor,
+  mix,
   smoothstep,
   clamp,
   normalize,
@@ -74,6 +76,15 @@ export const SURF_KEYS = [
   "normalCliff",
   "envIntensity",
   "metalness",
+  // CoH-style ground (dirt patches + anti-tiling + muted palette)
+  "dirtScale",
+  "dirtAmount",
+  "dirtPatchFreq",
+  "dirtSlope",
+  "normalDirt",
+  "macroVar",
+  "macroVarFreq",
+  "satMul",
 ];
 
 export const RTS_TERRAIN_DEFAULTS = {
@@ -114,6 +125,15 @@ export const RTS_TERRAIN_DEFAULTS = {
   normalCliff: 1.15,
   envIntensity: 0.25,
   metalness: 0.02,
+  // ── CoH-style ground look (live uniforms) ──
+  dirtScale: 0.02, // dirt layer UV tiling
+  dirtAmount: 0.42, // 0..1 — how much of the flats are dirt patches
+  dirtPatchFreq: 0.011, // patch noise frequency (lower = bigger patches)
+  dirtSlope: 0.65, // dirt creep onto mild slopes below the cliff band
+  normalDirt: 1.1,
+  macroVar: 0.55, // 0..1 — large-scale brightness/tint variation (anti-tiling)
+  macroVarFreq: 0.004,
+  satMul: 0.85, // <1 desaturates toward the muted wartime palette
 };
 
 const RTS_PEAKS = [
@@ -260,7 +280,26 @@ async function ensureTerrainPbr() {
       ),
     };
 
-    const layers = [grass, cliff];
+    const dirt = {
+      color: await loadTex(
+        `${PBR_PATH}Ground037/Ground037_1K-JPG_Color.jpg`,
+        true,
+      ),
+      normal: await loadTex(
+        `${PBR_PATH}Ground037/Ground037_1K-JPG_NormalGL.jpg`,
+        false,
+      ),
+      roughness: await loadTex(
+        `${PBR_PATH}Ground037/Ground037_1K-JPG_Roughness.jpg`,
+        false,
+      ),
+      ao: await loadTex(
+        `${PBR_PATH}Ground037/Ground037_1K-JPG_AmbientOcclusion.jpg`,
+        false,
+      ),
+    };
+
+    const layers = [grass, cliff, dirt];
     for (const m of layers) allTextures.push(...Object.values(m));
 
     const colorArray = buildLayerArray(
@@ -283,6 +322,7 @@ async function ensureTerrainPbr() {
 
     const L_GRASS = int(0);
     const L_CLIFF = int(1);
+    const L_DIRT = int(2);
     const surf = pickSurf(RTS_TERRAIN_DEFAULTS);
 
     const uGrassScale = uniform(surf.grassScale);
@@ -299,6 +339,14 @@ async function ensureTerrainPbr() {
     const uNormalCliff = uniform(surf.normalCliff);
     const uEnvIntensity = uniform(surf.envIntensity);
     const uMetalness = uniform(surf.metalness);
+    const uDirtScale = uniform(surf.dirtScale);
+    const uDirtAmount = uniform(surf.dirtAmount);
+    const uDirtPatchFreq = uniform(surf.dirtPatchFreq);
+    const uDirtSlope = uniform(surf.dirtSlope);
+    const uNormalDirt = uniform(surf.normalDirt);
+    const uMacroVar = uniform(surf.macroVar);
+    const uMacroVarFreq = uniform(surf.macroVarFreq);
+    const uSatMul = uniform(surf.satMul);
 
     Object.assign(uniforms, {
       grassScale: uGrassScale,
@@ -315,20 +363,61 @@ async function ensureTerrainPbr() {
       normalCliff: uNormalCliff,
       envIntensity: uEnvIntensity,
       metalness: uMetalness,
+      dirtScale: uDirtScale,
+      dirtAmount: uDirtAmount,
+      dirtPatchFreq: uDirtPatchFreq,
+      dirtSlope: uDirtSlope,
+      normalDirt: uNormalDirt,
+      macroVar: uMacroVar,
+      macroVarFreq: uMacroVarFreq,
+      satMul: uSatMul,
     });
 
+    // Cheap 2D value noise — drives dirt patches + macro variation.
+    const hash2 = (p) =>
+      fract(mul(sin(dot(p, vec2(127.1, 311.7))), 43758.5453));
+    const vnoise = (p) => {
+      const i = floor(p);
+      const f = fract(p);
+      const u = mul(mul(f, f), sub(vec2(3, 3), mul(f, 2)));
+      const a = hash2(i);
+      const b = hash2(add(i, vec2(1, 0)));
+      const c = hash2(add(i, vec2(0, 1)));
+      const d = hash2(add(i, vec2(1, 1)));
+      return mix(mix(a, b, u.x), mix(c, d, u.x), u.y);
+    };
+
+    // grass / cliff / dirt weights. Dirt = organic noise patches on the
+    // flats (CoH muddy-field look) + creep onto mild slopes below the
+    // cliff band. Cliff still owns steep faces.
     const layerWeights = () => {
       const slope = sub(float(1), abs(normalWorld.y));
-      const jitter = fract(
-        mul(sin(dot(positionWorld.xz, vec2(127.1, 311.7))), 43758.5453),
-      );
+      const jitter = hash2(positionWorld.xz);
       const wCliff = pow(smoothstep(uCliffLow, uCliffHigh, slope), uCliffPow);
+      const pNoise = add(
+        mul(vnoise(mul(positionWorld.xz, uDirtPatchFreq)), float(0.65)),
+        mul(
+          vnoise(
+            add(mul(positionWorld.xz, mul(uDirtPatchFreq, float(3.7))), vec2(13.7, 41.3)),
+          ),
+          float(0.35),
+        ),
+      );
+      const thr = sub(float(1), uDirtAmount);
+      const patches = smoothstep(sub(thr, float(0.16)), add(thr, float(0.16)), pNoise);
+      const slopeDirt = smoothstep(mul(uCliffLow, float(0.4)), uCliffLow, slope);
+      const dirtMask = clamp(
+        add(patches, mul(slopeDirt, uDirtSlope)),
+        float(0),
+        float(1),
+      );
+      const wDirt = mul(sub(float(1), wCliff), dirtMask);
       const wGrass = mul(
-        sub(float(1), wCliff),
+        sub(sub(float(1), wCliff), wDirt),
         add(sub(float(1), uGrassJitter), mul(jitter, uGrassJitter)),
       );
-      const wSum = add(wGrass, wCliff);
-      return vec2(wGrass, wCliff).div(max(wSum, float(0.001)));
+      const wSum = add(add(wGrass, wCliff), wDirt);
+      return vec3(wGrass, wCliff, wDirt).div(max(wSum, float(0.001)));
     };
 
     const layerRGB = (arr, layer, sc) =>
@@ -338,21 +427,49 @@ async function ensureTerrainPbr() {
 
     const gRGB = () => layerRGB(colorArray, L_GRASS, uGrassScale);
     const cRGB = () => layerRGB(colorArray, L_CLIFF, uCliffScale);
+    const dRGB = () => layerRGB(colorArray, L_DIRT, uDirtScale);
     const gR = () => layerR(roughArray, L_GRASS, uGrassScale);
     const cR = () => layerR(roughArray, L_CLIFF, uCliffScale);
+    const dR = () => layerR(roughArray, L_DIRT, uDirtScale);
     const gAo = () => layerR(aoArray, L_GRASS, uGrassScale);
     const cAo = () => layerR(aoArray, L_CLIFF, uCliffScale);
+    const dAo = () => layerR(aoArray, L_DIRT, uDirtScale);
 
     material = new THREE.MeshStandardNodeMaterial({ side: THREE.FrontSide });
     material.envMapIntensity = 0;
     material.colorNode = (() => {
       const lw = layerWeights();
-      return mul(add(mul(gRGB(), lw.x), mul(cRGB(), lw.y)), uAlbedoMul);
+      let albedo = add(
+        add(mul(gRGB(), lw.x), mul(cRGB(), lw.y)),
+        mul(dRGB(), lw.z),
+      );
+      // Macro variation — two very-low-frequency noises modulate brightness
+      // and wash patches toward a dry yellow-brown. Kills texture tiling at
+      // RTS zoom and gives fields that patchy, lived-on look.
+      const macroB = vnoise(mul(positionWorld.xz, uMacroVarFreq));
+      const macroT = vnoise(
+        add(mul(positionWorld.xz, mul(uMacroVarFreq, float(0.37))), vec2(7.3, 2.9)),
+      );
+      const brightMul = mix(
+        float(1),
+        add(float(0.74), mul(macroB, float(0.5))),
+        uMacroVar,
+      );
+      const dryTint = mix(
+        vec3(1, 1, 1),
+        vec3(1.1, 1.04, 0.8),
+        mul(mul(macroT, macroT), uMacroVar),
+      );
+      albedo = mul(mul(albedo, brightMul), dryTint);
+      // Muted wartime palette.
+      const lum = dot(albedo, vec3(0.2126, 0.7152, 0.0722));
+      albedo = mix(vec3(lum, lum, lum), albedo, uSatMul);
+      return mul(albedo, uAlbedoMul);
     })();
     material.roughnessNode = (() => {
       const lw = layerWeights();
       return clamp(
-        add(mul(gR(), lw.x), mul(cR(), lw.y)),
+        add(add(mul(gR(), lw.x), mul(cR(), lw.y)), mul(dR(), lw.z)),
         float(0.04),
         float(1),
       );
@@ -360,7 +477,7 @@ async function ensureTerrainPbr() {
     material.aoNode = (() => {
       const lw = layerWeights();
       return clamp(
-        add(mul(gAo(), lw.x), mul(cAo(), lw.y)),
+        add(add(mul(gAo(), lw.x), mul(cAo(), lw.y)), mul(dAo(), lw.z)),
         float(0.25),
         float(1),
       );
@@ -375,7 +492,13 @@ async function ensureTerrainPbr() {
         texture(normalArray, mul(positionWorld.xz, uCliffScale)).depth(L_CLIFF),
         vec2(uNormalCliff, uNormalCliff),
       );
-      return normalize(add(mul(nG, lw.x), mul(nC, lw.y)));
+      const nD = normalMap(
+        texture(normalArray, mul(positionWorld.xz, uDirtScale)).depth(L_DIRT),
+        vec2(uNormalDirt, uNormalDirt),
+      );
+      return normalize(
+        add(add(mul(nG, lw.x), mul(nC, lw.y)), mul(nD, lw.z)),
+      );
     })();
     // No positionNode displacement — shadow maps use mesh geometry; vertex
     // displacement caused unit shadows to float above the visible surface.

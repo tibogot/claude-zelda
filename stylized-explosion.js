@@ -8,6 +8,8 @@ import {
   length,
   mix,
   mod,
+  mrt,
+  output,
   smoothstep,
   step,
   texture,
@@ -170,7 +172,7 @@ function noise3(x, y, z) {
   return lerp(lerp(x00, x01, fy), lerp(x10, x11, fy), fz);
 }
 
-function createSpriteMaterial(map, tilesX, tilesY, useLifetimeFrames, hasAtlas, layerOpacity, layerTint) {
+function createSpriteMaterial(map, tilesX, tilesY, useLifetimeFrames, hasAtlas, layerOpacity, layerTint, glow = false) {
   const uTiles = uniform(vec2(tilesX, tilesY));
   const uUseLifeFrames = uniform(useLifetimeFrames ? 1 : 0);
   const uLayerOpacity = uniform(layerOpacity);
@@ -218,6 +220,11 @@ function createSpriteMaterial(map, tilesX, tilesY, useLifetimeFrames, hasAtlas, 
   });
   mat.colorNode = col;
   mat.opacityNode = alpha;
+  if (glow) {
+    // Fire layer feeds the selective-bloom emissive buffer (rts-lab MRT
+    // pipeline). Ignored when rendering without MRT.
+    mat.mrtNode = mrt({ output, emissive: col.mul(alpha) });
+  }
   return { mat, uLayerOpacity, uLayerTint };
 }
 
@@ -288,6 +295,7 @@ class TSLParticleSystem {
       this.hasAtlas,
       layerOpacity,
       layerTint,
+      this.layerKey === "fire",
     );
     this.uLayerOpacity = uLayerOpacity;
     this.uLayerTint = uLayerTint;

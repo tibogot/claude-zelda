@@ -1,9 +1,22 @@
 /**
- * RTS fog of war — vision grid → blurred strength texture → TSL scene fog.
- * Gameplay visibility stays grid-based; rendering fades into atmosphere fog.
+ * RTS fog of war — vision grid → RG texture (strength + shroud flag) → post overlay.
+ * Atmospheric fog stays on scene.fogNode; tactical shroud is composited in post.
  */
 import * as THREE from "three/webgpu";
-import { texture, positionWorld, float, vec2, uniform, clamp, max } from "three/tsl";
+import {
+  texture,
+  screenUV,
+  float,
+  vec2,
+  vec3,
+  vec4,
+  uniform,
+  mix,
+  dot,
+  step,
+  Fn,
+  getViewPosition,
+} from "three/tsl";
 
 export const RTS_FOW_TEX_RES = 256;
 
@@ -56,7 +69,7 @@ export function createRtsFogOfWarTexture() {
 }
 
 /**
- * Bake explored / visible grid into a blurred grayscale vision map (R = fog strength 0–1).
+ * Bake explored / visible grid into RG map: R = blurred overlay strength, G = shroud flag.
  */
 export function updateRtsFogOfWarTexture(
   ctx,
@@ -69,13 +82,14 @@ export function updateRtsFogOfWarTexture(
     fogAlpha,
     worldToFogCell,
     fogIdx,
-    blurRadius = 2,
-    blurPasses = 2,
+    blurRadius = 1,
+    blurPasses = 1,
   },
 ) {
   const res = RTS_FOW_TEX_RES;
   const half = mapSize * 0.5;
   let strengths = new Float32Array(res * res);
+  const states = new Float32Array(res * res);
 
   for (let py = 0; py < res; py++) {
     const wz = (py / res) * mapSize - half;
@@ -83,12 +97,20 @@ export function updateRtsFogOfWarTexture(
       const wx = (px / res) * mapSize - half;
       const { c, r } = worldToFogCell(wx, wz);
       let s = fogAlpha;
+      let st = 0;
       if (c >= 0 && r >= 0 && c < fog.cols && r < fog.rows) {
         const i = fogIdx(c, r);
-        if (fog.visible[i]) s = 0;
-        else if (fog.explored[i]) s = shroudAlpha;
+        if (fog.visible[i]) {
+          s = 0;
+          st = 1;
+        } else if (fog.explored[i]) {
+          s = shroudAlpha;
+          st = 1;
+        }
       }
-      strengths[py * res + px] = s;
+      const idx = py * res + px;
+      strengths[idx] = s;
+      states[idx] = st;
     }
   }
 
@@ -99,11 +121,10 @@ export function updateRtsFogOfWarTexture(
   const img = ctx.createImageData(res, res);
   const data = img.data;
   for (let i = 0; i < strengths.length; i++) {
-    const v = Math.round(Math.min(1, Math.max(0, strengths[i])) * 255);
     const p = i * 4;
-    data[p] = v;
-    data[p + 1] = v;
-    data[p + 2] = v;
+    data[p] = Math.round(Math.min(1, Math.max(0, strengths[i])) * 255);
+    data[p + 1] = Math.round(states[i] * 255);
+    data[p + 2] = 0;
     data[p + 3] = 255;
   }
   ctx.putImageData(img, 0, 0);
@@ -114,17 +135,23 @@ export function updateRtsFogOfWarTexture(
     const md = mini.data;
     for (let i = 0; i < strengths.length; i++) {
       const s = Math.min(1, Math.max(0, strengths[i]));
+      const st = states[i];
       const p = i * 4;
       if (s < 0.04) {
         md[p] = 255;
         md[p + 1] = 255;
         md[p + 2] = 255;
         md[p + 3] = 0;
+      } else if (st > 0.5) {
+        md[p] = 70;
+        md[p + 1] = 78;
+        md[p + 2] = 88;
+        md[p + 3] = Math.round(s * 200);
       } else {
-        md[p] = 14;
-        md[p + 1] = 20;
-        md[p + 2] = 28;
-        md[p + 3] = Math.round(s * 235);
+        md[p] = 12;
+        md[p + 1] = 16;
+        md[p + 2] = 24;
+        md[p + 3] = Math.round(s * 255);
       }
     }
     minimapCtx.putImageData(mini, 0, 0);
@@ -132,23 +159,71 @@ export function updateRtsFogOfWarTexture(
 }
 
 /**
- * TSL nodes: sample vision texture in world XZ and combine with atmospheric fog.
+ * Post-process FoW overlay: reconstruct world XZ from depth, sample RG vision map.
  */
-export function createRtsFogOfWarNodes(fowTex, mapSize, atmoFogColor, atmoFogFactor) {
+export function createRtsFogOfWarPostOverlay({ scenePass, camera, fowTex, mapSize }) {
   const uFoWEnabled = uniform(0);
   const uMapHalf = uniform(mapSize * 0.5);
   const uMapSize = uniform(mapSize);
+  const uInvProj = uniform(new THREE.Matrix4());
+  const uCameraWorld = uniform(new THREE.Matrix4());
+  const uShroudTint = uniform(new THREE.Color(0x454c55).convertSRGBToLinear());
+  const uUnexploredTint = uniform(new THREE.Color(0x080a0f).convertSRGBToLinear());
+  const uShroudDesat = uniform(0.58);
 
-  const fowUv = positionWorld.xz.add(vec2(uMapHalf, uMapHalf)).div(uMapSize);
-  const fowStrength = texture(fowTex, fowUv).r.mul(uFoWEnabled);
-  const combinedFactor = clamp(max(atmoFogFactor, fowStrength), float(0), float(1));
+  const scenePassDepth = scenePass.getTextureNode("depth");
+  const linearDepth = scenePass.getLinearDepthNode
+    ? scenePass.getLinearDepthNode()
+    : scenePassDepth.sample(screenUV).r;
+  const skyMask = step(float(0.999), linearDepth);
+
+  const applyFoW = Fn(([color]) => {
+    const depth = scenePassDepth.sample(screenUV).r;
+    const viewPos = getViewPosition(screenUV, depth, uInvProj);
+    const worldPos = uCameraWorld.mul(vec4(viewPos, float(1))).xyz;
+
+    const fowUv = worldPos.xz.add(vec2(uMapHalf, uMapHalf)).div(uMapSize);
+    const fowSample = texture(fowTex, fowUv);
+    const strength = fowSample.r.mul(uFoWEnabled);
+    const isShroud = step(float(0.5), fowSample.g);
+
+    const lum = dot(color.rgb, vec3(0.2126, 0.7152, 0.0722));
+    const desatRgb = mix(vec3(lum), color.rgb, float(1).sub(uShroudDesat));
+    const shroudRgb = mix(desatRgb, uShroudTint, strength.mul(float(0.72)));
+    const unexploredRgb = mix(color.rgb, uUnexploredTint, strength);
+    const fowRgb = mix(unexploredRgb, shroudRgb, isShroud);
+    const shaded = vec4(mix(color.rgb, fowRgb, strength), color.a);
+    return mix(color, shaded, float(1).sub(skyMask));
+  });
+
+  function syncCamera(cam) {
+    uInvProj.value.copy(cam.projectionMatrixInverse);
+    uCameraWorld.value.copy(cam.matrixWorld);
+  }
+
+  syncCamera(camera);
 
   return {
     uFoWEnabled,
     uMapHalf,
     uMapSize,
-    fowStrength,
-    combinedFactor,
-    fogColor: atmoFogColor,
+    uShroudTint,
+    uUnexploredTint,
+    uShroudDesat,
+    syncCamera,
+    apply: (colorNode) => applyFoW(colorNode),
   };
+}
+
+export function syncRtsFogOfWarOverlayUniforms(overlay, fogParams, camera) {
+  if (!overlay) return;
+  overlay.uFoWEnabled.value = fogParams.enabled ? 1 : 0;
+  overlay.uShroudDesat.value = fogParams.shroudDesat ?? 0.58;
+  overlay.uShroudTint.value
+    .set(fogParams.shroudColor ?? "#454c55")
+    .convertSRGBToLinear();
+  overlay.uUnexploredTint.value
+    .set(fogParams.unexploredColor ?? "#080a0f")
+    .convertSRGBToLinear();
+  if (camera) overlay.syncCamera(camera);
 }
