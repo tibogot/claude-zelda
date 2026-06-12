@@ -46,13 +46,16 @@ export async function bakeRtsThumbnails({ renderer, items, environment = null, s
   const prevClearAlpha = renderer.getClearAlpha();
   renderer.setClearColor(0x000000, 0);
 
+  // NOTE: never dispose geometries here. `make()` may return a clone of a
+  // cached GLB template (rts-units.js, windmill) whose geometry is SHARED
+  // with every live unit on the map — disposing it destroys the template's
+  // GPU buffers and the next frame submits them ("used in submit while
+  // destroyed"). Primitive-built thumbs leak a few small geometries once at
+  // startup, which is negligible; correctness wins.
   const clearGroup = () => {
     group.position.set(0, 0, 0);
     while (group.children.length) {
-      const c = group.children.pop();
-      c.traverse?.((o) => {
-        if (o.isMesh) o.geometry?.dispose?.();
-      });
+      group.children.pop();
     }
   };
 

@@ -3,32 +3,12 @@
  * Culling uses horizontal distance from the camera pan target and zoom-scaled radii.
  */
 import * as THREE from "three";
-import { GLTFLoader } from "three/addons/loaders/GLTFLoader.js";
-import { DRACOLoader } from "three/addons/loaders/DRACOLoader.js";
-import { KTX2Loader } from "three/addons/loaders/KTX2Loader.js";
+import { initRtsGltfLoader, loadRtsGltfScene } from "./rts-gltf-loader.js";
 
 const INITIAL_CAPACITY = 8192;
 const CULL_MARGIN = 8;
 const CULL_HEIGHT = 22;
 const _yAxis = new THREE.Vector3(0, 1, 0);
-
-const _draco = new DRACOLoader();
-_draco.setDecoderPath("https://www.gstatic.com/draco/versioned/decoders/1.5.6/");
-const _gltf = new GLTFLoader();
-_gltf.setDRACOLoader(_draco);
-let _ktx2Ready = false;
-
-/** WebGPU renderer must be wired before loading KTX2-compressed GLBs. */
-function ensureGltfForRenderer(renderer) {
-  if (_ktx2Ready) return;
-  const ktx2 = new KTX2Loader();
-  ktx2.setTranscoderPath(
-    "https://www.gstatic.com/basis-universal/versioned/2021-04-15-ba1c3e4/",
-  );
-  ktx2.detectSupport(renderer);
-  _gltf.setKTX2Loader(ktx2);
-  _ktx2Ready = true;
-}
 
 function makeForestRng(seed) {
   if (!seed) return () => Math.random();
@@ -82,13 +62,6 @@ function extractSubmeshes(root) {
   return submeshes;
 }
 
-async function loadGltfScene(url) {
-  const gltf = await new Promise((res, rej) =>
-    _gltf.load(url, res, undefined, rej),
-  );
-  return gltf.scene;
-}
-
 function resolveLodTier(dist2, lod0D2, fadeD2) {
   if (dist2 > fadeD2) return -1;
   if (dist2 > lod0D2) return 1;
@@ -132,10 +105,10 @@ export class RtsPineForest {
 
   async init(cfg) {
     this.cfg = cfg;
-    ensureGltfForRenderer(this.renderer);
+    initRtsGltfLoader(this.renderer);
     const [lod0Scene, lod1Scene] = await Promise.all([
-      loadGltfScene("models/pine2_compressed.glb"),
-      loadGltfScene("models/pine2LOD1_compressed.glb"),
+      loadRtsGltfScene("models/pine2_compressed.glb"),
+      loadRtsGltfScene("models/pine2LOD1_compressed.glb"),
     ]);
     const lod0Defs = extractSubmeshes(lod0Scene);
     const lod1Defs = extractSubmeshes(lod1Scene);

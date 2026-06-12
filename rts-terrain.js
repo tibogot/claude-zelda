@@ -1,5 +1,5 @@
 /**
- * RTS Lab terrain — organic FBM hills with slope-clamped ramps (aerial grass-rock / cliff PBR).
+ * RTS Lab terrain — organic FBM hills with slope-clamped ramps (Grass005 / Rock028 / Ground037 PBR).
  * Exposes `createRtsTerrain()` → { mesh, getHeight, uniforms, dispose }.
  */
 import * as THREE from "three/webgpu";
@@ -31,6 +31,12 @@ import {
   normalize,
 } from "three/tsl";
 import { ImprovedNoise } from "three/addons/math/ImprovedNoise.js";
+import {
+  applyRiverToHeights,
+  RTS_RIVER_DEFAULTS,
+  RTS_RIVER_PATH,
+  RTS_RIVER_BRIDGES,
+} from "./rts-river.js";
 
 /** Default RTS map extent (6× the original 240-unit lab). */
 export const RTS_MAP_SIZE = 1440;
@@ -52,10 +58,8 @@ export const SHAPE_KEYS = [
   "ridgeOctaves",
   "floorY",
   "mountainReliefMul",
-  "heroRidgeAmp",
-  "heroRidgeR",
-  "heroRidgeCx",
-  "heroRidgeCz",
+  "mountainRidgeAmp",
+  "mountainRidgeFreq",
   "rampMaxGrade",
   "slopeClampPasses",
 ];
@@ -68,6 +72,7 @@ export const SURF_KEYS = [
   "cliffLow",
   "cliffHigh",
   "cliffPow",
+  "cliffMinY",
   "grassJitter",
   "dispStrength",
   "dispCliffMul",
@@ -76,6 +81,7 @@ export const SURF_KEYS = [
   "normalCliff",
   "envIntensity",
   "metalness",
+  "grassRoughMin",
   // CoH-style ground (dirt patches + anti-tiling + muted palette)
   "dirtScale",
   "dirtAmount",
@@ -98,33 +104,33 @@ export const RTS_TERRAIN_DEFAULTS = {
   macroBlend: 0.22,
   macroFreq: 0.5,
   macroOctaves: 4,
-  peakBias: 0.05,
-  ridgeBoost: 0.016,
+  peakBias: 0.04,
+  ridgeBoost: 0.012,
   ridgeFreq: 1.1,
   ridgeOctaves: 2,
   floorY: -8,
-  mountainReliefMul: 0.24,
-  heroRidgeAmp: 18,
-  heroRidgeR: 155000,
-  heroRidgeCx: 72,
-  heroRidgeCz: -96,
+  mountainReliefMul: 0.09,
+  mountainRidgeAmp: 0.34,
+  mountainRidgeFreq: 0.24,
   rampMaxGrade: 0.4,
-  slopeClampPasses: 12,
+  slopeClampPasses: 10,
   // ── Surface / shading (live uniforms) ──
   grassScale: 0.008,
-  cliffScale: 0.0042,
+  cliffScale: 0.016,
   albedoMul: 0.96,
-  cliffLow: 0.22,
-  cliffHigh: 0.48,
-  cliffPow: 1.15,
+  cliffLow: 0.34,
+  cliffHigh: 0.52,
+  cliffPow: 1.2,
+  cliffMinY: 10,
   grassJitter: 0.08,
   dispStrength: 0.85,
   dispCliffMul: 1.1,
   dispUvScale: 38,
   normalGrass: 1.05,
   normalCliff: 1.15,
-  envIntensity: 0.25,
-  metalness: 0.02,
+  envIntensity: 0.12,
+  metalness: 0,
+  grassRoughMin: 0.78,
   // ── CoH-style ground look (live uniforms) ──
   dirtScale: 0.02, // dirt layer UV tiling
   dirtAmount: 0.42, // 0..1 — how much of the flats are dirt patches
@@ -136,15 +142,57 @@ export const RTS_TERRAIN_DEFAULTS = {
   satMul: 0.85, // <1 desaturates toward the muted wartime palette
 };
 
+/** Distant soft hills — low amplitude, wide falloff (not cliff-spined lumps). */
 const RTS_PEAKS = [
-  { cx: -220, cz: 140, r: 520000, a: 32 },
-  { cx: 260, cz: -170, r: 560000, a: 36 },
-  { cx: 0, cz: 40, r: 440000, a: 22 },
-  { cx: -140, cz: -220, r: 400000, a: 18 },
-  { cx: 180, cz: 200, r: 420000, a: 20 },
-  { cx: -320, cz: -80, r: 380000, a: 16 },
-  { cx: 300, cz: 280, r: 400000, a: 18 },
+  { cx: -300, cz: 260, r: 820000, a: 11 },
+  { cx: 340, cz: -280, r: 880000, a: 13 },
 ];
+
+/** Cosine bowl — subtracts depth at center, zero at radius edge. */
+function stampCraterIntoHeights(
+  heights,
+  seg,
+  vertsX,
+  half,
+  size,
+  cx,
+  cz,
+  radius,
+  depth,
+) {
+  const r = Math.max(1.5, radius);
+  const r2 = r * r;
+  for (let zi = 0; zi <= seg; zi++) {
+    const z = -half + (zi / seg) * size;
+    for (let xi = 0; xi <= seg; xi++) {
+      const x = -half + (xi / seg) * size;
+      const dx = x - cx;
+      const dz = z - cz;
+      const d2 = dx * dx + dz * dz;
+      if (d2 > r2) continue;
+      const d = Math.sqrt(d2);
+      const bowl = Math.cos((d / r) * Math.PI * 0.5);
+      const i = zi * vertsX + xi;
+      heights[i] -= depth * bowl * bowl;
+    }
+  }
+}
+
+function applyTerrainCraters(heights, seg, vertsX, half, size, craters = []) {
+  for (const c of craters) {
+    stampCraterIntoHeights(
+      heights,
+      seg,
+      vertsX,
+      half,
+      size,
+      c.x,
+      c.z,
+      c.radius ?? 5,
+      c.depth ?? 1.4,
+    );
+  }
+}
 
 function pickShape(params) {
   const out = {};
@@ -181,10 +229,30 @@ function fbm(perlin, x, y, z, octaves, persistence, lacunarity) {
   return total / Math.max(1e-6, maxValue);
 }
 
+/** Ridged multifractal — natural mountain chains instead of gaussian blobs. */
+function ridgedFbm(perlin, x, y, z, octaves, persistence, lacunarity) {
+  let total = 0;
+  let frequency = 1;
+  let amplitude = 1;
+  let maxValue = 0;
+  for (let i = 0; i < octaves; i++) {
+    let n = perlin.noise(x * frequency, y * frequency, z * frequency);
+    n = 1 - Math.abs(n);
+    n *= n;
+    total += n * amplitude;
+    maxValue += amplitude;
+    amplitude *= persistence;
+    frequency *= lacunarity;
+  }
+  return total / Math.max(1e-6, maxValue);
+}
+
 const ARRAY_RES = 1024;
+const TERRAIN_PBR_GEN = 6;
 const PBR_PATH = "./textures/pbr_materials/";
 /** Shared PBR material — loaded once, geometry rebuilt separately. */
 let _terrainPbr = null;
+let _terrainPbrGen = 0;
 
 function buildLayerArray(maps, srgb) {
   const count = maps.length;
@@ -233,7 +301,8 @@ function loadTerrainTex(loader, baseUrl, rel, srgb) {
 }
 
 async function ensureTerrainPbr() {
-  if (_terrainPbr) return _terrainPbr;
+  if (_terrainPbr && _terrainPbrGen === TERRAIN_PBR_GEN) return _terrainPbr;
+  _terrainPbr = null;
 
   const baseUrl = import.meta.url;
   const loader = new THREE.TextureLoader();
@@ -245,37 +314,39 @@ async function ensureTerrainPbr() {
   let material;
 
   try {
-    const grassRough = await loadTex(
-      `${PBR_PATH}aerial-grass-rock/aerial_grass_rock_rough_2k.jpg`,
-      false,
-    );
     const grass = {
       color: await loadTex(
-        `${PBR_PATH}aerial-grass-rock/aerial_grass_rock_diff_2k.jpg`,
+        `${PBR_PATH}Grass005/Grass005_1K-JPG_Color.jpg`,
         true,
       ),
       normal: await loadTex(
-        `${PBR_PATH}aerial-grass-rock/aerial_grass_rock_nor_gl_2k.jpg`,
-        false,
-      ),
-      roughness: grassRough,
-      ao: grassRough,
-    };
-    const cliff = {
-      color: await loadTex(
-        `${PBR_PATH}cliff_rocks_07_2k/cliff_rocks_07_basecolor_2k.png`,
-        true,
-      ),
-      normal: await loadTex(
-        `${PBR_PATH}cliff_rocks_07_2k/cliff_rocks_07_normal_gl_2k.png`,
+        `${PBR_PATH}Grass005/Grass005_1K-JPG_NormalGL.jpg`,
         false,
       ),
       roughness: await loadTex(
-        `${PBR_PATH}cliff_rocks_07_2k/cliff_rocks_07_roughness_2k.png`,
+        `${PBR_PATH}Grass005/Grass005_1K-JPG_Roughness.jpg`,
         false,
       ),
       ao: await loadTex(
-        `${PBR_PATH}cliff_rocks_07_2k/cliff_rocks_07_ambientocclusion_2k.png`,
+        `${PBR_PATH}Grass005/Grass005_1K-JPG_AmbientOcclusion.jpg`,
+        false,
+      ),
+    };
+    const cliff = {
+      color: await loadTex(
+        `${PBR_PATH}Rock028/Rock028_2K-JPG_Color.jpg`,
+        true,
+      ),
+      normal: await loadTex(
+        `${PBR_PATH}Rock028/Rock028_2K-JPG_NormalGL.jpg`,
+        false,
+      ),
+      roughness: await loadTex(
+        `${PBR_PATH}Rock028/Rock028_2K-JPG_Roughness.jpg`,
+        false,
+      ),
+      ao: await loadTex(
+        `${PBR_PATH}Rock028/Rock028_2K-JPG_AmbientOcclusion.jpg`,
         false,
       ),
     };
@@ -331,6 +402,7 @@ async function ensureTerrainPbr() {
     const uCliffLow = uniform(surf.cliffLow);
     const uCliffHigh = uniform(surf.cliffHigh);
     const uCliffPow = uniform(surf.cliffPow);
+    const uCliffMinY = uniform(surf.cliffMinY);
     const uGrassJitter = uniform(surf.grassJitter);
     const uDispStrength = uniform(surf.dispStrength);
     const uDispCliffMul = uniform(surf.dispCliffMul);
@@ -339,6 +411,7 @@ async function ensureTerrainPbr() {
     const uNormalCliff = uniform(surf.normalCliff);
     const uEnvIntensity = uniform(surf.envIntensity);
     const uMetalness = uniform(surf.metalness);
+    const uGrassRoughMin = uniform(surf.grassRoughMin ?? 0.78);
     const uDirtScale = uniform(surf.dirtScale);
     const uDirtAmount = uniform(surf.dirtAmount);
     const uDirtPatchFreq = uniform(surf.dirtPatchFreq);
@@ -355,6 +428,7 @@ async function ensureTerrainPbr() {
       cliffLow: uCliffLow,
       cliffHigh: uCliffHigh,
       cliffPow: uCliffPow,
+      cliffMinY: uCliffMinY,
       grassJitter: uGrassJitter,
       dispStrength: uDispStrength,
       dispCliffMul: uDispCliffMul,
@@ -363,6 +437,7 @@ async function ensureTerrainPbr() {
       normalCliff: uNormalCliff,
       envIntensity: uEnvIntensity,
       metalness: uMetalness,
+      grassRoughMin: uGrassRoughMin,
       dirtScale: uDirtScale,
       dirtAmount: uDirtAmount,
       dirtPatchFreq: uDirtPatchFreq,
@@ -393,7 +468,13 @@ async function ensureTerrainPbr() {
     const layerWeights = () => {
       const slope = sub(float(1), abs(normalWorld.y));
       const jitter = hash2(positionWorld.xz);
-      const wCliff = pow(smoothstep(uCliffLow, uCliffHigh, slope), uCliffPow);
+      const slopeCliff = pow(smoothstep(uCliffLow, uCliffHigh, slope), uCliffPow);
+      const heightCliff = smoothstep(
+        uCliffMinY,
+        add(uCliffMinY, float(14)),
+        positionWorld.y,
+      );
+      const wCliff = slopeCliff.mul(heightCliff);
       const pNoise = add(
         mul(vnoise(mul(positionWorld.xz, uDirtPatchFreq)), float(0.65)),
         mul(
@@ -425,14 +506,55 @@ async function ensureTerrainPbr() {
     const layerR = (arr, layer, sc) =>
       texture(arr, mul(positionWorld.xz, sc)).depth(layer).r;
 
+    // Triplanar cliff — reads on steep faces instead of stretched XZ.
+    const triplanarW = () => {
+      const n = abs(normalWorld);
+      const w = pow(
+        n.div(max(add(add(n.x, n.y), n.z), float(0.001))),
+        vec3(4, 4, 4),
+      );
+      const wSum = max(add(add(w.x, w.y), w.z), float(0.001));
+      return w.div(wSum);
+    };
+    const triplanarRGB = (arr, layer, sc) => {
+      const wb = triplanarW();
+      const sx = texture(arr, mul(positionWorld.zy, sc)).depth(layer).rgb;
+      const sy = texture(arr, mul(positionWorld.xz, sc)).depth(layer).rgb;
+      const sz = texture(arr, mul(positionWorld.xy, sc)).depth(layer).rgb;
+      return add(add(mul(sx, wb.x), mul(sy, wb.y)), mul(sz, wb.z));
+    };
+    const triplanarR = (arr, layer, sc) => {
+      const wb = triplanarW();
+      const sx = texture(arr, mul(positionWorld.zy, sc)).depth(layer).r;
+      const sy = texture(arr, mul(positionWorld.xz, sc)).depth(layer).r;
+      const sz = texture(arr, mul(positionWorld.xy, sc)).depth(layer).r;
+      return add(add(mul(sx, wb.x), mul(sy, wb.y)), mul(sz, wb.z));
+    };
+    const triplanarNormal = (arr, layer, sc, str) => {
+      const wb = triplanarW();
+      const nX = normalMap(
+        texture(arr, mul(positionWorld.zy, sc)).depth(layer),
+        vec2(str, str),
+      );
+      const nY = normalMap(
+        texture(arr, mul(positionWorld.xz, sc)).depth(layer),
+        vec2(str, str),
+      );
+      const nZ = normalMap(
+        texture(arr, mul(positionWorld.xy, sc)).depth(layer),
+        vec2(str, str),
+      );
+      return normalize(add(add(mul(nX, wb.x), mul(nY, wb.y)), mul(nZ, wb.z)));
+    };
+
     const gRGB = () => layerRGB(colorArray, L_GRASS, uGrassScale);
-    const cRGB = () => layerRGB(colorArray, L_CLIFF, uCliffScale);
+    const cRGB = () => triplanarRGB(colorArray, L_CLIFF, uCliffScale);
     const dRGB = () => layerRGB(colorArray, L_DIRT, uDirtScale);
     const gR = () => layerR(roughArray, L_GRASS, uGrassScale);
-    const cR = () => layerR(roughArray, L_CLIFF, uCliffScale);
+    const cR = () => triplanarR(roughArray, L_CLIFF, uCliffScale);
     const dR = () => layerR(roughArray, L_DIRT, uDirtScale);
     const gAo = () => layerR(aoArray, L_GRASS, uGrassScale);
-    const cAo = () => layerR(aoArray, L_CLIFF, uCliffScale);
+    const cAo = () => triplanarR(aoArray, L_CLIFF, uCliffScale);
     const dAo = () => layerR(aoArray, L_DIRT, uDirtScale);
 
     material = new THREE.MeshStandardNodeMaterial({ side: THREE.FrontSide });
@@ -468,11 +590,13 @@ async function ensureTerrainPbr() {
     })();
     material.roughnessNode = (() => {
       const lw = layerWeights();
-      return clamp(
-        add(add(mul(gR(), lw.x), mul(cR(), lw.y)), mul(dR(), lw.z)),
-        float(0.04),
-        float(1),
+      const blended = add(
+        add(mul(gR(), lw.x), mul(cR(), lw.y)),
+        mul(dR(), lw.z),
       );
+      // Grass005 roughness map + floor on grass-weighted areas (no glossy turf).
+      const matte = max(blended, mul(lw.x, uGrassRoughMin));
+      return clamp(matte, float(0.55), float(1));
     })();
     material.aoNode = (() => {
       const lw = layerWeights();
@@ -488,10 +612,7 @@ async function ensureTerrainPbr() {
         texture(normalArray, mul(positionWorld.xz, uGrassScale)).depth(L_GRASS),
         vec2(uNormalGrass, uNormalGrass),
       );
-      const nC = normalMap(
-        texture(normalArray, mul(positionWorld.xz, uCliffScale)).depth(L_CLIFF),
-        vec2(uNormalCliff, uNormalCliff),
-      );
+      const nC = triplanarNormal(normalArray, L_CLIFF, uCliffScale, uNormalCliff);
       const nD = normalMap(
         texture(normalArray, mul(positionWorld.xz, uDirtScale)).depth(L_DIRT),
         vec2(uNormalDirt, uNormalDirt),
@@ -512,8 +633,132 @@ async function ensureTerrainPbr() {
     material.metalnessNode = float(0);
   }
 
+  _terrainPbrGen = TERRAIN_PBR_GEN;
   _terrainPbr = { material, uniforms, allTextures };
   return _terrainPbr;
+}
+
+function gridIdxLocal(xi, zi, vertsX) {
+  return zi * vertsX + xi;
+}
+
+function sampleHeightBilinear(heights, seg, vertsX, half, size, x, z) {
+  const u = ((x + half) / size) * seg;
+  const v = ((z + half) / size) * seg;
+  const xi = Math.floor(u);
+  const zi = Math.floor(v);
+  const fx = u - xi;
+  const fz = v - zi;
+  const x0 = THREE.MathUtils.clamp(xi, 0, seg);
+  const x1 = THREE.MathUtils.clamp(xi + 1, 0, seg);
+  const z0 = THREE.MathUtils.clamp(zi, 0, seg);
+  const z1 = THREE.MathUtils.clamp(zi + 1, 0, seg);
+  const h00 = heights[gridIdxLocal(x0, z0, vertsX)];
+  const h10 = heights[gridIdxLocal(x1, z0, vertsX)];
+  const h01 = heights[gridIdxLocal(x0, z1, vertsX)];
+  const h11 = heights[gridIdxLocal(x1, z1, vertsX)];
+  const hx0 = h00 * (1 - fx) + h10 * fx;
+  const hx1 = h01 * (1 - fx) + h11 * fx;
+  return hx0 * (1 - fz) + hx1 * fz;
+}
+
+/**
+ * Smooth road corridors — blend heightfield toward centerline profile (pre-flatten snapshot).
+ * @param {Array<{ points: number[][], width?: number }>} roads
+ */
+export function applyRoadFlattenToHeights(
+  heights,
+  seg,
+  vertsX,
+  half,
+  size,
+  roads = [],
+  opts = {},
+) {
+  if (!roads?.length) return;
+  const feather = opts.feather ?? 3.5;
+  const pre = new Float32Array(heights);
+  const samplePre = (x, z) =>
+    sampleHeightBilinear(pre, seg, vertsX, half, size, x, z);
+
+  for (let zi = 0; zi <= seg; zi++) {
+    for (let xi = 0; xi <= seg; xi++) {
+      const x = -half + (xi / seg) * size;
+      const z = -half + (zi / seg) * size;
+      let bestW = 0;
+      let bestH = heights[gridIdxLocal(xi, zi, vertsX)];
+
+      for (const road of roads) {
+        const pts = road.points;
+        if (!pts || pts.length < 2) continue;
+        const halfW = (road.width ?? 8) * 0.5;
+
+        for (let i = 0; i < pts.length - 1; i++) {
+          const [x0, z0] = pts[i];
+          const [x1, z1] = pts[i + 1];
+          const sdx = x1 - x0;
+          const sdz = z1 - z0;
+          const len2 = sdx * sdx + sdz * sdz;
+          let t = 0;
+          if (len2 > 1e-6) {
+            t = Math.max(
+              0,
+              Math.min(1, ((x - x0) * sdx + (z - z0) * sdz) / len2),
+            );
+          }
+          const cx = x0 + t * sdx;
+          const cz = z0 + t * sdz;
+          const dist = Math.hypot(x - cx, z - cz);
+          const inner = halfW;
+          const outer = halfW + feather;
+          if (dist >= outer) continue;
+
+          const h0 = samplePre(x0, z0);
+          const h1 = samplePre(x1, z1);
+          const targetH = h0 * (1 - t) + h1 * t;
+
+          let w = 1;
+          if (dist > inner) {
+            const edge = (dist - inner) / Math.max(outer - inner, 1e-4);
+            w = 1 - edge * edge * (3 - 2 * edge);
+          }
+
+          if (w > bestW) {
+            bestW = w;
+            bestH = targetH;
+          }
+        }
+      }
+
+      if (bestW > 0) {
+        const idx = gridIdxLocal(xi, zi, vertsX);
+        heights[idx] = heights[idx] * (1 - bestW) + bestH * bestW;
+      }
+    }
+  }
+}
+
+function clampHeightsSlope(heights, seg, vertsX, maxDelta, passes = 1) {
+  for (let pass = 0; pass < passes; pass++) {
+    for (let zi = 0; zi <= seg; zi++) {
+      for (let xi = 0; xi <= seg; xi++) {
+        const i = gridIdxLocal(xi, zi, vertsX);
+        let h = heights[i];
+        if (xi < seg) {
+          const j = gridIdxLocal(xi + 1, zi, vertsX);
+          const dh = heights[j] - h;
+          if (dh > maxDelta) heights[j] = h + maxDelta;
+          else if (dh < -maxDelta) heights[j] = h - maxDelta;
+        }
+        if (zi < seg) {
+          const j = gridIdxLocal(xi, zi + 1, vertsX);
+          const dh = heights[j] - h;
+          if (dh > maxDelta) heights[j] = h + maxDelta;
+          else if (dh < -maxDelta) heights[j] = h - maxDelta;
+        }
+      }
+    }
+  }
 }
 
 /** Bake height samples + sampler (no GPU geometry allocation). */
@@ -528,12 +773,7 @@ function bakeTerrainHeightfield(size, segments, params = {}) {
       const dz = z - p.cz;
       sum += Math.exp(-(dx * dx + dz * dz) / p.r) * p.a;
     }
-    const ridge = Math.exp(
-      -((x - ts.heroRidgeCx) * (x - ts.heroRidgeCx) +
-        (z - ts.heroRidgeCz) * (z - ts.heroRidgeCz)) /
-        ts.heroRidgeR,
-    ) * ts.heroRidgeAmp;
-    return (sum + ridge) * ts.mountainReliefMul;
+    return sum * ts.mountainReliefMul;
   }
 
   function rawHeight(x, z) {
@@ -569,6 +809,23 @@ function bakeTerrainHeightfield(size, segments, params = {}) {
     h += Math.max(0, rid) * ts.ridgeBoost;
     const pk = Math.max(0, h);
     h += pk * pk * Math.max(0, ts.peakBias);
+
+    const mFreq = ts.mountainRidgeFreq ?? RTS_TERRAIN_DEFAULTS.mountainRidgeFreq;
+    const region =
+      fbm(perlin, nx * mFreq + 2.2, 0, nz * mFreq - 1.6, 3, 0.52, 2.05) * 0.5 +
+      0.5;
+    const mMask = THREE.MathUtils.smoothstep(region, 0.5, 0.74);
+    const ridged = ridgedFbm(
+      perlin,
+      nx * 0.88 + 0.4,
+      0.6,
+      nz * 0.88,
+      5,
+      0.5,
+      2.08,
+    );
+    h += ridged * mMask * (ts.mountainRidgeAmp ?? RTS_TERRAIN_DEFAULTS.mountainRidgeAmp);
+
     const y = h * ts.heightScale + mountainRelief(x, z);
     return Math.max(ts.floorY, y);
   }
@@ -621,6 +878,18 @@ function bakeTerrainHeightfield(size, segments, params = {}) {
     }
   }
 
+  const riverCfg = { ...RTS_RIVER_DEFAULTS, ...params.river };
+  applyRiverToHeights(
+    heights,
+    seg,
+    vertsX,
+    half,
+    size,
+    riverCfg,
+    params.riverPath ?? RTS_RIVER_PATH,
+    params.riverBridges ?? RTS_RIVER_BRIDGES,
+  );
+
   const flattenPads = (params.flattenPads || []).map((pad) => ({
     x: pad.x,
     z: pad.z,
@@ -646,6 +915,22 @@ function bakeTerrainHeightfield(size, segments, params = {}) {
     }
   }
 
+  const flattenRoads = params.flattenRoads ?? [];
+  if (flattenRoads.length) {
+    applyRoadFlattenToHeights(
+      heights,
+      seg,
+      vertsX,
+      half,
+      size,
+      flattenRoads,
+      params.roadFlatten ?? {},
+    );
+    clampHeightsSlope(heights, seg, vertsX, maxDelta, 2);
+  }
+
+  applyTerrainCraters(heights, seg, vertsX, half, size, params.craters ?? []);
+
   function sampleHeightGrid(x, z) {
     const u = ((x + half) / size) * seg;
     const v = ((z + half) / size) * seg;
@@ -670,6 +955,8 @@ function bakeTerrainHeightfield(size, segments, params = {}) {
     heights,
     seg,
     vertsX,
+    half,
+    mapSize: size,
     getHeight: (x, z) => sampleHeightGrid(x, z),
     shape: ts,
   };
@@ -707,6 +994,11 @@ function buildTerrainHeightfield(size, segments, params = {}) {
   return {
     geo,
     getHeight: baked.getHeight,
+    heights: baked.heights,
+    seg: baked.seg,
+    vertsX: baked.vertsX,
+    half: baked.half,
+    mapSize: baked.mapSize,
     shape: baked.shape,
   };
 }
@@ -719,21 +1011,27 @@ export async function createRtsTerrain(
   const surf = pickSurf({ ...RTS_TERRAIN_DEFAULTS, ...params });
   const pbr = await ensureTerrainPbr();
   syncRtsTerrainUniforms(pbr.uniforms, params);
-  const { geo, getHeight, shape } = buildTerrainHeightfield(size, segments, params);
-  const mesh = new THREE.Mesh(geo, pbr.material);
+  const built = buildTerrainHeightfield(size, segments, params);
+  const mesh = new THREE.Mesh(built.geo, pbr.material);
   mesh.name = "RtsTerrain";
   mesh.receiveShadow = true;
-  geo.attributes.position.setUsage(THREE.DynamicDrawUsage);
-  if (geo.attributes.normal) {
-    geo.attributes.normal.setUsage(THREE.DynamicDrawUsage);
+  built.geo.attributes.position.setUsage(THREE.DynamicDrawUsage);
+  if (built.geo.attributes.normal) {
+    built.geo.attributes.normal.setUsage(THREE.DynamicDrawUsage);
   }
 
   return {
     mesh,
-    getHeight,
+    getHeight: built.getHeight,
+    heights: built.heights,
+    seg: built.seg,
+    vertsX: built.vertsX,
+    half: built.half,
+    mapSize: built.mapSize,
+    craters: params.craters ?? [],
     uniforms: pbr.uniforms,
-    dispose: () => geo.dispose(),
-    shape,
+    dispose: () => built.geo.dispose(),
+    shape: built.shape,
     surf,
   };
 }
@@ -748,7 +1046,11 @@ export async function rebuildRtsTerrainHeight(
 ) {
   const pbr = await ensureTerrainPbr();
   syncRtsTerrainUniforms(terrainData.uniforms ?? pbr.uniforms, params);
-  const baked = bakeTerrainHeightfield(size, segments, params);
+  const craterList = terrainData.craters ?? params.craters ?? [];
+  const baked = bakeTerrainHeightfield(size, segments, {
+    ...params,
+    craters: craterList,
+  });
   const mesh = terrainData.mesh;
   const geo = mesh.geometry;
   const wantVerts = baked.vertsX * baked.vertsX;
@@ -759,22 +1061,107 @@ export async function rebuildRtsTerrainHeight(
     applyHeightsToGeometry(geo, baked.heights, baked.seg, baked.vertsX)
   ) {
     terrainData.getHeight = baked.getHeight;
+    terrainData.heights = baked.heights;
+    terrainData.seg = baked.seg;
+    terrainData.vertsX = baked.vertsX;
+    terrainData.half = baked.half;
+    terrainData.mapSize = baked.mapSize;
     terrainData.shape = baked.shape;
     if (!terrainData.uniforms) terrainData.uniforms = pbr.uniforms;
     return { inPlace: true };
   }
 
-  const { geo: newGeo, getHeight, shape } = buildTerrainHeightfield(
-    size,
-    segments,
-    params,
-  );
+  const built = buildTerrainHeightfield(size, segments, {
+    ...params,
+    craters: craterList,
+  });
   if (beforeGeometrySwap) await beforeGeometrySwap();
-  mesh.geometry = newGeo;
-  terrainData.getHeight = getHeight;
-  terrainData.shape = shape;
+  mesh.geometry = built.geo;
+  terrainData.getHeight = built.getHeight;
+  terrainData.heights = built.heights;
+  terrainData.seg = built.seg;
+  terrainData.vertsX = built.vertsX;
+  terrainData.half = built.half;
+  terrainData.mapSize = built.mapSize;
+  terrainData.shape = built.shape;
   if (!terrainData.uniforms) terrainData.uniforms = pbr.uniforms;
   return { inPlace: false };
+}
+
+/**
+ * Deform terrain in-place for an artillery crater (cheap — no full re-bake).
+ * @returns {boolean} true if the mesh was updated
+ */
+export function stampRtsTerrainCrater(terrainData, x, z, opts = {}) {
+  if (!terrainData?.heights?.length || !terrainData.mesh?.geometry) return false;
+  const crater = {
+    x,
+    z,
+    radius: opts.radius ?? 5,
+    depth: opts.depth ?? 1.4,
+  };
+  if (!terrainData.craters) terrainData.craters = [];
+  terrainData.craters.push(crater);
+  stampCraterIntoHeights(
+    terrainData.heights,
+    terrainData.seg,
+    terrainData.vertsX,
+    terrainData.half,
+    terrainData.mapSize,
+    crater.x,
+    crater.z,
+    crater.radius,
+    crater.depth,
+  );
+  return applyHeightsToGeometry(
+    terrainData.mesh.geometry,
+    terrainData.heights,
+    terrainData.seg,
+    terrainData.vertsX,
+  );
+}
+
+/**
+ * Batched crater stamping — applyHeightsToGeometry (full computeVertexNormals
+ * over the whole grid) is the expensive part, so stamp N craters into the
+ * heights first and pay the geometry update ONCE. Combat barrages call this
+ * via a debounce instead of stamping per shell.
+ */
+export function stampRtsTerrainCraters(terrainData, list = []) {
+  if (
+    !terrainData?.heights?.length ||
+    !terrainData.mesh?.geometry ||
+    !list.length
+  ) {
+    return false;
+  }
+  if (!terrainData.craters) terrainData.craters = [];
+  for (const c of list) {
+    const crater = {
+      x: c.x,
+      z: c.z,
+      radius: c.radius ?? 5,
+      depth: c.depth ?? 1.4,
+    };
+    terrainData.craters.push(crater);
+    stampCraterIntoHeights(
+      terrainData.heights,
+      terrainData.seg,
+      terrainData.vertsX,
+      terrainData.half,
+      terrainData.mapSize,
+      crater.x,
+      crater.z,
+      crater.radius,
+      crater.depth,
+    );
+  }
+  return applyHeightsToGeometry(
+    terrainData.mesh.geometry,
+    terrainData.heights,
+    terrainData.seg,
+    terrainData.vertsX,
+  );
 }
 
 /** Push all surface uniform values from a params object. */

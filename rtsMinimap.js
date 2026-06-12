@@ -1,8 +1,34 @@
 /**
  * RTS tactical minimap — baked terrain satellite layer + styled overlays.
  */
+import * as THREE from "three";
 
 const TERRAIN_RES = 280;
+
+const _ndcCorners = [
+  [-1, -1],
+  [1, -1],
+  [1, 1],
+  [-1, 1],
+];
+const _raycaster = new THREE.Raycaster();
+const _rayHit = new THREE.Vector3();
+const _groundPlane = new THREE.Plane(new THREE.Vector3(0, 1, 0), 0);
+const _ndc = new THREE.Vector2();
+
+/** Perspective camera footprint on the ground — CoH-style trapezoid (no minimap rotation). */
+function getCameraGroundFootprint(camera, groundY) {
+  _groundPlane.constant = -groundY;
+  const pts = [];
+  for (const [nx, ny] of _ndcCorners) {
+    _ndc.set(nx, ny);
+    _raycaster.setFromCamera(_ndc, camera);
+    const hit = _raycaster.ray.intersectPlane(_groundPlane, _rayHit);
+    if (!hit) return null;
+    pts.push({ x: _rayHit.x, z: _rayHit.z });
+  }
+  return pts;
+}
 
 function lerp(a, b, t) {
   return a + (b - a) * t;
@@ -255,28 +281,28 @@ function drawUnitBlip(ctx, x, y, u) {
   ctx.restore();
 }
 
-function drawCameraViewport(ctx, { mini, mapSize, target, camera, azimuthDeg, aspect }) {
-  const dist = camera.position.distanceTo(target);
-  const fovRad = (camera.fov * Math.PI) / 180;
-  const viewH = 2 * Math.tan(fovRad / 2) * dist;
-  const viewW = viewH * aspect;
-  const { x: cx, y: cy } = worldToMini(target.x, target.z, mapSize, mini);
-  const hw = (viewW / mapSize) * mini * 0.5;
-  const hh = (viewH / mapSize) * mini * 0.5;
+function drawCameraViewport(ctx, { mini, mapSize, target, camera }) {
+  const footprint = getCameraGroundFootprint(camera, target.y);
+  if (!footprint) return;
 
   ctx.save();
-  ctx.translate(cx, cy);
-  ctx.rotate(-((azimuthDeg - 90) * Math.PI) / 180);
   ctx.fillStyle = "rgba(255,255,255,0.1)";
   ctx.strokeStyle = "rgba(255,255,255,0.92)";
   ctx.lineWidth = 1.5;
   ctx.beginPath();
-  ctx.rect(-hw, -hh, hw * 2, hh * 2);
+  for (let i = 0; i < footprint.length; i++) {
+    const { x, y } = worldToMini(footprint[i].x, footprint[i].z, mapSize, mini);
+    if (i === 0) ctx.moveTo(x, y);
+    else ctx.lineTo(x, y);
+  }
+  ctx.closePath();
   ctx.fill();
   ctx.stroke();
+
+  const { x: cx, y: cy } = worldToMini(target.x, target.z, mapSize, mini);
   ctx.fillStyle = "rgba(255,255,255,0.95)";
   ctx.beginPath();
-  ctx.arc(0, 0, 2.2, 0, Math.PI * 2);
+  ctx.arc(cx, cy, 2.2, 0, Math.PI * 2);
   ctx.fill();
   ctx.restore();
 }
@@ -302,8 +328,6 @@ export function drawRtsMinimap(ctx, state) {
     units,
     camera,
     target,
-    azimuthDeg,
-    aspect,
     visibleAt,
     exploredAt,
   } = state;
@@ -393,8 +417,6 @@ export function drawRtsMinimap(ctx, state) {
     mapSize,
     target,
     camera,
-    azimuthDeg,
-    aspect,
   });
 
   drawVignette(ctx, mini);

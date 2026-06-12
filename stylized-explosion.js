@@ -230,6 +230,9 @@ function createSpriteMaterial(map, tilesX, tilesY, useLifetimeFrames, hasAtlas, 
 
 const INST_STRIDE = 6;
 
+/** Shared sprite materials per layer signature — see TSLParticleSystem ctor. */
+const _spriteMatCache = new Map();
+
 class TSLParticleSystem {
   constructor(scene, cfg, map, maxParticles, renderOrder, atlas, layer, look) {
     this.cfg = cfg;
@@ -287,16 +290,25 @@ class TSLParticleSystem {
     const layerTint =
       this.layerKey === "fire" ? look.fireTint : this.layerKey === "smoke" ? look.smokeTint : "#ffffff";
 
-    const { mat, uLayerOpacity, uLayerTint } = createSpriteMaterial(
-      map,
-      atlas.x,
-      atlas.y,
-      this.useLifetimeFrames,
-      this.hasAtlas,
-      layerOpacity,
-      layerTint,
-      this.layerKey === "fire",
-    );
+    // Materials are CACHED per layer signature — explosions fire constantly
+    // in combat and rebuilding the TSL node graph + pipeline per explosion
+    // was real per-shot CPU. Shared materials must never be disposed.
+    const matKey = `${this.layerKey}|${atlas.x}x${atlas.y}|${this.useLifetimeFrames ? 1 : 0}|${layerOpacity}|${layerTint}`;
+    let cached = _spriteMatCache.get(matKey);
+    if (!cached) {
+      cached = createSpriteMaterial(
+        map,
+        atlas.x,
+        atlas.y,
+        this.useLifetimeFrames,
+        this.hasAtlas,
+        layerOpacity,
+        layerTint,
+        this.layerKey === "fire",
+      );
+      _spriteMatCache.set(matKey, cached);
+    }
+    const { mat, uLayerOpacity, uLayerTint } = cached;
     this.uLayerOpacity = uLayerOpacity;
     this.uLayerTint = uLayerTint;
     this.mesh = new THREE.InstancedMesh(geo, mat, n);
@@ -509,9 +521,11 @@ class TSLParticleSystem {
   dispose(scene) {
     scene.remove(this.root);
     this.mesh.geometry.dispose();
-    this.mesh.material.dispose();
+    // Material is shared via _spriteMatCache — never dispose it here.
   }
 }
+
+const MAX_CONCURRENT_EXPLOSIONS = 5;
 
 class ExplosionDirector {
   constructor(scene, textures, look) {
@@ -522,19 +536,26 @@ class ExplosionDirector {
   }
 
   explode(x, y, z, scale = 1, now = performance.now()) {
+    if (this.groups.length >= MAX_CONCURRENT_EXPLOSIONS) return;
     const pos = new THREE.Vector3(x, y, z);
     const layerOpts = {
       sizeScale: this.look.sizeScale * scale,
       emissionScale: this.look.emissionScale * Math.sqrt(scale),
       gravityScale: this.look.gravityScale,
     };
+    const lite = scale < 1.35;
+    const fireCount = lite ? 40 : 64;
+    const smokeCount = lite ? 36 : 56;
+    const rockCount = lite ? 0 : 20;
 
-    const fire = new TSLParticleSystem(this.scene, FIRE_CFG, this.textures.flame, 100, 12, { x: 1, y: 1 }, { key: "fire", ...layerOpts }, this.look);
-    const rocks = new TSLParticleSystem(this.scene, ROCKS_CFG, this.textures.rocks, 36, 13, { x: 5, y: 2 }, { key: "rocks", ...layerOpts }, this.look);
-    const smoke = new TSLParticleSystem(this.scene, SMOKE_CFG, this.textures.cloud, 100, 14, { x: 1, y: 1 }, { key: "smoke", ...layerOpts }, this.look);
+    const fire = new TSLParticleSystem(this.scene, FIRE_CFG, this.textures.flame, fireCount, 12, { x: 1, y: 1 }, { key: "fire", ...layerOpts }, this.look);
+    const rocks = rockCount
+      ? new TSLParticleSystem(this.scene, ROCKS_CFG, this.textures.rocks, rockCount, 13, { x: 5, y: 2 }, { key: "rocks", ...layerOpts }, this.look)
+      : null;
+    const smoke = new TSLParticleSystem(this.scene, SMOKE_CFG, this.textures.cloud, smokeCount, 14, { x: 1, y: 1 }, { key: "smoke", ...layerOpts }, this.look);
 
     fire.start(pos, now);
-    rocks.start(pos, now);
+    if (rocks) rocks.start(pos, now);
     const smokePos = pos.clone();
     const smokeStart = now + this.look.smokeDelay;
     const group = { fire, rocks, smoke, smokePos, smokeStart, smokeStarted: false, born: now };
@@ -544,19 +565,20 @@ class ExplosionDirector {
       const idx = this.groups.indexOf(group);
       if (idx >= 0) this.groups.splice(idx, 1);
       fire.dispose(this.scene);
-      rocks.dispose(this.scene);
+      if (rocks) rocks.dispose(this.scene);
       smoke.dispose(this.scene);
     }, 5000);
   }
 
   update(now, delta, camera, canvasHeight) {
+    if (!this.groups.length) return;
     for (const g of this.groups) {
       if (!g.smokeStarted && now >= g.smokeStart) {
         g.smoke.start(g.smokePos, now);
         g.smokeStarted = true;
       }
       g.fire.update(now, delta, camera, canvasHeight);
-      g.rocks.update(now, delta, camera, canvasHeight);
+      if (g.rocks) g.rocks.update(now, delta, camera, canvasHeight);
       if (g.smokeStarted) g.smoke.update(now, delta, camera, canvasHeight);
     }
   }
@@ -564,7 +586,7 @@ class ExplosionDirector {
   dispose() {
     for (const g of [...this.groups]) {
       g.fire.dispose(this.scene);
-      g.rocks.dispose(this.scene);
+      if (g.rocks) g.rocks.dispose(this.scene);
       g.smoke.dispose(this.scene);
     }
     this.groups.length = 0;
