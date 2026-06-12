@@ -6,7 +6,7 @@ import * as THREE from "three";
 
 export const RTS_MAP_PROPS_DEFAULTS = {
   enabled: true,
-  roads: true,
+  roads: false,
   ruins: true,
   tankTraps: true,
   wire: true,

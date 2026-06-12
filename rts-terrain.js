@@ -1,5 +1,6 @@
 /**
- * RTS Lab terrain — organic FBM hills with slope-clamped ramps (Grass005 / Rock028 / Ground037 PBR).
+ * RTS Lab terrain — CoH-style procedural hills, choke ridges, worn dirt paths.
+ * PBR: aerial_grass_rock (flats) / Rock028 (cliffs) / Ground037 (paths + patches).
  * Exposes `createRtsTerrain()` → { mesh, getHeight, uniforms, dispose }.
  */
 import * as THREE from "three/webgpu";
@@ -29,14 +30,9 @@ import {
   smoothstep,
   clamp,
   normalize,
+  step,
 } from "three/tsl";
 import { ImprovedNoise } from "three/addons/math/ImprovedNoise.js";
-import {
-  applyRiverToHeights,
-  RTS_RIVER_DEFAULTS,
-  RTS_RIVER_PATH,
-  RTS_RIVER_BRIDGES,
-} from "./rts-river.js";
 
 /** Default RTS map extent (6× the original 240-unit lab). */
 export const RTS_MAP_SIZE = 1440;
@@ -62,6 +58,17 @@ export const SHAPE_KEYS = [
   "mountainRidgeFreq",
   "rampMaxGrade",
   "slopeClampPasses",
+  "ridgeClampMul",
+  "playBowlStrength",
+  "playBowlRadius",
+  "chokeRidgeAmp",
+  "chokeRidgeWidth",
+  "chokeRidgeWarp",
+  "edgeMassifAmp",
+  "edgeMassifStart",
+  "pathsEnabled",
+  "pathWidth",
+  "pathDepth",
 ];
 
 /** Keys synced to GPU uniforms (live, no rebuild). */
@@ -91,55 +98,68 @@ export const SURF_KEYS = [
   "macroVar",
   "macroVarFreq",
   "satMul",
+  "pathDirtBoost",
 ];
 
 export const RTS_TERRAIN_DEFAULTS = {
-  // ── Heightfield (organic hills + ramp clamp) ──
-  fbmScale: 0.0036,
+  // ── Heightfield (CoH bowl + choke ridges + selective clamp) ──
+  fbmScale: 0.0032,
   octaves: 5,
   persistence: 0.5,
   lacunarity: 1.9,
-  heightScale: 46,
-  flatness: 2.55,
-  macroBlend: 0.22,
-  macroFreq: 0.5,
+  heightScale: 52,
+  flatness: 1.85,
+  macroBlend: 0.28,
+  macroFreq: 0.48,
   macroOctaves: 4,
-  peakBias: 0.04,
-  ridgeBoost: 0.012,
-  ridgeFreq: 1.1,
+  peakBias: 0.06,
+  ridgeBoost: 0.018,
+  ridgeFreq: 1.05,
   ridgeOctaves: 2,
   floorY: -8,
-  mountainReliefMul: 0.09,
-  mountainRidgeAmp: 0.34,
-  mountainRidgeFreq: 0.24,
-  rampMaxGrade: 0.4,
-  slopeClampPasses: 10,
+  mountainReliefMul: 0.11,
+  mountainRidgeAmp: 0.38,
+  mountainRidgeFreq: 0.22,
+  rampMaxGrade: 0.52,
+  slopeClampPasses: 5,
+  ridgeClampMul: 2.35,
+  playBowlStrength: 0.38,
+  playBowlRadius: 0.36,
+  chokeRidgeAmp: 30,
+  chokeRidgeWidth: 88,
+  chokeRidgeWarp: 0.0017,
+  edgeMassifAmp: 16,
+  edgeMassifStart: 0.6,
+  pathsEnabled: true,
+  pathWidth: 7.5,
+  pathDepth: 0.24,
   // ── Surface / shading (live uniforms) ──
-  grassScale: 0.008,
-  cliffScale: 0.016,
-  albedoMul: 0.96,
-  cliffLow: 0.34,
-  cliffHigh: 0.52,
-  cliffPow: 1.2,
-  cliffMinY: 10,
-  grassJitter: 0.08,
+  grassScale: 0.0042, // aerial_grass_rock UV scale (flats)
+  cliffScale: 0.014,
+  albedoMul: 0.98,
+  cliffLow: 0.26,
+  cliffHigh: 0.46,
+  cliffPow: 1.05,
+  cliffMinY: 0,
+  grassJitter: 0.05,
   dispStrength: 0.85,
   dispCliffMul: 1.1,
   dispUvScale: 38,
-  normalGrass: 1.05,
+  normalGrass: 0.72,
   normalCliff: 1.15,
   envIntensity: 0.12,
   metalness: 0,
-  grassRoughMin: 0.78,
+  grassRoughMin: 0.82,
   // ── CoH-style ground look (live uniforms) ──
-  dirtScale: 0.02, // dirt layer UV tiling
-  dirtAmount: 0.42, // 0..1 — how much of the flats are dirt patches
-  dirtPatchFreq: 0.011, // patch noise frequency (lower = bigger patches)
-  dirtSlope: 0.65, // dirt creep onto mild slopes below the cliff band
-  normalDirt: 1.1,
-  macroVar: 0.55, // 0..1 — large-scale brightness/tint variation (anti-tiling)
-  macroVarFreq: 0.004,
-  satMul: 0.85, // <1 desaturates toward the muted wartime palette
+  dirtScale: 0.018,
+  dirtAmount: 0.28,
+  dirtPatchFreq: 0.009,
+  dirtSlope: 0.55,
+  normalDirt: 1.05,
+  macroVar: 0.42,
+  macroVarFreq: 0.0032,
+  satMul: 0.88,
+  pathDirtBoost: 0.94,
 };
 
 /** Distant soft hills — low amplitude, wide falloff (not cliff-spined lumps). */
@@ -248,13 +268,13 @@ function ridgedFbm(perlin, x, y, z, octaves, persistence, lacunarity) {
 }
 
 const ARRAY_RES = 1024;
-const TERRAIN_PBR_GEN = 6;
+const TERRAIN_PBR_GEN = 7;
 const PBR_PATH = "./textures/pbr_materials/";
 /** Shared PBR material — loaded once, geometry rebuilt separately. */
 let _terrainPbr = null;
 let _terrainPbrGen = 0;
 
-function buildLayerArray(maps, srgb) {
+function buildLayerArray(maps, srgb, fillWhite = false) {
   const count = maps.length;
   const stride = ARRAY_RES * ARRAY_RES * 4;
   const data = new Uint8Array(stride * count);
@@ -263,7 +283,10 @@ function buildLayerArray(maps, srgb) {
   const ctx = canvas.getContext("2d", { willReadFrequently: true });
   for (let i = 0; i < count; i++) {
     const img = maps[i]?.image;
-    if (!img) continue;
+    if (!img) {
+      if (fillWhite) data.fill(255, i * stride, (i + 1) * stride);
+      continue;
+    }
     ctx.clearRect(0, 0, ARRAY_RES, ARRAY_RES);
     ctx.drawImage(img, 0, 0, ARRAY_RES, ARRAY_RES);
     data.set(ctx.getImageData(0, 0, ARRAY_RES, ARRAY_RES).data, i * stride);
@@ -312,25 +335,23 @@ async function ensureTerrainPbr() {
   const uniforms = {};
   const allTextures = [];
   let material;
+  let pathMaskTex = null;
 
   try {
-    const grass = {
+    const aerial = {
       color: await loadTex(
-        `${PBR_PATH}Grass005/Grass005_1K-JPG_Color.jpg`,
+        `${PBR_PATH}aerial-grass-rock/aerial_grass_rock_diff_2k.jpg`,
         true,
       ),
       normal: await loadTex(
-        `${PBR_PATH}Grass005/Grass005_1K-JPG_NormalGL.jpg`,
+        `${PBR_PATH}aerial-grass-rock/aerial_grass_rock_nor_gl_2k.jpg`,
         false,
       ),
       roughness: await loadTex(
-        `${PBR_PATH}Grass005/Grass005_1K-JPG_Roughness.jpg`,
+        `${PBR_PATH}aerial-grass-rock/aerial_grass_rock_rough_2k.jpg`,
         false,
       ),
-      ao: await loadTex(
-        `${PBR_PATH}Grass005/Grass005_1K-JPG_AmbientOcclusion.jpg`,
-        false,
-      ),
+      ao: null,
     };
     const cliff = {
       color: await loadTex(
@@ -370,7 +391,7 @@ async function ensureTerrainPbr() {
       ),
     };
 
-    const layers = [grass, cliff, dirt];
+    const layers = [aerial, cliff, dirt];
     for (const m of layers) allTextures.push(...Object.values(m));
 
     const colorArray = buildLayerArray(
@@ -388,10 +409,11 @@ async function ensureTerrainPbr() {
     const aoArray = buildLayerArray(
       layers.map((l) => l.ao),
       false,
+      true,
     );
     allTextures.push(colorArray, normalArray, roughArray, aoArray);
 
-    const L_GRASS = int(0);
+    const L_AERIAL = int(0);
     const L_CLIFF = int(1);
     const L_DIRT = int(2);
     const surf = pickSurf(RTS_TERRAIN_DEFAULTS);
@@ -420,6 +442,22 @@ async function ensureTerrainPbr() {
     const uMacroVar = uniform(surf.macroVar);
     const uMacroVarFreq = uniform(surf.macroVarFreq);
     const uSatMul = uniform(surf.satMul);
+    const uPathDirtBoost = uniform(surf.pathDirtBoost);
+    const uMapHalf = uniform(RTS_MAP_SIZE * 0.5);
+    const uMapSize = uniform(RTS_MAP_SIZE);
+    const pathMaskData = new Uint8Array(4);
+    pathMaskTex = new THREE.DataTexture(
+      pathMaskData,
+      1,
+      1,
+      THREE.RedFormat,
+      THREE.UnsignedByteType,
+    );
+    pathMaskTex.wrapS = pathMaskTex.wrapT = THREE.ClampToEdgeWrapping;
+    pathMaskTex.minFilter = THREE.LinearFilter;
+    pathMaskTex.magFilter = THREE.LinearFilter;
+    pathMaskTex.needsUpdate = true;
+    const pathMaskNode = texture(pathMaskTex);
 
     Object.assign(uniforms, {
       grassScale: uGrassScale,
@@ -446,6 +484,10 @@ async function ensureTerrainPbr() {
       macroVar: uMacroVar,
       macroVarFreq: uMacroVarFreq,
       satMul: uSatMul,
+      pathDirtBoost: uPathDirtBoost,
+      mapHalf: uMapHalf,
+      mapSize: uMapSize,
+      pathMask: pathMaskNode,
     });
 
     // Cheap 2D value noise — drives dirt patches + macro variation.
@@ -462,17 +504,16 @@ async function ensureTerrainPbr() {
       return mix(mix(a, b, u.x), mix(c, d, u.x), u.y);
     };
 
-    // grass / cliff / dirt weights. Dirt = organic noise patches on the
-    // flats (CoH muddy-field look) + creep onto mild slopes below the
-    // cliff band. Cliff still owns steep faces.
+    // aerial / cliff / dirt weights. Dirt = organic noise patches on the
+    // flats (CoH muddy-field look) + procedural worn tracks + creep onto
+    // mild slopes below the cliff band. Cliff owns steep faces.
     const layerWeights = () => {
       const slope = sub(float(1), abs(normalWorld.y));
       const jitter = hash2(positionWorld.xz);
       const slopeCliff = pow(smoothstep(uCliffLow, uCliffHigh, slope), uCliffPow);
-      const heightCliff = smoothstep(
-        uCliffMinY,
-        add(uCliffMinY, float(14)),
-        positionWorld.y,
+      const heightCliff = max(
+        smoothstep(uCliffMinY, add(uCliffMinY, float(14)), positionWorld.y),
+        step(uCliffMinY, float(0.5)),
       );
       const wCliff = slopeCliff.mul(heightCliff);
       const pNoise = add(
@@ -487,11 +528,14 @@ async function ensureTerrainPbr() {
       const thr = sub(float(1), uDirtAmount);
       const patches = smoothstep(sub(thr, float(0.16)), add(thr, float(0.16)), pNoise);
       const slopeDirt = smoothstep(mul(uCliffLow, float(0.4)), uCliffLow, slope);
-      const dirtMask = clamp(
+      const pathUV = positionWorld.xz.add(uMapHalf).div(uMapSize);
+      const pathW = texture(pathMaskNode, pathUV).r;
+      let dirtMask = clamp(
         add(patches, mul(slopeDirt, uDirtSlope)),
         float(0),
         float(1),
       );
+      dirtMask = clamp(add(dirtMask, mul(pathW, uPathDirtBoost)), float(0), float(1));
       const wDirt = mul(sub(float(1), wCliff), dirtMask);
       const wGrass = mul(
         sub(sub(float(1), wCliff), wDirt),
@@ -547,13 +591,13 @@ async function ensureTerrainPbr() {
       return normalize(add(add(mul(nX, wb.x), mul(nY, wb.y)), mul(nZ, wb.z)));
     };
 
-    const gRGB = () => layerRGB(colorArray, L_GRASS, uGrassScale);
+    const gRGB = () => layerRGB(colorArray, L_AERIAL, uGrassScale);
     const cRGB = () => triplanarRGB(colorArray, L_CLIFF, uCliffScale);
     const dRGB = () => layerRGB(colorArray, L_DIRT, uDirtScale);
-    const gR = () => layerR(roughArray, L_GRASS, uGrassScale);
+    const gR = () => layerR(roughArray, L_AERIAL, uGrassScale);
     const cR = () => triplanarR(roughArray, L_CLIFF, uCliffScale);
     const dR = () => layerR(roughArray, L_DIRT, uDirtScale);
-    const gAo = () => layerR(aoArray, L_GRASS, uGrassScale);
+    const gAo = () => layerR(aoArray, L_AERIAL, uGrassScale);
     const cAo = () => triplanarR(aoArray, L_CLIFF, uCliffScale);
     const dAo = () => layerR(aoArray, L_DIRT, uDirtScale);
 
@@ -609,7 +653,7 @@ async function ensureTerrainPbr() {
     material.normalNode = (() => {
       const lw = layerWeights();
       const nG = normalMap(
-        texture(normalArray, mul(positionWorld.xz, uGrassScale)).depth(L_GRASS),
+        texture(normalArray, mul(positionWorld.xz, uGrassScale)).depth(L_AERIAL),
         vec2(uNormalGrass, uNormalGrass),
       );
       const nC = triplanarNormal(normalArray, L_CLIFF, uCliffScale, uNormalCliff);
@@ -634,7 +678,7 @@ async function ensureTerrainPbr() {
   }
 
   _terrainPbrGen = TERRAIN_PBR_GEN;
-  _terrainPbr = { material, uniforms, allTextures };
+  _terrainPbr = { material, uniforms, allTextures, pathMaskTex };
   return _terrainPbr;
 }
 
@@ -738,27 +782,337 @@ export function applyRoadFlattenToHeights(
   }
 }
 
-function clampHeightsSlope(heights, seg, vertsX, maxDelta, passes = 1) {
+function clampHeightsSlopeMasked(
+  heights,
+  ridgeMask,
+  seg,
+  vertsX,
+  maxDelta,
+  ridgeMul,
+  passes = 1,
+) {
+  const rm = Math.max(1, ridgeMul);
   for (let pass = 0; pass < passes; pass++) {
     for (let zi = 0; zi <= seg; zi++) {
       for (let xi = 0; xi <= seg; xi++) {
         const i = gridIdxLocal(xi, zi, vertsX);
+        const localMax = maxDelta * (1 + (ridgeMask[i] ?? 0) * (rm - 1));
         let h = heights[i];
         if (xi < seg) {
           const j = gridIdxLocal(xi + 1, zi, vertsX);
           const dh = heights[j] - h;
-          if (dh > maxDelta) heights[j] = h + maxDelta;
-          else if (dh < -maxDelta) heights[j] = h - maxDelta;
+          if (dh > localMax) heights[j] = h + localMax;
+          else if (dh < -localMax) heights[j] = h - localMax;
         }
         if (zi < seg) {
           const j = gridIdxLocal(xi, zi + 1, vertsX);
           const dh = heights[j] - h;
-          if (dh > maxDelta) heights[j] = h + maxDelta;
-          else if (dh < -maxDelta) heights[j] = h - maxDelta;
+          if (dh > localMax) heights[j] = h + localMax;
+          else if (dh < -localMax) heights[j] = h - localMax;
         }
       }
     }
   }
+}
+
+function smooth01(edge0, edge1, x) {
+  const t = THREE.MathUtils.clamp((x - edge0) / (edge1 - edge0), 0, 1);
+  return t * t * (3 - 2 * t);
+}
+
+function playBowlFactor(x, z, half, strength, radiusFrac) {
+  const r = Math.hypot(x, z) / Math.max(1, half * radiusFrac);
+  return smooth01(1, 0.12, r) * strength;
+}
+
+function chokeRidgeFactor(x, z, perlin, width, warp, amp) {
+  const w1 = perlin.noise(x * warp + 1.2, 0.5, z * warp * 0.72) * width * 0.58;
+  const w2 = perlin.noise(x * warp * 0.82, 1.1, z * warp + 2.4) * width * 0.48;
+  const d1 = Math.abs(z - w1);
+  const d2 = Math.abs(x - w2);
+  const r1 = smooth01(width * 1.35, width * 0.07, d1);
+  const r2 = smooth01(width * 1.15, width * 0.06, d2);
+  return Math.max(r1, r2 * 0.9) * amp;
+}
+
+function edgeMassifFactor(x, z, half, startFrac, amp) {
+  const r = Math.max(Math.abs(x), Math.abs(z)) / half;
+  return smooth01(startFrac, 0.94, r) * amp;
+}
+
+/** Authored waypoints — segments are valley-traced on the baked height grid. */
+const PROCEDURAL_PATH_ROUTES = [
+  [[0, 520], [0, 300], [0, 120], [0, -120], [0, -300], [0, -520]],
+  [[-470, 70], [-240, 35], [0, 0], [240, -35], [470, -70]],
+  [[-320, 400], [-150, 200], [0, 60]],
+  [[320, 400], [150, 200], [0, 60]],
+  [[-320, -400], [-150, -200], [0, -60]],
+  [[320, -400], [150, -200], [0, -60]],
+];
+
+function snapGrid(x, z, half, size, seg, step) {
+  const u = ((x + half) / size) * seg;
+  const v = ((z + half) / size) * seg;
+  return {
+    xi: THREE.MathUtils.clamp(Math.round(u / step) * step, 0, seg),
+    zi: THREE.MathUtils.clamp(Math.round(v / step) * step, 0, seg),
+  };
+}
+
+function traceLowPath(heights, seg, vertsX, half, size, x0, z0, x1, z1, step = 2) {
+  const hAt = (xi, zi) => heights[zi * vertsX + xi];
+  const start = snapGrid(x0, z0, half, size, seg, step);
+  const end = snapGrid(x1, z1, half, size, seg, step);
+  const key = (xi, zi) => `${xi},${zi}`;
+  const open = [];
+  const cameFrom = new Map();
+  const gScore = new Map();
+  const sk = key(start.xi, start.zi);
+  gScore.set(sk, 0);
+  open.push({
+    xi: start.xi,
+    zi: start.zi,
+    f: Math.hypot(start.xi - end.xi, start.zi - end.zi),
+  });
+
+  const neighbors = [
+    [step, 0],
+    [-step, 0],
+    [0, step],
+    [0, -step],
+    [step, step],
+    [step, -step],
+    [-step, step],
+    [-step, -step],
+  ];
+
+  while (open.length) {
+    open.sort((a, b) => a.f - b.f);
+    const cur = open.shift();
+    if (cur.xi === end.xi && cur.zi === end.zi) {
+      const path = [];
+      let ck = key(cur.xi, cur.zi);
+      let node = { xi: cur.xi, zi: cur.zi };
+      while (node) {
+        path.push({
+          x: -half + (node.xi / seg) * size,
+          z: -half + (node.zi / seg) * size,
+        });
+        const prev = cameFrom.get(ck);
+        if (!prev) break;
+        node = prev;
+        ck = key(node.xi, node.zi);
+      }
+      path.reverse();
+      return path;
+    }
+    const ck = key(cur.xi, cur.zi);
+    const curG = gScore.get(ck) ?? Infinity;
+    const prev = cameFrom.get(ck);
+    for (const [dx, dz] of neighbors) {
+      const nxi = cur.xi + dx;
+      const nzi = cur.zi + dz;
+      if (nxi < 0 || nzi < 0 || nxi > seg || nzi > seg) continue;
+      const dist = Math.hypot(dx, dz);
+      const dh = hAt(nxi, nzi) - hAt(cur.xi, cur.zi);
+      let turnCost = 0;
+      if (prev?.dx !== undefined) {
+        if (prev.dx !== dx || prev.dz !== dz) {
+          turnCost = dist * (Math.abs(prev.dx) === step && Math.abs(prev.dz) === step ? 1.1 : 0.45);
+        }
+      }
+      const cost =
+        dist * (1 + Math.max(0, dh) * 2.8) +
+        hAt(nxi, nzi) * 0.06 +
+        turnCost;
+      const nk = key(nxi, nzi);
+      const tentG = curG + cost;
+      if (tentG >= (gScore.get(nk) ?? Infinity)) continue;
+      cameFrom.set(nk, { xi: cur.xi, zi: cur.zi, dx, dz });
+      gScore.set(nk, tentG);
+      const h = Math.hypot(nxi - end.xi, nzi - end.zi);
+      open.push({ xi: nxi, zi: nzi, f: tentG + h });
+    }
+  }
+
+  return [
+    { x: x0, z: z0 },
+    { x: x1, z: z1 },
+  ];
+}
+
+function traceRouteWaypoints(heights, seg, vertsX, half, size, waypoints, step = 2) {
+  const merged = [];
+  for (let i = 0; i < waypoints.length - 1; i++) {
+    const [x0, z0] = waypoints[i];
+    const [x1, z1] = waypoints[i + 1];
+    const segPath = traceLowPath(heights, seg, vertsX, half, size, x0, z0, x1, z1, step);
+    if (i > 0 && segPath.length) segPath.shift();
+    merged.push(...segPath);
+  }
+  return merged;
+}
+
+function catmullRom2D(p0, p1, p2, p3, t) {
+  const t2 = t * t;
+  const t3 = t2 * t;
+  return {
+    x:
+      0.5 *
+      (2 * p1.x +
+        (-p0.x + p2.x) * t +
+        (2 * p0.x - 5 * p1.x + 4 * p2.x - p3.x) * t2 +
+        (-p0.x + 3 * p1.x - 3 * p2.x + p3.x) * t3),
+    z:
+      0.5 *
+      (2 * p1.z +
+        (-p0.z + p2.z) * t +
+        (2 * p0.z - 5 * p1.z + 4 * p2.z - p3.z) * t2 +
+        (-p0.z + 3 * p1.z - 3 * p2.z + p3.z) * t3),
+  };
+}
+
+/** Smooth A* polyline into a gentle winding track. */
+function resampleCatmullRom(points, subdiv = 8) {
+  if (points.length < 2) return points;
+  if (points.length === 2) {
+    const out = [];
+    const steps = Math.max(4, subdiv * 4);
+    for (let i = 0; i <= steps; i++) {
+      const t = i / steps;
+      out.push({
+        x: THREE.MathUtils.lerp(points[0].x, points[1].x, t),
+        z: THREE.MathUtils.lerp(points[0].z, points[1].z, t),
+      });
+    }
+    return out;
+  }
+  const out = [];
+  for (let i = 0; i < points.length - 1; i++) {
+    const p0 = points[Math.max(0, i - 1)];
+    const p1 = points[i];
+    const p2 = points[i + 1];
+    const p3 = points[Math.min(points.length - 1, i + 2)];
+    for (let j = 0; j < subdiv; j++) {
+      out.push(catmullRom2D(p0, p1, p2, p3, j / subdiv));
+    }
+  }
+  out.push(points[points.length - 1]);
+  return out;
+}
+
+function stampPathCorridor(mask, vertsX, half, size, seg, points, halfWidth) {
+  if (points.length < 2) return;
+  const hw = Math.max(2, halfWidth);
+  const outer = hw * 1.55;
+  const inner = hw * 0.42;
+  const stepM = Math.max(0.65, size / seg) * 0.5;
+  const cell = size / seg;
+  const rCells = Math.ceil(outer / cell) + 1;
+
+  for (let p = 0; p < points.length - 1; p++) {
+    const a = points[p];
+    const b = points[p + 1];
+    const len = Math.hypot(b.x - a.x, b.z - a.z);
+    const steps = Math.max(1, Math.ceil(len / stepM));
+    for (let s = 0; s <= steps; s++) {
+      const t = s / steps;
+      const px = THREE.MathUtils.lerp(a.x, b.x, t);
+      const pz = THREE.MathUtils.lerp(a.z, b.z, t);
+      const u = ((px + half) / size) * seg;
+      const v = ((pz + half) / size) * seg;
+      const cx = Math.round(u);
+      const cz = Math.round(v);
+      for (let dz = -rCells; dz <= rCells; dz++) {
+        for (let dx = -rCells; dx <= rCells; dx++) {
+          const xi = cx + dx;
+          const zi = cz + dz;
+          if (xi < 0 || zi < 0 || xi > seg || zi > seg) continue;
+          const wx = -half + (xi / seg) * size;
+          const wz = -half + (zi / seg) * size;
+          const d = Math.hypot(wx - px, wz - pz);
+          if (d > outer) continue;
+          const w = d <= inner ? 1 : smooth01(outer, inner, d);
+          const i = zi * vertsX + xi;
+          mask[i] = Math.max(mask[i], w);
+        }
+      }
+    }
+  }
+}
+
+function blurPathMask(mask, vertsX, seg, passes = 2) {
+  const tmp = new Float32Array(mask.length);
+  for (let pass = 0; pass < passes; pass++) {
+    for (let zi = 0; zi <= seg; zi++) {
+      for (let xi = 0; xi <= seg; xi++) {
+        let sum = 0;
+        let n = 0;
+        for (let dz = -1; dz <= 1; dz++) {
+          for (let dx = -1; dx <= 1; dx++) {
+            const xj = xi + dx;
+            const zj = zi + dz;
+            if (xj < 0 || zj < 0 || xj > seg || zj > seg) continue;
+            sum += mask[zj * vertsX + xj];
+            n++;
+          }
+        }
+        tmp[zi * vertsX + xi] = sum / Math.max(1, n);
+      }
+    }
+    mask.set(tmp);
+  }
+}
+
+function buildProceduralPathMask(heights, seg, vertsX, half, size, routes, halfWidth) {
+  const mask = new Float32Array(vertsX * vertsX);
+  for (const route of routes) {
+    const traced = traceRouteWaypoints(heights, seg, vertsX, half, size, route);
+    const smooth = resampleCatmullRom(traced, 10);
+    stampPathCorridor(mask, vertsX, half, size, seg, smooth, halfWidth);
+  }
+  blurPathMask(mask, vertsX, seg, 2);
+  return mask;
+}
+
+function applyPathDepression(heights, mask, depth) {
+  if (!depth) return;
+  for (let i = 0; i < heights.length; i++) {
+    heights[i] -= mask[i] * depth;
+  }
+}
+
+function createOrUpdatePathMaskTexture(tex, pathMask, vertsX) {
+  const data = new Uint8Array(pathMask.length);
+  for (let i = 0; i < pathMask.length; i++) {
+    data[i] = Math.round(THREE.MathUtils.clamp(pathMask[i], 0, 1) * 255);
+  }
+  if (!tex || tex.image.width !== vertsX) {
+    const next = new THREE.DataTexture(
+      data,
+      vertsX,
+      vertsX,
+      THREE.RedFormat,
+      THREE.UnsignedByteType,
+    );
+    next.wrapS = next.wrapT = THREE.ClampToEdgeWrapping;
+    next.minFilter = THREE.LinearFilter;
+    next.magFilter = THREE.LinearFilter;
+    next.needsUpdate = true;
+    return next;
+  }
+  tex.image.data = data;
+  tex.needsUpdate = true;
+  return tex;
+}
+
+/** Push path mask + map extents onto terrain material uniforms. */
+export function syncRtsTerrainPathMask(terrainData, pathMaskTex, half, size) {
+  const u = terrainData?.uniforms;
+  if (!u?.pathMask) return;
+  if (pathMaskTex) u.pathMask.value = pathMaskTex;
+  if (u.mapHalf) u.mapHalf.value = half;
+  if (u.mapSize) u.mapSize.value = size;
 }
 
 /** Bake height samples + sampler (no GPU geometry allocation). */
@@ -776,7 +1130,7 @@ function bakeTerrainHeightfield(size, segments, params = {}) {
     return sum * ts.mountainReliefMul;
   }
 
-  function rawHeight(x, z) {
+  function rawHeight(x, z, half) {
     const nx = x * ts.fbmScale;
     const nz = z * ts.fbmScale;
     const oct = THREE.MathUtils.clamp(Math.round(ts.octaves), 1, 14);
@@ -826,13 +1180,43 @@ function bakeTerrainHeightfield(size, segments, params = {}) {
     );
     h += ridged * mMask * (ts.mountainRidgeAmp ?? RTS_TERRAIN_DEFAULTS.mountainRidgeAmp);
 
-    const y = h * ts.heightScale + mountainRelief(x, z);
+    let y = h * ts.heightScale + mountainRelief(x, z);
+
+    const bowl = playBowlFactor(
+      x,
+      z,
+      half,
+      ts.playBowlStrength ?? RTS_TERRAIN_DEFAULTS.playBowlStrength,
+      ts.playBowlRadius ?? RTS_TERRAIN_DEFAULTS.playBowlRadius,
+    );
+    y *= 1 - bowl * 0.55;
+
+    const choke = chokeRidgeFactor(
+      x,
+      z,
+      perlin,
+      ts.chokeRidgeWidth ?? RTS_TERRAIN_DEFAULTS.chokeRidgeWidth,
+      ts.chokeRidgeWarp ?? RTS_TERRAIN_DEFAULTS.chokeRidgeWarp,
+      1,
+    );
+    const chokeRidged = ridgedFbm(perlin, nx * 1.15, 0.4, nz * 1.15, 4, 0.48, 2.1);
+    y += choke * chokeRidged * (ts.chokeRidgeAmp ?? RTS_TERRAIN_DEFAULTS.chokeRidgeAmp);
+
+    y += edgeMassifFactor(
+      x,
+      z,
+      half,
+      ts.edgeMassifStart ?? RTS_TERRAIN_DEFAULTS.edgeMassifStart,
+      ts.edgeMassifAmp ?? RTS_TERRAIN_DEFAULTS.edgeMassifAmp,
+    );
+
     return Math.max(ts.floorY, y);
   }
 
   const seg = THREE.MathUtils.clamp(Math.round(segments), 32, 512);
   const vertsX = seg + 1;
   const heights = new Float32Array(vertsX * vertsX);
+  const ridgeMask = new Float32Array(vertsX * vertsX);
   const half = size * 0.5;
 
   function gridIdx(xi, zi) {
@@ -849,52 +1233,35 @@ function bakeTerrainHeightfield(size, segments, params = {}) {
   for (let zi = 0; zi <= seg; zi++) {
     for (let xi = 0; xi <= seg; xi++) {
       const { x, z } = gridWorld(xi, zi);
-      heights[gridIdx(xi, zi)] = rawHeight(x, z);
+      const i = gridIdx(xi, zi);
+      heights[i] = rawHeight(x, z, half);
+      const choke = chokeRidgeFactor(
+        x,
+        z,
+        perlin,
+        ts.chokeRidgeWidth ?? RTS_TERRAIN_DEFAULTS.chokeRidgeWidth,
+        ts.chokeRidgeWarp ?? RTS_TERRAIN_DEFAULTS.chokeRidgeWarp,
+        1,
+      );
+      ridgeMask[i] = THREE.MathUtils.clamp(choke, 0, 1);
     }
   }
 
   const edgeDist = size / seg;
-  const maxDelta = edgeDist * THREE.MathUtils.clamp(ts.rampMaxGrade, 0.15, 0.85);
+  const maxDelta = edgeDist * THREE.MathUtils.clamp(ts.rampMaxGrade, 0.15, 0.95);
   const passes = THREE.MathUtils.clamp(Math.round(ts.slopeClampPasses), 0, 24);
-
-  for (let pass = 0; pass < passes; pass++) {
-    for (let zi = 0; zi <= seg; zi++) {
-      for (let xi = 0; xi <= seg; xi++) {
-        const i = gridIdx(xi, zi);
-        let h = heights[i];
-        if (xi < seg) {
-          const j = gridIdx(xi + 1, zi);
-          const dh = heights[j] - h;
-          if (dh > maxDelta) heights[j] = h + maxDelta;
-          else if (dh < -maxDelta) heights[j] = h - maxDelta;
-        }
-        if (zi < seg) {
-          const j = gridIdx(xi, zi + 1);
-          const dh = heights[j] - h;
-          if (dh > maxDelta) heights[j] = h + maxDelta;
-          else if (dh < -maxDelta) heights[j] = h - maxDelta;
-        }
-      }
-    }
-  }
-
-  const riverCfg = { ...RTS_RIVER_DEFAULTS, ...params.river };
-  applyRiverToHeights(
-    heights,
-    seg,
-    vertsX,
-    half,
-    size,
-    riverCfg,
-    params.riverPath ?? RTS_RIVER_PATH,
-    params.riverBridges ?? RTS_RIVER_BRIDGES,
+  const ridgeMul = THREE.MathUtils.clamp(
+    ts.ridgeClampMul ?? RTS_TERRAIN_DEFAULTS.ridgeClampMul,
+    1,
+    4,
   );
+  clampHeightsSlopeMasked(heights, ridgeMask, seg, vertsX, maxDelta, ridgeMul, passes);
 
   const flattenPads = (params.flattenPads || []).map((pad) => ({
     x: pad.x,
     z: pad.z,
     radius: pad.radius ?? 34,
-    height: pad.height ?? rawHeight(pad.x, pad.z),
+    height: pad.height ?? rawHeight(pad.x, pad.z, half),
   }));
 
   for (const pad of flattenPads) {
@@ -915,18 +1282,19 @@ function bakeTerrainHeightfield(size, segments, params = {}) {
     }
   }
 
-  const flattenRoads = params.flattenRoads ?? [];
-  if (flattenRoads.length) {
-    applyRoadFlattenToHeights(
+  let pathMask = new Float32Array(vertsX * vertsX);
+  if (ts.pathsEnabled !== false) {
+    pathMask = buildProceduralPathMask(
       heights,
       seg,
       vertsX,
       half,
       size,
-      flattenRoads,
-      params.roadFlatten ?? {},
+      PROCEDURAL_PATH_ROUTES,
+      (ts.pathWidth ?? RTS_TERRAIN_DEFAULTS.pathWidth) * 0.5,
     );
-    clampHeightsSlope(heights, seg, vertsX, maxDelta, 2);
+    applyPathDepression(heights, pathMask, ts.pathDepth ?? RTS_TERRAIN_DEFAULTS.pathDepth);
+    clampHeightsSlopeMasked(heights, ridgeMask, seg, vertsX, maxDelta, ridgeMul, 2);
   }
 
   applyTerrainCraters(heights, seg, vertsX, half, size, params.craters ?? []);
@@ -953,6 +1321,7 @@ function bakeTerrainHeightfield(size, segments, params = {}) {
 
   return {
     heights,
+    pathMask,
     seg,
     vertsX,
     half,
@@ -995,12 +1364,29 @@ function buildTerrainHeightfield(size, segments, params = {}) {
     geo,
     getHeight: baked.getHeight,
     heights: baked.heights,
+    pathMask: baked.pathMask,
     seg: baked.seg,
     vertsX: baked.vertsX,
     half: baked.half,
     mapSize: baked.mapSize,
     shape: baked.shape,
   };
+}
+
+function applyBakedPathMask(terrainData, baked, uniforms) {
+  const tex = createOrUpdatePathMaskTexture(
+    terrainData?.pathMaskTex,
+    baked.pathMask,
+    baked.vertsX,
+  );
+  if (terrainData) terrainData.pathMaskTex = tex;
+  syncRtsTerrainPathMask(
+    { uniforms: uniforms ?? terrainData?.uniforms },
+    tex,
+    baked.half,
+    baked.mapSize,
+  );
+  return tex;
 }
 
 export async function createRtsTerrain(
@@ -1019,6 +1405,7 @@ export async function createRtsTerrain(
   if (built.geo.attributes.normal) {
     built.geo.attributes.normal.setUsage(THREE.DynamicDrawUsage);
   }
+  const pathMaskTex = applyBakedPathMask({ uniforms: pbr.uniforms }, built, pbr.uniforms);
 
   return {
     mesh,
@@ -1030,6 +1417,7 @@ export async function createRtsTerrain(
     mapSize: built.mapSize,
     craters: params.craters ?? [],
     uniforms: pbr.uniforms,
+    pathMaskTex,
     dispose: () => built.geo.dispose(),
     shape: built.shape,
     surf,
@@ -1068,6 +1456,7 @@ export async function rebuildRtsTerrainHeight(
     terrainData.mapSize = baked.mapSize;
     terrainData.shape = baked.shape;
     if (!terrainData.uniforms) terrainData.uniforms = pbr.uniforms;
+    applyBakedPathMask(terrainData, baked, pbr.uniforms);
     return { inPlace: true };
   }
 
@@ -1085,6 +1474,7 @@ export async function rebuildRtsTerrainHeight(
   terrainData.mapSize = built.mapSize;
   terrainData.shape = built.shape;
   if (!terrainData.uniforms) terrainData.uniforms = pbr.uniforms;
+  applyBakedPathMask(terrainData, built, pbr.uniforms);
   return { inPlace: false };
 }
 

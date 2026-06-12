@@ -2,17 +2,26 @@ import * as THREE from "three";
 
 /**
  * Live thumbnail baker for RTS unit/building UI tiles.
- * Same render path as modularRoadThumbnails.js — transparent PNG, bounding-sphere
- * framing, uniform 3/4 camera — so palette tiles read like modular-road.
+ * Lighting matches the main RTS scene (low IBL + moderate sun) so PBR GLBs
+ * don't blow out; framing fills ~90% of the tile so models read larger in UI.
  *
  * @param {object} o
  * @param {THREE.WebGPURenderer} o.renderer
  * @param {{key:string, make:()=>THREE.Object3D}[]} o.items
  * @param {THREE.Texture} [o.environment]
- * @param {number} [o.size=192]
+ * @param {number} [o.environmentIntensity=0.1]
+ * @param {number} [o.size=256]
+ * @param {number} [o.fill=0.9] — fraction of frame height used by model
  * @returns {Promise<Map<string,string>>}
  */
-export async function bakeRtsThumbnails({ renderer, items, environment = null, size = 192 }) {
+export async function bakeRtsThumbnails({
+  renderer,
+  items,
+  environment = null,
+  environmentIntensity = 0.1,
+  size = 256,
+  fill = 0.9,
+}) {
   const out = new Map();
   if (!renderer || !Array.isArray(items)) return out;
 
@@ -26,14 +35,18 @@ export async function bakeRtsThumbnails({ renderer, items, environment = null, s
   });
 
   const scene = new THREE.Scene();
-  if (environment) scene.environment = environment;
-  const hemi = new THREE.HemisphereLight(0xdfeaff, 0x3a3a42, 2.4);
+  if (environment) {
+    scene.environment = environment;
+    scene.environmentIntensity = environmentIntensity;
+  }
+  // Match in-game lights (rts-lab.html) — not the brighter modular-road bake.
+  const hemi = new THREE.HemisphereLight(0xffffff, 0xffffff, 1);
   scene.add(hemi);
-  const dir = new THREE.DirectionalLight(0xfff2e0, 2.8);
+  const dir = new THREE.DirectionalLight(0xffffff, 1);
   dir.position.set(5, 9, 6);
   scene.add(dir);
 
-  const camera = new THREE.PerspectiveCamera(30, 1, 0.05, 5000);
+  const camera = new THREE.PerspectiveCamera(26, 1, 0.05, 5000);
   const group = new THREE.Group();
   scene.add(group);
 
@@ -75,7 +88,8 @@ export async function bakeRtsThumbnails({ renderer, items, environment = null, s
       box.getBoundingSphere(sphere);
       center.copy(sphere.center);
       const r = Math.max(sphere.radius, 0.5);
-      const dist = (r / Math.sin(THREE.MathUtils.degToRad(camera.fov) / 2)) * 1.12;
+      const halfFov = THREE.MathUtils.degToRad(camera.fov) * 0.5;
+      const dist = (r / (Math.tan(halfFov) * fill));
       camera.position.copy(center).addScaledVector(camDir, dist);
       camera.lookAt(center);
       camera.updateMatrixWorld(true);
