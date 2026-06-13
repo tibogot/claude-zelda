@@ -1915,6 +1915,7 @@
         RTS_TERRAIN_DEFAULTS,
         syncRtsTerrainUniforms,
       } from "./rts-terrain.js";
+      import { createRtsCameraControl } from "./rtsCameraControl.js";
       import { createRtsGrass } from "./rts-grass.js";
       import { createRtsRevoGrass } from "./rts-revo-grass.js";
       import { RtsPineForest } from "./rts-forest.js";
@@ -2692,17 +2693,6 @@
 
         function cameraTargetGroundY(x, z) {
           return terrainHeight(x, z) + PARAMS.camera.targetY;
-        }
-
-        function updateCameraGroundFollow(dt) {
-          if (cam.mode !== "rts" || !PARAMS.camera.followTerrain) return;
-          const wantY = cameraTargetGroundY(controls.target.x, controls.target.z);
-          const t = Math.min(1, dt * (PARAMS.camera.terrainFollowSpeed ?? 10));
-          const newY = THREE.MathUtils.lerp(controls.target.y, wantY, t);
-          const dy = newY - controls.target.y;
-          if (Math.abs(dy) < 0.0005) return;
-          controls.target.y = newY;
-          camera.position.y += dy;
         }
 
         function syncCameraFromParams() {
@@ -9079,50 +9069,29 @@
         const _right = new THREE.Vector3();
         const _pan = new THREE.Vector3();
         const WORLD_UP = new THREE.Vector3(0, 1, 0);
-        // Shared helper: slide the whole view (camera + orbit target) across
-        // the ground plane. ix = right, iz = forward (away from camera).
-        function panView(ix, iz, speedMul, dt) {
-          if (!ix && !iz) return;
-          _fwd.copy(controls.target).sub(camera.position);
-          _fwd.y = 0;
-          if (_fwd.lengthSq() < 1e-8) return;
-          _fwd.normalize();
-          _right.crossVectors(_fwd, WORLD_UP).normalize();
-          // Scale with zoom distance so it feels constant on screen.
-          const dist = camera.position.distanceTo(controls.target);
-          const sp = speedMul * dist * 0.9 * dt;
-          _pan
-            .set(0, 0, 0)
-            .addScaledVector(_fwd, iz * sp)
-            .addScaledVector(_right, ix * sp);
-          camera.position.add(_pan);
-          controls.target.add(_pan);
-        }
-
-        function panCamera(dt) {
-          let ix = 0;
-          let iz = 0;
-          if (keys.KeyW || keys.ArrowUp) iz += 1;
-          if (keys.KeyS || keys.ArrowDown) iz -= 1;
-          if (keys.KeyD || keys.ArrowRight) ix += 1;
-          if (keys.KeyQ || keys.ArrowLeft) ix -= 1; // A = attack-move, not pan
-          panView(ix, iz, PARAMS.camera.panSpeed, dt);
-        }
-
-        // Edge scrolling — only in RTS mode, only while the cursor is over the
-        // canvas and not drag-selecting. Pushing the mouse to a screen edge
-        // slides the map, like every classic RTS.
-        function edgeScroll(dt) {
-          if (cam.mode !== "rts" || !pointerInCanvas || dragging) return;
-          const E = PARAMS.camera.edgeSize;
-          let ix = 0;
-          let iz = 0;
-          if (mouseX < E) ix -= 1;
-          else if (mouseX > innerWidth - E) ix += 1;
-          if (mouseY < E) iz += 1;
-          else if (mouseY > innerHeight - E) iz -= 1;
-          panView(ix, iz, PARAMS.camera.edgeSpeed, dt);
-        }
+        // RTS runtime camera controller (pan / edge-scroll / terrain-follow)
+        // now lives in ./rtsCameraControl.js. `terrainHeight` is the
+        // world-interface it depends on; `input` reads the live keyboard/mouse
+        // state. The lab's camera-CONFIG functions (syncCameraFromParams,
+        // applyCamModeConstraints, etc.) stay in this file — they're editor-only
+        // and won't port to the engine.
+        const rtsCameraControl = createRtsCameraControl({
+          camera,
+          controls,
+          params: PARAMS.camera,
+          isRtsMode: () => cam.mode === "rts",
+          terrainHeight,
+          worldUp: WORLD_UP,
+          input: {
+            keys,
+            getPointer: () => ({
+              x: mouseX,
+              y: mouseY,
+              inCanvas: pointerInCanvas,
+              dragging,
+            }),
+          },
+        });
 
         // ── COMBAT ──────────────────────────────────────────────────────
         // Per-type shot feel: hitscan tracers (scout/tank) vs ballistic shells
@@ -10960,10 +10929,9 @@
           fogFrame++;
           forestAnimT += dt;
 
-          panCamera(dt);
-          edgeScroll(dt);
+          rtsCameraControl.panAndEdge(dt);
           controls.update();
-          updateCameraGroundFollow(dt);
+          rtsCameraControl.groundFollow(dt);
           syncCameraForPick();
           if ((terrainFowBind || fowOverlay) && PARAMS.fog.enabled) {
             (fowOverlay ?? terrainFowBind).syncCamera?.(camera);

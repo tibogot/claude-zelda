@@ -1097,6 +1097,7 @@
       import Stats from "stats-gl";
       import {
         Vehicle,
+        FIXED_DT,
         TIRE,
         CHASSIS,
         SOLID,
@@ -1753,6 +1754,13 @@
         const pauseBadge = document.getElementById("pause-badge");
         const slowmoBadge = document.getElementById("slowmo-badge");
         const SLOWMO_FACTOR = 0.3; // sim speed while slow-mo is on
+        // Fixed-timestep accumulator: render time pools here and the sim only
+        // advances in whole FIXED_DT ticks, so physics + lap timing behave the
+        // same at every display refresh rate. Cap ticks/frame so a long stall
+        // drops sim time instead of spiraling (render dt is clamped to 0.05 →
+        // at most 6 ticks normally).
+        let simAccum = 0;
+        const MAX_SIM_TICKS = 8;
         const perfReadout = document.getElementById("perf-readout");
         let _perfT = 0; // throttle the draw-call/triangle readout (~4 Hz)
 
@@ -2084,6 +2092,7 @@
           state.paused = false;
           state.frameStep = false;
           state.slowmo = false;
+          simAccum = 0;
           pauseBadge.style.display = "none";
           slowmoBadge.style.display = "none";
           controls.enabled = !on; // chase cam drives in drive mode
@@ -2527,20 +2536,20 @@
           const dt = Math.min(now - lastT, 0.05);
           lastT = now;
           if (state.mode === "drive") {
-            // Paused → freeze the sim (simDt 0); N requests a single frame step.
+            // Paused → freeze the sim (simDt 0); N steps exactly one fixed tick.
             // Slow-mo scales sim time only (camera stays on real dt); lap times are
             // unaffected since the clock + the car's motion scale together.
             let simDt = state.paused ? 0 : dt * (state.slowmo ? SLOWMO_FACTOR : 1);
             if (state.paused && state.frameStep) {
-              simDt = 1 / 60;
+              simDt = FIXED_DT;
               state.frameStep = false;
             }
             if (simDt > 0) {
               // Race countdown: hold the car still and tick 3·2·1·GO.
-              let controls;
+              let driveInput;
               if (raceCountdown > 0) {
                 raceCountdown -= simDt;
-                controls = HELD_CONTROLS;
+                driveInput = HELD_CONTROLS;
                 countdownEl.style.display = "";
                 if (raceCountdown > 0) {
                   countdownEl.textContent = String(Math.ceil(raceCountdown));
@@ -2551,48 +2560,65 @@
                   _goLinger = 0.7;
                 }
               } else {
-                controls = readControls();
+                driveInput = readControls();
                 if (_goLinger > 0) {
                   _goLinger -= simDt;
                   if (_goLinger <= 0) countdownEl.style.display = "none";
                 }
               }
-              moverProps.update(simDt);
-              if (moverProps.getDeckMovers().length) rebakeDeckWithMovers();
-              vehicle.update(simDt, controls);
-              if (raceCountdown <= 0) props.applyFields(vehicle, simDt); // boost pads etc.
+              // ── FIXED-TIMESTEP SIM ── everything that affects the outcome
+              // (movers, car, boost fields, portals, lap clock) advances in
+              // FIXED_DT ticks; visuals interpolate the leftover fraction.
+              simAccum += simDt;
+              let ticks = Math.floor(simAccum / FIXED_DT);
+              if (ticks > MAX_SIM_TICKS) {
+                ticks = MAX_SIM_TICKS;
+                simAccum = ticks * FIXED_DT; // drop the backlog
+              }
+              simAccum -= ticks * FIXED_DT;
+              const hasDeckMovers = moverProps.getDeckMovers().length > 0;
+              for (let i = 0; i < ticks; i++) {
+                moverProps.update(FIXED_DT);
+                if (hasDeckMovers) rebakeDeckWithMovers();
+                vehicle.tick(driveInput);
+                if (raceCountdown <= 0) props.applyFields(vehicle, FIXED_DT); // boost pads etc.
+                portals.updateDrive(FIXED_DT, vehicle);
+                // Lap timing — inside the tick loop so gate-crossing times are
+                // quantized to the fixed clock (framerate-independent records).
+                if (state.racingUi) {
+                  const lapEv = lap.update(FIXED_DT, vehicle.body.pos, vehicle.body.vel);
+                  if (lapEv) {
+                    setRespawnToLastGate();
+                    if (lapEv.kind === "checkpoint") {
+                      showSplit(lapEv.splitDelta); // ± vs your best lap at this gate
+                    } else if (lapEv.kind === "start") {
+                      ghost.beginLap(); // start recording lap 1
+                    } else if (lapEv.kind === "lap") {
+                      if (lapEv.isRecord) {
+                        ghost.commit(); // this lap is the new ghost
+                        saveStoredBest(courseKey, lapEv.lapTime);
+                        saveStoredGhost(courseKey);
+                        saveStoredSplits(courseKey, lap.bestLapSplits);
+                        refreshRecordCard();
+                        celebrateRecord();
+                      } else {
+                        ghost.discard();
+                      }
+                      if (!lapEv.finished) ghost.beginLap(); // record the next lap fresh
+                    }
+                  }
+                }
+              }
+              vehicle.syncVisuals(dt, simAccum / FIXED_DT);
               tireMarks.update(vehicle);
               driftSmoke.updateFromVehicle(vehicle, camera, simDt, keys);
-              portals.updateDrive(simDt, vehicle);
               // Fell off the track → snap back to the last cleared gate (or start).
               if (vehicle.body.pos.y < FALL_Y) {
                 vehicle.respawn();
                 tireMarks.reset();
                 driftSmoke.reset();
               }
-              // Lap timing + ghost — only while the racing UI is enabled.
               if (state.racingUi) {
-                const lapEv = lap.update(simDt, vehicle.body.pos, vehicle.body.vel);
-                if (lapEv) {
-                  setRespawnToLastGate();
-                  if (lapEv.kind === "checkpoint") {
-                    showSplit(lapEv.splitDelta); // ± vs your best lap at this gate
-                  } else if (lapEv.kind === "start") {
-                    ghost.beginLap(); // start recording lap 1
-                  } else if (lapEv.kind === "lap") {
-                    if (lapEv.isRecord) {
-                      ghost.commit(); // this lap is the new ghost
-                      saveStoredBest(courseKey, lapEv.lapTime);
-                      saveStoredGhost(courseKey);
-                      saveStoredSplits(courseKey, lap.bestLapSplits);
-                      refreshRecordCard();
-                      celebrateRecord();
-                    } else {
-                      ghost.discard();
-                    }
-                    if (!lapEv.finished) ghost.beginLap(); // record the next lap fresh
-                  }
-                }
                 // Record the live pose, then drive the phantom from the lap clock.
                 if (lap.running) ghost.record(lap.currentTime, vehicle.chassisMesh.position, vehicle.chassisMesh.quaternion);
                 updateGhost();

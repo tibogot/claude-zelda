@@ -14,6 +14,10 @@ import * as THREE from "three";
 
 export const GRAVITY = 9.81;
 
+/** Fixed physics tick (s). The sim only ever advances in whole ticks of this,
+ *  so car behavior, lap times, and ghosts are framerate-independent. */
+export const FIXED_DT = 1 / 120;
+
 export const CHASSIS = {
   width: 1.8,
   height: 0.6,
@@ -571,7 +575,16 @@ export class Vehicle {
       }
       return null;
     };
-    this.SUBSTEPS = 4;
+    // 2 substeps × FIXED_DT (1/120) → a 1/240 s integration step, the same
+    // substep the old variable-rate path produced at 60 fps (dt/4), so the
+    // existing handling tune carries over unchanged.
+    this.SUBSTEPS = 2;
+    // Previous-tick pose, kept for render interpolation between fixed ticks.
+    this._prevPos = new THREE.Vector3();
+    this._prevQuat = new THREE.Quaternion();
+    this._renderPos = new THREE.Vector3();
+    this._renderQuat = new THREE.Quaternion();
+    this._renderWheelPos = new THREE.Vector3();
     this.respawn();
   }
 
@@ -891,6 +904,14 @@ export class Vehicle {
     this.body.vel.set(0, 0, 0);
     this.body.quat.copy(this.spawnQuat);
     this.body.angVel.set(0, 0, 0);
+    this._resetInterpolation();
+  }
+
+  /** Snap the interpolation history to the current pose so teleports and
+   *  respawns don't smear the mesh across the map for one frame. */
+  _resetInterpolation() {
+    this._prevPos.copy(this.body.pos);
+    this._prevQuat.copy(this.body.quat);
   }
 
   /** Recover in place: keep position + heading, zero the roll/pitch and spin,
@@ -902,6 +923,7 @@ export class Vehicle {
     this.body.angVel.set(0, 0, 0);
     this.body.vel.y = 0;
     this.body.pos.y += 0.6;
+    this._resetInterpolation();
   }
 
   /**
@@ -929,6 +951,7 @@ export class Vehicle {
       }
     }
     if (opts.dampVertical) body.vel.y *= 0.25;
+    this._resetInterpolation();
   }
 
   setEnabled(on) {
@@ -941,18 +964,23 @@ export class Vehicle {
     this.arrowGroup.visible = v;
   }
 
-  /** @param {{steerTarget:number, throttle:number, handbrake:boolean}} controls */
-  update(dt, controls) {
+  /**
+   * Advance exactly one fixed physics tick (FIXED_DT). Drive this from an
+   * accumulator loop, then call syncVisuals(renderDt, alpha) once per frame.
+   * @param {{steerTarget:number, throttle:number, handbrake:boolean, yaw:number}} controls
+   */
+  tick(controls) {
     if (!this.enabled) return;
-    const k = 1 - Math.exp(-TIRE.steerSmooth * dt);
+    this._prevPos.copy(this.body.pos);
+    this._prevQuat.copy(this.body.quat);
+    const k = 1 - Math.exp(-TIRE.steerSmooth * FIXED_DT);
     this.input.steer += ((controls.steerTarget ?? 0) - this.input.steer) * k;
     this.input.throttle = controls.throttle ?? 0;
     this.input.handbrake = !!controls.handbrake;
     this.input.yaw = controls.yaw ?? 0;
 
-    this._physicsStep(dt);
+    this._physicsStep(FIXED_DT);
     this._depenetrateFromWalls();
-    this._syncVisuals(dt);
   }
 
   /** Steer angle after speed-sensitive reduction (shared by physics + visuals). */
@@ -1199,31 +1227,45 @@ export class Vehicle {
     }
   }
 
-  _syncVisuals(dt) {
+  /**
+   * Sync meshes to the body pose, interpolated `alpha` (0..1) of the way from
+   * the previous fixed tick to the current one. `dt` is the RENDER dt — it
+   * only drives visual smoothing (suspension ease, wheel spin), not physics.
+   */
+  syncVisuals(dt, alpha = 1) {
     const body = this.body;
     this._updateTaillights();
-    this._geomCenter.copy(_COM_OFFSET).applyQuaternion(body.quat).add(body.pos);
+    this._renderPos.lerpVectors(this._prevPos, body.pos, alpha);
+    this._renderQuat.slerpQuaternions(this._prevQuat, body.quat, alpha);
+    this._geomCenter.copy(_COM_OFFSET).applyQuaternion(this._renderQuat).add(this._renderPos);
     this.chassisMesh.position.copy(this._geomCenter);
     if (CHASSIS.visualLift !== 0) {
-      this._wheelUp.set(0, 1, 0).applyQuaternion(body.quat);
+      this._wheelUp.set(0, 1, 0).applyQuaternion(this._renderQuat);
       this.chassisMesh.position.addScaledVector(this._wheelUp, CHASSIS.visualLift);
     }
-    this.chassisMesh.quaternion.copy(body.quat);
+    this.chassisMesh.quaternion.copy(this._renderQuat);
 
     const steerAngle = this._steerAngle();
     for (let i = 0; i < this.tires.length; i++) {
       const t = this.tires[i];
       const cfg = WHEEL_LOCAL[i];
-      this._wheelUp.copy(this._yAxis).applyQuaternion(body.quat);
+      this._wheelUp.copy(this._yAxis).applyQuaternion(this._renderQuat);
       const targetDist = t.grounded ? t.hitDistance : TIRE.rayLength;
       if (t._smoothDist === undefined) t._smoothDist = targetDist;
       const k = 1 - Math.exp(-TIRE.suspVisSmooth * dt);
       t._smoothDist += (targetDist - t._smoothDist) * k;
       const suspExt = Math.max(0, t._smoothDist - WHEEL.radius);
       this._wheelOffset.copy(this._wheelUp).multiplyScalar(-suspExt);
-      this.tireGroups[i].position.copy(t.worldPos).add(this._wheelOffset);
+      // Hub position recomputed from the INTERPOLATED pose (t.worldPos is the
+      // tick-time position and would lag the interpolated chassis).
+      this._renderWheelPos
+        .copy(t.localPos)
+        .sub(_COM_OFFSET)
+        .applyQuaternion(this._renderQuat)
+        .add(this._renderPos);
+      this.tireGroups[i].position.copy(this._renderWheelPos).add(this._wheelOffset);
 
-      this._wheelFwdWorld.copy(this._zAxis).applyQuaternion(body.quat);
+      this._wheelFwdWorld.copy(this._zAxis).applyQuaternion(this._renderQuat);
       if (cfg.steer && steerAngle !== 0) {
         this._steerLocalQ.setFromAxisAngle(this._wheelUp, steerAngle);
         this._wheelFwdWorld.applyQuaternion(this._steerLocalQ);
@@ -1237,9 +1279,9 @@ export class Vehicle {
       this._spinLocalQ.setFromAxisAngle(this._xAxis, this.wheelSpin[i]);
       if (cfg.steer) {
         this._steerLocalQ.setFromAxisAngle(this._yAxis, steerAngle);
-        this.tireGroups[i].quaternion.multiplyQuaternions(body.quat, this._steerLocalQ).multiply(this._spinLocalQ);
+        this.tireGroups[i].quaternion.multiplyQuaternions(this._renderQuat, this._steerLocalQ).multiply(this._spinLocalQ);
       } else {
-        this.tireGroups[i].quaternion.multiplyQuaternions(body.quat, this._spinLocalQ);
+        this.tireGroups[i].quaternion.multiplyQuaternions(this._renderQuat, this._spinLocalQ);
       }
 
       if (this.arrowGroup.visible) {
