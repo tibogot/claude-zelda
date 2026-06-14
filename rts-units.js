@@ -57,7 +57,7 @@ export const RTS_UNIT_GLB = {
     ringScale: 1.1,
   },
   helicopter: {
-    path: "models/rts/heli4.glb",
+    path: "models/rts/heli5.glb",
     // targetLength = final in-game FUSELAGE length (rotors are excluded from
     // the measured box), so this number is true regardless of GLB scale.
     targetLength: 13,
@@ -74,7 +74,28 @@ function isRotorMeshName(name) {
   const n = (name || "").toLowerCase();
   if (!n) return false;
   if (/tail/.test(n) && /rotor|prop|blade/.test(n)) return true;
-  return /rotor|propeller|blade|\bprop\b/.test(n);
+  return /rotor|propeller|blade|\bprop\b|object_14\.001(?:_\d+)?$/.test(n);
+}
+
+function isTailRotorMeshName(name) {
+  const n = (name || "").toLowerCase();
+  return /tail/.test(n) && /rotor|prop|blade/.test(n);
+}
+
+/** Mesh is a rotor if its name matches or any ancestor up to unit root is a rotor group. */
+function meshRotorKind(mesh, root) {
+  if (!mesh?.isMesh) return null;
+  if (isTailRotorMeshName(mesh.name)) return "tail";
+  if (isRotorMeshName(mesh.name)) return "main";
+  let p = mesh.parent;
+  while (p && p !== root) {
+    const pn = (p.name || "").toLowerCase();
+    if (isTailRotorMeshName(p.name)) return "tail";
+    if (pn === "rotor" || pn === "mainrotor" || isRotorMeshName(p.name)) return "main";
+    if (pn === "tailrotor") return "tail";
+    p = p.parent;
+  }
+  return null;
 }
 
 function normalizeUnitRoot(scene, cfg) {
@@ -91,7 +112,7 @@ function normalizeUnitRoot(scene, cfg) {
     _box.makeEmpty();
     let hasBody = false;
     root.traverse((o) => {
-      if (!o.isMesh || isRotorMeshName(o.name)) return;
+      if (!o.isMesh || meshRotorKind(o, root)) return;
       _box.expandByObject(o);
       hasBody = true;
     });
@@ -120,12 +141,15 @@ function normalizeUnitRoot(scene, cfg) {
   if (cfg.findRotors) {
     const found = [];
     root.traverse((o) => {
-      const n = (o.name || "").toLowerCase();
-      if (!n) return;
-      if (/tail/.test(n) && /rotor|prop|blade/.test(n)) o.name = "TailRotor";
-      else if (/rotor|propeller|blade|\bprop\b/.test(n)) o.name = "MainRotor";
-      else return;
-      found.push(n);
+      if (!o.isMesh) return;
+      const kind = meshRotorKind(o, root);
+      if (kind === "tail") {
+        o.name = "TailRotor";
+        found.push(o.name);
+      } else if (kind === "main") {
+        o.name = "MainRotor";
+        found.push(o.name);
+      }
     });
     if (!found.length) {
       const names = [];
@@ -251,8 +275,17 @@ export function createRtsUnitGlbMesh(faction, type, palette) {
   const g = template.clone(true);
   tintFactionMeshes(g, faction, palette);
   if (RTS_UNIT_GLB[type]?.findRotors) {
-    g.userData.mainRotor = g.getObjectByName("MainRotor") ?? null;
-    g.userData.tailRotor = g.getObjectByName("TailRotor") ?? null;
+    const mainRotors = [];
+    const tailRotors = [];
+    g.traverse((o) => {
+      if (!o.isMesh) return;
+      if (o.name === "MainRotor") mainRotors.push(o);
+      else if (o.name === "TailRotor") tailRotors.push(o);
+    });
+    g.userData.mainRotor = mainRotors[0] ?? null;
+    g.userData.tailRotor = tailRotors[0] ?? null;
+    g.userData.mainRotors = mainRotors;
+    g.userData.tailRotors = tailRotors;
   }
   return g;
 }

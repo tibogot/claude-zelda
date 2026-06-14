@@ -1,6 +1,6 @@
 /**
  * RTS Lab terrain — CoH-style procedural hills, choke ridges, worn dirt paths.
- * PBR: aerial_grass_rock (flats) / Rock028 (cliffs) / Ground037 (paths + patches).
+ * PBR: Grass005 (flats) / Rock028 (cliffs) / Ground037 (paths + patches).
  * Exposes `createRtsTerrain()` → { mesh, getHeight, uniforms, dispose }.
  */
 import * as THREE from "three/webgpu";
@@ -36,6 +36,8 @@ import { ImprovedNoise } from "three/addons/math/ImprovedNoise.js";
 
 /** Default RTS map extent (6× the original 240-unit lab). */
 export const RTS_MAP_SIZE = 1440;
+
+const PBR_PATH = "./textures/pbr_materials/";
 
 /** Keys that affect the baked heightfield (mesh rebuild required). */
 export const SHAPE_KEYS = [
@@ -134,12 +136,12 @@ export const RTS_TERRAIN_DEFAULTS = {
   pathWidth: 7.5,
   pathDepth: 0.24,
   // ── Surface / shading (live uniforms) ──
-  grassScale: 0.0042, // aerial_grass_rock UV scale (flats)
+  grassScale: 0.02, // Grass005 UV scale (flats)
   cliffScale: 0.014,
   albedoMul: 0.98,
-  cliffLow: 0.26,
-  cliffHigh: 0.46,
-  cliffPow: 1.05,
+  cliffLow: 0.03,
+  cliffHigh: 0.14,
+  cliffPow: 0.6,
   cliffMinY: 0,
   grassJitter: 0.05,
   dispStrength: 0.85,
@@ -160,6 +162,71 @@ export const RTS_TERRAIN_DEFAULTS = {
   macroVarFreq: 0.0032,
   satMul: 0.88,
   pathDirtBoost: 0.94,
+  // Per-layer texture overrides — empty string = built-in default path.
+  pbrLayers: {
+    aerial: { color: "", normal: "", roughness: "", ao: "" },
+    cliff: { color: "", normal: "", roughness: "", ao: "" },
+    dirt: { color: "", normal: "", roughness: "", ao: "" },
+  },
+};
+
+export const RTS_TERRAIN_PBR_LAYER_KEYS = ["aerial", "cliff", "dirt"];
+
+export const RTS_TERRAIN_PBR_LAYER_META = {
+  aerial: {
+    title: "Flats",
+    hint: "Grass005 on open ground",
+    scaleKey: "grassScale",
+    scaleLabel: "UV scale",
+    normalKey: "normalGrass",
+    normalLabel: "Normal",
+    scaleMin: 0.002,
+    scaleMax: 0.06,
+    scaleStep: 0.001,
+  },
+  cliff: {
+    title: "Cliffs",
+    hint: "Steep slopes (triplanar)",
+    scaleKey: "cliffScale",
+    scaleLabel: "UV scale",
+    normalKey: "normalCliff",
+    normalLabel: "Normal",
+    scaleMin: 0.004,
+    scaleMax: 0.04,
+    scaleStep: 0.001,
+  },
+  dirt: {
+    title: "Dirt & paths",
+    hint: "Patches, tracks, mild slopes",
+    scaleKey: "dirtScale",
+    scaleLabel: "UV scale",
+    normalKey: "normalDirt",
+    normalLabel: "Normal",
+    scaleMin: 0.005,
+    scaleMax: 0.08,
+    scaleStep: 0.001,
+  },
+};
+
+export const RTS_TERRAIN_PBR_DEFAULT_PATHS = {
+  aerial: {
+    color: `${PBR_PATH}Grass005/Grass005_1K-JPG_Color.jpg`,
+    normal: `${PBR_PATH}Grass005/Grass005_1K-JPG_NormalGL.jpg`,
+    roughness: `${PBR_PATH}Grass005/Grass005_1K-JPG_Roughness.jpg`,
+    ao: `${PBR_PATH}Grass005/Grass005_1K-JPG_AmbientOcclusion.jpg`,
+  },
+  cliff: {
+    color: `${PBR_PATH}Rock028/Rock028_2K-JPG_Color.jpg`,
+    normal: `${PBR_PATH}Rock028/Rock028_2K-JPG_NormalGL.jpg`,
+    roughness: `${PBR_PATH}Rock028/Rock028_2K-JPG_Roughness.jpg`,
+    ao: `${PBR_PATH}Rock028/Rock028_2K-JPG_AmbientOcclusion.jpg`,
+  },
+  dirt: {
+    color: `${PBR_PATH}Ground037/Ground037_1K-JPG_Color.jpg`,
+    normal: `${PBR_PATH}Ground037/Ground037_1K-JPG_NormalGL.jpg`,
+    roughness: `${PBR_PATH}Ground037/Ground037_1K-JPG_Roughness.jpg`,
+    ao: `${PBR_PATH}Ground037/Ground037_1K-JPG_AmbientOcclusion.jpg`,
+  },
 };
 
 /** Distant soft hills — low amplitude, wide falloff (not cliff-spined lumps). */
@@ -268,11 +335,11 @@ function ridgedFbm(perlin, x, y, z, octaves, persistence, lacunarity) {
 }
 
 const ARRAY_RES = 1024;
-const TERRAIN_PBR_GEN = 7;
-const PBR_PATH = "./textures/pbr_materials/";
+const TERRAIN_PBR_GEN = 8;
 /** Shared PBR material — loaded once, geometry rebuilt separately. */
 let _terrainPbr = null;
 let _terrainPbrGen = 0;
+let _terrainPbrCacheKey = "";
 
 function buildLayerArray(maps, srgb, fillWhite = false) {
   const count = maps.length;
@@ -303,10 +370,19 @@ function buildLayerArray(maps, srgb, fillWhite = false) {
   return tex;
 }
 
+function resolveTerrainTexUrl(baseUrl, rel) {
+  if (!rel || !String(rel).trim()) return null;
+  const s = String(rel).trim();
+  if (/^(blob:|https?:|data:)/i.test(s)) return s;
+  return new URL(s, baseUrl).href;
+}
+
 function loadTerrainTex(loader, baseUrl, rel, srgb) {
+  const url = resolveTerrainTexUrl(baseUrl, rel);
+  if (!url) return Promise.resolve(null);
   return new Promise((resolve, reject) => {
     loader.load(
-      new URL(rel, baseUrl).href,
+      url,
       (t) => {
         t.wrapS = t.wrapT = THREE.RepeatWrapping;
         t.colorSpace = srgb
@@ -323,14 +399,68 @@ function loadTerrainTex(loader, baseUrl, rel, srgb) {
   });
 }
 
-async function ensureTerrainPbr() {
-  if (_terrainPbr && _terrainPbrGen === TERRAIN_PBR_GEN) return _terrainPbr;
+function pickLayerPath(defaults, custom, key) {
+  const v = custom?.[key];
+  if (typeof v === "string" && v.trim()) return v.trim();
+  const d = defaults?.[key];
+  return typeof d === "string" && d.trim() ? d.trim() : null;
+}
+
+async function loadLayerMaps(loader, baseUrl, defaults, custom = {}) {
+  const loadSlot = async (key, srgb) => {
+    const path = pickLayerPath(defaults, custom, key);
+    if (!path) return null;
+    return loadTerrainTex(loader, baseUrl, path, srgb);
+  };
+  return {
+    color: await loadSlot("color", true),
+    normal: await loadSlot("normal", false),
+    roughness: await loadSlot("roughness", false),
+    ao: await loadSlot("ao", false),
+  };
+}
+
+function disposeTerrainPbrPack() {
+  if (!_terrainPbr) return;
+  for (const t of _terrainPbr.allTextures || []) {
+    try {
+      t.dispose();
+    } catch {}
+  }
+  try {
+    _terrainPbr.material?.dispose();
+  } catch {}
   _terrainPbr = null;
+  _terrainPbrGen = 0;
+  _terrainPbrCacheKey = "";
+}
+
+/** Swap terrain PBR texture arrays (e.g. after loading external maps in the inspector). */
+export async function reloadRtsTerrainPbrTextures(terrainData, params = {}) {
+  disposeTerrainPbrPack();
+  const pbr = await ensureTerrainPbr(params);
+  if (terrainData) {
+    if (terrainData.mesh) terrainData.mesh.material = pbr.material;
+    terrainData.uniforms = pbr.uniforms;
+  }
+  syncRtsTerrainUniforms(pbr.uniforms, params);
+  return pbr;
+}
+
+async function ensureTerrainPbr(params = {}) {
+  const pbrKey = JSON.stringify(params.pbrLayers ?? {});
+  if (
+    _terrainPbr &&
+    _terrainPbrGen === TERRAIN_PBR_GEN &&
+    _terrainPbrCacheKey === pbrKey
+  ) {
+    return _terrainPbr;
+  }
+  disposeTerrainPbrPack();
 
   const baseUrl = import.meta.url;
   const loader = new THREE.TextureLoader();
-  const loadTex = (rel, srgb) =>
-    loadTerrainTex(loader, baseUrl, rel, srgb);
+  const layersCustom = params.pbrLayers ?? {};
 
   const uniforms = {};
   const allTextures = [];
@@ -338,58 +468,24 @@ async function ensureTerrainPbr() {
   let pathMaskTex = null;
 
   try {
-    const aerial = {
-      color: await loadTex(
-        `${PBR_PATH}aerial-grass-rock/aerial_grass_rock_diff_2k.jpg`,
-        true,
-      ),
-      normal: await loadTex(
-        `${PBR_PATH}aerial-grass-rock/aerial_grass_rock_nor_gl_2k.jpg`,
-        false,
-      ),
-      roughness: await loadTex(
-        `${PBR_PATH}aerial-grass-rock/aerial_grass_rock_rough_2k.jpg`,
-        false,
-      ),
-      ao: null,
-    };
-    const cliff = {
-      color: await loadTex(
-        `${PBR_PATH}Rock028/Rock028_2K-JPG_Color.jpg`,
-        true,
-      ),
-      normal: await loadTex(
-        `${PBR_PATH}Rock028/Rock028_2K-JPG_NormalGL.jpg`,
-        false,
-      ),
-      roughness: await loadTex(
-        `${PBR_PATH}Rock028/Rock028_2K-JPG_Roughness.jpg`,
-        false,
-      ),
-      ao: await loadTex(
-        `${PBR_PATH}Rock028/Rock028_2K-JPG_AmbientOcclusion.jpg`,
-        false,
-      ),
-    };
-
-    const dirt = {
-      color: await loadTex(
-        `${PBR_PATH}Ground037/Ground037_1K-JPG_Color.jpg`,
-        true,
-      ),
-      normal: await loadTex(
-        `${PBR_PATH}Ground037/Ground037_1K-JPG_NormalGL.jpg`,
-        false,
-      ),
-      roughness: await loadTex(
-        `${PBR_PATH}Ground037/Ground037_1K-JPG_Roughness.jpg`,
-        false,
-      ),
-      ao: await loadTex(
-        `${PBR_PATH}Ground037/Ground037_1K-JPG_AmbientOcclusion.jpg`,
-        false,
-      ),
-    };
+    const aerial = await loadLayerMaps(
+      loader,
+      baseUrl,
+      RTS_TERRAIN_PBR_DEFAULT_PATHS.aerial,
+      layersCustom.aerial,
+    );
+    const cliff = await loadLayerMaps(
+      loader,
+      baseUrl,
+      RTS_TERRAIN_PBR_DEFAULT_PATHS.cliff,
+      layersCustom.cliff,
+    );
+    const dirt = await loadLayerMaps(
+      loader,
+      baseUrl,
+      RTS_TERRAIN_PBR_DEFAULT_PATHS.dirt,
+      layersCustom.dirt,
+    );
 
     const layers = [aerial, cliff, dirt];
     for (const m of layers) allTextures.push(...Object.values(m));
@@ -678,6 +774,7 @@ async function ensureTerrainPbr() {
   }
 
   _terrainPbrGen = TERRAIN_PBR_GEN;
+  _terrainPbrCacheKey = pbrKey;
   _terrainPbr = { material, uniforms, allTextures, pathMaskTex };
   return _terrainPbr;
 }
@@ -1261,23 +1358,51 @@ function bakeTerrainHeightfield(size, segments, params = {}) {
     x: pad.x,
     z: pad.z,
     radius: pad.radius ?? 34,
-    height: pad.height ?? rawHeight(pad.x, pad.z, half),
+    height: pad.height,
+    core: pad.core ?? 0.55,
   }));
 
-  for (const pad of flattenPads) {
+  function padTargetHeight(pad) {
+    if (pad.height != null && Number.isFinite(pad.height)) return pad.height;
+    const r = pad.radius ?? 34;
+    const r2 = r * r;
+    let maxH = -Infinity;
     for (let zi = 0; zi <= seg; zi++) {
       for (let xi = 0; xi <= seg; xi++) {
         const { x, z } = gridWorld(xi, zi);
         const dx = x - pad.x;
         const dz = z - pad.z;
-        const r = pad.radius;
-        const d2 = dx * dx + dz * dz;
-        if (d2 >= r * r) continue;
-        const d = Math.sqrt(d2);
-        const t = d / r;
-        const w = 1 - t * t * (3 - 2 * t);
-        const i = gridIdx(xi, zi);
-        heights[i] = heights[i] * (1 - w) + pad.height * w;
+        if (dx * dx + dz * dz > r2) continue;
+        maxH = Math.max(maxH, heights[gridIdx(xi, zi)]);
+      }
+    }
+    return Number.isFinite(maxH) ? maxH : 0;
+  }
+
+  function padBlendWeight(t, coreFrac = 0.55) {
+    if (t <= coreFrac) return 1;
+    const u = (t - coreFrac) / Math.max(1e-4, 1 - coreFrac);
+    return 1 - u * u * (3 - 2 * u);
+  }
+
+  function applyFlattenPads() {
+    for (const pad of flattenPads) {
+      const targetH = padTargetHeight(pad);
+      const core = pad.core ?? 0.55;
+      for (let zi = 0; zi <= seg; zi++) {
+        for (let xi = 0; xi <= seg; xi++) {
+          const { x, z } = gridWorld(xi, zi);
+          const dx = x - pad.x;
+          const dz = z - pad.z;
+          const r = pad.radius;
+          const d2 = dx * dx + dz * dz;
+          if (d2 >= r * r) continue;
+          const d = Math.sqrt(d2);
+          const t = d / r;
+          const w = padBlendWeight(t, core);
+          const i = gridIdx(xi, zi);
+          heights[i] = heights[i] * (1 - w) + targetH * w;
+        }
       }
     }
   }
@@ -1298,6 +1423,9 @@ function bakeTerrainHeightfield(size, segments, params = {}) {
   }
 
   applyTerrainCraters(heights, seg, vertsX, half, size, params.craters ?? []);
+
+  // Flatten after paths/craters so pads stay level (path crossings won't carve through).
+  applyFlattenPads();
 
   function sampleHeightGrid(x, z) {
     const u = ((x + half) / size) * seg;
@@ -1395,7 +1523,7 @@ export async function createRtsTerrain(
   params = {},
 ) {
   const surf = pickSurf({ ...RTS_TERRAIN_DEFAULTS, ...params });
-  const pbr = await ensureTerrainPbr();
+  const pbr = await ensureTerrainPbr(params);
   syncRtsTerrainUniforms(pbr.uniforms, params);
   const built = buildTerrainHeightfield(size, segments, params);
   const mesh = new THREE.Mesh(built.geo, pbr.material);
@@ -1432,7 +1560,7 @@ export async function rebuildRtsTerrainHeight(
   params = {},
   { beforeGeometrySwap } = {},
 ) {
-  const pbr = await ensureTerrainPbr();
+  const pbr = await ensureTerrainPbr(params);
   syncRtsTerrainUniforms(terrainData.uniforms ?? pbr.uniforms, params);
   const craterList = terrainData.craters ?? params.craters ?? [];
   const baked = bakeTerrainHeightfield(size, segments, {

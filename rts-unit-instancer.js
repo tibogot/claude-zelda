@@ -36,7 +36,7 @@ function extractSubmeshes(root) {
   root.updateMatrixWorld(true);
   _invRoot.copy(root.matrixWorld).invert();
   const out = [];
-  const rotors = { main: null, tail: null };
+  const rotors = { main: [], tail: [] };
   root.traverse((child) => {
     if (!child.isMesh) return;
     child.updateMatrixWorld(true);
@@ -47,8 +47,8 @@ function extractSubmeshes(root) {
       localMatrix: _local.clone(),
       name: child.name,
     };
-    if (child.name === "MainRotor") rotors.main = entry;
-    else if (child.name === "TailRotor") rotors.tail = entry;
+    if (child.name === "MainRotor") rotors.main.push(entry);
+    else if (child.name === "TailRotor") rotors.tail.push(entry);
     else out.push(entry);
   });
   return { body: out, rotors };
@@ -130,22 +130,12 @@ export class RtsUnitInstancer {
           bodySlots: body.map((def) =>
             makeInstancedSlot(def, INITIAL_CAPACITY, this.castShadow, this.group),
           ),
-          mainRotor: rotors.main
-            ? makeInstancedSlot(
-                rotors.main,
-                INITIAL_CAPACITY,
-                false,
-                this.group,
-              )
-            : null,
-          tailRotor: rotors.tail
-            ? makeInstancedSlot(
-                rotors.tail,
-                INITIAL_CAPACITY,
-                false,
-                this.group,
-              )
-            : null,
+          mainRotor: rotors.main.map((def) =>
+            makeInstancedSlot(def, INITIAL_CAPACITY, false, this.group),
+          ),
+          tailRotor: rotors.tail.map((def) =>
+            makeInstancedSlot(def, INITIAL_CAPACITY, false, this.group),
+          ),
           hitbox: new THREE.InstancedMesh(hitboxGeo, _hitboxMat, INITIAL_CAPACITY),
           hitboxGeo,
           boxCenterMatrix,
@@ -202,8 +192,8 @@ export class RtsUnitInstancer {
     for (const pool of this.pools.values()) {
       pool.units.length = 0;
       for (const slot of pool.bodySlots) slot.im.count = 0;
-      if (pool.mainRotor) pool.mainRotor.im.count = 0;
-      if (pool.tailRotor) pool.tailRotor.im.count = 0;
+      for (const slot of pool.mainRotor) slot.im.count = 0;
+      for (const slot of pool.tailRotor) slot.im.count = 0;
       pool.hitbox.count = 0;
       pool.pickUnits.length = 0;
     }
@@ -215,13 +205,13 @@ export class RtsUnitInstancer {
         this.group.remove(slot.im);
         slot.im.dispose();
       }
-      if (pool.mainRotor) {
-        this.group.remove(pool.mainRotor.im);
-        pool.mainRotor.im.dispose();
+      for (const slot of pool.mainRotor) {
+        this.group.remove(slot.im);
+        slot.im.dispose();
       }
-      if (pool.tailRotor) {
-        this.group.remove(pool.tailRotor.im);
-        pool.tailRotor.im.dispose();
+      for (const slot of pool.tailRotor) {
+        this.group.remove(slot.im);
+        slot.im.dispose();
       }
       this.group.remove(pool.hitbox);
       pool.hitbox.dispose();
@@ -263,23 +253,17 @@ export class RtsUnitInstancer {
           slot.im.setMatrixAt(write, _final);
         }
 
-        if (pool.mainRotor) {
+        for (const slot of pool.mainRotor) {
           u._mainRotorAngle = (u._mainRotorAngle ?? 0) + dt * rotorSpeed;
           _spin.makeRotationY(u._mainRotorAngle);
-          _final
-            .copy(pool.mainRotor.localMatrix)
-            .premultiply(_spin)
-            .premultiply(_body);
-          pool.mainRotor.im.setMatrixAt(write, _final);
+          _final.multiplyMatrices(_body, slot.localMatrix).multiply(_spin);
+          slot.im.setMatrixAt(write, _final);
         }
-        if (pool.tailRotor) {
+        for (const slot of pool.tailRotor) {
           u._tailRotorAngle = (u._tailRotorAngle ?? 0) + dt * rotorSpeed * 2.4;
           _spin.makeRotationX(u._tailRotorAngle);
-          _final
-            .copy(pool.tailRotor.localMatrix)
-            .premultiply(_spin)
-            .premultiply(_body);
-          pool.tailRotor.im.setMatrixAt(write, _final);
+          _final.multiplyMatrices(_body, slot.localMatrix).multiply(_spin);
+          slot.im.setMatrixAt(write, _final);
         }
 
         _final.multiplyMatrices(_body, pool.boxCenterMatrix);
@@ -295,17 +279,17 @@ export class RtsUnitInstancer {
           draws++;
         }
       }
-      if (pool.mainRotor) {
-        pool.mainRotor.im.count = write;
+      for (const slot of pool.mainRotor) {
+        slot.im.count = write;
         if (write > 0) {
-          pool.mainRotor.im.instanceMatrix.needsUpdate = true;
+          slot.im.instanceMatrix.needsUpdate = true;
           draws++;
         }
       }
-      if (pool.tailRotor) {
-        pool.tailRotor.im.count = write;
+      for (const slot of pool.tailRotor) {
+        slot.im.count = write;
         if (write > 0) {
-          pool.tailRotor.im.instanceMatrix.needsUpdate = true;
+          slot.im.instanceMatrix.needsUpdate = true;
           draws++;
         }
       }

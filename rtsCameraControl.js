@@ -16,7 +16,9 @@ import * as THREE from "three";
  * @param {object}              deps.params     PARAMS.camera (panSpeed, edgeSpeed,
  *                                              edgeSize, followTerrain,
  *                                              terrainFollowSpeed, targetY)
- * @param {() => boolean}       deps.isRtsMode  true only while the RTS camera is active
+ * @param {() => boolean}       deps.isRtsMode  true while the RTS camera is active
+ * @param {() => boolean}       [deps.isEdgeScrollEnabled] edge pan at screen
+ *                                              borders; defaults to isRtsMode
  * @param {(x:number,z:number)=>number} deps.terrainHeight  world-interface: ground Y at XZ
  * @param {object}              deps.input      live input: { keys, getPointer() }
  *                                              keys: { [code]: bool }; getPointer():
@@ -28,6 +30,7 @@ export function createRtsCameraControl({
   controls,
   params,
   isRtsMode,
+  isEdgeScrollEnabled = isRtsMode,
   terrainHeight,
   input,
   worldUp = new THREE.Vector3(0, 1, 0),
@@ -57,8 +60,7 @@ export function createRtsCameraControl({
   }
 
   // Keyboard pan (WASD / arrows; Q = left, since A is attack-move) + edge
-  // scroll. Edge scroll only in RTS mode while the cursor is over the canvas
-  // and not drag-selecting.
+  // scroll at screen borders when enabled (play mode only in the lab).
   function panAndEdge(dt) {
     const keys = input.keys;
     let kx = 0;
@@ -69,7 +71,7 @@ export function createRtsCameraControl({
     if (keys.KeyQ || keys.ArrowLeft) kx -= 1;
     panView(kx, kz, params.panSpeed, dt);
 
-    if (!isRtsMode()) return;
+    if (!isEdgeScrollEnabled()) return;
     const p = input.getPointer();
     if (!p.inCanvas || p.dragging) return;
     const E = params.edgeSize;

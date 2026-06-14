@@ -3,6 +3,8 @@
  * Feeds nav stamping, cover evaluation, and runtime obstacle push-out.
  */
 import * as THREE from "three";
+import { mergeGeometries } from "three/addons/utils/BufferGeometryUtils.js";
+import { createRtsBuildingGlbMesh, isRtsBuildingGlbRoot, snapRtsBuildingGroupToTerrain, snapRtsBuildingGroupToTerrainCenter } from "./rts-buildings.js";
 
 export const RTS_MAP_PROPS_DEFAULTS = {
   enabled: true,
@@ -10,6 +12,8 @@ export const RTS_MAP_PROPS_DEFAULTS = {
   ruins: true,
   tankTraps: true,
   wire: true,
+  containers: true,
+  radioStations: true,
   roadWidth: 1,
   ruinScale: 1,
 };
@@ -123,6 +127,75 @@ export const RTS_MAP_PROP_LAYOUT = {
       ],
     },
   ],
+  /** Shipping-container yards — supply clutter near bases and ruins. */
+  containerClusters: [
+    {
+      id: "player-supply",
+      x: -42,
+      z: 468,
+      rot: 0.12,
+      items: [
+        { x: 0, z: 0, rot: 0 },
+        { x: 7.8, z: 0.4, rot: 0.1 },
+        { x: 4.2, z: 5.6, rot: -0.14 },
+        { x: 11.5, z: 5.2, rot: 0.06 },
+      ],
+    },
+    {
+      id: "enemy-supply",
+      x: 48,
+      z: -465,
+      rot: -0.18,
+      items: [
+        { x: 0, z: 0, rot: 0.05 },
+        { x: -7.5, z: 0.8, rot: -0.08 },
+        { x: -3.5, z: -5.4, rot: 0.12 },
+        { x: 8.2, z: -4.8, rot: -0.05 },
+      ],
+    },
+    {
+      id: "crossroads-yard",
+      x: -128,
+      z: 18,
+      rot: 0.65,
+      items: [
+        { x: 0, z: 0, rot: 0 },
+        { x: 6.8, z: 1.8, rot: 0.18 },
+        { x: -4.5, z: 5.5, rot: -0.22 },
+      ],
+    },
+    {
+      id: "east-farm-yard",
+      x: 272,
+      z: -98,
+      rot: -0.35,
+      items: [
+        { x: 0, z: 0, rot: 0 },
+        { x: 7.2, z: -1.2, rot: 0.1 },
+        { x: 3.5, z: 5.8, rot: -0.08 },
+      ],
+    },
+    {
+      id: "west-hamlet-yard",
+      x: -285,
+      z: 142,
+      rot: 0.42,
+      items: [
+        { x: 0, z: 0, rot: 0 },
+        { x: 6.5, z: 2.2, rot: 0.15 },
+      ],
+    },
+  ],
+  /** Comms masts — placed near capture nodes and approaches. */
+  radioStations: [
+    { x: 24, z: -22, rot: 0.5 },
+    { x: -198, z: 172, rot: -0.85 },
+    { x: 188, z: -178, rot: 0.3 },
+    { x: -148, z: -308, rot: 1.05 },
+    { x: 168, z: 302, rot: -0.4 },
+    { x: -62, z: 438, rot: 0.15 },
+    { x: 58, z: -432, rot: -0.25 },
+  ],
   tankTrapLines: [
     { x: -108, z: -168, rot: 0, count: 11, spacing: 4.2 },
     { x: 108, z: -168, rot: 0, count: 11, spacing: 4.2 },
@@ -167,6 +240,28 @@ export const RTS_MAP_PROP_LAYOUT = {
   ],
 };
 
+/** Terrain flatten pads for GLB field props (smooth pad before placement). */
+export function getRtsMapPropFlattenPads(layout = RTS_MAP_PROP_LAYOUT) {
+  const pads = [];
+  for (const st of layout.radioStations ?? []) {
+    pads.push({
+      x: st.x,
+      z: st.z,
+      radius: st.flattenR ?? 38,
+      core: st.flattenCore ?? 0.6,
+    });
+  }
+  for (const cl of layout.containerClusters ?? []) {
+    pads.push({
+      x: cl.x,
+      z: cl.z,
+      radius: cl.flattenR ?? 22,
+      core: cl.flattenCore ?? 0.58,
+    });
+  }
+  return pads;
+}
+
 function yawPoint(x, z, rot) {
   const c = Math.cos(rot);
   const s = Math.sin(rot);
@@ -178,24 +273,117 @@ function coverRadius(w, d) {
 }
 
 function addHedgehog(group, x, z, rotY, mats, getHeight) {
-  const g = new THREE.Group();
-  const len = 2.1;
-  const thick = 0.22;
-  for (let i = 0; i < 3; i++) {
-    const beam = new THREE.Mesh(
-      new THREE.BoxGeometry(thick, thick, len),
-      mats.trap,
-    );
-    beam.rotation.y = rotY + (i * Math.PI) / 3;
-    beam.position.y = len * 0.28;
-    beam.castShadow = true;
-    g.add(beam);
+  const g = createRtsBuildingGlbMesh("hedgehog") ?? new THREE.Group();
+  if (!g.userData.glbBuilding) {
+    const len = 2.1;
+    const thick = 0.22;
+    for (let i = 0; i < 3; i++) {
+      const beam = new THREE.Mesh(
+        new THREE.BoxGeometry(thick, thick, len),
+        mats.trap,
+      );
+      beam.rotation.y = rotY + (i * Math.PI) / 3;
+      beam.position.y = len * 0.28;
+      beam.castShadow = true;
+      g.add(beam);
+    }
   }
   const y = getHeight(x, z);
   g.position.set(x, y, z);
   g.rotation.y = rotY * 0.37;
   group.add(g);
   return { x, z, r: 1.85, coverTier: "green" };
+}
+
+function placeGlbProp(
+  group,
+  type,
+  x,
+  z,
+  rotY,
+  getHeight,
+  fallbackMat,
+  fallbackSize,
+  opts = {},
+) {
+  let g = createRtsBuildingGlbMesh(type);
+  if (!g && fallbackMat && fallbackSize) {
+    g = new THREE.Mesh(
+      new THREE.BoxGeometry(fallbackSize[0], fallbackSize[1], fallbackSize[2]),
+      fallbackMat,
+    );
+    g.position.y = fallbackSize[1] * 0.5;
+  }
+  if (!g) return null;
+  g.rotation.y = rotY;
+  if (opts.useFootprintSnap) {
+    g.position.set(x, getHeight(x, z), z);
+    snapRtsBuildingGroupToTerrain(g, getHeight, x, z);
+  } else {
+    snapRtsBuildingGroupToTerrainCenter(g, getHeight, x, z);
+  }
+  group.add(g);
+  g.updateMatrixWorld(true);
+  const box = new THREE.Box3().setFromObject(g);
+  const hx = (box.max.x - box.min.x) * 0.5;
+  const hz = (box.max.z - box.min.z) * 0.5;
+  const r = Math.max(hx, hz) + 0.6;
+  return { x, z, r };
+}
+
+function buildContainerCluster(group, cluster, getHeight, out) {
+  const c = Math.cos(cluster.rot ?? 0);
+  const s = Math.sin(cluster.rot ?? 0);
+  for (const item of cluster.items) {
+    const lx = item.x;
+    const lz = item.z;
+    const wx = cluster.x + lx * c - lz * s;
+    const wz = cluster.z + lx * s + lz * c;
+    const rotY = (cluster.rot ?? 0) + (item.rot ?? 0);
+    const fp = placeGlbProp(
+      group,
+      "container",
+      wx,
+      wz,
+      rotY,
+      getHeight,
+      null,
+      null,
+    );
+    if (!fp) continue;
+    out.navCircles.push({ x: fp.x, z: fp.z, r: fp.r * 0.82 });
+    out.pushCircles.push({ x: fp.x, z: fp.z, r: fp.r });
+    out.coverPieces.push({
+      x: fp.x,
+      z: fp.z,
+      r: fp.r + 0.8,
+      coverTier: "yellow",
+    });
+  }
+}
+
+function buildRadioStations(group, stations, getHeight, out) {
+  for (const st of stations) {
+    const fp = placeGlbProp(
+      group,
+      "radiostation",
+      st.x,
+      st.z,
+      st.rot ?? 0,
+      getHeight,
+      null,
+      null,
+    );
+    if (!fp) continue;
+    out.navCircles.push({ x: fp.x, z: fp.z, r: fp.r * 0.9 });
+    out.pushCircles.push({ x: fp.x, z: fp.z, r: fp.r + 0.5 });
+    out.coverPieces.push({
+      x: fp.x,
+      z: fp.z,
+      r: fp.r + 1.4,
+      coverTier: "yellow",
+    });
+  }
 }
 
 const ROAD_LIFT = 0.14;
@@ -371,16 +559,31 @@ function buildRuinPiece(group, cluster, piece, mats, getHeight, scale) {
 function buildWireLine(group, line, mats, getHeight, out) {
   const pts = line.points;
   const hw = line.halfWidth ?? 1.2;
+  const postH = 1.85;
+  const postY = postH * 0.5;
+  // Multiple horizontal runs — readable from the RTS camera (single 8cm strand was invisible).
+  const strandHeights = [0.42, 0.78, 1.12, 1.44];
+
   for (let i = 0; i < pts.length; i++) {
     const [x, z] = pts[i];
     const y = getHeight(x, z);
     const post = new THREE.Mesh(
-      new THREE.CylinderGeometry(0.12, 0.14, 1.35, 6),
+      new THREE.CylinderGeometry(0.1, 0.13, postH, 6),
       mats.wirePost,
     );
-    post.position.set(x, y + 0.62, z);
+    post.position.set(x, y + postY, z);
     post.castShadow = true;
+    post.receiveShadow = true;
     group.add(post);
+
+    const cap = new THREE.Mesh(
+      new THREE.BoxGeometry(0.22, 0.1, 0.22),
+      mats.wirePostCap,
+    );
+    cap.position.set(x, y + postH + 0.02, z);
+    cap.castShadow = true;
+    group.add(cap);
+
     out.navCircles.push({ x, z, r: hw + 0.35 });
     out.pushCircles.push({ x, z, r: hw + 0.5 });
     out.coverPieces.push({
@@ -390,6 +593,7 @@ function buildWireLine(group, line, mats, getHeight, out) {
       coverTier: "green",
     });
   }
+
   for (let i = 0; i < pts.length - 1; i++) {
     const [x0, z0] = pts[i];
     const [x1, z1] = pts[i + 1];
@@ -398,15 +602,152 @@ function buildWireLine(group, line, mats, getHeight, out) {
     const len = Math.hypot(dx, dz);
     const midX = (x0 + x1) * 0.5;
     const midZ = (z0 + z1) * 0.5;
-    const y = (getHeight(x0, z0) + getHeight(x1, z1)) * 0.5;
-    const strand = new THREE.Mesh(
-      new THREE.BoxGeometry(len, 0.08, 0.06),
-      mats.wire,
-    );
-    strand.position.set(midX, y + 0.72, midZ);
-    strand.rotation.y = Math.atan2(dx, dz);
-    group.add(strand);
+    const y0 = getHeight(x0, z0);
+    const y1 = getHeight(x1, z1);
+    const rotY = Math.atan2(dx, dz);
+
+    for (const strandLift of strandHeights) {
+      const strand = new THREE.Mesh(
+        new THREE.BoxGeometry(len, 0.1, 0.09),
+        mats.wire,
+      );
+      const t0 = strandLift / postH;
+      const strandY = y0 * (1 - t0) + y1 * t0 + strandLift;
+      strand.position.set(midX, strandY, midZ);
+      strand.rotation.y = rotY;
+      strand.castShadow = true;
+      group.add(strand);
+    }
+
+    // Occasional barb spurs along the run (silhouette from above).
+    const spurCount = Math.max(2, Math.floor(len / 7));
+    for (let s = 1; s < spurCount; s++) {
+      const t = s / spurCount;
+      const sx = x0 + dx * t;
+      const sz = z0 + dz * t;
+      const sy = y0 * (1 - t) + y1 * t;
+      const spur = new THREE.Mesh(
+        new THREE.BoxGeometry(0.14, 0.32, 0.06),
+        mats.wireBarb,
+      );
+      spur.position.set(sx, sy + 0.92, sz);
+      spur.rotation.y = rotY + (s % 2 ? 0.55 : -0.55);
+      spur.castShadow = true;
+      group.add(spur);
+    }
+
     out.navSegments.push({ x0, z0, x1, z1, halfWidth: hw });
+  }
+}
+
+/**
+/**
+ * Collapse the props group into a handful of draw calls:
+ *   - repeated GLB props (all share their template's geometry/material) →
+ *     one InstancedMesh per template submesh,
+ *   - one-off procedural meshes → merged by material into one mesh each.
+ * The group sits at the scene origin with identity transform, so each child's
+ * world matrix is already its group-local matrix. Nav/cover data is derived
+ * from positions during build() and is untouched here — this is purely visual.
+ */
+function batchStaticGroup(group) {
+  group.updateMatrixWorld(true);
+  // glbType -> { submeshes:[{geo,mat,local,castShadow,receiveShadow}], matrices:[] }
+  const glbBuckets = new Map();
+  // material.uuid -> { material, originals:[mesh], castShadow, receiveShadow }
+  const procBuckets = new Map();
+
+  for (const child of group.children) {
+    if (child.userData?.glbBuilding) {
+      child.updateMatrixWorld(true);
+      let bucket = glbBuckets.get(child.userData.glbBuilding);
+      if (!bucket) {
+        // First instance defines the (shared) submesh templates.
+        bucket = { submeshes: [], matrices: [] };
+        const rootInv = child.matrixWorld.clone().invert();
+        child.traverse((o) => {
+          if (!o.isMesh || Array.isArray(o.material)) return;
+          o.updateMatrixWorld(true);
+          bucket.submeshes.push({
+            geo: o.geometry,
+            mat: o.material,
+            local: o.matrixWorld.clone().premultiply(rootInv),
+            castShadow: o.castShadow,
+            receiveShadow: o.receiveShadow,
+          });
+        });
+        glbBuckets.set(child.userData.glbBuilding, bucket);
+      }
+      bucket.matrices.push(child.matrixWorld.clone());
+    } else if (child.isMesh && !Array.isArray(child.material)) {
+      const key = child.material.uuid;
+      let pb = procBuckets.get(key);
+      if (!pb) {
+        pb = {
+          material: child.material,
+          originals: [],
+          castShadow: child.castShadow,
+          receiveShadow: child.receiveShadow,
+        };
+        procBuckets.set(key, pb);
+      }
+      pb.originals.push(child);
+    }
+    // Non-mesh / multi-material children (e.g. hedgehog fallback group) are
+    // left as-is — they're rare and not worth the special-casing.
+  }
+
+  // Instance the GLB props. Geometry/material are shared with the cached
+  // template, so they're marked glbBatch and never disposed by clearGroup().
+  for (const [type, bucket] of glbBuckets) {
+    const n = bucket.matrices.length;
+    if (!n) continue;
+    const m = new THREE.Matrix4();
+    for (const sm of bucket.submeshes) {
+      const im = new THREE.InstancedMesh(sm.geo, sm.mat, n);
+      im.name = `RtsMapProps-${type}`;
+      im.userData.glbBatch = true;
+      im.frustumCulled = false;
+      im.castShadow = sm.castShadow;
+      im.receiveShadow = sm.receiveShadow;
+      for (let i = 0; i < n; i++) {
+        m.multiplyMatrices(bucket.matrices[i], sm.local);
+        im.setMatrixAt(i, m);
+      }
+      im.instanceMatrix.needsUpdate = true;
+      group.add(im);
+    }
+    // GLB roots are now redundant — remove without disposing shared resources.
+    for (const child of group.children.slice()) {
+      if (child.userData?.glbBuilding === type) group.remove(child);
+    }
+  }
+
+  // Merge each procedural material bucket into a single mesh.
+  for (const pb of procBuckets.values()) {
+    if (pb.originals.length < 2) continue; // nothing to gain from a single mesh
+    const geos = pb.originals.map((mesh) => {
+      mesh.updateMatrixWorld(true);
+      return mesh.geometry.clone().applyMatrix4(mesh.matrixWorld);
+    });
+    let merged = null;
+    try {
+      merged = mergeGeometries(geos, false);
+    } catch {
+      merged = null;
+    }
+    for (const g of geos) g.dispose?.();
+    if (!merged) continue; // attribute mismatch — leave originals in place
+    for (const mesh of pb.originals) {
+      group.remove(mesh);
+      mesh.geometry?.dispose?.();
+    }
+    const mesh = new THREE.Mesh(merged, pb.material);
+    mesh.name = "RtsMapProps-merged";
+    mesh.userData.procBatch = true;
+    mesh.castShadow = pb.castShadow;
+    mesh.receiveShadow = pb.receiveShadow;
+    group.add(mesh);
   }
 }
 
@@ -460,14 +801,26 @@ export function createRtsMapProps(scene, opts = {}) {
       metalness: 0.35,
     }),
     wire: new THREE.MeshStandardMaterial({
-      color: 0x6a6a62,
-      roughness: 0.8,
-      metalness: 0.25,
+      color: 0xc8ccd4,
+      roughness: 0.38,
+      metalness: 0.62,
+      emissive: 0x1a1a22,
+      emissiveIntensity: 0.08,
+    }),
+    wireBarb: new THREE.MeshStandardMaterial({
+      color: 0x9aa0aa,
+      roughness: 0.42,
+      metalness: 0.55,
     }),
     wirePost: new THREE.MeshStandardMaterial({
-      color: 0x3e3e38,
-      roughness: 0.85,
-      metalness: 0.2,
+      color: 0x4a4034,
+      roughness: 0.88,
+      metalness: 0.08,
+    }),
+    wirePostCap: new THREE.MeshStandardMaterial({
+      color: 0x6a5c48,
+      roughness: 0.78,
+      metalness: 0.12,
     }),
   };
 
@@ -482,6 +835,14 @@ export function createRtsMapProps(scene, opts = {}) {
     while (group.children.length) {
       const ch = group.children[0];
       group.remove(ch);
+      // GLB roots and instanced GLB batches reference shared template
+      // geometry/material from the building cache — never dispose those.
+      if (isRtsBuildingGlbRoot(ch) || ch.userData?.glbBatch) continue;
+      // Merged procedural batch owns its geometry — dispose it.
+      if (ch.userData?.procBatch) {
+        ch.geometry?.dispose?.();
+        continue;
+      }
       ch.traverse?.((o) => {
         if (o.geometry && o.geometry !== ch.geometry) o.geometry.dispose?.();
       });
@@ -552,6 +913,33 @@ export function createRtsMapProps(scene, opts = {}) {
         buildWireLine(group, wire, mats, getHeight, state);
       }
     }
+
+    if (config.containers) {
+      for (const cluster of layout.containerClusters ?? []) {
+        buildContainerCluster(group, cluster, getHeight, state);
+      }
+    }
+
+    if (config.radioStations) {
+      buildRadioStations(
+        group,
+        layout.radioStations ?? [],
+        getHeight,
+        state,
+      );
+    }
+
+    // Collapse the hundreds of individual prop meshes into a handful of
+    // instanced/merged draw calls.
+    batchStaticGroup(group);
+
+    // Props never move after placement. Update world matrices once, then opt
+    // the whole subtree out of the renderer's per-frame matrix traversal —
+    // these were a big chunk of the ~14% spent in updateMatrixWorld/compose
+    // under load. Re-runs on every rebuild() so freshly placed props are fixed.
+    group.matrixWorldAutoUpdate = true;
+    group.updateMatrixWorld(true);
+    group.matrixWorldAutoUpdate = false;
   }
 
   build();
@@ -586,7 +974,21 @@ export function createRtsMapProps(scene, opts = {}) {
 }
 
 /** Stamp a nav segment as a chain of blocked circles (wire, walls). */
-export function stampNavSegment(grid, cols, rows, minX, minZ, cellSize, x0, z0, x1, z1, halfWidth) {
+export function stampNavSegment(
+  grid,
+  cols,
+  rows,
+  minX,
+  minZ,
+  cellSize,
+  x0,
+  z0,
+  x1,
+  z1,
+  halfWidth,
+  blockReason = null,
+  reason = 6,
+) {
   const len = Math.hypot(x1 - x0, z1 - z0);
   const steps = Math.max(2, Math.ceil(len / (cellSize * 0.45)));
   const rr = halfWidth;
@@ -605,7 +1007,9 @@ export function stampNavSegment(grid, cols, rows, minX, minZ, cellSize, x0, z0, 
         const dx = wx - x;
         const dz = wz - z;
         if (dx * dx + dz * dz < rr * rr) {
-          grid[r * cols + c] = 1;
+          const hi = r * cols + c;
+          grid[hi] = 1;
+          if (blockReason) blockReason[hi] = reason;
         }
       }
     }

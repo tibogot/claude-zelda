@@ -223,7 +223,7 @@ function createSpriteMaterial(map, tilesX, tilesY, useLifetimeFrames, hasAtlas, 
   if (glow) {
     // Fire layer feeds the selective-bloom emissive buffer (rts-lab MRT
     // pipeline). Ignored when rendering without MRT.
-    mat.mrtNode = mrt({ output, emissive: col.mul(alpha) });
+    mat.mrtNode = mrt({ output, emissive: col });
   }
   return { mat, uLayerOpacity, uLayerTint };
 }
