@@ -1286,7 +1286,26 @@
       let trunkLod1Root = null;
 
       // ─── LEAF TEXTURE ────────────────────────────────────────────────────────────
-      const leafMapNode = texture(new THREE.Texture());
+      // Atlas sampling. uUseAtlas=1 remaps the leaf quad uv into a cell; 0 leaves
+      // it unchanged (standalone rendering identical to before). The cell index is
+      // a PER-INSTANCE attribute (aAtlasIndex) — uniform across one arborist tree,
+      // but per-tree-type in v2's merged mesh. That per-instance index is what lets
+      // v2 batch every tree type on ONE material. Grid packed as
+      // (cols, cellStep=cellPx/size, gutterFrac, innerFrac); math is identical in
+      // arborist and v2 so the contract can't drift.
+      let atlasCellIndex = 0;
+      const uUseAtlas = uniform(0.0);
+      const uAtlasGrid = uniform(new THREE.Vector4(4, 0.25, 12 / 1024, 232 / 1024));
+      const aAtlasIndex = attribute("aAtlasIndex", "float");
+      const _leafBaseUv = uv();
+      const _agCols = uAtlasGrid.x;
+      const _agRow = floor(aAtlasIndex.div(_agCols));
+      const _agCol = aAtlasIndex.sub(_agRow.mul(_agCols));
+      const _agOx = _agCol.mul(uAtlasGrid.y).add(uAtlasGrid.z);
+      const _agOy = _agCols.sub(1).sub(_agRow).mul(uAtlasGrid.y).add(uAtlasGrid.z);
+      const _leafCellUv = _leafBaseUv.mul(uAtlasGrid.w).add(vec2(_agOx, _agOy));
+      const _leafSampleUv = mix(_leafBaseUv, _leafCellUv, uUseAtlas);
+      const leafMapNode = texture(new THREE.Texture(), _leafSampleUv);
       // 0 = sample mask from .r (grayscale/RGB-only PNGs), 1 = sample from .a (RGBA PNGs).
       // Set per-texture by detectAlphaChannel() after load.
       const uMaskInAlpha = uniform(0.0);
@@ -2628,6 +2647,13 @@ const SKY_DEFAULTS = {
           new THREE.InstancedBufferAttribute(centerData, 3),
         );
 
+        // Per-leaf atlas cell (one preset/tree = one cell here; per-tree-type in v2).
+        const idxData = new Float32Array(n).fill(atlasCellIndex);
+        geo.setAttribute(
+          "aAtlasIndex",
+          new THREE.InstancedBufferAttribute(idxData, 1),
+        );
+
         const mesh = new THREE.InstancedMesh(geo, leafMat, n);
         mesh.frustumCulled = false;
         mesh.castShadow = true;
@@ -3237,7 +3263,10 @@ const SKY_DEFAULTS = {
         hemiIntensity: 0.4,
         sunDistance: 20,
         exposure: 1.0,
+        envIntensity: 0.4,
       };
+      // Dome horizon haze (the visible "world fog" on the sky dome).
+      const worldFog = { enabled: false, density: 0.0006, color: "#aebfc8", hazeHeight: 0.12 };
       // "studio" = original neutral rig (best for authoring colour/shape);
       // "world"  = v2 sky + sun + ACES tonemap (best for validating final look).
       let lightingMode = "world";
@@ -3265,6 +3294,10 @@ const SKY_DEFAULTS = {
         }
         worldSunDirFromTime(PROC_SKY.timeOfDay, _worldSunDir);
         _worldMoonDir.copy(_worldSunDir).negate();
+        if (Math.abs(PROC_SKY.timeOfDay - _envLastTOD) > 0.15) {
+          _envLastTOD = PROC_SKY.timeOfDay;
+          _envNeeds = true; // sun moved -> sky IBL is stale
+        }
         const sunUp = _worldSunDir.y;
         if (sunUp < 0) {
           // Night: relight by the moon (sun antipode); fade in near the horizon.
@@ -3283,7 +3316,10 @@ const SKY_DEFAULTS = {
         hemi.intensity = worldLight.hemiIntensity;
         // Leaf SSS / rim track the dominant key light (sun by day, moon by night).
         uSunDir.value.copy(_worldEffDir).normalize();
-        _worldFog.hazeHeight = PROC_SKY.hazeHeight;
+        _worldFog.enabled = worldFog.enabled;
+        _worldFog.color.set(worldFog.color);
+        _worldFog.density = worldFog.density;
+        _worldFog.hazeHeight = worldFog.hazeHeight;
         dayNightSky.update(PROC_SKY, {
           time: timeSec,
           sunDir: _worldSunDir,
@@ -3293,15 +3329,67 @@ const SKY_DEFAULTS = {
         });
       }
 
+      // --- Sky-derived IBL (PMREM from the dome) for the PBR trunk + ground ---
+      // Mirrors v2: clone the dome into an env scene at the origin, render a small
+      // cube, convolve to a REUSED PMREM RT (reuse avoids WebGPU device-loss while
+      // scrubbing). Leaves opt out (envMapIntensity = 0); trunk + ground pick it up.
+      let _envScene = null, _envCubeRT = null, _envCubeCam = null, _envRT = null, _pmrem = null;
+      let _envFace = -1, _envIdle = 0, _envNeeds = false, _envLastTOD = -999;
+      const ENV_IDLE = 1.0; // seconds between re-bake cycles
+
+      function ensureEnvRig() {
+        if (_envCubeRT) return;
+        _envScene = new THREE.Scene();
+        const domeClone = dayNightSky.mesh.clone(); // shares the live material/uniforms
+        domeClone.position.set(0, 0, 0);
+        _envScene.add(domeClone);
+        _envCubeRT = new THREE.CubeRenderTarget(64, { type: THREE.HalfFloatType });
+        _envCubeCam = new THREE.CubeCamera(0.1, 20000, _envCubeRT);
+        _envCubeCam.updateMatrixWorld(true);
+        _pmrem = _pmrem ?? new THREE.PMREMGenerator(renderer);
+      }
+      function renderEnvFace(face) {
+        ensureEnvRig();
+        const prev = renderer.getRenderTarget();
+        renderer.setRenderTarget(_envCubeRT, face);
+        renderer.render(_envScene, _envCubeCam.children[face]);
+        renderer.setRenderTarget(prev);
+      }
+      function convolveEnv() {
+        _envRT = _pmrem.fromCubemap(_envCubeRT.texture, _envRT); // REUSE the RT (no churn)
+        if (lightingMode === "world") scene.environment = _envRT.texture;
+      }
+      // Amortized: one cube face per frame, convolve on the 6th, then idle.
+      function updateEnvBake(dt) {
+        if (_envFace < 0) {
+          if (!_envNeeds && !PROC_SKY.autoAdvance) return;
+          _envIdle -= dt;
+          if (_envIdle > 0) return;
+          _envNeeds = false;
+          _envFace = 0;
+        }
+        renderEnvFace(_envFace);
+        _envFace++;
+        if (_envFace >= 6) {
+          convolveEnv();
+          _envFace = -1;
+          _envIdle = ENV_IDLE;
+        }
+      }
+
       function applyLightingMode() {
         const world = lightingMode === "world";
         dayNightSky.mesh.visible = world;
         if (world) {
           scene.background = null; // the sky dome is the backdrop
           renderer.toneMappingExposure = worldLight.exposure;
+          scene.environmentIntensity = worldLight.envIntensity;
+          scene.environment = _envRT ? _envRT.texture : null;
+          _envNeeds = true; // (re)bake the sky IBL on entering world mode
         } else {
           scene.background = new THREE.Color(params.bgColor);
           renderer.toneMappingExposure = 1.0;
+          scene.environment = null; // no sky IBL in the neutral studio rig
           // Restore the neutral studio rig.
           hemi.color.set("#b8dfff");
           hemi.groundColor.set("#3d6b20");
@@ -3361,6 +3449,14 @@ const SKY_DEFAULTS = {
           trunkLod1File: trunkLod1FileName,
           // Either "textures/leaves/..." (built-in, light) or "data:image/...;base64,..." (embedded, self-contained).
           leafTexture: activeLeafTexPath || activeLeafTexDataUrl || "",
+          atlas: {
+            enabled: uUseAtlas.value > 0.5,
+            cell: atlasCellIndex,
+            cols: ATLAS_COLS,
+            cellPx: ATLAS_CELLPX,
+            gutter: ATLAS_GUTTER,
+            size: ATLAS_SIZE,
+          },
           leafTextureName: params.leafTexFile || "",
           clusters: clusterDefs.map((c) => ({ ...c })),
           material: {
@@ -3539,6 +3635,12 @@ const SKY_DEFAULTS = {
             loadLeafTexFromPath(data.leafTexture);
           }
         }
+        if (data.atlas && data.atlas.enabled && atlasTexture) {
+          setAtlasCell(data.atlas.cell ?? 0);
+          useAtlas(true);
+          atlasUi.use = true;
+          atlasUi.cell = data.atlas.cell ?? 0;
+        }
         if (data.bushMode != null) {
           params.bushMode = data.bushMode;
           applyBushMode(data.bushMode);
@@ -3562,6 +3664,213 @@ const SKY_DEFAULTS = {
       }
 
       const infoEl = document.getElementById("info");
+
+      // --- LEAF MASK ATLAS (open-world batching: bake N leaf masks into one image) ---
+      // Arborist colours leaves procedurally (gradient + SSS/rim); the leaf PNG is
+      // used ONLY as a cutout mask. So the atlas carries MASKS: each cell = one
+      // leaf's mask (grayscale in RGB, A=255). v2 auto-detects channel -> reads .r.
+      // 1024 / 4x4 / 256px cells, 12px gutter + 10px alpha-dilation so mips don't
+      // bleed between cells. Up to 16 cells; bakes the 6 built-ins into 0..5.
+      const ATLAS_SIZE = 1024;
+      const ATLAS_COLS = 4;
+      const ATLAS_CELLPX = 256;
+      const ATLAS_GUTTER = 12;
+      const ATLAS_DILATE = 10;
+      const ATLAS_INNER = ATLAS_CELLPX - ATLAS_GUTTER * 2; // 232
+      let atlasTexture = null; // THREE.CanvasTexture once baked
+      let atlasCanvas = null;  // source canvas (preview + download)
+      let atlasCellMap = [];   // [{ index, name, uvRect:{ox,oy,sx,sy} }]
+      let _atlasPreviewImg = null;
+      let _atlasSavedTex = null, _atlasSavedMaskInAlpha = 0;
+      const atlasUi = { use: false, cell: 0 };
+
+      function setAtlasCell(i) {
+        atlasCellIndex = i | 0;
+        // Per-instance now: rewrite the aAtlasIndex buffer on the live meshes.
+        for (const m of [leavesMesh, lodMesh1, lodMesh2]) {
+          const a = m && m.geometry.attributes.aAtlasIndex;
+          if (a) { a.array.fill(atlasCellIndex); a.needsUpdate = true; }
+        }
+      }
+      // Switch the live tree between its standalone leaf texture and an atlas cell.
+      function useAtlas(on) {
+        if (on) {
+          if (!atlasTexture) { infoEl.textContent = "Bake the atlas first."; return false; }
+          _atlasSavedTex = leafMapNode.value;
+          _atlasSavedMaskInAlpha = uMaskInAlpha.value;
+          leafMapNode.value = atlasTexture;
+          uMaskInAlpha.value = 0; // atlas stores the mask in red
+          uUseAtlas.value = 1;
+          setAtlasCell(atlasCellIndex);
+        } else {
+          if (_atlasSavedTex) leafMapNode.value = _atlasSavedTex;
+          uMaskInAlpha.value = _atlasSavedMaskInAlpha;
+          uUseAtlas.value = 0;
+        }
+        return true;
+      }
+
+      // uv sub-rect for cell i, accounting for CanvasTexture flipY = true.
+      function atlasCellRect(i) {
+        const c = i % ATLAS_COLS;
+        const r = (i / ATLAS_COLS) | 0;
+        const s = ATLAS_INNER / ATLAS_SIZE;
+        const ox = (c * ATLAS_CELLPX + ATLAS_GUTTER) / ATLAS_SIZE;
+        const oy = ((ATLAS_COLS - 1 - r) * ATLAS_CELLPX + ATLAS_GUTTER) / ATLAS_SIZE;
+        return { ox, oy, sx: s, sy: s };
+      }
+
+      function _loadImg(src) {
+        return new Promise((resolve, reject) => {
+          const img = new Image();
+          img.crossOrigin = "anonymous";
+          img.onload = () => resolve(img);
+          img.onerror = () => reject(new Error("img load failed: " + src));
+          img.src = src;
+        });
+      }
+
+      // 4-neighbour max-dilation by `iters` px, then restore the interior so only
+      // the gutter ring is filled (keeps the visible silhouette crisp).
+      function _dilateGutter(mask, w, h, iters, x0, y0, x1, y1) {
+        const orig = mask.slice();
+        for (let it = 0; it < iters; it++) {
+          const src = mask.slice();
+          for (let y = 0; y < h; y++) {
+            for (let x = 0; x < w; x++) {
+              const idx = y * w + x;
+              if (src[idx] >= 250) continue;
+              let m = src[idx];
+              if (x > 0) m = Math.max(m, src[idx - 1]);
+              if (x < w - 1) m = Math.max(m, src[idx + 1]);
+              if (y > 0) m = Math.max(m, src[idx - w]);
+              if (y < h - 1) m = Math.max(m, src[idx + w]);
+              mask[idx] = m;
+            }
+          }
+        }
+        for (let y = y0; y < y1; y++) {
+          for (let x = x0; x < x1; x++) {
+            mask[y * w + x] = orig[y * w + x]; // restore crisp interior
+          }
+        }
+      }
+
+      async function bakeLeafAtlas() {
+        const sources = LEAF_TEXTURES.slice(0, ATLAS_COLS * ATLAS_COLS);
+        infoEl.textContent = "Baking leaf atlas...";
+        let imgs;
+        try {
+          imgs = await Promise.all(sources.map((t) => _loadImg(t.path)));
+        } catch (e) {
+          infoEl.textContent = "Atlas bake failed: " + e.message;
+          return;
+        }
+        const cv = document.createElement("canvas");
+        cv.width = ATLAS_SIZE;
+        cv.height = ATLAS_SIZE;
+        const ctx = cv.getContext("2d", { willReadFrequently: true });
+        ctx.clearRect(0, 0, ATLAS_SIZE, ATLAS_SIZE);
+        const tmp = document.createElement("canvas");
+        tmp.width = ATLAS_INNER;
+        tmp.height = ATLAS_INNER;
+        const tctx = tmp.getContext("2d", { willReadFrequently: true });
+
+        atlasCellMap = [];
+        imgs.forEach((img, i) => {
+          const c = i % ATLAS_COLS;
+          const r = (i / ATLAS_COLS) | 0;
+          const px0 = c * ATLAS_CELLPX;
+          const py0 = r * ATLAS_CELLPX;
+
+          // Channel choice = SAME as the live shader (detectAlphaChannel on the
+          // full source image) so the atlas mask matches non-atlas rendering.
+          const hasAlpha = detectAlphaChannel(img);
+          // Draw at interior resolution: NO transparent gutter to contaminate the
+          // read. (The gutter made every cell read alpha=255 -> solid 100%.)
+          tctx.clearRect(0, 0, ATLAS_INNER, ATLAS_INNER);
+          tctx.drawImage(img, 0, 0, ATLAS_INNER, ATLAS_INNER);
+          const d = tctx.getImageData(0, 0, ATLAS_INNER, ATLAS_INNER).data;
+          const mask = new Uint8ClampedArray(ATLAS_CELLPX * ATLAS_CELLPX);
+          for (let yy = 0; yy < ATLAS_INNER; yy++) {
+            for (let xx = 0; xx < ATLAS_INNER; xx++) {
+              const sp = (yy * ATLAS_INNER + xx) * 4;
+              mask[(yy + ATLAS_GUTTER) * ATLAS_CELLPX + (xx + ATLAS_GUTTER)] =
+                hasAlpha ? d[sp + 3] : d[sp];
+            }
+          }
+          _dilateGutter(
+            mask, ATLAS_CELLPX, ATLAS_CELLPX, ATLAS_DILATE,
+            ATLAS_GUTTER, ATLAS_GUTTER, ATLAS_GUTTER + ATLAS_INNER, ATLAS_GUTTER + ATLAS_INNER,
+          );
+          const out = ctx.createImageData(ATLAS_CELLPX, ATLAS_CELLPX);
+          const od = out.data;
+          for (let q = 0, p = 0; q < mask.length; q++, p += 4) {
+            od[p] = od[p + 1] = od[p + 2] = mask[q];
+            od[p + 3] = 255;
+          }
+          ctx.putImageData(out, px0, py0);
+          atlasCellMap.push({ index: i, name: sources[i].name, uvRect: atlasCellRect(i) });
+        });
+
+        atlasCanvas = cv;
+        if (atlasTexture) atlasTexture.dispose();
+        atlasTexture = new THREE.CanvasTexture(cv);
+        atlasTexture.colorSpace = THREE.SRGBColorSpace;
+        atlasTexture.needsUpdate = true;
+
+        // Preview: mask drives ALPHA over a checkerboard so partial-coverage leaf
+        // shapes are visible (the atlas itself keeps the mask in RGB for the shader).
+        const full = ctx.getImageData(0, 0, ATLAS_SIZE, ATLAS_SIZE);
+        const fd = full.data;
+        const prev = document.createElement("canvas");
+        prev.width = ATLAS_SIZE;
+        prev.height = ATLAS_SIZE;
+        const pctx = prev.getContext("2d");
+        const pim = pctx.createImageData(ATLAS_SIZE, ATLAS_SIZE);
+        const pd = pim.data;
+        for (let p = 0; p < fd.length; p += 4) {
+          pd[p] = 120; pd[p + 1] = 230; pd[p + 2] = 90; // leaf green
+          pd[p + 3] = fd[p]; // alpha = mask (red channel)
+        }
+        pctx.putImageData(pim, 0, 0);
+        if (_atlasPreviewImg) _atlasPreviewImg.src = prev.toDataURL("image/png");
+
+        // Per-cell coverage (% of interior texels with mask > 128).
+        const cov = atlasCellMap.map((cell) => {
+          const c = cell.index % ATLAS_COLS, r = (cell.index / ATLAS_COLS) | 0;
+          let on = 0, tot = 0;
+          for (let y = r * ATLAS_CELLPX + ATLAS_GUTTER; y < r * ATLAS_CELLPX + ATLAS_GUTTER + ATLAS_INNER; y++) {
+            for (let x = c * ATLAS_CELLPX + ATLAS_GUTTER; x < c * ATLAS_CELLPX + ATLAS_GUTTER + ATLAS_INNER; x++) {
+              tot++;
+              if (fd[(y * ATLAS_SIZE + x) * 4] > 128) on++;
+            }
+          }
+          return cell.name + ":" + Math.round((on / tot) * 100) + "%";
+        });
+        console.log("[atlas] per-cell coverage:", cov);
+        infoEl.textContent = "Leaf atlas baked. Coverage = " + cov.join("  ");
+      }
+
+      function downloadAtlasPng() {
+        if (!atlasCanvas) { infoEl.textContent = "Bake the atlas first."; return; }
+        const a = document.createElement("a");
+        a.href = atlasCanvas.toDataURL("image/png");
+        a.download = "leaf_atlas.png";
+        a.click();
+      }
+      function downloadAtlasMap() {
+        if (!atlasCellMap.length) { infoEl.textContent = "Bake the atlas first."; return; }
+        const map = {
+          size: ATLAS_SIZE, cols: ATLAS_COLS, cellPx: ATLAS_CELLPX,
+          gutter: ATLAS_GUTTER, maskChannel: "r", cells: atlasCellMap,
+        };
+        const a = document.createElement("a");
+        a.href = URL.createObjectURL(new Blob([JSON.stringify(map, null, 2)], { type: "application/json" }));
+        a.download = "leaf_atlas_map.json";
+        a.click();
+      }
+
 
       // ─── UI ──────────────────────────────────────────────────────────────────────
       const uiRoot = document.getElementById("ui-scroll");
@@ -3663,6 +3972,30 @@ const SKY_DEFAULTS = {
         max: 3,
         step: 0.05,
       });
+      _slider(worldBody, worldLight, "envIntensity", {
+        label: "Sky reflections",
+        min: 0,
+        max: 2,
+        step: 0.05,
+        onChange: () => {
+          if (lightingMode === "world") scene.environmentIntensity = worldLight.envIntensity;
+        },
+      });
+      _separator(worldBody);
+      _toggle(worldBody, worldFog, "enabled", { label: "World fog (dome haze)" });
+      _slider(worldBody, worldFog, "density", {
+        label: "Fog density",
+        min: 0,
+        max: 0.003,
+        step: 0.0001,
+      });
+      _slider(worldBody, worldFog, "hazeHeight", {
+        label: "Fog height",
+        min: 0.02,
+        max: 0.6,
+        step: 0.01,
+      });
+      _color(worldBody, worldFog, "color", { label: "Fog colour" });
 
 
       const trunkBody = _section(uiRoot, "Trunk", true);
@@ -3763,6 +4096,40 @@ const SKY_DEFAULTS = {
           scheduleUndo();
         },
       });
+
+      const atlasBody = _section(uiRoot, "Leaf Atlas (mask, for open world)", true);
+      {
+        const note = document.createElement("div");
+        note.className = "tex-gallery-label";
+        note.textContent = "Bakes the 6 built-in leaf masks into one 1024px atlas (4x4 / 256px cells, gutter + dilation).";
+        atlasBody.appendChild(note);
+        _atlasPreviewImg = document.createElement("img");
+        _atlasPreviewImg.style.cssText =
+          "width:100%;border:1px solid var(--border);border-radius:4px;margin:4px 0;image-rendering:pixelated;min-height:60px;background-color:#2a2a2a;background-image:repeating-conic-gradient(#3a3a3a 0% 25%, #2a2a2a 0% 50%);background-size:16px 16px;";
+        atlasBody.appendChild(_atlasPreviewImg);
+      }
+      _button(atlasBody, { title: "Bake atlas (built-in masks)", onClick: () => bakeLeafAtlas() });
+      _button(atlasBody, { title: "Download atlas PNG", onClick: downloadAtlasPng });
+      _button(atlasBody, { title: "Download cell map JSON", onClick: downloadAtlasMap });
+      _separator(atlasBody);
+      {
+        _toggle(atlasBody, atlasUi, "use", {
+          label: "Use atlas on tree",
+          onChange: (ev) => {
+            const ok = useAtlas(ev.value);
+            if (!ok) { atlasUi.use = false; uiRefresh(); }
+          },
+        });
+        _slider(atlasBody, atlasUi, "cell", {
+          label: "Cell index (0-5)",
+          min: 0,
+          max: 15,
+          step: 1,
+          onChange: (ev) => {
+            if (uUseAtlas.value > 0.5) setAtlasCell(ev.value | 0);
+          },
+        });
+      }
 
       clusterDefs.forEach((c, ci) => {
         const cBody = _section(
@@ -4187,6 +4554,7 @@ const SKY_DEFAULTS = {
         const dt = timer.getDelta();
         uTime.value = timer.getElapsed();
         if (lightingMode === "world") driveWorldLighting(timer.getElapsed(), dt);
+        if (lightingMode === "world") updateEnvBake(dt);
         controls.update();
         renderer.render(scene, camera);
       });

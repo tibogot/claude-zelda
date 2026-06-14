@@ -1,0 +1,547 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Fog Showcase — WebGPU / TSL</title>
+    <style>
+      :root {
+        --bg: #14171c;
+        --panel: #1b1f26;
+        --panel-hdr: #232832;
+        --text: #d7dde6;
+        --text-dim: #8a93a3;
+        --accent: #6cc1ff;
+        --font: system-ui, -apple-system, "Segoe UI", sans-serif;
+        --font-mono: ui-monospace, "SF Mono", "Cascadia Code", monospace;
+      }
+      * { box-sizing: border-box; }
+      html, body { margin: 0; height: 100%; overflow: hidden; background: var(--bg); }
+      canvas { display: block; }
+
+      #panel {
+        position: fixed; top: 12px; right: 12px; width: 290px;
+        max-height: calc(100vh - 24px); overflow-y: auto;
+        background: var(--panel); border: 1px solid #000;
+        border-radius: 8px; color: var(--text);
+        font-family: var(--font); font-size: 12px;
+        box-shadow: 0 8px 30px rgba(0,0,0,.5); z-index: 10;
+      }
+      #panel h1 {
+        margin: 0; padding: 11px 13px; font-size: 12px; font-weight: 600;
+        letter-spacing: .04em; text-transform: uppercase; color: var(--accent);
+        border-bottom: 1px solid #000; background: var(--panel-hdr);
+      }
+      .sec-hdr {
+        padding: 8px 13px; font-weight: 600; cursor: pointer;
+        background: var(--panel-hdr); border-bottom: 1px solid #0008;
+        user-select: none; font-size: 11px; letter-spacing: .03em;
+      }
+      .sec-hdr::before { content: "▾ "; color: var(--text-dim); }
+      .sec-hdr.collapsed::before { content: "▸ "; }
+      .sec-body { padding: 6px 13px 10px; }
+      .sec-body.hidden { display: none; }
+      .row { display: flex; align-items: center; gap: 8px; margin: 6px 0; }
+      .row label { flex: 0 0 96px; color: var(--text-dim); }
+      .row input[type=range] { flex: 1; min-width: 0; accent-color: var(--accent); }
+      .row .num {
+        flex: 0 0 50px; background: #0d0f13; border: 1px solid #000;
+        color: var(--text); border-radius: 4px; padding: 2px 4px;
+        font-family: var(--font-mono); font-size: 11px;
+      }
+      .row input[type=color] {
+        flex: 0 0 36px; height: 20px; background: none; border: 1px solid #000;
+        border-radius: 4px; padding: 0; cursor: pointer;
+      }
+      .btn {
+        display: inline-block; margin: 3px 4px 3px 0; padding: 5px 10px;
+        background: #2a3140; color: var(--text); border: 1px solid #000;
+        border-radius: 5px; cursor: pointer; font-size: 11px;
+      }
+      .btn:hover { background: #33414f; }
+      .toggle {
+        flex: 1; text-align: left; padding: 4px 8px; border-radius: 5px;
+        border: 1px solid #000; background: #2a3140; color: var(--text-dim);
+        cursor: pointer; font-size: 11px;
+      }
+      .toggle.on { background: #234a2e; color: #b7f0c4; border-color: #1c3a24; }
+      #hud {
+        position: fixed; left: 12px; bottom: 12px; z-index: 10;
+        font-family: var(--font-mono); font-size: 11px; color: var(--text-dim);
+        background: #0009; padding: 6px 10px; border-radius: 6px; line-height: 1.5;
+        pointer-events: none;
+      }
+      #hud b { color: var(--accent); }
+    </style>
+    <script type="importmap">
+      {
+        "imports": {
+          "three": "https://cdn.jsdelivr.net/npm/three@0.183.1/build/three.webgpu.js",
+          "three/webgpu": "https://cdn.jsdelivr.net/npm/three@0.183.1/build/three.webgpu.js",
+          "three/tsl": "https://cdn.jsdelivr.net/npm/three@0.183.1/build/three.tsl.js",
+          "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.183.1/examples/jsm/"
+        }
+      }
+    </script>
+  </head>
+  <body>
+    <div id="panel"><h1>Fog Showcase</h1></div>
+    <div id="hud">
+      Drag = orbit · Scroll = zoom · Right-drag = pan<br />
+      Time of day: <b id="hud-tod">9.5</b>h · FPS <b id="hud-fps">—</b>
+    </div>
+
+    <script type="module">
+      import * as THREE from "three";
+      import {
+        Fn, float, vec3, vec4, uniform, color, mix, smoothstep, clamp, pow, dot,
+        normalize, length, exp, min, max, int, Loop, If, Break,
+        positionWorld, cameraPosition, normalWorld, screenUV, pass,
+        mx_fractal_noise_float, orthographicDepthToViewZ, viewZToPerspectiveDepth,
+        getViewPosition, cameraProjectionMatrixInverse, cameraWorldMatrix,
+        cameraNear, cameraFar,
+      } from "three/tsl";
+      import { OrbitControls } from "three/addons/controls/OrbitControls.js";
+      import { mergeGeometries } from "three/addons/utils/BufferGeometryUtils.js";
+      import {
+        createDayNightSky, SKY_DEFAULTS, SKY_RADIUS,
+      } from "./procedural-sky.js";
+
+      // ─── tiny UI helpers ──────────────────────────────────────────────────
+      const panel = document.getElementById("panel");
+      const _refreshers = [];
+      function uiRefresh() { _refreshers.forEach((r) => r()); }
+      function section(title, expanded = true) {
+        const hdr = document.createElement("div");
+        hdr.className = "sec-hdr" + (expanded ? "" : " collapsed");
+        hdr.textContent = title;
+        const body = document.createElement("div");
+        body.className = "sec-body" + (expanded ? "" : " hidden");
+        hdr.onclick = () => { hdr.classList.toggle("collapsed"); body.classList.toggle("hidden"); };
+        panel.append(hdr, body);
+        return body;
+      }
+      function slider(parent, obj, key, { label, min, max, step = 0.01, onChange }) {
+        const row = document.createElement("div");
+        row.className = "row";
+        row.innerHTML = `<label>${label}</label>
+          <input type="range" min="${min}" max="${max}" step="${step}" value="${obj[key]}">
+          <input class="num" type="number" min="${min}" max="${max}" step="${step}" value="${obj[key]}">`;
+        const [sl, num] = row.querySelectorAll("input");
+        const fire = (v) => { obj[key] = v; sl.value = v; num.value = v; onChange?.(v); };
+        sl.oninput = () => fire(parseFloat(sl.value));
+        num.onchange = () => fire(parseFloat(num.value));
+        parent.appendChild(row);
+        _refreshers.push(() => { sl.value = obj[key]; num.value = obj[key]; });
+      }
+      function colorPick(parent, obj, key, { label, onChange }) {
+        const row = document.createElement("div");
+        row.className = "row";
+        row.innerHTML = `<label>${label}</label><input type="color" value="${obj[key]}">`;
+        const inp = row.querySelector("input");
+        inp.oninput = () => { obj[key] = inp.value; onChange?.(inp.value); };
+        parent.appendChild(row);
+      }
+      function toggle(parent, obj, key, { label, onChange }) {
+        const row = document.createElement("div");
+        row.className = "row";
+        const btn = document.createElement("button");
+        btn.className = "toggle" + (obj[key] ? " on" : "");
+        btn.textContent = label;
+        btn.onclick = () => {
+          obj[key] = !obj[key];
+          btn.classList.toggle("on", obj[key]);
+          onChange?.(obj[key]);
+        };
+        row.appendChild(btn);
+        parent.appendChild(row);
+      }
+      function button(parent, label, onClick) {
+        const b = document.createElement("button");
+        b.className = "btn"; b.textContent = label; b.onclick = onClick;
+        parent.appendChild(b);
+      }
+
+      // ─── renderer / scene / camera ────────────────────────────────────────
+      const renderer = new THREE.WebGPURenderer({ antialias: true });
+      renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
+      renderer.setSize(innerWidth, innerHeight);
+      renderer.shadowMap.enabled = true;
+      renderer.shadowMap.type = THREE.PCFSoftShadowMap;
+      renderer.toneMapping = THREE.ACESFilmicToneMapping;
+      renderer.toneMappingExposure = 1.0;
+      document.body.appendChild(renderer.domElement);
+      await renderer.init();
+
+      const scene = new THREE.Scene();
+      const camera = new THREE.PerspectiveCamera(55, innerWidth / innerHeight, 0.5, 4000);
+      camera.position.set(40, 24, 215);
+      const controls = new OrbitControls(camera, renderer.domElement);
+      controls.target.set(0, -2, 0);
+      controls.maxDistance = 600;
+      controls.maxPolarAngle = Math.PI * 0.52; // stay above ground
+      controls.update();
+
+      const sun = new THREE.DirectionalLight("#fff5e0", 2.2);
+      sun.castShadow = true;
+      sun.shadow.mapSize.set(2048, 2048);
+      sun.shadow.camera.near = 0.5;
+      sun.shadow.camera.far = 900;
+      const sc = sun.shadow.camera;
+      sc.left = -240; sc.right = 240; sc.top = 240; sc.bottom = -240;
+      sun.shadow.bias = -0.0008;
+      scene.add(sun, sun.target);
+
+      const hemi = new THREE.HemisphereLight("#c8e0ff", "#4a5536", 0.5);
+      scene.add(hemi);
+
+      // ─── terrain: central basin ringed by ridges (fog pools in the bowl) ──
+      const TERRAIN_SIZE = 460;
+      const FOG_BASE_Y = -7; // ~valley floor; haze fills from here upward
+      function sampleHeight(x, z) {
+        const r = Math.hypot(x, z);
+        const ridge = 24 * Math.exp(-(((r - 120) / 46) ** 2)); // ring of hills
+        const bowl = 11 * Math.exp(-((r / 58) ** 2));          // dished centre
+        const rolling =
+          6.0 * Math.sin(x * 0.028) * Math.cos(z * 0.024) +
+          3.0 * Math.sin(x * 0.062 + 1.3) * Math.cos(z * 0.055) +
+          1.4 * Math.sin(x * 0.13 + 4.1) * Math.cos(z * 0.12 + 0.7);
+        return ridge - bowl + rolling;
+      }
+
+      const terrainGeo = new THREE.PlaneGeometry(TERRAIN_SIZE, TERRAIN_SIZE, 256, 256);
+      terrainGeo.rotateX(-Math.PI / 2);
+      {
+        const p = terrainGeo.attributes.position;
+        for (let i = 0; i < p.count; i++) {
+          p.setY(i, sampleHeight(p.getX(i), p.getZ(i)));
+        }
+        p.needsUpdate = true;
+        terrainGeo.computeVertexNormals();
+      }
+
+      // Terrain material: grass→rock by height & slope, lit by sun + hemi.
+      const grassLo = uniform(new THREE.Color("#3c5a26"));
+      const grassHi = uniform(new THREE.Color("#6e8a3e"));
+      const rockCol = uniform(new THREE.Color("#6b6258"));
+      const terrainMat = new THREE.MeshStandardNodeMaterial({ roughness: 1.0, metalness: 0.0 });
+      terrainMat.colorNode = Fn(() => {
+        const h = positionWorld.y;
+        const grass = mix(grassLo, grassHi, smoothstep(-6, 22, h));
+        const slope = clamp(normalWorld.y, 0, 1);          // 1 = flat, 0 = cliff
+        const rockAmt = smoothstep(0.82, 0.6, slope);       // steep → rock
+        return mix(grass, rockCol, rockAmt);
+      })();
+      const terrain = new THREE.Mesh(terrainGeo, terrainMat);
+      terrain.receiveShadow = true;
+      scene.add(terrain);
+
+      // ─── instanced trees (hundreds, low-poly; vertical refs for the fog) ──
+      function mulberry32(a) {
+        return function () {
+          a |= 0; a = (a + 0x6d2b79f5) | 0;
+          let t = Math.imul(a ^ (a >>> 15), 1 | a);
+          t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t;
+          return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+        };
+      }
+      const rng = mulberry32(1337);
+
+      // Trunk geometry, base at y=0.
+      const trunkGeo = new THREE.CylinderGeometry(0.13, 0.26, 2.4, 6, 1);
+      trunkGeo.translate(0, 1.2, 0);
+      // Foliage = two stacked cones merged, base sitting on the trunk top.
+      const coneA = new THREE.ConeGeometry(1.35, 3.0, 7).translate(0, 3.9, 0);
+      const coneB = new THREE.ConeGeometry(0.95, 2.2, 7).translate(0, 5.4, 0);
+      const foliageGeo = mergeGeometries([coneA, coneB]);
+
+      const trunkMat = new THREE.MeshStandardNodeMaterial({ color: "#5a4632", roughness: 1 });
+      const foliageMat = new THREE.MeshStandardNodeMaterial({ color: "#4f6f29", roughness: 1 });
+
+      const TREE_COUNT = 520;
+      const trunks = new THREE.InstancedMesh(trunkGeo, trunkMat, TREE_COUNT);
+      const foliage = new THREE.InstancedMesh(foliageGeo, foliageMat, TREE_COUNT);
+      trunks.castShadow = foliage.castShadow = true;
+      trunks.receiveShadow = foliage.receiveShadow = true;
+
+      const dummy = new THREE.Object3D();
+      let placed = 0;
+      let guard = 0;
+      while (placed < TREE_COUNT && guard < TREE_COUNT * 20) {
+        guard++;
+        const x = (rng() - 0.5) * TERRAIN_SIZE * 0.92;
+        const z = (rng() - 0.5) * TERRAIN_SIZE * 0.92;
+        const r = Math.hypot(x, z);
+        if (r < 34) continue; // keep the basin floor open so mist reads clearly
+        // reject steep slopes (approx via finite-difference normal)
+        const hC = sampleHeight(x, z);
+        const dx = sampleHeight(x + 1, z) - hC;
+        const dz = sampleHeight(x, z + 1) - hC;
+        const flat = 1 / Math.sqrt(1 + dx * dx + dz * dz);
+        if (flat < 0.86) continue;
+        const s = 0.7 + rng() * 1.1;
+        dummy.position.set(x, hC - 0.2, z);
+        dummy.rotation.set(0, rng() * Math.PI * 2, 0);
+        dummy.scale.set(s, s * (0.85 + rng() * 0.4), s);
+        dummy.updateMatrix();
+        trunks.setMatrixAt(placed, dummy.matrix);
+        foliage.setMatrixAt(placed, dummy.matrix);
+        placed++;
+      }
+      trunks.count = foliage.count = placed;
+      trunks.instanceMatrix.needsUpdate = true;
+      foliage.instanceMatrix.needsUpdate = true;
+      scene.add(trunks, foliage);
+
+      // A few rock monoliths — solid silhouettes that read god-ray shafts.
+      const rockGeo = new THREE.IcosahedronGeometry(1, 0);
+      const rockMat = new THREE.MeshStandardNodeMaterial({ color: "#5d5750", roughness: 1 });
+      const ROCKS = 14;
+      const rocks = new THREE.InstancedMesh(rockGeo, rockMat, ROCKS);
+      rocks.castShadow = rocks.receiveShadow = true;
+      for (let i = 0; i < ROCKS; i++) {
+        const a = rng() * Math.PI * 2;
+        const rr = 45 + rng() * 120;
+        const x = Math.cos(a) * rr, z = Math.sin(a) * rr;
+        const sy = 4 + rng() * 9, sxz = 2 + rng() * 3;
+        dummy.position.set(x, sampleHeight(x, z) + sy * 0.35, z);
+        dummy.rotation.set(rng(), rng() * 6.28, rng());
+        dummy.scale.set(sxz, sy, sxz);
+        dummy.updateMatrix();
+        rocks.setMatrixAt(i, dummy.matrix);
+      }
+      rocks.instanceMatrix.needsUpdate = true;
+      scene.add(rocks);
+
+      // ─── the procedural sky (forked rig) ──────────────────────────────────
+      const dayNightSky = createDayNightSky();
+      scene.add(dayNightSky.mesh);
+
+      // ─── FOG: raymarched volumetric (Tier 2, single-scatter) ─────────────
+      // Real volume: march the view ray through a 3D density field (height-bounded
+      // slab × animated FBM), accumulate transmittance, and scatter the sun through
+      // it with a Henyey-Greenstein phase. Runs as a post-process so it composites
+      // against scene DEPTH — fog wraps trees / pools in the basin instead of being
+      // painted on surfaces. No secondary light march yet (= no hard shafts).
+      const FOG = {
+        enabled: true,
+        density: 0.09,        // extinction per unit through the medium
+        scatter: 1.6,         // sun in-scatter brightness
+        height: 26,           // scale height of the exponential falloff (m)
+        base: -6,             // y of densest fog (≈ basin floor)
+        noiseScale: 0.035,    // 3D noise frequency
+        noiseStrength: 0.85,  // how much noise carves the slab into wisps
+        coverage: 0.42,       // density threshold (higher = thinner/wispier)
+        hg: 0.66,             // forward-scatter anisotropy (0..0.95)
+        steps: 32,            // raymarch samples
+        maxDist: 600,         // far clamp of the march
+        speed: 0.04,          // drift speed of the noise
+        color: "#9fb3c6",     // ambient (shadow-side) fog tint
+        sunColor: "#ffdeb0",  // sun in-scatter tint
+      };
+      const lin = (hex) => new THREE.Color(hex).convertSRGBToLinear();
+      const uFogEnabled = uniform(FOG.enabled ? 1 : 0);
+      const uFogDensity = uniform(FOG.density);
+      const uFogScatter = uniform(FOG.scatter);
+      const uFogHeight = uniform(FOG.height);
+      const uFogBase = uniform(FOG.base);
+      const uNoiseScale = uniform(FOG.noiseScale);
+      const uNoiseStrength = uniform(FOG.noiseStrength);
+      const uCoverage = uniform(FOG.coverage);
+      const uHG = uniform(FOG.hg);
+      const uSteps = uniform(FOG.steps);
+      const uMaxDist = uniform(FOG.maxDist);
+      const uNoiseSpeed = uniform(FOG.speed);
+      const uFogColor = uniform(lin(FOG.color));
+      const uFogSunColor = uniform(lin(FOG.sunColor));
+      const uSunDirFog = uniform(new THREE.Vector3(0, 1, 0)); // toward the sun
+      const fogTime = uniform(0).onFrameUpdate((f) => f.time);
+      const VOL_MAX_STEPS = 64; // loop ceiling; uSteps is the live count
+
+      // Henyey-Greenstein phase — peaks toward the sun for the forward halo.
+      const hgPhase = Fn(([g, mu]) => {
+        const gg = g.mul(g);
+        const denom = float(1).add(gg).sub(g.mul(mu).mul(2)).max(0.0001);
+        return float(1).sub(gg).div(pow(denom, 1.5)).mul(1 / (4 * Math.PI));
+      });
+
+      // Density at a world point: exponential height slab × animated FBM wisps.
+      const fogDensityAt = Fn(([p]) => {
+        const above = p.y.sub(uFogBase).max(0);
+        const hf = exp(above.div(uFogHeight).negate());
+        const coord = p.mul(uNoiseScale)
+          .add(vec3(fogTime.mul(uNoiseSpeed), fogTime.mul(uNoiseSpeed.mul(0.4)), 0));
+        const n = mx_fractal_noise_float(coord, int(4), float(2.0), float(0.5), float(1.0))
+          .mul(0.5).add(0.5);
+        const wisp = smoothstep(uCoverage, float(1.0), mix(float(1.0), n, uNoiseStrength));
+        return hf.mul(wisp);
+      });
+
+      // ─── post-process pipeline: scene pass → volumetric march → composite ─
+      const postProcessing = new THREE.RenderPipeline(renderer);
+      const scenePass = pass(scene, camera);
+      const scenePassColor = scenePass.getTextureNode();
+
+      const volumetricFog = Fn(([inColor]) => {
+        // Reconstruct the world-space surface position from scene depth.
+        const ld = scenePass.getLinearDepthNode();
+        const viewZ = orthographicDepthToViewZ(ld, cameraNear, cameraFar);
+        const perspD = viewZToPerspectiveDepth(viewZ, cameraNear, cameraFar);
+        const viewPos = getViewPosition(screenUV, perspD, cameraProjectionMatrixInverse);
+        const worldPos = cameraWorldMatrix.mul(vec4(viewPos, 1)).xyz;
+        const camPos = cameraPosition;
+        const delta = worldPos.sub(camPos);
+        const dir = normalize(delta);
+        const endDist = min(length(delta), uMaxDist);
+        // Divide by the LIVE step count (uSteps), not the loop ceiling, so the
+        // march always spans the full distance regardless of the quality slider.
+        const stepSize = endDist.div(float(uSteps).max(1));
+        // Phase is constant along the ray (sun is directional) → compute once.
+        const phase = hgPhase(uHG, dot(dir, uSunDirFog));
+        const inscatterLi = color(uFogSunColor).mul(phase).mul(uFogScatter)
+          .add(color(uFogColor));
+
+        const T = float(1).toVar();          // transmittance to camera
+        const scatter = vec3(0).toVar();     // accumulated in-scattered light
+        Loop(VOL_MAX_STEPS, ({ i }) => {
+          If(float(i).greaterThanEqual(uSteps), () => Break());
+          const t = float(i).add(0.5).mul(stepSize);
+          const p = camPos.add(dir.mul(t));
+          const d = fogDensityAt(p).mul(uFogDensity);
+          If(d.greaterThan(0.0002), () => {
+            const sT = exp(d.mul(stepSize).negate());         // step transmittance
+            scatter.addAssign(T.mul(float(1).sub(sT)).mul(inscatterLi));
+            T.assign(T.mul(sT));
+          });
+          If(T.lessThan(0.012), () => Break());               // fully occluded
+        });
+
+        const foggy = inColor.rgb.mul(T).add(scatter);
+        return vec4(mix(inColor.rgb, foggy, uFogEnabled), inColor.a);
+      });
+      postProcessing.outputNode = volumetricFog(scenePassColor);
+
+      // ─── world lighting drive (timeOfDay → sun dir → sky.update) ──────────
+      const PROC_SKY = { ...SKY_DEFAULTS, timeOfDay: 9.5, autoAdvance: false, daySpeed: 0.4 };
+      const worldLight = {
+        dirColor: "#fff5e0", dirIntensity: 2.4, moonIntensity: 0.25,
+        hemiSky: "#c8e0ff", hemiGround: "#4a5536", hemiIntensity: 0.5, sunDistance: 600,
+      };
+      const SKY_TILT = 0.28;
+      const _sunDir = new THREE.Vector3();
+      const _moonDir = new THREE.Vector3();
+      const _effDir = new THREE.Vector3();
+      // Dome's own horizon haze stays OFF — the volumetric post-fog now provides
+      // aerial perspective on everything, including the sky dome (geometry at 1500).
+      const _skyFog = { enabled: false, color: new THREE.Color(FOG.color), density: 0.0006, hazeHeight: 0.12 };
+
+      function worldSunDirFromTime(t, out) {
+        const ang = (t / 24) * Math.PI * 2;
+        return out.set(Math.sin(ang), -Math.cos(ang), SKY_TILT).normalize();
+      }
+      function driveWorldLighting(timeSec, dt) {
+        if (PROC_SKY.autoAdvance) {
+          PROC_SKY.timeOfDay = (PROC_SKY.timeOfDay + PROC_SKY.daySpeed * dt) % 24;
+          uiRefresh();
+        }
+        worldSunDirFromTime(PROC_SKY.timeOfDay, _sunDir);
+        _moonDir.copy(_sunDir).negate();
+        const sunUp = _sunDir.y;
+        if (sunUp < 0) {
+          _effDir.copy(_moonDir);
+          sun.position.copy(_effDir).multiplyScalar(worldLight.sunDistance);
+          sun.color.set(PROC_SKY.moonColor);
+          sun.intensity = worldLight.moonIntensity * THREE.MathUtils.smoothstep(-sunUp, 0, 0.15);
+        } else {
+          _effDir.copy(_sunDir);
+          sun.position.copy(_sunDir).multiplyScalar(worldLight.sunDistance);
+          sun.color.set(worldLight.dirColor);
+          sun.intensity = worldLight.dirIntensity * THREE.MathUtils.smoothstep(sunUp, -0.05, 0.1);
+        }
+        sun.target.position.set(0, 0, 0);
+        hemi.color.set(worldLight.hemiSky);
+        hemi.groundColor.set(worldLight.hemiGround);
+        hemi.intensity = worldLight.hemiIntensity * THREE.MathUtils.smoothstep(sunUp, -0.2, 0.2) + 0.05;
+        // fog in-scatter tracks the key light (sun by day, moon by night)
+        uSunDirFog.value.copy(_effDir).normalize();
+        dayNightSky.update(PROC_SKY, {
+          time: timeSec, sunDir: _sunDir, moonDir: _moonDir, camera, fog: _skyFog,
+        });
+      }
+
+      // ─── control panel ────────────────────────────────────────────────────
+      {
+        const s1 = section("Time of Day");
+        slider(s1, PROC_SKY, "timeOfDay", { label: "Hour", min: 0, max: 24, step: 0.1,
+          onChange: (v) => { document.getElementById("hud-tod").textContent = v.toFixed(1); } });
+        toggle(s1, PROC_SKY, "autoAdvance", { label: "Auto-advance day" });
+        slider(s1, PROC_SKY, "daySpeed", { label: "Day speed", min: 0.05, max: 3, step: 0.05 });
+        const presets = document.createElement("div");
+        s1.appendChild(presets);
+        const setTOD = (h) => { PROC_SKY.timeOfDay = h; uiRefresh();
+          document.getElementById("hud-tod").textContent = h.toFixed(1); };
+        button(presets, "Dawn", () => setTOD(6.2));
+        button(presets, "Noon", () => setTOD(12));
+        button(presets, "Dusk", () => setTOD(18.0));
+        button(presets, "Night", () => setTOD(0.5));
+
+        const s2 = section("Fog — Volume");
+        toggle(s2, FOG, "enabled", { label: "Fog enabled",
+          onChange: (v) => { uFogEnabled.value = v ? 1 : 0; } });
+        slider(s2, FOG, "density", { label: "Density", min: 0, max: 0.4, step: 0.005,
+          onChange: (v) => (uFogDensity.value = v) });
+        slider(s2, FOG, "base", { label: "Floor height", min: -20, max: 20, step: 0.5,
+          onChange: (v) => (uFogBase.value = v) });
+        slider(s2, FOG, "height", { label: "Scale height", min: 4, max: 80, step: 1,
+          onChange: (v) => (uFogHeight.value = v) });
+        slider(s2, FOG, "coverage", { label: "Coverage", min: 0, max: 0.95, step: 0.01,
+          onChange: (v) => (uCoverage.value = v) });
+        slider(s2, FOG, "maxDist", { label: "Max distance", min: 100, max: 1200, step: 10,
+          onChange: (v) => (uMaxDist.value = v) });
+
+        const s3 = section("Fog — Light");
+        slider(s3, FOG, "scatter", { label: "Sun scatter", min: 0, max: 5, step: 0.05,
+          onChange: (v) => (uFogScatter.value = v) });
+        slider(s3, FOG, "hg", { label: "Forward (HG)", min: 0, max: 0.94, step: 0.01,
+          onChange: (v) => (uHG.value = v) });
+        colorPick(s3, FOG, "color", { label: "Ambient",
+          onChange: (v) => { uFogColor.value.copy(lin(v)); } });
+        colorPick(s3, FOG, "sunColor", { label: "Sun tint",
+          onChange: (v) => { uFogSunColor.value.copy(lin(v)); } });
+
+        const s4 = section("Fog — Motion / Quality", false);
+        slider(s4, FOG, "noiseScale", { label: "Noise scale", min: 0.008, max: 0.1, step: 0.001,
+          onChange: (v) => (uNoiseScale.value = v) });
+        slider(s4, FOG, "noiseStrength", { label: "Noise amount", min: 0, max: 1, step: 0.01,
+          onChange: (v) => (uNoiseStrength.value = v) });
+        slider(s4, FOG, "speed", { label: "Drift speed", min: 0, max: 0.3, step: 0.005,
+          onChange: (v) => (uNoiseSpeed.value = v) });
+        slider(s4, FOG, "steps", { label: "March steps", min: 8, max: 64, step: 1,
+          onChange: (v) => (uSteps.value = Math.round(v)) });
+      }
+
+      // ─── loop ─────────────────────────────────────────────────────────────
+      const timer = new THREE.Timer();
+      let fpsT = 0, fpsN = 0;
+      renderer.setAnimationLoop(() => {
+        timer.update();
+        const dt = Math.min(timer.getDelta(), 0.05);
+        const t = timer.getElapsed();
+        controls.update();
+        driveWorldLighting(t, dt);
+        postProcessing.render();
+        fpsN++; fpsT += dt;
+        if (fpsT >= 0.5) {
+          document.getElementById("hud-fps").textContent = Math.round(fpsN / fpsT);
+          fpsT = 0; fpsN = 0;
+        }
+      });
+
+      addEventListener("resize", () => {
+        camera.aspect = innerWidth / innerHeight;
+        camera.updateProjectionMatrix();
+        renderer.setSize(innerWidth, innerHeight);
+      });
+    </script>
+  </body>
+</html>

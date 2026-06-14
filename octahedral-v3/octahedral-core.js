@@ -4,7 +4,7 @@
 import * as THREE from "three";
 import {
   Fn, If, normalize, sub, mul, add, div, abs, vec2, vec3, vec4, sign, dot, cross,
-  floor, fract, min, max, clamp, saturate, texture, cameraPosition,
+  floor, fract, min, max, clamp, saturate, texture, cameraPosition, cameraViewMatrix,
   positionWorld, positionLocal, positionView, float, uniform, varying, select,
   length, negate, mix, smoothstep, fwidth, pow, sin, cos, normalWorld,
   tangentLocal, viewportCoordinate, uv, instanceIndex, screenCoordinate,
@@ -684,7 +684,10 @@ function createImpostorMaterials(textures, opts) {
   mainMat.depthWrite = true;
   mainMat.positionNode  = positionFn();
   mainMat.colorNode     = displayColor;
-  mainMat.normalNode    = finalWorldN;
+  // World->view: three lighting consumes normalNode in VIEW space, but our atlas
+  // stores WORLD normals. Without this the terminator is correct only near the
+  // front (world≈view) and mirrors as you orbit to the back. (TEST)
+  mainMat.normalNode    = normalize(mul(cameraViewMatrix, vec4(finalWorldN, 0)).xyz);
   mainMat.roughnessNode = finalRough;
   mainMat.metalnessNode = finalMetal;
   mainMat.aoNode        = ao;
