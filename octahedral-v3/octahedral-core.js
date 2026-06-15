@@ -6,7 +6,7 @@ import {
   Fn, If, normalize, sub, mul, add, div, abs, vec2, vec3, vec4, sign, dot, cross,
   floor, fract, min, max, clamp, saturate, texture, cameraPosition, cameraViewMatrix,
   positionWorld, positionLocal, positionView, float, uniform, varying, select,
-  length, negate, mix, smoothstep, fwidth, pow, sin, cos, normalWorld,
+  length, negate, mix, smoothstep, step, fwidth, pow, sin, cos, normalWorld,
   tangentLocal, viewportCoordinate, uv, instanceIndex, screenCoordinate,
 } from "three/tsl";
 // ═══════════════════════════════════════════════════════════════════════════
@@ -332,6 +332,8 @@ async function bakeAtlases(renderer, meshData, opts) {
   for (let gy = 0; gy < grid; gy++) {
     for (let gx = 0; gx < grid; gx++) {
       gridToDir(gx / (grid - 1), gy / (grid - 1), dir);
+      const _poleT = THREE.MathUtils.smoothstep(Math.abs(dir.y), 0.9, 1.0);
+      ortho.up.set(0, 1 - _poleT, _poleT); // match the render's blended pole up-ref
       ortho.position.copy(center).addScaledVector(dir, radius * 2);
       ortho.lookAt(center);
       ortho.updateMatrixWorld(true);
@@ -430,6 +432,8 @@ function createImpostorMaterials(textures, opts) {
 
   // Debug
   const uDebugMode   = uniform(float(0)); // 0=PBR, 1=normals, 2=raw atlas
+  const uUnlit       = uniform(float(0)); // 1 = show baked colour UNLIT (emissive), no relight
+  const uFade        = uniform(float(1)); // LOD crossfade: screen-door dither, 1=solid 0=gone
 
   // Vertex→fragment varyings
   const vWeight = varying(vec4(0, 0, 0, 0), "vW");
@@ -483,15 +487,19 @@ function createImpostorMaterials(textures, opts) {
 
   // Build orthonormal frame on the cell plane
   const planeTangent = Fn(([n]) => {
-    const up = mix(vec3(0, 1, 0), vec3(-1, 0, 0),
-      max(float(0), sign(sub(n.y, float(0.999)))));
+    // Blend the up-reference toward horizontal (+Z) as n nears vertical, so
+    // cross(up, n) never collapses at the pole (top view). MUST match the bake
+    // camera up (set per-cell in the bake loops) or the top cell renders rotated.
+    const up = mix(vec3(0, 1, 0), vec3(0, 0, 1), smoothstep(float(0.9), float(1.0), abs(n.y)));
     return normalize(cross(up, n));
   });
   const planeUp = Fn(([n, t]) => {
-    const worldUp = vec3(0, 1, 0);
-    const proj = sub(worldUp, mul(n, dot(n, worldUp)));
+    // Same blended reference as planeTangent (so render up == bake camera up).
+    const ref = mix(vec3(0, 1, 0), vec3(0, 0, 1), smoothstep(float(0.9), float(1.0), abs(n.y)));
+    const proj = sub(ref, mul(n, dot(n, ref)));
     const len = length(proj);
-    return select(len.lessThan(float(0.001)), t, normalize(proj));
+    // Exact-pole fallback: a vector PERPENDICULAR to the tangent (not the tangent).
+    return select(len.lessThan(float(0.001)), normalize(cross(n, t)), normalize(proj));
   });
   const projectVert = Fn(([n]) => {
     const t = planeTangent(n);
@@ -683,7 +691,7 @@ function createImpostorMaterials(textures, opts) {
   mainMat.alphaToCoverage = false;
   mainMat.depthWrite = true;
   mainMat.positionNode  = positionFn();
-  mainMat.colorNode     = displayColor;
+  mainMat.colorNode     = mix(displayColor, vec3(0, 0, 0), uUnlit);
   // World->view: three lighting consumes normalNode in VIEW space, but our atlas
   // stores WORLD normals. Without this the terminator is correct only near the
   // front (world≈view) and mirrors as you orbit to the back. (TEST)
@@ -691,8 +699,8 @@ function createImpostorMaterials(textures, opts) {
   mainMat.roughnessNode = finalRough;
   mainMat.metalnessNode = finalMetal;
   mainMat.aoNode        = ao;
-  mainMat.opacityNode   = smoothAlpha;
-  mainMat.emissiveNode  = displayEmissive;
+  mainMat.opacityNode   = mul(smoothAlpha, step(ign, uFade)); // × LOD crossfade dither
+  mainMat.emissiveNode  = mix(displayEmissive, finalAlbedo, uUnlit);
 
   // Shadow casting — Renderer._getShadowNodes() picks these up per-draw and
   // patches them onto the shared ShadowPassMaterial. cameraPosition during the
@@ -712,13 +720,139 @@ function createImpostorMaterials(textures, opts) {
       uWindAmp, uWindFreq,
       uTransAmt, uTransPow, uTransTint,
       uSunDir, uSunColor,
-      uDebugMode,
+      uDebugMode, uUnlit, uFade,
     },
   };
 }
+// ═══════════════════════════════════════════════════════════════════════════
+//  Color-only bake of a LIVE object (renders with its OWN materials)
+//  — for custom-shader trees (stylized billboard foliage) where the generic
+//  material-substitution bake (bakeAtlases) can't reproduce the look. Captures
+//  the final lit/stylized appearance in RGB + coverage in alpha. No normal/RM/
+//  depth (pair with flat aux atlases for an unlit/lightly-relit impostor).
+// ═══════════════════════════════════════════════════════════════════════════
+async function bakeColorAtlasFromObject(renderer, objects, opts) {
+  const { grid, atlasSize, maxAniso = 8, cellPad = 4, fullOctahedral = false } = opts;
+  const gridToDir = fullOctahedral ? fullOctaGridToDir : hemiOctaGridToDir;
+  const cs = Math.floor(atlasSize / grid);
+  const pad = cellPad;
+  const innerCS = cs - pad * 2;
+
+  // Isolated bake scene — clone each source object so the page scene
+  // (ground / sky / other tree) isn't captured. Clones share materials, so the
+  // foliage still billboards toward the bake camera and keeps its stylized color.
+  const bakeScene = new THREE.Scene();
+  for (const o of objects) if (o) bakeScene.add(o.clone(true));
+  // Lights so MeshStandard trunks aren't black — the color bake captures the LIT
+  // look (the foliage's stylized colour is mostly self-lit via its own shader).
+  if (opts.lights) {
+    for (const L of opts.lights) {
+      const lc = L.clone();
+      bakeScene.add(lc);
+      if (lc.target && L.target) { lc.target.position.copy(L.target.position); bakeScene.add(lc.target); }
+    }
+  }
+  bakeScene.updateMatrixWorld(true);
+
+  const box = new THREE.Box3().setFromObject(bakeScene);
+  const sphere = new THREE.Sphere();
+  box.getBoundingSphere(sphere);
+  const radius = sphere.radius * BAKE_SPHERE_MARGIN;
+  const center = sphere.center.clone();
+
+  const ortho = new THREE.OrthographicCamera(-radius, radius, radius, -radius, 0.001, radius * 4);
+  const dir = new THREE.Vector3();
+
+  const ssScale = 2;
+  const ssCS = innerCS * ssScale;
+  const cellRT = new THREE.RenderTarget(ssCS, ssCS, {
+    format: THREE.RGBAFormat, type: THREE.UnsignedByteType,
+    colorSpace: THREE.LinearSRGBColorSpace, samples: 1,
+  });
+
+  const savedTM = renderer.toneMapping;
+  const savedOCS = renderer.outputColorSpace;
+  const savedTarget = renderer.getRenderTarget();
+  const savedAutoClear = renderer.autoClear;
+  renderer.toneMapping = THREE.NoToneMapping;
+  renderer.outputColorSpace = THREE.LinearSRGBColorSpace;
+  renderer.setClearColor(0x000000, 0);
+  await renderer.compileAsync(bakeScene, ortho);
+
+  const colorPixels = new Uint8Array(atlasSize * atlasSize * 4);
+  const ssTightRow = ssCS * 4;
+  const ssPaddedRow = Math.ceil(ssTightRow / 256) * 256;
+  const ssFlipped = new Uint8Array(ssCS * ssCS * 4);
+
+  for (let gy = 0; gy < grid; gy++) {
+    for (let gx = 0; gx < grid; gx++) {
+      gridToDir(gx / (grid - 1), gy / (grid - 1), dir);
+      const _poleT = THREE.MathUtils.smoothstep(Math.abs(dir.y), 0.9, 1.0);
+      ortho.up.set(0, 1 - _poleT, _poleT); // match the render's blended pole up-ref
+      ortho.position.copy(center).addScaledVector(dir, radius * 2);
+      ortho.lookAt(center);
+      ortho.updateMatrixWorld(true);
+
+      renderer.setRenderTarget(cellRT);
+      renderer.autoClear = true;
+      renderer.render(bakeScene, ortho);
+
+      const buf = await renderer.readRenderTargetPixelsAsync(cellRT, 0, 0, ssCS, ssCS);
+      const src = new Uint8Array(buf.buffer, buf.byteOffset, buf.byteLength);
+      const srcStride = src.length > ssCS * ssCS * 4 ? ssPaddedRow : ssTightRow;
+      for (let row = 0; row < ssCS; row++) {
+        const srcOff = (ssCS - 1 - row) * srcStride;
+        ssFlipped.set(src.subarray(srcOff, srcOff + ssTightRow), row * ssTightRow);
+      }
+      const dsCell = downsample2x(ssFlipped, ssCS);
+      const dsRow = innerCS * 4;
+      for (let row = 0; row < innerCS; row++) {
+        const dy = gy * cs + pad + row;
+        const dstOff = (dy * atlasSize + gx * cs + pad) * 4;
+        colorPixels.set(dsCell.subarray(row * dsRow, row * dsRow + dsRow), dstOff);
+      }
+    }
+  }
+
+  cellRT.dispose();
+  renderer.setRenderTarget(savedTarget);
+  renderer.autoClear = savedAutoClear;
+  renderer.toneMapping = savedTM;
+  renderer.outputColorSpace = savedOCS;
+
+  linearToSrgb(colorPixels);
+  dilateAtlasEdges(colorPixels, atlasSize, grid, 8);
+
+  const colorTex = makeTexWithMips(
+    generatePerCellMipmaps(colorPixels, atlasSize, grid), atlasSize, maxAniso, true,
+  );
+  return { colorTex, colorPixels, atlasSize, grid, cellPad: pad, center, radius };
+}
+
+// Tiny uniform aux atlases for a color-only impostor: flat world-up normal,
+// uniform roughness/metalness, mid depth. Lets createImpostorMaterials run with
+// a color-only bake (lighting reads ~flat normals → reads stylized-flat).
+function makeFlatAuxTextures() {
+  const mk = (r, g, b, a, srgb) => {
+    const t = new THREE.DataTexture(new Uint8Array([r, g, b, a]), 1, 1, THREE.RGBAFormat);
+    t.needsUpdate = true; t.flipY = false;
+    t.minFilter = THREE.LinearFilter; t.magFilter = THREE.LinearFilter;
+    t.wrapS = THREE.ClampToEdgeWrapping; t.wrapT = THREE.ClampToEdgeWrapping;
+    if (srgb) t.colorSpace = THREE.SRGBColorSpace;
+    return t;
+  };
+  return {
+    normalTex: mk(128, 255, 128, 255, false), // (0,1,0) world-up
+    rmTex:     mk(230, 0, 0, 255, false),      // rough ~0.9, metal 0
+    depthTex:  mk(0, 0, 0, 255, false),  // depth 0 -> ao 1 (no spurious AO dim on relit impostor)
+  };
+}
+
 export {
   BAKE_SPHERE_MARGIN,
   bakeAtlases,
+  bakeColorAtlasFromObject,
+  makeFlatAuxTextures,
   createImpostorMaterials,
   hemiOctaGridToDir,
   fullOctaGridToDir,

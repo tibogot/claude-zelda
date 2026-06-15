@@ -435,6 +435,11 @@
       import { GLTFLoader } from "three/addons/loaders/GLTFLoader.js";
       import { DRACOLoader } from "three/addons/loaders/DRACOLoader.js";
       import { OrbitControls } from "three/addons/controls/OrbitControls.js";
+      import {
+        bakeColorAtlasFromObject,
+        makeFlatAuxTextures,
+        createImpostorMaterials,
+      } from "./octahedral-v3/octahedral-core.js";
 
       // ─── CUSTOM INSPECTOR (v2/editor-style) ─────────────────────────────────────
       const _checkSvg =
@@ -2996,8 +3001,10 @@ const SKY_DEFAULTS = {
       function toggleLodPreview(on) {
         lodPreview = on;
         if (on) {
-          controls.target.set(0, 3, 0);
-          camera.position.set(0, 6, 22);
+          // Shift + back off when an impostor 4th column is present.
+          const cx = impostorMesh ? LOD_SPACING * 0.9 : 0;
+          controls.target.set(cx, 3, 0);
+          camera.position.set(cx, 6, impostorMesh ? 32 : 22);
           controls.update();
         } else {
           controls.target.set(0, 3, 0);
@@ -3871,6 +3878,157 @@ const SKY_DEFAULTS = {
         a.click();
       }
 
+      // --- OCTAHEDRAL IMPOSTOR (far-LOD): bake the whole tree into a color atlas ---
+      // Phase 1a: bake + preview only. Renders trunk + stylized billboard foliage
+      // with their REAL materials from grid² octahedral views. The lab does the
+      // heavy lifting (octahedral-v3/octahedral-core.js = single source of truth).
+      const IMP = { grid: 8, atlasSize: 4096, cellPad: 6, fullOctahedral: false, bakeLight: 3.0 };
+      let impostorResult = null;
+      let _impPreviewImg = null;
+
+      async function bakeTreeImpostor() {
+        const trunk = trunkRoot || (params.bushMode ? null : defaultTrunk);
+        const objs = [leavesMesh, trunk].filter(Boolean);
+        if (!objs.length) { infoEl.textContent = "Nothing to bake (no foliage / trunk)."; return; }
+        infoEl.textContent = "Baking tree impostor — rendering the tree " + (IMP.grid * IMP.grid) + "x...";
+        await new Promise((r) => requestAnimationFrame(() => requestAnimationFrame(r)));
+        // Force world-up leaf normals during the bake so lighting is VIEW-STABLE —
+        // normalBias<1 (presets use 0.75) makes leaves face the bake camera, so
+        // anti-sun views bake dark. Restored right after; live tree unchanged.
+        const _savedNB = uNormalBias.value;
+        const _savedAO = uAoStr.value;
+        const _savedRim = uRimStr.value;
+        const _savedSSS = uSssStr.value;
+        uNormalBias.value = 1.0; // world-up leaves
+        uAoStr.value = 0.0;      // no AO darkening
+        uRimStr.value = 0.0;     // no view-dependent rim glow
+        uSssStr.value = 0.0;     // no view-dependent back-light SSS
+        // Flat AMBIENT bake light only — NO directional sun, so there's no
+        // lit/shadow side and every octahedral view is illuminated identically
+        // (the real cause of the bright/dark cells). View-stable atlas.
+        // Captures ~ALBEDO (not lit colour) so the impostor can be RELIT live by
+        // the scene sun (Phase 2 / day-night). Intensity is the brightness-match
+        // knob (three's ambient ~/π, so true albedo ≈ 3); tune via the UI slider.
+        const _bakeLight = new THREE.AmbientLight(0xffffff, IMP.bakeLight);
+        try {
+          impostorResult = await bakeColorAtlasFromObject(renderer, objs, {
+            grid: IMP.grid, atlasSize: IMP.atlasSize, cellPad: IMP.cellPad,
+            fullOctahedral: IMP.fullOctahedral, maxAniso: 8,
+            lights: [_bakeLight],
+          });
+        } catch (e) {
+          uNormalBias.value = _savedNB;
+          uAoStr.value = _savedAO;
+          uRimStr.value = _savedRim;
+          uSssStr.value = _savedSSS;
+          console.error(e);
+          infoEl.textContent = "Impostor bake failed: " + e.message;
+          return;
+        }
+        uNormalBias.value = _savedNB;
+        uAoStr.value = _savedAO;
+        uRimStr.value = _savedRim;
+        uSssStr.value = _savedSSS;
+        const { colorPixels, atlasSize } = impostorResult;
+        const cv = document.createElement("canvas");
+        cv.width = atlasSize; cv.height = atlasSize;
+        const ctx = cv.getContext("2d");
+        const im = ctx.createImageData(atlasSize, atlasSize);
+        im.data.set(colorPixels);
+        ctx.putImageData(im, 0, 0);
+        if (_impPreviewImg) _impPreviewImg.src = cv.toDataURL("image/png");
+        buildImpostorMesh();
+        infoEl.textContent =
+          "Tree impostor atlas baked: " + (IMP.grid * IMP.grid) + " views, " +
+          atlasSize + "px (" + Math.floor(atlasSize / IMP.grid) + "px/cell)";
+      }
+
+      let impostorMesh = null;
+      let impUniforms = null;
+      let _impShow = true;
+      const IMPSWAP = { enabled: false, startDist: 40, endDist: 80 };
+
+      // Build the far-LOD billboard from the baked atlas, standing it beside the
+      // real tree for comparison. UNLIT (the stylized lighting is baked in).
+      function buildImpostorMesh() {
+        if (!impostorResult) return;
+        if (impostorMesh) {
+          scene.remove(impostorMesh);
+          impostorMesh.geometry.dispose();
+          impostorMesh = null;
+        }
+        const flats = makeFlatAuxTextures();
+        const built = createImpostorMaterials(
+          {
+            colorTex: impostorResult.colorTex,
+            normalTex: flats.normalTex,
+            rmTex: flats.rmTex,
+            depthTex: flats.depthTex,
+          },
+          {
+            impostorScale: impostorResult.radius,
+            gridVal: IMP.grid,
+            atlasSize: impostorResult.atlasSize,
+            cellPad: impostorResult.cellPad,
+            fullOctahedral: IMP.fullOctahedral,
+          },
+        );
+        impUniforms = built.uniforms;
+        impUniforms.uUnlit.value = 0; // RELIGHT: albedo lit live by the scene sun (day/night)
+        built.mainMat.envMapIntensity = 0; // match leaves (they ignore env) -> sun+hemi only, no double sky tint
+
+        const R = impostorResult.radius;
+        const gap = 2 * R + 4;
+        impostorMesh = new THREE.Mesh(new THREE.PlaneGeometry(1, 1), built.mainMat);
+        impostorMesh.position.set(
+          impostorResult.center.x + gap,
+          impostorResult.center.y,
+          impostorResult.center.z,
+        );
+        impostorMesh.scale.setScalar(2 * R);
+        impostorMesh.frustumCulled = false;
+        impUniforms.uCenter.value.copy(impostorMesh.position);
+        scene.add(impostorMesh);
+        infoEl.textContent = "Impostor placed beside the tree (orbit to compare).";
+      }
+
+      // Per-frame placement + LOD crossfade for the impostor billboard.
+      // Priority: LOD-preview 4th column > distance swap (overlay) > compare (beside).
+      function updateImpostorLod() {
+        if (!impostorMesh || !impostorResult) return;
+        const c = impostorResult.center;
+        const trunk = trunkRoot || defaultTrunk;
+        if (lodPreview) {
+          impostorMesh.position.set(LOD_SPACING * 2, c.y, c.z);
+          impUniforms.uCenter.value.copy(impostorMesh.position);
+          impUniforms.uFade.value = 1;
+          impostorMesh.visible = true;
+          return;
+        }
+        if (IMPSWAP.enabled) {
+          impostorMesh.position.set(c.x, c.y, c.z); // overlay the real tree
+          impUniforms.uCenter.value.copy(impostorMesh.position);
+          const dx = camera.position.x - c.x;
+          const dy = camera.position.y - c.y;
+          const dz = camera.position.z - c.z;
+          const d = Math.sqrt(dx * dx + dy * dy + dz * dz);
+          const t = THREE.MathUtils.smoothstep(d, IMPSWAP.startDist, IMPSWAP.endDist);
+          impUniforms.uFade.value = t;        // impostor dithers in as you pull away
+          impostorMesh.visible = t > 0.001;
+          const nearOn = t < 0.999;           // near tree hard-cut once impostor is solid
+          if (leavesMesh) leavesMesh.visible = nearOn;
+          if (trunk) trunk.visible = nearOn && !params.bushMode;
+          return;
+        }
+        // Compare mode: stand beside the tree, fully solid.
+        if (leavesMesh) leavesMesh.visible = true;
+        if (trunk) trunk.visible = !params.bushMode;
+        impostorMesh.position.set(c.x + 2 * impostorResult.radius + 4, c.y, c.z);
+        impUniforms.uCenter.value.copy(impostorMesh.position);
+        impUniforms.uFade.value = 1;
+        impostorMesh.visible = _impShow;
+      }
+
 
       // ─── UI ──────────────────────────────────────────────────────────────────────
       const uiRoot = document.getElementById("ui-scroll");
@@ -4130,6 +4288,35 @@ const SKY_DEFAULTS = {
           },
         });
       }
+
+      const impBody = _section(uiRoot, "Impostor (octahedral, far-LOD)", false);
+      {
+        const note = document.createElement("div");
+        note.className = "tex-gallery-label";
+        note.textContent =
+          "Bakes trunk + foliage into an octahedral color atlas (the far-LOD billboard source).";
+        impBody.appendChild(note);
+        _impPreviewImg = document.createElement("img");
+        _impPreviewImg.style.cssText =
+          "width:100%;border:1px solid var(--border);border-radius:4px;margin:4px 0;min-height:60px;background-color:#2a2a2a;background-image:repeating-conic-gradient(#3a3a3a 0% 25%, #2a2a2a 0% 50%);background-size:16px 16px;";
+        impBody.appendChild(_impPreviewImg);
+      }
+      _slider(impBody, IMP, "grid", { label: "Views / side", min: 4, max: 16, step: 1 });
+      _slider(impBody, IMP, "atlasSize", { label: "Atlas size", min: 1024, max: 8192, step: 1024 });
+      _toggle(impBody, IMP, "fullOctahedral", { label: "Full octahedral" });
+      _slider(impBody, IMP, "bakeLight", { label: "Albedo brightness", min: 0.5, max: 6, step: 0.1 });
+      _button(impBody, { title: "Bake tree impostor atlas", onClick: () => bakeTreeImpostor() });
+      {
+        const impVis = { show: true };
+        _toggle(impBody, impVis, "show", {
+          label: "Show impostor",
+          onChange: (ev) => { _impShow = ev.value; },
+        });
+      }
+      _separator(impBody);
+      _toggle(impBody, IMPSWAP, "enabled", { label: "Distance LOD swap" });
+      _slider(impBody, IMPSWAP, "startDist", { label: "Swap start dist", min: 5, max: 200, step: 1 });
+      _slider(impBody, IMPSWAP, "endDist", { label: "Swap end dist", min: 5, max: 300, step: 1 });
 
       clusterDefs.forEach((c, ci) => {
         const cBody = _section(
@@ -4555,6 +4742,8 @@ const SKY_DEFAULTS = {
         uTime.value = timer.getElapsed();
         if (lightingMode === "world") driveWorldLighting(timer.getElapsed(), dt);
         if (lightingMode === "world") updateEnvBake(dt);
+        if (impUniforms) impUniforms.uTime.value = timer.getElapsed();
+        updateImpostorLod();
         controls.update();
         renderer.render(scene, camera);
       });
