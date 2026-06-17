@@ -2348,6 +2348,10 @@ const SKY_DEFAULTS = {
           z,
           rx: 2.0,
           ry: 1.5,
+          rz: 2.0,
+          scale: 1.0,
+          leanX: 0,
+          leanZ: 0,
           count: 300,
           leafSize: 1.0,
           scaleVar: 0.3,
@@ -2405,6 +2409,16 @@ const SKY_DEFAULTS = {
         makeDefaultCluster(false, 0, 1.5, 0),
       ];
 
+      // Backfill shaping fields added later (independent Z radius, uniform scale,
+      // ellipsoid lean) so old presets / inline defs always have them defined.
+      function normalizeCluster(c) {
+        if (c.rz == null) c.rz = c.rx;
+        if (c.scale == null) c.scale = 1;
+        if (c.leanX == null) c.leanX = 0;
+        if (c.leanZ == null) c.leanZ = 0;
+      }
+      clusterDefs.forEach(normalizeCluster);
+
       // ─── UNDO / REDO ─────────────────────────────────────────────────────────────
       const undoStack = [];
       const redoStack = [];
@@ -2437,14 +2451,19 @@ const SKY_DEFAULTS = {
             windMicro: params.windMicro,
           },
           trunkScale: params.trunkScale,
+          canopyScale: params.canopyScale,
           bushMode: params.bushMode,
         };
       }
 
       function restoreState(state) {
         state.clusters.forEach((c, i) => {
-          if (i < clusterDefs.length) Object.assign(clusterDefs[i], c);
+          if (i < clusterDefs.length) {
+            Object.assign(clusterDefs[i], c);
+            normalizeCluster(clusterDefs[i]);
+          }
         });
+        if (state.canopyScale != null) params.canopyScale = state.canopyScale;
         if (state.material) {
           const m = state.material;
           params.bottomColor = m.bottomColor;
@@ -2563,6 +2582,11 @@ const SKY_DEFAULTS = {
       }
 
       // ─── ELLIPSOID SAMPLER ───────────────────────────────────────────────────────
+      const _leanEuler = new THREE.Euler();
+      const _leanQuat = new THREE.Quaternion();
+      const _leanVec = new THREE.Vector3();
+      const SAMPLE_DEG2RAD = Math.PI / 180;
+
       function sampleCluster(c, seedOffset) {
         let lcg = (seedOffset * 1664525 + 1013904223) >>> 0;
         const rng = () => {
@@ -2570,23 +2594,51 @@ const SKY_DEFAULTS = {
           return lcg / 0xffffffff;
         };
 
+        // Uniform size multiplier: per-cluster scale x global canopy scale.
+        const cs = (c.scale ?? 1) * (params.canopyScale ?? 1);
+        const effRx = c.rx * cs;
+        const effRy = c.ry * cs;
+        const effRz = (c.rz ?? c.rx) * cs;
+        // Ellipsoid lean (orientation): rotate each sampled offset before adding
+        // the cluster center, so the whole blob tilts off vertical.
+        const leanX = (c.leanX ?? 0) * SAMPLE_DEG2RAD;
+        const leanZ = (c.leanZ ?? 0) * SAMPLE_DEG2RAD;
+        const hasLean = leanX !== 0 || leanZ !== 0;
+        if (hasLean) {
+          _leanEuler.set(leanX, 0, leanZ, "XYZ");
+          _leanQuat.setFromEuler(_leanEuler);
+        }
+
         const positions = [];
         const maxTry = c.count * 12;
         let tries = 0;
 
+        // NOTE: rng() draw order (ux, uy, uz, then shell) is unchanged from the
+        // original so the per-leaf rand/jitter stream stays aligned with v2's
+        // foliageSampler. The new scale/rz/lean only transform the POSITION.
         while (positions.length < c.count && tries++ < maxTry) {
-          const rx = rng() * 2 - 1;
-          const ry = rng() * 2 - 1;
-          const rz = rng() * 2 - 1;
-          const d = Math.sqrt(rx * rx + ry * ry + rz * rz);
+          const ux = rng() * 2 - 1;
+          const uy = rng() * 2 - 1;
+          const uz = rng() * 2 - 1;
+          const d = Math.sqrt(ux * ux + uy * uy + uz * uz);
           if (d > 1.0) continue;
           const innerR = 1.0 - c.shellThick;
           if (d < innerR && rng() < c.shell) continue;
 
+          let ox = ux * effRx;
+          let oy = uy * effRy;
+          let oz = uz * effRz;
+          if (hasLean) {
+            _leanVec.set(ox, oy, oz).applyQuaternion(_leanQuat);
+            ox = _leanVec.x;
+            oy = _leanVec.y;
+            oz = _leanVec.z;
+          }
+
           positions.push({
-            x: c.x + rx * c.rx,
-            y: c.y + ry * c.ry,
-            z: c.z + rz * c.rx,
+            x: c.x + ox,
+            y: c.y + oy,
+            z: c.z + oz,
             leafSize: c.leafSize,
             scaleVar: c.scaleVar,
             tiltMax: c.tiltMax,
@@ -3051,15 +3103,25 @@ const SKY_DEFAULTS = {
 
       function updateClusterHelpers() {
         const xOff = lodPreview ? -LOD_SPACING : 0;
+        const DEG2RAD = Math.PI / 180;
         clusterDefs.forEach((c, i) => {
+          const cs = (c.scale ?? 1) * (params.canopyScale ?? 1);
           clusterHelpers[i].position.set(c.x + xOff, c.y, c.z);
-          clusterHelpers[i].scale.set(c.rx, c.ry, c.rx);
+          clusterHelpers[i].scale.set(c.rx * cs, c.ry * cs, (c.rz ?? c.rx) * cs);
+          clusterHelpers[i].rotation.set(
+            (c.leanX ?? 0) * DEG2RAD,
+            0,
+            (c.leanZ ?? 0) * DEG2RAD,
+          );
           clusterHelpers[i].visible = showHelpers && c.enabled;
           clusterMarkers[i].position.set(c.x + xOff, c.y, c.z);
           clusterMarkers[i].visible = showHelpers && c.enabled;
         });
       }
-      updateClusterHelpers();
+      // NOTE: do NOT call updateClusterHelpers() here — it reads params.canopyScale,
+      // and `params` is a const declared further down (TDZ). The initial build runs
+      // it after params exists (buildFoliage -> updateClusterHelpers), and helpers
+      // are hidden by default, so positioning before then isn't needed.
 
       // ─── DRAG CLUSTER MARKERS ────────────────────────────────────────────────────
       const raycaster = new THREE.Raycaster();
@@ -3226,6 +3288,7 @@ const SKY_DEFAULTS = {
         showFog: false,
         bushMode: false,
         trunkScale: 1.0,
+        canopyScale: 1.0,
         bottomColor: "#2d5a1b",
         topColor: "#5aaa2a",
         colorVar: 0.12,
@@ -3490,6 +3553,7 @@ const SKY_DEFAULTS = {
             windMicro: params.windMicro,
           },
           trunkScale: params.trunkScale,
+          canopyScale: params.canopyScale,
           bushMode: params.bushMode,
           lodDistances: { lod1: params.lodDist1, lod2: params.lodDist2 },
         };
@@ -3532,12 +3596,22 @@ const SKY_DEFAULTS = {
       function applyPresetData(data) {
         if (data.clusters) {
           data.clusters.forEach((c, i) => {
-            if (i < clusterDefs.length) Object.assign(clusterDefs[i], c);
+            if (i < clusterDefs.length) {
+              const t = clusterDefs[i];
+              Object.assign(t, c);
+              // Backfill shaping fields from the LOADED data's presence, so a
+              // preset predating them loads clean (no stale rz/scale/lean leak).
+              if (c.rz == null) t.rz = t.rx;
+              if (c.scale == null) t.scale = 1;
+              if (c.leanX == null) t.leanX = 0;
+              if (c.leanZ == null) t.leanZ = 0;
+            }
           });
           for (let i = data.clusters.length; i < clusterDefs.length; i++) {
             clusterDefs[i].enabled = false;
           }
         }
+        if (data.canopyScale != null) params.canopyScale = data.canopyScale;
         if (data.material) {
           const m = data.material;
           if (m.bottomColor) {
@@ -4318,6 +4392,15 @@ const SKY_DEFAULTS = {
       _slider(impBody, IMPSWAP, "startDist", { label: "Swap start dist", min: 5, max: 200, step: 1 });
       _slider(impBody, IMPSWAP, "endDist", { label: "Swap end dist", min: 5, max: 300, step: 1 });
 
+      const allBody = _section(uiRoot, "All Clusters", false);
+      _slider(allBody, params, "canopyScale", {
+        label: "Canopy scale",
+        min: 0.1,
+        max: 4,
+        step: 0.01,
+        onChange: rebuildCluster,
+      });
+
       clusterDefs.forEach((c, ci) => {
         const cBody = _section(
           uiRoot,
@@ -4374,7 +4457,14 @@ const SKY_DEFAULTS = {
         });
         _separator(cBody);
         _slider(cBody, c, "rx", {
-          label: "Radius XZ",
+          label: "Radius X",
+          min: 0.2,
+          max: 10,
+          step: 0.05,
+          onChange: rebuildCluster,
+        });
+        _slider(cBody, c, "rz", {
+          label: "Radius Z",
           min: 0.2,
           max: 10,
           step: 0.05,
@@ -4385,6 +4475,27 @@ const SKY_DEFAULTS = {
           min: 0.2,
           max: 8,
           step: 0.05,
+          onChange: rebuildCluster,
+        });
+        _slider(cBody, c, "scale", {
+          label: "Cluster scale",
+          min: 0.1,
+          max: 4,
+          step: 0.01,
+          onChange: rebuildCluster,
+        });
+        _slider(cBody, c, "leanX", {
+          label: "Lean X",
+          min: -60,
+          max: 60,
+          step: 1,
+          onChange: rebuildCluster,
+        });
+        _slider(cBody, c, "leanZ", {
+          label: "Lean Z",
+          min: -60,
+          max: 60,
+          step: 1,
           onChange: rebuildCluster,
         });
         _separator(cBody);
