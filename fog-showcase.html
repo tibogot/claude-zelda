@@ -3,7 +3,7 @@
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <title>Fog Showcase — WebGPU / TSL</title>
+    <title>Analytic Fog — Mountain Landscape</title>
     <style>
       :root {
         --bg: #14171c;
@@ -20,22 +20,22 @@
       canvas { display: block; }
 
       #panel {
-        position: fixed; top: 12px; right: 12px; width: 290px;
+        position: fixed; top: 12px; right: 12px; width: 300px;
         max-height: calc(100vh - 24px); overflow-y: auto;
         background: var(--panel); border: 1px solid #000;
         border-radius: 8px; color: var(--text);
         font-family: var(--font); font-size: 12px;
-        box-shadow: 0 8px 30px rgba(0,0,0,.5); z-index: 10;
+        box-shadow: 0 8px 30px rgba(0, 0, 0, 0.5); z-index: 10;
       }
       #panel h1 {
         margin: 0; padding: 11px 13px; font-size: 12px; font-weight: 600;
-        letter-spacing: .04em; text-transform: uppercase; color: var(--accent);
+        letter-spacing: 0.04em; text-transform: uppercase; color: var(--accent);
         border-bottom: 1px solid #000; background: var(--panel-hdr);
       }
       .sec-hdr {
         padding: 8px 13px; font-weight: 600; cursor: pointer;
         background: var(--panel-hdr); border-bottom: 1px solid #0008;
-        user-select: none; font-size: 11px; letter-spacing: .03em;
+        user-select: none; font-size: 11px; letter-spacing: 0.03em;
       }
       .sec-hdr::before { content: "▾ "; color: var(--text-dim); }
       .sec-hdr.collapsed::before { content: "▸ "; }
@@ -72,6 +72,11 @@
         pointer-events: none;
       }
       #hud b { color: var(--accent); }
+      #err {
+        position: fixed; left: 12px; top: 12px; z-index: 20; max-width: 420px;
+        background: #3a1212; color: #ffb0b0; padding: 10px 12px; border-radius: 6px;
+        font-family: var(--font-mono); font-size: 11px; display: none; white-space: pre-wrap;
+      }
     </style>
     <script type="importmap">
       {
@@ -85,29 +90,33 @@
     </script>
   </head>
   <body>
-    <div id="panel"><h1>Fog Showcase</h1></div>
+    <div id="err"></div>
+    <div id="panel"><h1>Analytic Fog</h1></div>
     <div id="hud">
       Drag = orbit · Scroll = zoom · Right-drag = pan<br />
-      Time of day: <b id="hud-tod">9.5</b>h · FPS <b id="hud-fps">—</b>
+      Volumetric fog · Time: <b id="hud-tod">6.5</b>h · FPS <b id="hud-fps">—</b>
     </div>
 
     <script type="module">
-      import * as THREE from "three";
+      import * as THREE from "three/webgpu";
       import {
         Fn, float, vec3, vec4, uniform, color, mix, smoothstep, clamp, pow, dot,
-        normalize, length, exp, min, max, int, Loop, If, Break,
-        positionWorld, cameraPosition, normalWorld, screenUV, pass,
-        mx_fractal_noise_float, orthographicDepthToViewZ, viewZToPerspectiveDepth,
+        normalize, length, exp, min, max, int, Loop, If, step,
+        positionWorld, normalWorld, screenUV, pass, cameraPosition,
+        orthographicDepthToViewZ, viewZToPerspectiveDepth,
         getViewPosition, cameraProjectionMatrixInverse, cameraWorldMatrix,
-        cameraNear, cameraFar,
+        cameraNear, cameraFar, sqrt, log, abs, sign, uniformArray, PI,
       } from "three/tsl";
       import { OrbitControls } from "three/addons/controls/OrbitControls.js";
-      import { mergeGeometries } from "three/addons/utils/BufferGeometryUtils.js";
-      import {
-        createDayNightSky, SKY_DEFAULTS, SKY_RADIUS,
-      } from "./procedural-sky.js";
 
-      // ─── tiny UI helpers ──────────────────────────────────────────────────
+      const errEl = document.getElementById("err");
+      function showErr(msg) {
+        errEl.style.display = "block";
+        errEl.textContent = msg;
+        console.error(msg);
+      }
+
+      // ─── UI helpers ───────────────────────────────────────────────────────
       const panel = document.getElementById("panel");
       const _refreshers = [];
       function uiRefresh() { _refreshers.forEach((r) => r()); }
@@ -117,7 +126,10 @@
         hdr.textContent = title;
         const body = document.createElement("div");
         body.className = "sec-body" + (expanded ? "" : " hidden");
-        hdr.onclick = () => { hdr.classList.toggle("collapsed"); body.classList.toggle("hidden"); };
+        hdr.onclick = () => {
+          hdr.classList.toggle("collapsed");
+          body.classList.toggle("hidden");
+        };
         panel.append(hdr, body);
         return body;
       }
@@ -162,54 +174,97 @@
         parent.appendChild(b);
       }
 
+      function mulberry32(a) {
+        return function () {
+          a |= 0; a = (a + 0x6d2b79f5) | 0;
+          let t = Math.imul(a ^ (a >>> 15), 1 | a);
+          t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t;
+          return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+        };
+      }
+
+      // ─── layered mountain terrain (reference-style silhouettes) ───────────
+      const TERRAIN_SIZE = 1400;
+      function sampleHeight(x, z) {
+        let h = 0;
+
+        // Distant background massifs
+        h += 118 * Math.exp(-(((x * 0.003 - z * 0.0015 + 0.4) * 2.8) ** 2));
+        h += 102 * Math.exp(-(((x * 0.0025 + z * 0.002 - 0.6) * 2.4) ** 2));
+        h += 88 * Math.exp(-(((x * 0.002 - 0.2) ** 2 + (z * 0.0018 + 0.5) ** 2) * 3.2));
+
+        // Parallel ridgelines — depth layers along Z
+        for (let i = -3; i <= 3; i++) {
+          const ridgeZ = i * 165;
+          const dz = z - ridgeZ;
+          const ridge =
+            (82 - Math.abs(i) * 6) *
+            Math.exp(-((x * 0.0075) ** 2)) *
+            Math.exp(-((dz * 0.018) ** 2));
+          h = Math.max(h, ridge);
+        }
+
+        // Foreground peaks (dark silhouettes in ref. image)
+        h += 68 * Math.exp(-(((x + 110) * 0.009) ** 2 + ((z - 90) * 0.011) ** 2));
+        h += 58 * Math.exp(-(((x - 160) * 0.0085) ** 2 + ((z + 70) * 0.012) ** 2));
+        h += 52 * Math.exp(-(((x + 40) * 0.01) ** 2 + ((z + 180) * 0.013) ** 2));
+
+        // Deep valleys where fog pools
+        h -= 38 * Math.exp(-((x * 0.0045) ** 2 + (z * 0.0038) ** 2));
+        h -= 28 * Math.exp(-(((x - 80) * 0.005) ** 2 + ((z + 120) * 0.0045) ** 2));
+        h -= 22 * Math.exp(-(((x + 140) * 0.0048) ** 2 + ((z - 160) * 0.004) ** 2));
+
+        return Math.max(h, -8);
+      }
+
+      function valleyDepth(x, z) {
+        const h = sampleHeight(x, z);
+        const ring = [-60, 0, 60, 120];
+        let maxNeighbor = h;
+        for (const dz of ring) {
+          maxNeighbor = Math.max(maxNeighbor, sampleHeight(x, z + dz));
+        }
+        for (const dx of ring) {
+          maxNeighbor = Math.max(maxNeighbor, sampleHeight(x + dx, z));
+        }
+        return maxNeighbor - h;
+      }
+
       // ─── renderer / scene / camera ────────────────────────────────────────
       const renderer = new THREE.WebGPURenderer({ antialias: true });
       renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
       renderer.setSize(innerWidth, innerHeight);
-      renderer.shadowMap.enabled = true;
-      renderer.shadowMap.type = THREE.PCFSoftShadowMap;
       renderer.toneMapping = THREE.ACESFilmicToneMapping;
-      renderer.toneMappingExposure = 1.0;
+      renderer.toneMappingExposure = 1.05;
       document.body.appendChild(renderer.domElement);
-      await renderer.init();
 
-      const scene = new THREE.Scene();
-      const camera = new THREE.PerspectiveCamera(55, innerWidth / innerHeight, 0.5, 4000);
-      camera.position.set(40, 24, 215);
-      const controls = new OrbitControls(camera, renderer.domElement);
-      controls.target.set(0, -2, 0);
-      controls.maxDistance = 600;
-      controls.maxPolarAngle = Math.PI * 0.52; // stay above ground
-      controls.update();
-
-      const sun = new THREE.DirectionalLight("#fff5e0", 2.2);
-      sun.castShadow = true;
-      sun.shadow.mapSize.set(2048, 2048);
-      sun.shadow.camera.near = 0.5;
-      sun.shadow.camera.far = 900;
-      const sc = sun.shadow.camera;
-      sc.left = -240; sc.right = 240; sc.top = 240; sc.bottom = -240;
-      sun.shadow.bias = -0.0008;
-      scene.add(sun, sun.target);
-
-      const hemi = new THREE.HemisphereLight("#c8e0ff", "#4a5536", 0.5);
-      scene.add(hemi);
-
-      // ─── terrain: central basin ringed by ridges (fog pools in the bowl) ──
-      const TERRAIN_SIZE = 460;
-      const FOG_BASE_Y = -7; // ~valley floor; haze fills from here upward
-      function sampleHeight(x, z) {
-        const r = Math.hypot(x, z);
-        const ridge = 24 * Math.exp(-(((r - 120) / 46) ** 2)); // ring of hills
-        const bowl = 11 * Math.exp(-((r / 58) ** 2));          // dished centre
-        const rolling =
-          6.0 * Math.sin(x * 0.028) * Math.cos(z * 0.024) +
-          3.0 * Math.sin(x * 0.062 + 1.3) * Math.cos(z * 0.055) +
-          1.4 * Math.sin(x * 0.13 + 4.1) * Math.cos(z * 0.12 + 0.7);
-        return ridge - bowl + rolling;
+      try {
+        await renderer.init();
+      } catch (e) {
+        showErr("WebGPU init failed:\n" + e.message);
+        throw e;
       }
 
-      const terrainGeo = new THREE.PlaneGeometry(TERRAIN_SIZE, TERRAIN_SIZE, 256, 256);
+      const scene = new THREE.Scene();
+      scene.background = new THREE.Color(0xd8e2ec);
+      scene.fog = null;
+
+      const camera = new THREE.PerspectiveCamera(50, innerWidth / innerHeight, 1, 6000);
+      camera.position.set(0, 42, 540);
+      const controls = new OrbitControls(camera, renderer.domElement);
+      controls.target.set(0, 38, -180);
+      controls.maxDistance = 1600;
+      controls.maxPolarAngle = Math.PI * 0.52;
+      controls.update();
+
+      const sun = new THREE.DirectionalLight("#fff6ea", 2.2);
+      sun.position.set(140, 90, 260);
+      scene.add(sun);
+
+      const hemi = new THREE.HemisphereLight("#dce8f4", "#6a6660", 0.85);
+      scene.add(hemi);
+
+      const terrainGeo = new THREE.PlaneGeometry(TERRAIN_SIZE, TERRAIN_SIZE, 320, 320);
       terrainGeo.rotateX(-Math.PI / 2);
       {
         const p = terrainGeo.attributes.position;
@@ -220,287 +275,392 @@
         terrainGeo.computeVertexNormals();
       }
 
-      // Terrain material: grass→rock by height & slope, lit by sun + hemi.
-      const grassLo = uniform(new THREE.Color("#3c5a26"));
-      const grassHi = uniform(new THREE.Color("#6e8a3e"));
-      const rockCol = uniform(new THREE.Color("#6b6258"));
-      const terrainMat = new THREE.MeshStandardNodeMaterial({ roughness: 1.0, metalness: 0.0 });
+      const rockDark = uniform(new THREE.Color("#4a4742"));
+      const rockMid = uniform(new THREE.Color("#726c64"));
+      const rockHi = uniform(new THREE.Color("#9a948a"));
+      const uSunDirTerrain = uniform(new THREE.Vector3(0.45, 0.35, 0.82).normalize());
+      const terrainMat = new THREE.MeshStandardNodeMaterial({
+        roughness: 1.0,
+        metalness: 0.0,
+      });
       terrainMat.colorNode = Fn(() => {
-        const h = positionWorld.y;
-        const grass = mix(grassLo, grassHi, smoothstep(-6, 22, h));
-        const slope = clamp(normalWorld.y, 0, 1);          // 1 = flat, 0 = cliff
-        const rockAmt = smoothstep(0.82, 0.6, slope);       // steep → rock
-        return mix(grass, rockCol, rockAmt);
+        const ndl = clamp(normalWorld.dot(uSunDirTerrain).mul(0.5).add(0.5), 0.15, 1);
+        const base = mix(rockDark, rockMid, ndl);
+        const heightFade = smoothstep(5, 85, positionWorld.y);
+        return mix(base, rockHi, heightFade.mul(0.4));
       })();
       const terrain = new THREE.Mesh(terrainGeo, terrainMat);
-      terrain.receiveShadow = true;
       scene.add(terrain);
 
-      // ─── instanced trees (hundreds, low-poly; vertical refs for the fog) ──
-      function mulberry32(a) {
-        return function () {
-          a |= 0; a = (a + 0x6d2b79f5) | 0;
-          let t = Math.imul(a ^ (a >>> 15), 1 | a);
-          t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t;
-          return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
-        };
-      }
-      const rng = mulberry32(1337);
+      // Simple sky dome — bright horizon for reference-style haze
+      const skyMat = new THREE.MeshBasicNodeMaterial({ side: THREE.BackSide, depthWrite: false });
+      skyMat.colorNode = Fn(() => {
+        const up = clamp(normalWorld.y, 0, 1);
+        const zenith = color(0x9eb4cc);
+        const horizon = color(0xf2f0ea);
+        return mix(horizon, zenith, pow(up, 0.55));
+      })();
+      const sky = new THREE.Mesh(new THREE.SphereGeometry(5000, 32, 16), skyMat);
+      sky.frustumCulled = false;
+      scene.add(sky);
 
-      // Trunk geometry, base at y=0.
-      const trunkGeo = new THREE.CylinderGeometry(0.13, 0.26, 2.4, 6, 1);
-      trunkGeo.translate(0, 1.2, 0);
-      // Foliage = two stacked cones merged, base sitting on the trunk top.
-      const coneA = new THREE.ConeGeometry(1.35, 3.0, 7).translate(0, 3.9, 0);
-      const coneB = new THREE.ConeGeometry(0.95, 2.2, 7).translate(0, 5.4, 0);
-      const foliageGeo = mergeGeometries([coneA, coneB]);
-
-      const trunkMat = new THREE.MeshStandardNodeMaterial({ color: "#5a4632", roughness: 1 });
-      const foliageMat = new THREE.MeshStandardNodeMaterial({ color: "#4f6f29", roughness: 1 });
-
-      const TREE_COUNT = 520;
-      const trunks = new THREE.InstancedMesh(trunkGeo, trunkMat, TREE_COUNT);
-      const foliage = new THREE.InstancedMesh(foliageGeo, foliageMat, TREE_COUNT);
-      trunks.castShadow = foliage.castShadow = true;
-      trunks.receiveShadow = foliage.receiveShadow = true;
-
-      const dummy = new THREE.Object3D();
-      let placed = 0;
-      let guard = 0;
-      while (placed < TREE_COUNT && guard < TREE_COUNT * 20) {
-        guard++;
-        const x = (rng() - 0.5) * TERRAIN_SIZE * 0.92;
-        const z = (rng() - 0.5) * TERRAIN_SIZE * 0.92;
-        const r = Math.hypot(x, z);
-        if (r < 34) continue; // keep the basin floor open so mist reads clearly
-        // reject steep slopes (approx via finite-difference normal)
-        const hC = sampleHeight(x, z);
-        const dx = sampleHeight(x + 1, z) - hC;
-        const dz = sampleHeight(x, z + 1) - hC;
-        const flat = 1 / Math.sqrt(1 + dx * dx + dz * dz);
-        if (flat < 0.86) continue;
-        const s = 0.7 + rng() * 1.1;
-        dummy.position.set(x, hC - 0.2, z);
-        dummy.rotation.set(0, rng() * Math.PI * 2, 0);
-        dummy.scale.set(s, s * (0.85 + rng() * 0.4), s);
-        dummy.updateMatrix();
-        trunks.setMatrixAt(placed, dummy.matrix);
-        foliage.setMatrixAt(placed, dummy.matrix);
-        placed++;
-      }
-      trunks.count = foliage.count = placed;
-      trunks.instanceMatrix.needsUpdate = true;
-      foliage.instanceMatrix.needsUpdate = true;
-      scene.add(trunks, foliage);
-
-      // A few rock monoliths — solid silhouettes that read god-ray shafts.
-      const rockGeo = new THREE.IcosahedronGeometry(1, 0);
-      const rockMat = new THREE.MeshStandardNodeMaterial({ color: "#5d5750", roughness: 1 });
-      const ROCKS = 14;
-      const rocks = new THREE.InstancedMesh(rockGeo, rockMat, ROCKS);
-      rocks.castShadow = rocks.receiveShadow = true;
-      for (let i = 0; i < ROCKS; i++) {
-        const a = rng() * Math.PI * 2;
-        const rr = 45 + rng() * 120;
-        const x = Math.cos(a) * rr, z = Math.sin(a) * rr;
-        const sy = 4 + rng() * 9, sxz = 2 + rng() * 3;
-        dummy.position.set(x, sampleHeight(x, z) + sy * 0.35, z);
-        dummy.rotation.set(rng(), rng() * 6.28, rng());
-        dummy.scale.set(sxz, sy, sxz);
-        dummy.updateMatrix();
-        rocks.setMatrixAt(i, dummy.matrix);
-      }
-      rocks.instanceMatrix.needsUpdate = true;
-      scene.add(rocks);
-
-      // ─── the procedural sky (forked rig) ──────────────────────────────────
-      const dayNightSky = createDayNightSky();
-      scene.add(dayNightSky.mesh);
-
-      // ─── FOG: raymarched volumetric (Tier 2, single-scatter) ─────────────
-      // Real volume: march the view ray through a 3D density field (height-bounded
-      // slab × animated FBM), accumulate transmittance, and scatter the sun through
-      // it with a Henyey-Greenstein phase. Runs as a post-process so it composites
-      // against scene DEPTH — fog wraps trees / pools in the basin instead of being
-      // painted on surfaces. No secondary light march yet (= no hard shafts).
+      // ─── analytic fog volumes ─────────────────────────────────────────────
+      const MAX_FOG = 64;
       const FOG = {
         enabled: true,
-        density: 0.09,        // extinction per unit through the medium
-        scatter: 1.6,         // sun in-scatter brightness
-        height: 26,           // scale height of the exponential falloff (m)
-        base: -6,             // y of densest fog (≈ basin floor)
-        noiseScale: 0.035,    // 3D noise frequency
-        noiseStrength: 0.85,  // how much noise carves the slab into wisps
-        coverage: 0.42,       // density threshold (higher = thinner/wispier)
-        hg: 0.66,             // forward-scatter anisotropy (0..0.95)
-        steps: 32,            // raymarch samples
-        maxDist: 600,         // far clamp of the march
-        speed: 0.04,          // drift speed of the noise
-        color: "#9fb3c6",     // ambient (shadow-side) fog tint
-        sunColor: "#ffdeb0",  // sun in-scatter tint
+        density: 0.42,
+        scatter: 2.8,
+        hg: 0.8,
+        maxDist: 1600,
+        atmosphere: 0.78,
+        atmFalloff: 380,
+        profile: 0,
+        volumeScale: 1.25,
+        strength: 1.5,
+        horizon: 0.72,
+        color: "#c4c8d0",
+        sunColor: "#fff8f0",
+        seed: 7711,
+        timeOfDay: 6.5,
       };
+
       const lin = (hex) => new THREE.Color(hex).convertSRGBToLinear();
       const uFogEnabled = uniform(FOG.enabled ? 1 : 0);
       const uFogDensity = uniform(FOG.density);
       const uFogScatter = uniform(FOG.scatter);
-      const uFogHeight = uniform(FOG.height);
-      const uFogBase = uniform(FOG.base);
-      const uNoiseScale = uniform(FOG.noiseScale);
-      const uNoiseStrength = uniform(FOG.noiseStrength);
-      const uCoverage = uniform(FOG.coverage);
       const uHG = uniform(FOG.hg);
-      const uSteps = uniform(FOG.steps);
       const uMaxDist = uniform(FOG.maxDist);
-      const uNoiseSpeed = uniform(FOG.speed);
+      const uFogProfile = uniform(FOG.profile);
+      const uVolumeScale = uniform(FOG.volumeScale);
+      const uPrimStrength = uniform(FOG.strength);
+      const uHorizon = uniform(FOG.horizon);
+      const uAtmosphere = uniform(FOG.atmosphere);
+      const uAtmFalloff = uniform(FOG.atmFalloff);
       const uFogColor = uniform(lin(FOG.color));
       const uFogSunColor = uniform(lin(FOG.sunColor));
-      const uSunDirFog = uniform(new THREE.Vector3(0, 1, 0)); // toward the sun
-      const fogTime = uniform(0).onFrameUpdate((f) => f.time);
-      const VOL_MAX_STEPS = 64; // loop ceiling; uSteps is the live count
+      const uSunDirFog = uniform(new THREE.Vector3(0.3, 0.4, 0.85).normalize());
+      const uFogCount = uniform(0);
 
-      // Henyey-Greenstein phase — peaks toward the sun for the forward halo.
+      const fogCenterData = new Array(MAX_FOG).fill(null).map(() => new THREE.Vector4());
+      const fogScaleData = new Array(MAX_FOG).fill(null).map(() => new THREE.Vector4(1, 1, 1, 0));
+      const uFogCenters = uniformArray(fogCenterData, "vec4");
+      const uFogScales = uniformArray(fogScaleData, "vec4");
+
+      function generateFogVolumes(seed = FOG.seed) {
+        const prng = mulberry32(seed);
+        const centers = [];
+
+        // Large atmospheric slabs along depth — guaranteed to intersect view rays
+        const SLABS = 10;
+        for (let i = 0; i < SLABS && centers.length < MAX_FOG; i++) {
+          const z = -480 + i * 105;
+          const y = 14 + i * 16;
+          centers.push({
+            center: new THREE.Vector4(0, y, z, 1.5 + i * 0.04),
+            scale: new THREE.Vector4(
+              TERRAIN_SIZE * 0.5,
+              40 + i * 6,
+              TERRAIN_SIZE * 0.42,
+              1,
+            ),
+          });
+        }
+
+        // Valley fog banks
+        for (let layer = 0; layer < 8 && centers.length < MAX_FOG; layer++) {
+          const layerZ = -520 + layer * 115 + (prng() - 0.5) * 50;
+          const layerCount = 4 + Math.floor(prng() * 3);
+          for (let n = 0; n < layerCount && centers.length < MAX_FOG; n++) {
+            const x = (n - layerCount * 0.5) * 130 + (prng() - 0.5) * 90;
+            const z = layerZ + (prng() - 0.5) * 70;
+            if (Math.abs(x) > TERRAIN_SIZE * 0.44) continue;
+
+            const h = sampleHeight(x, z);
+            const depth = valleyDepth(x, z);
+            if (depth < 4 && layer > 2) continue;
+
+            const y = h + 4 + depth * 0.2 + prng() * 10;
+            const sx = 90 + prng() * 110;
+            const sy = 28 + prng() * 35 + depth * 0.3;
+            const sz = 70 + prng() * 90;
+            const strength = 0.65 + prng() * 0.5 + depth * 0.02;
+
+            centers.push({
+              center: new THREE.Vector4(x, y, z, strength),
+              scale: new THREE.Vector4(sx, sy, sz, 1),
+            });
+          }
+        }
+
+        // Extra fill in valleys
+        for (let i = 0; i < 60 && centers.length < MAX_FOG; i++) {
+          const x = (prng() - 0.5) * TERRAIN_SIZE * 0.75;
+          const z = (prng() - 0.5) * TERRAIN_SIZE * 0.55;
+          const depth = valleyDepth(x, z);
+          if (depth < 6) continue;
+          const h = sampleHeight(x, z);
+          centers.push({
+            center: new THREE.Vector4(x, h + 6 + prng() * 12, z, 0.85 + depth * 0.02),
+            scale: new THREE.Vector4(80 + prng() * 60, 30 + prng() * 25, 70 + prng() * 50, 1),
+          });
+        }
+
+        for (let i = 0; i < MAX_FOG; i++) {
+          if (i < centers.length) {
+            fogCenterData[i].copy(centers[i].center);
+            fogScaleData[i].copy(centers[i].scale);
+          } else {
+            fogCenterData[i].set(0, -9999, 0, 0);
+            fogScaleData[i].set(1, 1, 1, 0);
+          }
+        }
+        uFogCount.value = Math.min(centers.length, MAX_FOG);
+        return uFogCount.value;
+      }
+      generateFogVolumes();
+      const fogVolumeCount = uFogCount.value;
+
+      const erfApprox = Fn(([z]) => {
+        const az = abs(z);
+        const poly = float(0.278393).add(
+          az.mul(float(0.230389).add(az.mul(float(0.000972).add(az.mul(0.078108))))),
+        );
+        return sign(z).mul(float(1).sub(float(1).div(pow(float(1).add(az.mul(poly)), 4))));
+      });
+
+      const antiderivativeQuartic = Fn(([a, b, c, t]) =>
+        t.mul(
+          t.mul(
+            t.mul(
+              t.mul(a.mul(a).mul(t).div(5).add(a.mul(b))).add(
+                b.mul(b).mul(2).add(a.mul(c)).sub(a).mul(2).div(3),
+              ),
+            ).add(b.mul(c).sub(b).mul(2)),
+          ).add(c.mul(c).sub(c.mul(2)).add(1)),
+        ),
+      );
+
+      const antiderivativeGaussian = Fn(([a, b, c, t]) => {
+        const sqrtA = sqrt(a.max(1e-8));
+        return sqrt(PI)
+          .mul(exp(b.mul(b).div(a.max(1e-8)).sub(c)))
+          .mul(erfApprox(a.mul(t).add(b).div(sqrtA)))
+          .div(sqrtA.mul(2));
+      });
+
+      const antiderivativeSpiky = Fn(([a, b, c, t]) => {
+        const aa = a.max(1e-8);
+        const u = t.add(b.div(aa));
+        const v = b.mul(b).sub(aa.mul(c)).div(aa.mul(aa));
+        const radical = sqrt(max(u.mul(u).sub(v), 0.0));
+        return t
+          .mul(t.mul(t.mul(aa).div(3).add(b)).add(c).add(1))
+          .sub(sqrt(aa).mul(u.mul(radical).sub(v.mul(log(float(0.001).add(u).add(radical))))));
+      });
+
+      const integrateProfile = Fn(([a, b, c, segLen]) => {
+        const q0 = antiderivativeQuartic(a, b, c, float(0));
+        const g0 = antiderivativeGaussian(a, b, c, float(0));
+        const s0 = antiderivativeSpiky(a, b, c, float(0));
+        const q = antiderivativeQuartic(a, b, c, segLen).sub(q0);
+        const g = antiderivativeGaussian(a, b, c, segLen).sub(g0);
+        const s = antiderivativeSpiky(a, b, c, segLen).sub(s0);
+        const isQ = uFogProfile.lessThan(0.5);
+        const isG = uFogProfile.greaterThan(0.5).and(uFogProfile.lessThan(1.5));
+        return isQ.select(q, isG.select(g, s));
+      });
+
       const hgPhase = Fn(([g, mu]) => {
         const gg = g.mul(g);
         const denom = float(1).add(gg).sub(g.mul(mu).mul(2)).max(0.0001);
         return float(1).sub(gg).div(pow(denom, 1.5)).mul(1 / (4 * Math.PI));
       });
 
-      // Density at a world point: exponential height slab × animated FBM wisps.
-      const fogDensityAt = Fn(([p]) => {
-        const above = p.y.sub(uFogBase).max(0);
-        const hf = exp(above.div(uFogHeight).negate());
-        const coord = p.mul(uNoiseScale)
-          .add(vec3(fogTime.mul(uNoiseSpeed), fogTime.mul(uNoiseSpeed.mul(0.4)), 0));
-        const n = mx_fractal_noise_float(coord, int(4), float(2.0), float(0.5), float(1.0))
-          .mul(0.5).add(0.5);
-        const wisp = smoothstep(uCoverage, float(1.0), mix(float(1.0), n, uNoiseStrength));
-        return hf.mul(wisp);
+      const primitiveTau = Fn(([camPos, dir, endDist, center, scale, strength]) => {
+        const ro = camPos.sub(center).div(scale.max(0.001));
+        const rd = dir.div(scale.max(0.001));
+        const a = dot(rd, rd).max(1e-8);
+        const b = dot(rd, ro);
+        const c = dot(ro, ro);
+        const disc = b.mul(b).sub(a.mul(c.sub(1)));
+        const tau = float(0).toVar();
+
+        If(disc.greaterThanEqual(0), () => {
+          const sd = sqrt(disc);
+          const tNear = b.negate().sub(sd).div(a);
+          const tFar = b.negate().add(sd).div(a);
+          const t0 = max(tNear, 0);
+          const t1 = min(tFar, endDist);
+          If(t1.greaterThan(t0), () => {
+            const segLen = t1.sub(t0);
+            const b2 = b.add(a.mul(t0));
+            const c2 = c.add(b.mul(t0).mul(2)).add(a.mul(t0).mul(t0));
+            tau.assign(
+              integrateProfile(a, b2, c2, segLen).mul(strength).mul(uPrimStrength),
+            );
+          });
+        });
+        return max(tau, 0);
       });
 
-      // ─── post-process pipeline: scene pass → volumetric march → composite ─
       const postProcessing = new THREE.RenderPipeline(renderer);
       const scenePass = pass(scene, camera);
-      const scenePassColor = scenePass.getTextureNode();
+      const scenePassColor = scenePass.getTextureNode
+        ? scenePass.getTextureNode("output")
+        : scenePass.getTextureNode();
 
       const volumetricFog = Fn(([inColor]) => {
-        // Reconstruct the world-space surface position from scene depth.
         const ld = scenePass.getLinearDepthNode();
+        const skyMask = step(float(0.999), ld);
         const viewZ = orthographicDepthToViewZ(ld, cameraNear, cameraFar);
         const perspD = viewZToPerspectiveDepth(viewZ, cameraNear, cameraFar);
         const viewPos = getViewPosition(screenUV, perspD, cameraProjectionMatrixInverse);
         const worldPos = cameraWorldMatrix.mul(vec4(viewPos, 1)).xyz;
         const camPos = cameraPosition;
-        const delta = worldPos.sub(camPos);
-        const dir = normalize(delta);
-        const endDist = min(length(delta), uMaxDist);
-        // Divide by the LIVE step count (uSteps), not the loop ceiling, so the
-        // march always spans the full distance regardless of the quality slider.
-        const stepSize = endDist.div(float(uSteps).max(1));
-        // Phase is constant along the ray (sun is directional) → compute once.
-        const phase = hgPhase(uHG, dot(dir, uSunDirFog));
-        const inscatterLi = color(uFogSunColor).mul(phase).mul(uFogScatter)
-          .add(color(uFogColor));
+        const dir = normalize(worldPos.sub(camPos));
+        const surfDist = length(worldPos.sub(camPos));
+        const endDist = mix(min(surfDist, uMaxDist), uMaxDist, skyMask);
 
-        const T = float(1).toVar();          // transmittance to camera
-        const scatter = vec3(0).toVar();     // accumulated in-scattered light
-        Loop(VOL_MAX_STEPS, ({ i }) => {
-          If(float(i).greaterThanEqual(uSteps), () => Break());
-          const t = float(i).add(0.5).mul(stepSize);
-          const p = camPos.add(dir.mul(t));
-          const d = fogDensityAt(p).mul(uFogDensity);
-          If(d.greaterThan(0.0002), () => {
-            const sT = exp(d.mul(stepSize).negate());         // step transmittance
-            scatter.addAssign(T.mul(float(1).sub(sT)).mul(inscatterLi));
-            T.assign(T.mul(sT));
-          });
-          If(T.lessThan(0.012), () => Break());               // fully occluded
+        const phase = hgPhase(uHG, dot(dir, uSunDirFog));
+        const ambientLi = vec3(uFogColor);
+        const sunLi = vec3(uFogSunColor).mul(phase).mul(uFogScatter);
+
+        const totalTau = float(0).toVar();
+        const scatter = vec3(0).toVar();
+
+        Loop({ start: int(0), end: int(MAX_FOG), type: "int", condition: "<" }, ({ i }) => {
+          const active = float(i).lessThan(uFogCount).select(float(1), float(0));
+          const center = uFogCenters.element(i).xyz;
+          const strength = uFogCenters.element(i).w;
+          const scale = uFogScales.element(i).xyz.mul(uVolumeScale).max(0.001);
+          const tau = primitiveTau(camPos, dir, endDist, center, scale, strength).mul(active);
+
+          const toCenter = normalize(center.sub(camPos));
+          const sunAmt = dot(toCenter, uSunDirFog).mul(0.5).add(0.5);
+          const primLi = mix(ambientLi, sunLi, sunAmt);
+          scatter.addAssign(tau.mul(primLi));
+          totalTau.addAssign(tau);
         });
 
-        const foggy = inColor.rgb.mul(T).add(scatter);
-        return vec4(mix(inColor.rgb, foggy, uFogEnabled), inColor.a);
+        const tauExt = totalTau.mul(uFogDensity);
+        const T = exp(tauExt.negate());
+        const scatterColor = scatter.div(totalTau.max(0.0001));
+        const volFoggy = inColor.rgb.mul(T).add(scatterColor.mul(float(1).sub(T)));
+
+        const horizonMu = dot(dir, uSunDirFog).mul(0.5).add(0.5);
+        const horizonGlow = mix(vec3(uFogColor), vec3(uFogSunColor), horizonMu);
+        const atmAmt = float(1).sub(exp(endDist.div(uAtmFalloff).negate())).mul(uAtmosphere);
+        const skyHaze = pow(float(1).sub(abs(dir.y)), 2.2).mul(uHorizon).mul(skyMask);
+        const withAtm = mix(volFoggy, horizonGlow, atmAmt);
+        const finalFoggy = mix(withAtm, horizonGlow, skyHaze);
+
+        return vec4(mix(inColor.rgb, finalFoggy, uFogEnabled), inColor.a);
       });
+
       postProcessing.outputNode = volumetricFog(scenePassColor);
 
-      // ─── world lighting drive (timeOfDay → sun dir → sky.update) ──────────
-      const PROC_SKY = { ...SKY_DEFAULTS, timeOfDay: 9.5, autoAdvance: false, daySpeed: 0.4 };
-      const worldLight = {
-        dirColor: "#fff5e0", dirIntensity: 2.4, moonIntensity: 0.25,
-        hemiSky: "#c8e0ff", hemiGround: "#4a5536", hemiIntensity: 0.5, sunDistance: 600,
-      };
-      const SKY_TILT = 0.28;
+      try {
+        await renderer.compileAsync(scene, camera);
+      } catch (e) {
+        showErr("Shader compile failed:\n" + e.message);
+        throw e;
+      }
+
+      // ─── lighting (sun angle drives fog + terrain) ────────────────────────
+      const SKY_TILT = 0.22;
       const _sunDir = new THREE.Vector3();
-      const _moonDir = new THREE.Vector3();
-      const _effDir = new THREE.Vector3();
-      // Dome's own horizon haze stays OFF — the volumetric post-fog now provides
-      // aerial perspective on everything, including the sky dome (geometry at 1500).
-      const _skyFog = { enabled: false, color: new THREE.Color(FOG.color), density: 0.0006, hazeHeight: 0.12 };
 
       function worldSunDirFromTime(t, out) {
         const ang = (t / 24) * Math.PI * 2;
         return out.set(Math.sin(ang), -Math.cos(ang), SKY_TILT).normalize();
       }
-      function driveWorldLighting(timeSec, dt) {
-        if (PROC_SKY.autoAdvance) {
-          PROC_SKY.timeOfDay = (PROC_SKY.timeOfDay + PROC_SKY.daySpeed * dt) % 24;
-          uiRefresh();
-        }
-        worldSunDirFromTime(PROC_SKY.timeOfDay, _sunDir);
-        _moonDir.copy(_sunDir).negate();
-        const sunUp = _sunDir.y;
-        if (sunUp < 0) {
-          _effDir.copy(_moonDir);
-          sun.position.copy(_effDir).multiplyScalar(worldLight.sunDistance);
-          sun.color.set(PROC_SKY.moonColor);
-          sun.intensity = worldLight.moonIntensity * THREE.MathUtils.smoothstep(-sunUp, 0, 0.15);
-        } else {
-          _effDir.copy(_sunDir);
-          sun.position.copy(_sunDir).multiplyScalar(worldLight.sunDistance);
-          sun.color.set(worldLight.dirColor);
-          sun.intensity = worldLight.dirIntensity * THREE.MathUtils.smoothstep(sunUp, -0.05, 0.1);
-        }
-        sun.target.position.set(0, 0, 0);
-        hemi.color.set(worldLight.hemiSky);
-        hemi.groundColor.set(worldLight.hemiGround);
-        hemi.intensity = worldLight.hemiIntensity * THREE.MathUtils.smoothstep(sunUp, -0.2, 0.2) + 0.05;
-        // fog in-scatter tracks the key light (sun by day, moon by night)
-        uSunDirFog.value.copy(_effDir).normalize();
-        dayNightSky.update(PROC_SKY, {
-          time: timeSec, sunDir: _sunDir, moonDir: _moonDir, camera, fog: _skyFog,
-        });
-      }
 
-      // ─── control panel ────────────────────────────────────────────────────
+      function driveWorldLighting() {
+        worldSunDirFromTime(FOG.timeOfDay, _sunDir);
+        const sunUp = _sunDir.y;
+        sun.position.copy(_sunDir).multiplyScalar(500);
+        sun.intensity = 2.4 * THREE.MathUtils.smoothstep(sunUp, -0.08, 0.15);
+        uSunDirFog.value.copy(_sunDir);
+        uSunDirTerrain.value.copy(_sunDir);
+      }
+      driveWorldLighting();
+
+      // ─── controls ─────────────────────────────────────────────────────────
       {
         const s1 = section("Time of Day");
-        slider(s1, PROC_SKY, "timeOfDay", { label: "Hour", min: 0, max: 24, step: 0.1,
-          onChange: (v) => { document.getElementById("hud-tod").textContent = v.toFixed(1); } });
-        toggle(s1, PROC_SKY, "autoAdvance", { label: "Auto-advance day" });
-        slider(s1, PROC_SKY, "daySpeed", { label: "Day speed", min: 0.05, max: 3, step: 0.05 });
+        slider(s1, FOG, "timeOfDay", {
+          label: "Hour", min: 0, max: 24, step: 0.1,
+          onChange: (v) => {
+            document.getElementById("hud-tod").textContent = v.toFixed(1);
+            driveWorldLighting();
+          },
+        });
         const presets = document.createElement("div");
         s1.appendChild(presets);
-        const setTOD = (h) => { PROC_SKY.timeOfDay = h; uiRefresh();
-          document.getElementById("hud-tod").textContent = h.toFixed(1); };
+        const setTOD = (h) => {
+          FOG.timeOfDay = h;
+          uiRefresh();
+          document.getElementById("hud-tod").textContent = h.toFixed(1);
+          driveWorldLighting();
+        };
         button(presets, "Dawn", () => setTOD(6.2));
-        button(presets, "Noon", () => setTOD(12));
+        button(presets, "Morning", () => setTOD(8.5));
         button(presets, "Dusk", () => setTOD(18.0));
-        button(presets, "Night", () => setTOD(0.5));
 
-        const s2 = section("Fog — Volume");
-        toggle(s2, FOG, "enabled", { label: "Fog enabled",
-          onChange: (v) => { uFogEnabled.value = v ? 1 : 0; } });
-        slider(s2, FOG, "density", { label: "Density", min: 0, max: 0.4, step: 0.005,
-          onChange: (v) => (uFogDensity.value = v) });
-        slider(s2, FOG, "base", { label: "Floor height", min: -20, max: 20, step: 0.5,
-          onChange: (v) => (uFogBase.value = v) });
-        slider(s2, FOG, "height", { label: "Scale height", min: 4, max: 80, step: 1,
-          onChange: (v) => (uFogHeight.value = v) });
-        slider(s2, FOG, "coverage", { label: "Coverage", min: 0, max: 0.95, step: 0.01,
-          onChange: (v) => (uCoverage.value = v) });
-        slider(s2, FOG, "maxDist", { label: "Max distance", min: 100, max: 1200, step: 10,
+        const s2 = section("Fog — Atmosphere");
+        toggle(s2, FOG, "enabled", {
+          label: "Fog enabled",
+          onChange: (v) => { uFogEnabled.value = v ? 1 : 0; },
+        });
+        slider(s2, FOG, "atmosphere", { label: "Distance haze", min: 0, max: 1, step: 0.01,
+          onChange: (v) => (uAtmosphere.value = v) });
+        slider(s2, FOG, "atmFalloff", { label: "Haze range", min: 100, max: 900, step: 10,
+          onChange: (v) => (uAtmFalloff.value = v) });
+        slider(s2, FOG, "horizon", { label: "Horizon glow", min: 0, max: 1, step: 0.01,
+          onChange: (v) => (uHorizon.value = v) });
+        slider(s2, FOG, "maxDist", { label: "Max distance", min: 200, max: 2000, step: 25,
           onChange: (v) => (uMaxDist.value = v) });
 
+        const s2b = section("Fog — Volumes");
+        slider(s2b, FOG, "density", { label: "Vol. density", min: 0, max: 1.5, step: 0.01,
+          onChange: (v) => (uFogDensity.value = v) });
+        slider(s2b, FOG, "strength", { label: "Prim strength", min: 0.2, max: 3, step: 0.05,
+          onChange: (v) => (uPrimStrength.value = v) });
+        slider(s2b, FOG, "volumeScale", { label: "Volume scale", min: 0.5, max: 2.5, step: 0.05,
+          onChange: (v) => (uVolumeScale.value = v) });
+        {
+          const row = document.createElement("div");
+          row.className = "row";
+          row.innerHTML = `<label>Profile</label>`;
+          const sel = document.createElement("select");
+          sel.style.cssText = "flex:1;background:#0d0f13;color:var(--text);border:1px solid #000;border-radius:4px;padding:3px 6px;font-size:11px;";
+          ["Quartic", "Gaussian", "Spiky"].forEach((name, i) => {
+            const opt = document.createElement("option");
+            opt.value = i; opt.textContent = name;
+            if (i === FOG.profile) opt.selected = true;
+            sel.appendChild(opt);
+          });
+          sel.onchange = () => {
+            FOG.profile = parseInt(sel.value, 10);
+            uFogProfile.value = FOG.profile;
+          };
+          row.appendChild(sel);
+          s2b.appendChild(row);
+        }
+        {
+          const row = document.createElement("div");
+          row.className = "row";
+          row.innerHTML = `<label>Volumes</label><span id="fog-vol-count" style="color:var(--text-dim);font-family:var(--font-mono);">${fogVolumeCount} / ${MAX_FOG}</span>`;
+          s2b.appendChild(row);
+        }
+        button(s2b, "Regenerate volumes", () => {
+          FOG.seed = (FOG.seed + 997) | 0;
+          const n = generateFogVolumes(FOG.seed);
+          document.getElementById("fog-vol-count").textContent = `${n} / ${MAX_FOG}`;
+        });
+
         const s3 = section("Fog — Light");
-        slider(s3, FOG, "scatter", { label: "Sun scatter", min: 0, max: 5, step: 0.05,
+        slider(s3, FOG, "scatter", { label: "Sun scatter", min: 0, max: 6, step: 0.05,
           onChange: (v) => (uFogScatter.value = v) });
         slider(s3, FOG, "hg", { label: "Forward (HG)", min: 0, max: 0.94, step: 0.01,
           onChange: (v) => (uHG.value = v) });
@@ -508,19 +668,8 @@
           onChange: (v) => { uFogColor.value.copy(lin(v)); } });
         colorPick(s3, FOG, "sunColor", { label: "Sun tint",
           onChange: (v) => { uFogSunColor.value.copy(lin(v)); } });
-
-        const s4 = section("Fog — Motion / Quality", false);
-        slider(s4, FOG, "noiseScale", { label: "Noise scale", min: 0.008, max: 0.1, step: 0.001,
-          onChange: (v) => (uNoiseScale.value = v) });
-        slider(s4, FOG, "noiseStrength", { label: "Noise amount", min: 0, max: 1, step: 0.01,
-          onChange: (v) => (uNoiseStrength.value = v) });
-        slider(s4, FOG, "speed", { label: "Drift speed", min: 0, max: 0.3, step: 0.005,
-          onChange: (v) => (uNoiseSpeed.value = v) });
-        slider(s4, FOG, "steps", { label: "March steps", min: 8, max: 64, step: 1,
-          onChange: (v) => (uSteps.value = Math.round(v)) });
       }
 
-      // ─── loop ─────────────────────────────────────────────────────────────
       const timer = new THREE.Timer();
       let fpsT = 0, fpsN = 0;
       renderer.setAnimationLoop(() => {
@@ -528,7 +677,6 @@
         const dt = Math.min(timer.getDelta(), 0.05);
         const t = timer.getElapsed();
         controls.update();
-        driveWorldLighting(t, dt);
         postProcessing.render();
         fpsN++; fpsT += dt;
         if (fpsT >= 0.5) {

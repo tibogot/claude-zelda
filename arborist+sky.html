@@ -1236,14 +1236,19 @@
       const sun = new THREE.DirectionalLight("#fff8e8", 2.2);
       sun.position.set(5, 12, 4);
       sun.castShadow = true;
-      sun.shadow.mapSize.set(2048, 2048);
+      // Single-tree editor: tighten the shadow frustum to ~fit the tree + the
+      // -12/0/+12 LOD previews so the 4096 map isn't wasted on empty ground.
+      // 4096 / 40m ≈ 102 texels/m (vs the old 2048 / 60m ≈ 34) — ~3x crisper, so
+      // the thin trunk shadow stops looking blocky.
+      sun.shadow.mapSize.set(4096, 4096);
       sun.shadow.camera.near = 0.5;
       sun.shadow.camera.far = 200;
-      sun.shadow.camera.left = -30;
-      sun.shadow.camera.right = 30;
-      sun.shadow.camera.top = 30;
-      sun.shadow.camera.bottom = -30;
-      sun.shadow.bias = -0.001;
+      sun.shadow.camera.left = -20;
+      sun.shadow.camera.right = 20;
+      sun.shadow.camera.top = 20;
+      sun.shadow.camera.bottom = -20;
+      sun.shadow.bias = -0.0005;
+      sun.shadow.normalBias = 0.02;
       scene.add(sun);
 
       // ─── GROUND ──────────────────────────────────────────────────────────────────
@@ -1275,13 +1280,30 @@
         scene.add(p);
       });
 
+      // ─── PROCEDURAL TRUNK MATERIAL (TSL) ─────────────────────────────────────────
+      // Shared by the default cylinder AND any imported GLB trunk, so trunks get a
+      // bark colour with NO texture needed. Cheap: a vertical 2-colour gradient
+      // (world-Y from the ground up) + roughness, metalness 0 (so it bakes the same
+      // colour it shows — no sky-reflection metal trap). Live-tunable via uniforms.
+      const uTrunkBot = uniform(new THREE.Color(0x4a2f17));
+      const uTrunkTop = uniform(new THREE.Color(0x6b4a2b));
+      const uTrunkGradH = uniform(6.0);
+      const uTrunkRough = uniform(0.9);
+      const trunkMat = new MeshStandardNodeMaterial({ metalness: 0 });
+      trunkMat.colorNode = mix(
+        uTrunkBot,
+        uTrunkTop,
+        smoothstep(
+          float(0.0),
+          float(1.0),
+          div(positionWorld.y, max(uTrunkGradH, float(0.001))),
+        ),
+      );
+      trunkMat.roughnessNode = uTrunkRough;
+
       // ─── DEFAULT TRUNK PLACEHOLDER ───────────────────────────────────────────────
       const defTrunkGeo = new THREE.CylinderGeometry(0.1, 0.3, 5.0, 10, 3);
-      const defTrunkMat = new THREE.MeshStandardMaterial({
-        color: 0x5c3a1e,
-        roughness: 0.95,
-      });
-      const defaultTrunk = new THREE.Mesh(defTrunkGeo, defTrunkMat);
+      const defaultTrunk = new THREE.Mesh(defTrunkGeo, trunkMat);
       defaultTrunk.position.y = 2.5;
       defaultTrunk.castShadow = true;
       defaultTrunk.receiveShadow = true;
@@ -2452,8 +2474,53 @@ const SKY_DEFAULTS = {
           },
           trunkScale: params.trunkScale,
           canopyScale: params.canopyScale,
+          trunkMaterial: {
+            botColor: params.trunkBotColor,
+            topColor: params.trunkTopColor,
+            gradHeight: params.trunkGradHeight,
+            roughness: params.trunkRoughness,
+            useGlb: params.useGlbTrunkMat,
+          },
           bushMode: params.bushMode,
         };
+      }
+
+      // Swap loaded trunks between the procedural bark material and their own GLB
+      // material, per params.useGlbTrunkMat. defaultTrunk has no GLB material, so it
+      // always keeps the procedural one.
+      function applyTrunkMatChoice() {
+        const useGlb = params.useGlbTrunkMat;
+        [trunkRoot, trunkLod1Root].forEach((root) => {
+          if (!root) return;
+          root.traverse((o) => {
+            if (o.isMesh) {
+              o.material =
+                useGlb && o.userData.origMat ? o.userData.origMat : trunkMat;
+            }
+          });
+        });
+      }
+
+      function applyTrunkMaterial(tm) {
+        if (!tm) return;
+        if (tm.useGlb != null) params.useGlbTrunkMat = tm.useGlb;
+        if (tm.botColor != null) {
+          params.trunkBotColor = tm.botColor;
+          uTrunkBot.value.set(tm.botColor);
+        }
+        if (tm.topColor != null) {
+          params.trunkTopColor = tm.topColor;
+          uTrunkTop.value.set(tm.topColor);
+        }
+        if (tm.gradHeight != null) {
+          params.trunkGradHeight = tm.gradHeight;
+          uTrunkGradH.value = tm.gradHeight;
+        }
+        if (tm.roughness != null) {
+          params.trunkRoughness = tm.roughness;
+          uTrunkRough.value = tm.roughness;
+        }
+        applyTrunkMatChoice();
       }
 
       function restoreState(state) {
@@ -2464,6 +2531,7 @@ const SKY_DEFAULTS = {
           }
         });
         if (state.canopyScale != null) params.canopyScale = state.canopyScale;
+        applyTrunkMaterial(state.trunkMaterial);
         if (state.material) {
           const m = state.material;
           params.bottomColor = m.bottomColor;
@@ -3206,6 +3274,11 @@ const SKY_DEFAULTS = {
               if (o.isMesh) {
                 o.castShadow = true;
                 o.receiveShadow = true;
+                // Use the shared procedural bark material (no texture needed; also
+                // avoids GLBs that arrive metalness=1 and bake wrong). Stash the
+                // original so a future "use GLB material" toggle can restore it.
+                o.userData.origMat = o.material;
+                o.material = params.useGlbTrunkMat ? o.userData.origMat : trunkMat;
               }
             });
             scene.add(trunkRoot);
@@ -3250,6 +3323,8 @@ const SKY_DEFAULTS = {
               if (o.isMesh) {
                 o.castShadow = true;
                 o.receiveShadow = true;
+                o.userData.origMat = o.material;
+                o.material = params.useGlbTrunkMat ? o.userData.origMat : trunkMat;
               }
             });
 
@@ -3289,6 +3364,11 @@ const SKY_DEFAULTS = {
         bushMode: false,
         trunkScale: 1.0,
         canopyScale: 1.0,
+        trunkBotColor: "#4a2f17",
+        trunkTopColor: "#6b4a2b",
+        trunkGradHeight: 6.0,
+        trunkRoughness: 0.9,
+        useGlbTrunkMat: false,
         bottomColor: "#2d5a1b",
         topColor: "#5aaa2a",
         colorVar: 0.12,
@@ -3554,6 +3634,13 @@ const SKY_DEFAULTS = {
           },
           trunkScale: params.trunkScale,
           canopyScale: params.canopyScale,
+          trunkMaterial: {
+            botColor: params.trunkBotColor,
+            topColor: params.trunkTopColor,
+            gradHeight: params.trunkGradHeight,
+            roughness: params.trunkRoughness,
+            useGlb: params.useGlbTrunkMat,
+          },
           bushMode: params.bushMode,
           lodDistances: { lod1: params.lodDist1, lod2: params.lodDist2 },
         };
@@ -3612,6 +3699,7 @@ const SKY_DEFAULTS = {
           }
         }
         if (data.canopyScale != null) params.canopyScale = data.canopyScale;
+        applyTrunkMaterial(data.trunkMaterial);
         if (data.material) {
           const m = data.material;
           if (m.bottomColor) {
@@ -4294,6 +4382,51 @@ const SKY_DEFAULTS = {
       });
       _info(trunkBody, "LOD0 triangles", () => String(params.trunkTris));
       _info(trunkBody, "LOD1 triangles", () => String(params.trunkLod1Tris));
+
+      // Procedural bark material (no texture needed) — applied to default + GLB trunks.
+      const trunkMatBody = _section(trunkBody, "Trunk Material", false);
+      _toggle(trunkMatBody, params, "useGlbTrunkMat", {
+        label: "Use GLB material",
+        onChange: () => {
+          applyTrunkMatChoice();
+          if (lodPreview) buildFoliage(true);
+          scheduleUndo();
+        },
+      });
+      _color(trunkMatBody, params, "trunkBotColor", {
+        label: "Base (bottom)",
+        onChange: (ev) => {
+          uTrunkBot.value.set(ev.value);
+          scheduleUndo();
+        },
+      });
+      _color(trunkMatBody, params, "trunkTopColor", {
+        label: "Top",
+        onChange: (ev) => {
+          uTrunkTop.value.set(ev.value);
+          scheduleUndo();
+        },
+      });
+      _slider(trunkMatBody, params, "trunkGradHeight", {
+        label: "Gradient height",
+        min: 0.5,
+        max: 30,
+        step: 0.5,
+        onChange: (ev) => {
+          uTrunkGradH.value = ev.value;
+          scheduleUndo();
+        },
+      });
+      _slider(trunkMatBody, params, "trunkRoughness", {
+        label: "Roughness",
+        min: 0,
+        max: 1,
+        step: 0.01,
+        onChange: (ev) => {
+          uTrunkRough.value = ev.value;
+          scheduleUndo();
+        },
+      });
 
       const leafTexBody = _section(uiRoot, "Leaf Texture", true);
       buildTexGallery(leafTexBody);
