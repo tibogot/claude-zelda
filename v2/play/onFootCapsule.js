@@ -190,11 +190,16 @@ export class CapsuleController {
     this.crouching = wantCrouch;
     const h = this.crouching ? crouchH : fullH;
 
-    const moveSpeed = this.crouching
-      ? p.walkSpeed * p.crouchSpeedMult
-      : input.run
-        ? p.runSpeed
-        : p.walkSpeed;
+    // Speed is normally walk/run/crouch; a host (e.g. v2 ability layer) may
+    // override it (roll/slide/etc.) via ctx.moveSpeedOverride.
+    const moveSpeed =
+      ctx.moveSpeedOverride != null
+        ? ctx.moveSpeedOverride
+        : this.crouching
+          ? p.walkSpeed * p.crouchSpeedMult
+          : input.run
+            ? p.runSpeed
+            : p.walkSpeed;
 
     // ── Jump (coyote time + buffer) / glide ──────────────────────────────────
     const jumpEdge = !!input.jump && !this._spacePrev;
@@ -204,7 +209,12 @@ export class CapsuleController {
     if (jumpEdge && !this.grounded && this._coyoteTimer <= 0) {
       this.gliding = !this.gliding;
     }
-    if (this._jumpBufferTimer > 0 && this._coyoteTimer > 0 && !this.crouching) {
+    if (
+      this._jumpBufferTimer > 0 &&
+      this._coyoteTimer > 0 &&
+      !this.crouching &&
+      ctx.canJump !== false
+    ) {
       this.velY = p.jumpVel;
       this.grounded = false;
       this._coyoteTimer = 0;
@@ -352,29 +362,42 @@ export class CapsuleController {
     // If we were grounded, didn't jump, and the move floated us off, a downward
     // ray finds walkable ground within groundStickDist and snaps the feet to it.
     // Ray (not capsule depenetration) so thin stair/ramp quads resolve correctly.
+    // Considers BOTH the analytic terrain (getTerrainHeight) and the BVH so we
+    // stick to procedural hills on descent, not just baked geometry.
     if (
       !grounded &&
       wasGrounded &&
       !jumpedThisFrame &&
       this.velY <= 0 &&
-      p.groundStickDist > 0 &&
-      collider?.raycastDown
+      p.groundStickDist > 0
     ) {
-      const originY = this.position.y + r; // bottom sphere centre (above surface)
-      const hit = collider.raycastDown(
-        this.position.x,
-        originY,
-        this.position.z,
-        r + p.groundStickDist + 0.02,
-      );
-      if (hit && hit.ny >= p.minGroundNormalY) {
-        const drop = this.position.y - hit.y; // how far ground sits below the feet
-        if (drop >= -0.02 && drop <= p.groundStickDist) {
-          this.position.y = hit.y;
-          grounded = true;
-          this.velY = 0;
-          if (hit.ny > maxNY) maxNY = hit.ny;
+      let bestY = -Infinity;
+      let bestNY = 1;
+      // Analytic terrain candidate (treated as walkable — no normal available).
+      const stickTerrainY = getTerrainHeight(this.position.x, this.position.z);
+      const dropT = this.position.y - stickTerrainY;
+      if (dropT >= -0.02 && dropT <= p.groundStickDist) bestY = stickTerrainY;
+      // BVH candidate (cliffs / trees / platforms baked into the collider).
+      if (collider?.raycastDown) {
+        const hit = collider.raycastDown(
+          this.position.x,
+          this.position.y + r, // bottom sphere centre (above surface)
+          this.position.z,
+          r + p.groundStickDist + 0.02,
+        );
+        if (hit && hit.ny >= p.minGroundNormalY) {
+          const dropB = this.position.y - hit.y;
+          if (dropB >= -0.02 && dropB <= p.groundStickDist && hit.y > bestY) {
+            bestY = hit.y;
+            bestNY = hit.ny;
+          }
         }
+      }
+      if (bestY > -Infinity) {
+        this.position.y = bestY;
+        grounded = true;
+        this.velY = 0;
+        if (bestNY > maxNY) maxNY = bestNY;
       }
     }
 
