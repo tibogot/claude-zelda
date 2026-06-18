@@ -1,0 +1,752 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Parkour character lab — BVH on-foot physics</title>
+    <script type="importmap">
+      {
+        "imports": {
+          "three": "https://cdn.jsdelivr.net/npm/three@0.184.0/build/three.webgpu.js",
+          "three/webgpu": "https://cdn.jsdelivr.net/npm/three@0.184.0/build/three.webgpu.js",
+          "three/tsl": "https://cdn.jsdelivr.net/npm/three@0.184.0/build/three.tsl.js",
+          "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.184.0/examples/jsm/",
+          "three-mesh-bvh": "https://cdn.jsdelivr.net/npm/three-mesh-bvh@0.9.9/build/index.module.js"
+        }
+      }
+    </script>
+    <style>
+      * { margin: 0; padding: 0; box-sizing: border-box; }
+      html, body { width: 100%; height: 100%; overflow: hidden; background: #0e1218; }
+      #hud {
+        position: fixed; left: 12px; top: 12px; z-index: 10;
+        font: 12px/1.55 ui-monospace, Menlo, Consolas, monospace;
+        color: #cfe8ff; background: rgba(8, 14, 22, 0.72);
+        padding: 10px 12px; border-radius: 8px; pointer-events: none;
+        white-space: pre; border: 1px solid rgba(120, 200, 255, 0.25);
+      }
+      #badge {
+        position: fixed; bottom: 12px; right: 12px; z-index: 10;
+        font: 11px/1.4 system-ui, sans-serif; letter-spacing: 0.04em;
+        text-transform: uppercase; color: #9ec8e8;
+        background: rgba(20, 40, 60, 0.85); padding: 6px 10px;
+        border-radius: 6px; border: 1px solid rgba(120, 200, 255, 0.35);
+        pointer-events: none;
+      }
+      #panel {
+        position: fixed; top: 12px; right: 12px; z-index: 20;
+        width: min(320px, calc(100vw - 24px)); max-height: calc(100vh - 24px);
+        overflow: auto; padding: 12px 14px;
+        font: 11px/1.5 ui-monospace, Menlo, Consolas, monospace;
+        color: #d8d8de; background: rgba(8, 10, 16, 0.9);
+        border: 1px solid rgba(255, 255, 255, 0.08);
+        border-radius: 10px; backdrop-filter: blur(8px);
+      }
+      #panel h2 {
+        font-size: 12px; font-weight: 600; color: #7fd1ff;
+        margin-bottom: 8px; letter-spacing: 0.04em; text-transform: uppercase;
+      }
+      #panel details { margin-bottom: 8px; }
+      #panel summary {
+        cursor: pointer; color: #7fd1ff; font-weight: 600;
+        margin-bottom: 6px; user-select: none;
+      }
+      #panel .row {
+        display: grid; grid-template-columns: 1fr 52px;
+        align-items: center; gap: 8px; margin-bottom: 4px;
+      }
+      #panel .row span:first-child { color: #b8b8c2; }
+      #panel .row output { text-align: right; color: #7fd1ff; font-variant-numeric: tabular-nums; }
+      #panel .row input[type="range"] { grid-column: 1 / -1; width: 100%; accent-color: #7fd1ff; }
+      #panel .inline-row {
+        display: flex; align-items: center; justify-content: space-between;
+        margin-bottom: 6px; gap: 8px;
+      }
+      #panel select, #panel button {
+        font: inherit; color: #d8d8de; background: #1a2230;
+        border: 1px solid rgba(255,255,255,0.15); border-radius: 5px;
+        padding: 4px 8px; cursor: pointer;
+      }
+      #panel button { width: 100%; margin-bottom: 6px; }
+      #panel input[type="checkbox"] { accent-color: #7fd1ff; }
+      #help {
+        position: fixed; left: 12px; bottom: 12px; z-index: 10;
+        max-width: 420px; font: 12px/1.5 system-ui, sans-serif;
+        color: #b8c8d8; background: rgba(8, 12, 18, 0.75);
+        padding: 10px 12px; border-radius: 8px; pointer-events: none;
+      }
+      #help kbd {
+        background: rgba(255,255,255,0.1); padding: 1px 5px; border-radius: 4px;
+        font: 11px ui-monospace, monospace;
+      }
+    </style>
+  </head>
+  <body>
+    <div id="hud">Loading…</div>
+    <div id="badge">BVH · on-foot physics lab</div>
+    <div id="help">
+      Click canvas · <kbd>WASD</kbd> move · <kbd>Shift</kbd> run · <kbd>Ctrl</kbd> crouch · <kbd>Space</kbd> jump<br />
+      <kbd>1</kbd> capsule · <kbd>2</kbd> character · <kbd>P</kbd> physics A/B · <kbd>R</kbd> cycle spawn · <kbd>Esc</kbd> unlock mouse
+    </div>
+    <aside id="panel"></aside>
+    <script type="module">
+      import * as THREE from "three";
+      import { RoadBvh } from "./play/modularRoadBvh.js";
+      import { OnFootController, DEFAULT_ON_FOOT_PARAMS } from "./play/onFootPhysics.js";
+      import { CapsuleController } from "./play/onFootCapsule.js";
+      import { buildParkourCourse, PARKOUR_SPAWNS } from "./play/parkourCourse.js";
+      import { createMovingPlatforms } from "./play/movingPlatforms.js";
+      import { getSharedGltfLoader, initGlbLoaderRenderer } from "./core/foliage/glbLoader.js";
+
+      const CHAR_MODEL = "../models/UA1+UA2_compressed.glb";
+      const CHAR_HEIGHT = 2.5;
+
+      function getTerrainHeight() {
+        return 0;
+      }
+
+      const scene = new THREE.Scene();
+      scene.background = new THREE.Color(0x8fb7e8);
+      scene.fog = new THREE.Fog(0x8fb7e8, 70, 220);
+
+      const camera = new THREE.PerspectiveCamera(
+        60, window.innerWidth / window.innerHeight, 0.1, 600,
+      );
+
+      const renderer = new THREE.WebGPURenderer({ antialias: true });
+      renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+      renderer.setSize(window.innerWidth, window.innerHeight);
+      renderer.shadowMap.enabled = true;
+      document.body.appendChild(renderer.domElement);
+      await renderer.init();
+      initGlbLoaderRenderer(renderer);
+
+      scene.add(new THREE.HemisphereLight(0xbcd6ff, 0x4a5240, 0.95));
+      const sun = new THREE.DirectionalLight(0xffffff, 2.2);
+      sun.position.set(50, 80, 35);
+      sun.castShadow = true;
+      sun.shadow.mapSize.set(2048, 2048);
+      sun.shadow.camera.left = -55;
+      sun.shadow.camera.right = 55;
+      sun.shadow.camera.top = 55;
+      sun.shadow.camera.bottom = -55;
+      sun.shadow.camera.far = 200;
+      scene.add(sun);
+
+      const collidables = buildParkourCourse(scene);
+      const bvh = new RoadBvh();
+      bvh.bakeFromMeshes(collidables);
+
+      // Adapter — exposes the editor's CliffBvh collision contract
+      // (raycastHeightFrom / raycastLateral / raycastUp) on top of RoadBvh, so
+      // the lab runs the exact same controller code path as v2/editor. RoadBvh
+      // is a v2 file we don't touch; this glue lives only in the lab.
+      const _aO = new THREE.Vector3();
+      const _aD = new THREE.Vector3();
+      const _capSeg = new THREE.Line3();
+      const _capBox = new THREE.Box3();
+      const _triPt = new THREE.Vector3();
+      const _segPt = new THREE.Vector3();
+      const _pushDir = new THREE.Vector3();
+      const collider = {
+        get baked() {
+          return bvh.baked;
+        },
+        // Push a capsule (segment + radius) out of the BVH. Returns the
+        // accumulated displacement of the segment and the most-upward contact
+        // normal.y. Uses RoadBvh's inner MeshBVH directly (lab-only glue).
+        capsuleDepenetrate(sx, sy, sz, ex, ey, ez, radius) {
+          const mb = bvh._bvh;
+          if (!mb) return null;
+          _capSeg.start.set(sx, sy, sz);
+          _capSeg.end.set(ex, ey, ez);
+          let maxNY = -1;
+          let movedAny = false;
+          _capBox.makeEmpty();
+          _capBox.expandByPoint(_capSeg.start);
+          _capBox.expandByPoint(_capSeg.end);
+          _capBox.min.addScalar(-radius);
+          _capBox.max.addScalar(radius);
+          mb.shapecast({
+            intersectsBounds: (box) => box.intersectsBox(_capBox),
+            intersectsTriangle: (tri) => {
+              const dist = tri.closestPointToSegment(_capSeg, _triPt, _segPt);
+              if (dist < radius) {
+                const depth = radius - dist;
+                _pushDir.copy(_segPt).sub(_triPt);
+                const len = _pushDir.length();
+                if (len > 1e-9) {
+                  _pushDir.multiplyScalar(1 / len);
+                  _capSeg.start.addScaledVector(_pushDir, depth);
+                  _capSeg.end.addScaledVector(_pushDir, depth);
+                  if (_pushDir.y > maxNY) maxNY = _pushDir.y;
+                  movedAny = true;
+                }
+              }
+              return false;
+            },
+          });
+          if (!movedAny) return { dx: 0, dy: 0, dz: 0, maxNY: -1 };
+          return {
+            dx: _capSeg.start.x - sx,
+            dy: _capSeg.start.y - sy,
+            dz: _capSeg.start.z - sz,
+            maxNY,
+          };
+        },
+        raycastHeightFrom(wx, wy, wz) {
+          const hit = bvh.raycastFirst(_aO.set(wx, wy, wz), _aD.set(0, -1, 0));
+          return hit ? hit.point.y : null;
+        },
+        raycastLateral(ox, oy, oz, dx, dz, maxDist) {
+          const len = Math.hypot(dx, dz);
+          if (len < 1e-8) return null;
+          const ndx = dx / len;
+          const ndz = dz / len;
+          const hit = bvh.raycastFirst(_aO.set(ox, oy, oz), _aD.set(ndx, 0, ndz), maxDist);
+          if (!hit) return null;
+          let nx = hit.normal.x;
+          let ny = hit.normal.y;
+          let nz = hit.normal.z;
+          // RoadBvh double-sides every triangle, so the returned normal can have
+          // arbitrary winding. Orient it to oppose the ray (point back at the
+          // mover) for reliable wall blocking — CliffBvh returns this naturally.
+          if (nx * ndx + nz * ndz > 0) {
+            nx = -nx;
+            ny = -ny;
+            nz = -nz;
+          }
+          return { point: hit.point, normal: { x: nx, y: ny, z: nz }, distance: hit.distance };
+        },
+        raycastUp(ox, oy, oz, maxDist) {
+          const hit = bvh.raycastFirst(_aO.set(ox, oy, oz), _aD.set(0, 1, 0), maxDist);
+          return hit ? hit.point.y : null;
+        },
+        // Down ray for ground-stick: robust on thin quads (stair tops / ramps)
+        // where capsule depenetration would resolve to the wrong side. ny is
+        // oriented upward (double-sided geometry returns arbitrary winding).
+        raycastDown(ox, oy, oz, maxDist) {
+          const hit = bvh.raycastFirst(_aO.set(ox, oy, oz), _aD.set(0, -1, 0), maxDist);
+          if (!hit) return null;
+          return { y: hit.point.y, ny: Math.abs(hit.normal.y) };
+        },
+      };
+      const WORLD_HALF = 44;
+
+      // Moving platforms — analytic AABBs, NOT in the static BVH. Only the
+      // CapsuleController rides/collides them; the editor mirror ignores them.
+      const movers = createMovingPlatforms(scene);
+
+      // A/B controllers — "mirror" = faithful editor physics, "capsule" = the
+      // new solid capsule-vs-BVH collision. `controller` always points at the
+      // active one; both share the same public API + ctx.
+      const controllers = {
+        mirror: new OnFootController(),
+        capsule: new CapsuleController(),
+      };
+      let physicsMode = "capsule";
+      let controller = controllers[physicsMode];
+      let spawnIdx = 0;
+      controller.reset(
+        PARKOUR_SPAWNS[0].x,
+        PARKOUR_SPAWNS[0].y,
+        PARKOUR_SPAWNS[0].z,
+      );
+
+      function setPhysicsMode(mode) {
+        if (mode === physicsMode) return;
+        const prev = controller;
+        physicsMode = mode;
+        controller = controllers[mode];
+        controller.reset(prev.position.x, prev.position.y, prev.position.z);
+        controller.yaw = prev.yaw;
+        buildPanel();
+      }
+
+      let viewMode = "capsule";
+      let camYaw = 0;
+      let camPitch = 0.35;
+      const keys = {};
+      let pointerLocked = false;
+
+      const capsuleMat = new THREE.MeshStandardMaterial({
+        color: 0xff6633,
+        roughness: 0.55,
+        metalness: 0.05,
+      });
+      const capsuleMesh = new THREE.Mesh(
+        new THREE.CapsuleGeometry(
+          DEFAULT_ON_FOOT_PARAMS.capRadius,
+          DEFAULT_ON_FOOT_PARAMS.capHeight,
+          8,
+          16,
+        ),
+        capsuleMat,
+      );
+      capsuleMesh.castShadow = true;
+      scene.add(capsuleMesh);
+
+      const debugCapsule = new THREE.Mesh(
+        new THREE.CapsuleGeometry(1, 1, 4, 8),
+        new THREE.MeshBasicMaterial({
+          color: 0x44ff88,
+          wireframe: true,
+          transparent: true,
+          opacity: 0.35,
+          depthWrite: false,
+        }),
+      );
+      debugCapsule.visible = false;
+      scene.add(debugCapsule);
+
+      let charRoot = null;
+      let charMixer = null;
+      let charActions = null;
+      let charCurrent = null;
+      let charLoaded = false;
+
+      function pickClip(animations, names) {
+        for (const base of names) {
+          const hit = animations.find(
+            (a) => a.name === base + "_Armature" || a.name === base,
+          );
+          if (hit) return hit;
+        }
+        return null;
+      }
+
+      function setCharAction(next) {
+        if (!next || next === charCurrent) return;
+        if (charCurrent) charCurrent.crossFadeTo(next, 0.12, false);
+        next.reset().play();
+        charCurrent = next;
+      }
+
+      getSharedGltfLoader().load(
+        CHAR_MODEL,
+        (gltf) => {
+          const model = gltf.scene;
+          model.traverse((o) => {
+            if (o.isMesh || o.isSkinnedMesh) {
+              o.castShadow = true;
+              o.receiveShadow = true;
+              o.frustumCulled = false;
+            }
+          });
+          const box = new THREE.Box3().setFromObject(model);
+          const size = new THREE.Vector3();
+          box.getSize(size);
+          const scale = CHAR_HEIGHT / (size.y || 1);
+          model.scale.setScalar(scale);
+          box.setFromObject(model);
+          model.position.y -= box.min.y;
+
+          charRoot = new THREE.Group();
+          charRoot.add(model);
+          charRoot.visible = false;
+          scene.add(charRoot);
+
+          if (gltf.animations?.length) {
+            charMixer = new THREE.AnimationMixer(model);
+            const mk = (clip, once) => {
+              if (!clip) return null;
+              const a = charMixer.clipAction(clip).setLoop(
+                once ? THREE.LoopOnce : THREE.LoopRepeat,
+              );
+              if (once) a.clampWhenFinished = true;
+              return a;
+            };
+            const idle = pickClip(gltf.animations, ["Idle_Loop"]) || gltf.animations[0];
+            charActions = {
+              idle: mk(idle, false),
+              walk: mk(pickClip(gltf.animations, ["Walk_Loop"]) || idle, false),
+              run: mk(
+                pickClip(gltf.animations, ["Sprint_Loop", "Jog_Fwd_Loop"]) || idle,
+                false,
+              ),
+              jumpStart: mk(pickClip(gltf.animations, ["Jump_Start"]), true),
+              jumpLoop: mk(
+                pickClip(gltf.animations, ["Jump_Loop", "NinjaJump_Idle_Loop"]),
+                false,
+              ),
+              jumpLand: mk(pickClip(gltf.animations, ["Jump_Land"]), true),
+              crouch: mk(pickClip(gltf.animations, ["Crouch_Idle_Loop"]) || idle, false),
+              crouchWalk: mk(
+                pickClip(gltf.animations, ["Crouch_Fwd_Loop"]) ||
+                  pickClip(gltf.animations, ["Crouch_Idle_Loop"]),
+                false,
+              ),
+            };
+            charActions.idle.play();
+            charCurrent = charActions.idle;
+          }
+          charLoaded = true;
+        },
+        undefined,
+        (err) => console.warn("[lab] character load failed:", err),
+      );
+
+      function syncVisuals() {
+        const { radius, height } = controller.getCapsuleDims();
+        const cy = controller.getCapsuleCenterY();
+        capsuleMesh.visible = viewMode === "capsule" || !charLoaded;
+        capsuleMesh.geometry.dispose();
+        capsuleMesh.geometry = new THREE.CapsuleGeometry(radius, height, 8, 16);
+        capsuleMesh.position.set(controller.position.x, cy, controller.position.z);
+        capsuleMesh.rotation.y = controller.yaw + Math.PI;
+
+        if (charRoot && charLoaded) {
+          charRoot.visible = viewMode === "character";
+          charRoot.position.copy(controller.position);
+          charRoot.rotation.y = controller.yaw;
+        }
+
+        if (debugCapsule.visible) {
+          debugCapsule.geometry.dispose();
+          debugCapsule.geometry = new THREE.CapsuleGeometry(radius, height, 4, 8);
+          debugCapsule.position.set(controller.position.x, cy, controller.position.z);
+        }
+      }
+
+      function updateCharacterAnim(input, dt) {
+        if (!charMixer || !charActions || viewMode !== "character") return;
+        if (controller.inAir) {
+          if (controller.velY > 0.5 && charActions.jumpStart) {
+            setCharAction(charActions.jumpStart);
+          } else if (charActions.jumpLoop) {
+            setCharAction(charActions.jumpLoop);
+          }
+        } else if (controller.crouching) {
+          setCharAction(
+            Math.hypot(input.mx, input.mz) > 0.01
+              ? charActions.crouchWalk
+              : charActions.crouch,
+          );
+        } else if (Math.hypot(input.mx, input.mz) > 0.01) {
+          setCharAction(input.run ? charActions.run : charActions.walk);
+        } else {
+          setCharAction(charActions.idle);
+        }
+        charMixer.update(dt);
+      }
+
+      function respawnAt(idx) {
+        spawnIdx = ((idx % PARKOUR_SPAWNS.length) + PARKOUR_SPAWNS.length) % PARKOUR_SPAWNS.length;
+        const s = PARKOUR_SPAWNS[spawnIdx];
+        controller.reset(s.x, s.y, s.z);
+      }
+
+      function buildPanel() {
+        const panel = document.getElementById("panel");
+        const p = controller.params;
+        panel.innerHTML = `<h2>On-foot physics</h2>`;
+
+        const physRow = document.createElement("div");
+        physRow.className = "inline-row";
+        physRow.innerHTML = `<span>Physics</span>`;
+        const physSel = document.createElement("select");
+        [
+          ["capsule", "Capsule collide (new)"],
+          ["mirror", "Editor mirror"],
+        ].forEach(([val, label]) => {
+          const o = document.createElement("option");
+          o.value = val;
+          o.textContent = label;
+          if (val === physicsMode) o.selected = true;
+          physSel.appendChild(o);
+        });
+        physSel.addEventListener("change", () => setPhysicsMode(physSel.value));
+        physRow.appendChild(physSel);
+        panel.appendChild(physRow);
+
+        const modeRow = document.createElement("div");
+        modeRow.className = "inline-row";
+        modeRow.innerHTML = `<span>View mode</span>`;
+        const modeSel = document.createElement("select");
+        ["capsule", "character"].forEach((m) => {
+          const o = document.createElement("option");
+          o.value = m;
+          o.textContent = m;
+          if (m === viewMode) o.selected = true;
+          modeSel.appendChild(o);
+        });
+        modeSel.addEventListener("change", () => {
+          viewMode = modeSel.value;
+        });
+        modeRow.appendChild(modeSel);
+        panel.appendChild(modeRow);
+
+        const spawnSel = document.createElement("select");
+        PARKOUR_SPAWNS.forEach((s, i) => {
+          const o = document.createElement("option");
+          o.value = String(i);
+          o.textContent = s.label;
+          spawnSel.appendChild(o);
+        });
+        spawnSel.addEventListener("change", () => respawnAt(Number(spawnSel.value)));
+        const spawnRow = document.createElement("div");
+        spawnRow.className = "inline-row";
+        spawnRow.innerHTML = `<span>Spawn</span>`;
+        spawnRow.appendChild(spawnSel);
+        panel.appendChild(spawnRow);
+
+        const commonFolders = [
+          {
+            title: "Capsule",
+            keys: [
+              ["capRadius", "Radius (CAP_R)", 0.2, 0.7, 0.01],
+              ["capHeight", "Height (CAP_H)", 0.6, 2.0, 0.05],
+            ],
+          },
+          {
+            title: "Move",
+            keys: [
+              ["walkSpeed", "Walk", 2, 8, 0.1],
+              ["runSpeed", "Run", 4, 14, 0.1],
+              ["crouchSpeedMult", "Crouch ×", 0.2, 1, 0.02],
+            ],
+          },
+          {
+            title: "Jump / gravity",
+            keys: [
+              ["jumpVel", "Jump vel", 5, 16, 0.25],
+              ["gravity", "Gravity", 8, 40, 0.5],
+              ["glideFallSpeed", "Glide fall", 1, 10, 0.25],
+            ],
+          },
+        ];
+
+        const modeFolders =
+          physicsMode === "capsule"
+            ? [
+                {
+                  title: "Collision",
+                  keys: [
+                    ["minGroundNormalY", "Slope limit N·Y", 0.1, 0.95, 0.01],
+                    ["groundStickDist", "Ground stick", 0, 1, 0.05],
+                    ["crouchHeightScale", "Crouch H×", 0.3, 1, 0.02],
+                    ["iterations", "Depen. iters", 1, 8, 1],
+                    ["substepFraction", "Substep frac", 0.2, 1, 0.05],
+                    ["yawLerpRate", "Turn rate", 4, 30, 0.5],
+                  ],
+                },
+                {
+                  title: "Step / jump feel",
+                  keys: [
+                    ["stepMaxHeight", "Autostep max", 0, 0.9, 0.05],
+                    ["coyoteTime", "Coyote s", 0, 0.35, 0.01],
+                    ["jumpBufferTime", "Jump buffer s", 0, 0.35, 0.01],
+                  ],
+                },
+              ]
+            : [
+                {
+                  title: "Ground",
+                  keys: [
+                    ["groundStepUp", "Ground step-up", 0.2, 2.5, 0.05],
+                    ["ledgeFallThreshold", "Ledge walk-off", 0.1, 1.2, 0.05],
+                  ],
+                },
+                {
+                  title: "Collision",
+                  keys: [
+                    ["wallMargin", "Wall margin", 0, 0.2, 0.005],
+                    ["yawLerpRate", "Turn rate", 4, 30, 0.5],
+                  ],
+                },
+              ];
+
+        const folders = [...commonFolders, ...modeFolders];
+
+        const toggles = [];
+
+        const debugToggles = [["debugCapsule", "Wire capsule"]];
+
+        for (const folder of folders) {
+          const det = document.createElement("details");
+          det.open = folder.title === "Collision" || folder.title === "Ground";
+          det.innerHTML = `<summary>${folder.title}</summary>`;
+          for (const [key, label, min, max, step] of folder.keys) {
+            const row = document.createElement("div");
+            row.className = "row";
+            const span = document.createElement("span");
+            span.textContent = label;
+            const out = document.createElement("output");
+            out.textContent = String(p[key]);
+            const range = document.createElement("input");
+            range.type = "range";
+            range.min = String(min);
+            range.max = String(max);
+            range.step = String(step);
+            range.value = String(p[key]);
+            range.addEventListener("input", () => {
+              const v = Number(range.value);
+              p[key] = v;
+              out.textContent = String(v);
+            });
+            row.append(span, out, range);
+            det.appendChild(row);
+          }
+          panel.appendChild(det);
+        }
+
+        const togDet = document.createElement("details");
+        togDet.open = true;
+        togDet.innerHTML = `<summary>Toggles</summary>`;
+        for (const [key, label] of toggles) {
+          const row = document.createElement("div");
+          row.className = "inline-row";
+          const span = document.createElement("span");
+          span.textContent = label;
+          const cb = document.createElement("input");
+          cb.type = "checkbox";
+          cb.checked = !!p[key];
+          cb.addEventListener("change", () => {
+            p[key] = cb.checked;
+          });
+          row.append(span, cb);
+          togDet.appendChild(row);
+        }
+        for (const [id, label] of debugToggles) {
+          const row = document.createElement("div");
+          row.className = "inline-row";
+          const span = document.createElement("span");
+          span.textContent = label;
+          const cb = document.createElement("input");
+          cb.type = "checkbox";
+          cb.addEventListener("change", () => {
+            if (id === "debugCapsule") debugCapsule.visible = cb.checked;
+          });
+          row.append(span, cb);
+          togDet.appendChild(row);
+        }
+        panel.appendChild(togDet);
+
+        const exportBtn = document.createElement("button");
+        exportBtn.textContent = "Copy params JSON";
+        exportBtn.addEventListener("click", () => {
+          navigator.clipboard?.writeText(JSON.stringify(p, null, 2));
+        });
+        panel.appendChild(exportBtn);
+      }
+
+      buildPanel();
+
+      renderer.domElement.addEventListener("click", () => {
+        renderer.domElement.requestPointerLock();
+      });
+      document.addEventListener("pointerlockchange", () => {
+        pointerLocked = document.pointerLockElement === renderer.domElement;
+      });
+      document.addEventListener("mousemove", (e) => {
+        if (!pointerLocked) return;
+        camYaw -= e.movementX * 0.002;
+        camPitch = THREE.MathUtils.clamp(camPitch - e.movementY * 0.002, -0.6, 1.1);
+      });
+      document.addEventListener("keydown", (e) => {
+        keys[e.code] = true;
+        if (e.code === "Digit1") viewMode = "capsule";
+        if (e.code === "Digit2" && charLoaded) viewMode = "character";
+        if (e.code === "KeyR" && !e.repeat) respawnAt(spawnIdx + 1);
+        if (e.code === "KeyP" && !e.repeat)
+          setPhysicsMode(physicsMode === "capsule" ? "mirror" : "capsule");
+        if (["Space", "ArrowUp", "ArrowDown", "ArrowLeft", "ArrowRight"].includes(e.code)) {
+          e.preventDefault();
+        }
+      });
+      document.addEventListener("keyup", (e) => {
+        keys[e.code] = false;
+      });
+
+      const hud = document.getElementById("hud");
+      const _camTgt = new THREE.Vector3();
+      const _camDes = new THREE.Vector3();
+      let lastT = performance.now();
+
+      function updateHud() {
+        const d = controller.debug;
+        const modeLabel = viewMode === "character" ? "CHAR" : "CAPSULE";
+        const lastLine =
+          physicsMode === "capsule"
+            ? `N·Y ${(d.normalY ?? 0).toFixed(2)}  substeps ${d.substeps ?? 1}  plat ${d.onPlatform ? "yes" : "no"}`
+            : `wall ${d.blocked ? "blocked" : "clear"}  bvh tris ${bvh.triCount}`;
+        hud.textContent =
+          `physics ${physicsMode === "capsule" ? "CAPSULE-COLLIDE" : "EDITOR-MIRROR"}  view ${modeLabel}\n` +
+          `spawn ${PARKOUR_SPAWNS[spawnIdx].label}\n` +
+          `pos ${controller.position.x.toFixed(2)}, ${controller.position.y.toFixed(2)}, ${controller.position.z.toFixed(2)}\n` +
+          `velY ${controller.velY.toFixed(2)}  hspd ${d.moveSpeed.toFixed(2)}  ground ${d.groundY.toFixed(2)}\n` +
+          `air ${controller.inAir ? "yes" : "no"}  grounded ${controller.grounded ? "yes" : "no"}  glide ${controller.gliding ? "yes" : "no"}\n` +
+          lastLine;
+      }
+
+      function updateCamera(dt) {
+        const cy = controller.getCapsuleCenterY() + 0.3;
+        _camTgt.set(controller.position.x, cy, controller.position.z);
+        const dist = 7.5;
+        const cp = Math.cos(camPitch);
+        _camDes.set(
+          _camTgt.x + Math.sin(camYaw) * cp * dist,
+          _camTgt.y + Math.sin(camPitch) * dist,
+          _camTgt.z + Math.cos(camYaw) * cp * dist,
+        );
+        const s = 1 - Math.exp(-8 * dt);
+        camera.position.lerp(_camDes, s);
+        camera.lookAt(_camTgt);
+      }
+
+      renderer.setAnimationLoop(() => {
+        const now = performance.now();
+        const dt = Math.min((now - lastT) / 1000, 0.05);
+        lastT = now;
+
+        let mx = 0;
+        let mz = 0;
+        if (keys.KeyW || keys.ArrowUp) {
+          mx -= Math.sin(camYaw);
+          mz -= Math.cos(camYaw);
+        }
+        if (keys.KeyS || keys.ArrowDown) {
+          mx += Math.sin(camYaw);
+          mz += Math.cos(camYaw);
+        }
+        if (keys.KeyA || keys.ArrowLeft) {
+          mx -= Math.cos(camYaw);
+          mz += Math.sin(camYaw);
+        }
+        if (keys.KeyD || keys.ArrowRight) {
+          mx += Math.cos(camYaw);
+          mz -= Math.sin(camYaw);
+        }
+
+        const input = {
+          mx,
+          mz,
+          jump: !!keys.Space,
+          run: !!(keys.ShiftLeft || keys.ShiftRight),
+          crouch: !!(keys.ControlLeft || keys.ControlRight),
+        };
+
+        movers.update(dt);
+        controller.update(dt, {
+          input,
+          collider,
+          getTerrainHeight,
+          worldHalf: WORLD_HALF,
+          platforms: movers.platforms,
+        });
+
+        updateCharacterAnim(input, dt);
+        syncVisuals();
+        updateCamera(dt);
+        updateHud();
+        renderer.render(scene, camera);
+      });
+
+      window.addEventListener("resize", () => {
+        camera.aspect = window.innerWidth / window.innerHeight;
+        camera.updateProjectionMatrix();
+        renderer.setSize(window.innerWidth, window.innerHeight);
+      });
+    </script>
+  </body>
+</html>
