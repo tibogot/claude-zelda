@@ -38,6 +38,7 @@ export const GANTRY_DEFAULTS = {
 
   board: true,
   boardMode: "checker", // checker | chevron | lights
+  boardShape: "round", // round | square | diamond | solid (no dots)
   boardHeightFrac: 0.78, // board height as a fraction of beamHeight
   boardInsetEnds: 0.9, // shrink the board this far in from each tower
   dotPitch: 0.085, // metres per LED dot — keeps dot size constant at any span
@@ -102,18 +103,34 @@ function makeBoardMaterial(p, boardW, boardH) {
     side: THREE.DoubleSide,
   });
 
+  const solid = p.boardShape === "solid";
+
   mat.emissiveNode = Fn(() => {
-    const gx = uv().x.mul(cols);
-    const gy = uv().y.mul(rows);
+    const base = uv();
+    const gx = base.x.mul(cols);
+    const gy = base.y.mul(rows);
     const cxc = gx.floor().add(0.5);
     const cyc = gy.floor().add(0.5);
-    const dot = smoothstep(
-      dotR,
-      dotR - 0.06,
-      vec2(gx.sub(cxc), gy.sub(cyc)).length(),
-    );
-    const cu = cxc.div(cols); // cell-centre uv 0..1
-    const cv = cyc.div(rows);
+
+    // pixel style: round / square / diamond / solid (no mask)
+    const lx = gx.sub(cxc).abs();
+    const ly = gy.sub(cyc).abs();
+    let dot;
+    if (solid) {
+      dot = float(1.0);
+    } else {
+      const dist =
+        p.boardShape === "square"
+          ? lx.max(ly)
+          : p.boardShape === "diamond"
+            ? lx.add(ly)
+            : vec2(lx, ly).length(); // round
+      dot = smoothstep(dotR, dotR - 0.06, dist);
+    }
+
+    // solid samples the pattern continuously (smooth); else at the cell centre
+    const cu = solid ? base.x : cxc.div(cols);
+    const cv = solid ? base.y : cyc.div(rows);
 
     // hot core -> warm rim per dot (matches the LED board look)
     const core = dot.mul(dot);

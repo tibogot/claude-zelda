@@ -119,6 +119,7 @@
         threshold: 0.5, // image/text: luminance cutoff for "lit"
         cols: 78,
         rows: 22,
+        shape: 0, // 0 round · 1 square · 2 diamond · 3 solid (no dots)
         dotRadius: 0.36,
         emissive: 6.0,
         offLevel: 0.04,
@@ -139,6 +140,7 @@
         threshold: uniform(float(params.threshold)),
         cols: uniform(float(params.cols)),
         rows: uniform(float(params.rows)),
+        shape: uniform(float(params.shape)),
         dotRadius: uniform(float(params.dotRadius)),
         emissive: uniform(float(params.emissive)),
         offLevel: uniform(float(params.offLevel)),
@@ -249,12 +251,30 @@
           const grid = vec2(baseUV.x.mul(u.cols), baseUV.y.mul(u.rows));
           const cellCenter = grid.floor().add(0.5);
           const local = grid.sub(cellCenter); // -0.5 .. 0.5
-          // correct for non-square cells so the LED stays a round dot
+          // correct for non-square cells so the LED stays the right shape
           const shaped = vec2(local.x.mul(u.cellAspect), local.y);
-          // circular LED — soft edge gives the "clipping dots" look
-          const dot = smoothstep(u.dotRadius, u.dotRadius.sub(0.06), shaped.length());
+          const ax = shaped.x.abs();
+          const ay = shaped.y.abs();
+          // pixel style: 0 round · 1 square · 2 diamond · 3 solid (no mask)
+          const dist = select(
+            u.shape.lessThan(0.5),
+            shaped.length(), // round
+            select(u.shape.lessThan(1.5), ax.max(ay), ax.add(ay)), // square / diamond
+          );
+          const solid = u.shape.greaterThan(2.5);
+          const dot = select(
+            solid,
+            float(1.0), // solid: fill the whole pattern, no LED mask
+            smoothstep(u.dotRadius, u.dotRadius.sub(0.06), dist),
+          );
 
-          const cuv = cellCenter.div(vec2(u.cols, u.rows)); // cell-centre uv 0..1
+          // solid mode samples the pattern continuously (smooth), otherwise at
+          // the cell centre so each LED snaps cleanly on/off
+          const cuv = select(
+            solid,
+            baseUV,
+            cellCenter.div(vec2(u.cols, u.rows)),
+          );
           const scroll = time.mul(u.panSpeed);
 
           // ── SOURCE A: procedural chevron (panned) ──
@@ -532,6 +552,12 @@
           </section>
           <section>
             <label>LED grid</label>
+            <div class="row"><select id="shape" class="full" style="grid-column:1/-1">
+              <option value="0">Round dots</option>
+              <option value="1">Square dots</option>
+              <option value="2">Diamond dots</option>
+              <option value="3">Solid (no dots)</option>
+            </select></div>
             <div class="row">
               <span>Columns</span><output id="o-cols">${params.cols}</output>
               <input type="range" id="cols" min="20" max="160" step="1" value="${params.cols}" />
@@ -615,6 +641,10 @@
 
         document.getElementById("source").addEventListener("change", (e) => {
           setSource(Number(e.target.value));
+        });
+        document.getElementById("shape").addEventListener("change", (e) => {
+          params.shape = Number(e.target.value);
+          u.shape.value = params.shape;
         });
         document.getElementById("rgb").addEventListener("change", (e) => {
           params.rgb = e.target.checked ? 1 : 0;
