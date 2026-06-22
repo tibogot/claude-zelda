@@ -479,6 +479,13 @@
         WINDMILL_DEFAULTS,
         WINDMILL_HERO_POINTS,
       } from "./objects/windmill.js";
+      import {
+        buildTrafficLightMesh,
+        TRAFFIC_LIGHT_DEFAULTS,
+        TRAFFIC_LIGHT_HERO_POINTS,
+      } from "./objects/trafficLight.js";
+      import { pass, mrt, output, emissive } from "three/tsl";
+      import { bloom } from "three/addons/tsl/display/BloomNode.js";
 
       const PARAMS = {
         camera: { fov: 60, followDist: 8 },
@@ -508,6 +515,12 @@
           shadowBias: -0.0005,
           shadowNormalBias: 0.02,
         },
+        bloom: {
+          enabled: true,
+          strength: 0.9,
+          radius: 0.6,
+          threshold: 0.0, // selective bloom = emissive buffer only; bloom it all
+        },
         // Same defaults as v2/editor (config.js physicalSky block).
         physicalSky: {
           turbidity: 2,
@@ -534,6 +547,7 @@
         streetLamp: { ...STREET_LAMP_DEFAULTS },
         sidewalk: { ...SIDEWALK_DEFAULTS, _map: null },
         windmill: { ...WINDMILL_DEFAULTS },
+        trafficLight: { ...TRAFFIC_LIGHT_DEFAULTS },
         lab: { objectType: "guardrail", layout: "spline" },
         spline: {
           closed: false,
@@ -771,6 +785,8 @@
               return { ...PARAMS.sidewalk, map: PARAMS.sidewalk._map ?? null };
             case "windmill":
               return PARAMS.windmill;
+            case "trafficLight":
+              return PARAMS.trafficLight;
             default:
               return PARAMS.guardrail;
           }
@@ -805,6 +821,8 @@
               return buildSidewalkMesh(opts);
             case "windmill":
               return buildWindmillMesh(opts);
+            case "trafficLight":
+              return buildTrafficLightMesh(opts);
             default:
               return buildGuardrailMesh(opts);
           }
@@ -842,12 +860,16 @@
           if (type === "windmill") {
             return WINDMILL_HERO_POINTS;
           }
+          if (type === "trafficLight") {
+            return TRAFFIC_LIGHT_HERO_POINTS;
+          }
           return HERO_STRIP_POINTS;
         }
 
         function minSplinePointsForLab() {
           return PARAMS.lab.objectType === "streetLamp" ||
-            PARAMS.lab.objectType === "windmill"
+            PARAMS.lab.objectType === "windmill" ||
+            PARAMS.lab.objectType === "trafficLight"
             ? 1
             : 2;
         }
@@ -1057,6 +1079,7 @@
           "streetLamp",
           "sidewalk",
           "windmill",
+          "trafficLight",
         ];
         const GALLERY_LABELS = {
           guardrail: "Guardrail",
@@ -1068,6 +1091,7 @@
           streetLamp: "Street lamp",
           sidewalk: "Sidewalk",
           windmill: "Windmill",
+          trafficLight: "Traffic Light",
         };
         const GALLERY_COLS = 3;
         const GALLERY_GAP = 4; // open space between cell footprints (m)
@@ -1082,7 +1106,7 @@
           { x: 3, y: 0, z: 0 },
         ];
         function getPreviewPoints(type) {
-          if (type === "streetLamp" || type === "windmill") {
+          if (type === "streetLamp" || type === "windmill" || type === "trafficLight") {
             return [{ x: 0, y: 0, z: 0 }];
           }
           return GALLERY_STRIP.map((p) => ({ ...p }));
@@ -1498,7 +1522,8 @@
             controls.update();
           }
 
-          renderer.render(scene, camera);
+          if (PARAMS.bloom.enabled) bloomPipeline.render();
+          else renderer.render(scene, camera);
           renderer.resolveTimestampsAsync(THREE.TimestampQuery.RENDER);
           stats.update();
         });
@@ -1511,9 +1536,26 @@
         });
 
         // ── UI PANEL (v2/editor.html helpers) ──────────────────────────────
+        // ── POST: SELECTIVE bloom — only the emissive MRT buffer is bloomed,
+        // so emissive objects (LED lamps, lamp bulbs) glow but the bright sky
+        // never does, no matter how bright it gets. ──
+        const bloomPipeline = new THREE.RenderPipeline(renderer);
+        const scenePass = pass(scene, camera);
+        scenePass.setMRT(mrt({ output: output, emissive: emissive }));
+        const sceneColor = scenePass.getTextureNode("output");
+        const emissiveColor = scenePass.getTextureNode("emissive");
+        const bloomPass = bloom(
+          emissiveColor,
+          PARAMS.bloom.strength,
+          PARAMS.bloom.radius,
+          PARAMS.bloom.threshold,
+        );
+        bloomPipeline.outputNode = sceneColor.add(bloomPass);
+
         buildInspector({
           camera,
           floorMat,
+          bloomPass,
           updateSun,
           rebuildSkyEnv,
           lab,
@@ -1739,6 +1781,7 @@
       function buildInspector({
         camera,
         floorMat,
+        bloomPass,
         updateSun,
         rebuildSkyEnv,
         lab,
@@ -1782,6 +1825,8 @@
             type === "sidewalk" ? "" : "none";
           windmillSection.parentElement.style.display =
             type === "windmill" ? "" : "none";
+          trafficLightSection.parentElement.style.display =
+            type === "trafficLight" ? "" : "none";
         }
 
         // Toggle show/hide.
@@ -1860,6 +1905,7 @@
               streetLamp: "Street lamp",
               sidewalk: "Sidewalk",
               windmill: "Windmill",
+              trafficLight: "Traffic Light",
             },
             onChange: () => {
               syncObjectSections();
@@ -2791,6 +2837,103 @@
           });
         }
 
+        const trafficLightSection = _section(body, "Traffic Light", true);
+        {
+          const sec = trafficLightSection;
+          const T = PARAMS.trafficLight;
+          _slider(sec, T, "poleHeight", {
+            label: "Pole H (place height)",
+            min: 0.5,
+            max: 8,
+            step: 0.05,
+            onChange: rebuildObj,
+          });
+          _slider(sec, T, "poleRadius", {
+            label: "Pole R",
+            min: 0.04,
+            max: 0.2,
+            step: 0.005,
+            onChange: rebuildObj,
+          });
+          _separator(sec);
+          _slider(sec, T, "lampSize", {
+            label: "Lamp size",
+            min: 0.15,
+            max: 0.8,
+            step: 0.01,
+            onChange: rebuildObj,
+          });
+          _slider(sec, T, "lampGap", {
+            label: "Lamp gap",
+            min: 0.2,
+            max: 1.0,
+            step: 0.01,
+            onChange: rebuildObj,
+          });
+          _separator(sec);
+          _slider(sec, T, "density", {
+            label: "LED density",
+            min: 6,
+            max: 32,
+            step: 1,
+            onChange: rebuildObj,
+          });
+          _slider(sec, T, "dotRadius", {
+            label: "Dot size",
+            min: 0.12,
+            max: 0.5,
+            step: 0.01,
+            onChange: rebuildObj,
+          });
+          _slider(sec, T, "emissive", {
+            label: "Brightness",
+            min: 1,
+            max: 14,
+            step: 0.1,
+            onChange: rebuildObj,
+          });
+          _separator(sec);
+          _slider(sec, T, "greenDur", {
+            label: "Green s",
+            min: 0,
+            max: 10,
+            step: 0.1,
+            onChange: rebuildObj,
+          });
+          _slider(sec, T, "amberDur", {
+            label: "Amber s",
+            min: 0,
+            max: 6,
+            step: 0.1,
+            onChange: rebuildObj,
+          });
+          _slider(sec, T, "redDur", {
+            label: "Red s",
+            min: 0,
+            max: 10,
+            step: 0.1,
+            onChange: rebuildObj,
+          });
+          _slider(sec, T, "redAmberDur", {
+            label: "Red+Amber s",
+            min: 0,
+            max: 6,
+            step: 0.1,
+            onChange: rebuildObj,
+          });
+          _slider(sec, T, "speed", {
+            label: "Speed",
+            min: 0.1,
+            max: 5,
+            step: 0.1,
+            onChange: rebuildObj,
+          });
+          _separator(sec);
+          _color(sec, T, "redColor", { label: "Red", onChange: rebuildObj });
+          _color(sec, T, "amberColor", { label: "Amber", onChange: rebuildObj });
+          _color(sec, T, "greenColor", { label: "Green", onChange: rebuildObj });
+        }
+
         syncObjectSections();
 
         // ── Spline ──
@@ -2883,6 +3026,39 @@
             min: 3,
             max: 25,
             step: 0.25,
+          });
+        }
+
+        // ── Bloom (makes emissive objects glow) ──
+        {
+          const sec = _section(body, "Bloom", true);
+          _toggle(sec, PARAMS.bloom, "enabled", { label: "Enabled" });
+          _slider(sec, PARAMS.bloom, "strength", {
+            label: "Strength",
+            min: 0,
+            max: 3,
+            step: 0.05,
+            onChange: (v) => {
+              if (bloomPass) bloomPass.strength.value = v;
+            },
+          });
+          _slider(sec, PARAMS.bloom, "radius", {
+            label: "Radius",
+            min: 0,
+            max: 1,
+            step: 0.02,
+            onChange: (v) => {
+              if (bloomPass) bloomPass.radius.value = v;
+            },
+          });
+          _slider(sec, PARAMS.bloom, "threshold", {
+            label: "Threshold",
+            min: 0,
+            max: 3,
+            step: 0.01,
+            onChange: (v) => {
+              if (bloomPass) bloomPass.threshold.value = v;
+            },
           });
         }
 
