@@ -59,6 +59,8 @@
         border: 1px solid rgba(255, 255, 255, 0.14);
         border-radius: 5px; padding: 6px 8px;
       }
+      select { background-color: #14161c; }
+      select option { background-color: #14161c; color: #e8e8ee; }
       button {
         cursor: pointer; color: #ff9a2e; border-color: rgba(255, 154, 46, 0.4);
       }
@@ -102,17 +104,14 @@
       import { OrbitControls } from "three/addons/controls/OrbitControls.js";
       import { bloom } from "three/addons/tsl/display/BloomNode.js";
 
-      // Board face proportions (used to fit content + keep dots round-ish)
-      const BOARD_W = 6.4;
-      const BOARD_H = 1.9;
-      const BOARD_ASPECT = BOARD_W / BOARD_H;
-
       // Source modes
-      const MODE = { CHEVRON: 0, IMAGE: 1, TEXT: 2 };
+      const MODE = { CHEVRON: 0, IMAGE: 1, TEXT: 2, VIDEO: 3 };
 
       const params = {
         source: MODE.CHEVRON,
         rgb: 0, // 1 = show source colour per LED (video-wall), 0 = mono LED
+        boardW: 6.4, // physical board width
+        boardH: 1.9, // physical board height
         panSpeed: 0.4, // chevron: cells/sec · image+text: uv/sec scroll
         chevronCount: 6,
         skew: 2.3,
@@ -146,7 +145,11 @@
         coreColor: uniform(color(params.coreColor)),
         edgeColor: uniform(color(params.edgeColor)),
         contentRepeat: uniform(float(1.0)), // texture widths across the board
+        cellAspect: uniform(float(1.0)), // (cellW/cellH) — keeps LED dots round
       };
+
+      const boardAspect = () => params.boardW / params.boardH;
+      let sourceAspect = 1.0; // current content's own width/height
 
       // ONE persistent content canvas + texture. We redraw into the canvas and
       // flag needsUpdate — never swap the texture object — so the GPU binding
@@ -168,15 +171,31 @@
       contentCanvasTex.generateMipmaps = false;
       const contentTex = texture(contentCanvasTex);
 
-      // Re-upload after drawing into the canvas. dispose() forces the WebGPU
-      // backend to recreate the GPU texture when the canvas size changed.
-      function commitContent(repeat) {
-        contentCanvasTex.dispose();
+      // Re-upload after drawing into the canvas. Pass resized=true when the
+      // canvas dimensions changed so the WebGPU backend recreates the GPU
+      // texture; per-frame video updates pass false (same size = cheap upload).
+      function commitContent(resized = true) {
+        if (resized) contentCanvasTex.dispose();
         contentCanvasTex.needsUpdate = true;
-        u.contentRepeat.value = repeat;
       }
 
+      // How many texture-widths span the board. Text shows at natural height
+      // (so it scrolls); image/video fills the board once (use Fit to source
+      // to match the board's aspect and avoid squeezing).
+      function updateContentMapping() {
+        u.contentRepeat.value =
+          params.source === MODE.TEXT ? boardAspect() / sourceAspect : 1.0;
+      }
+
+      // Offscreen <video> drawn into the content canvas each frame.
+      const video = document.createElement("video");
+      video.muted = true;
+      video.loop = true;
+      video.playsInline = true;
+      video.crossOrigin = "anonymous";
+
       let camera, scene, renderer, controls, pipeline, bloomPass, boardMaterial;
+      let board, frame, legL, legR;
 
       init().catch(console.error);
 
@@ -230,8 +249,10 @@
           const grid = vec2(baseUV.x.mul(u.cols), baseUV.y.mul(u.rows));
           const cellCenter = grid.floor().add(0.5);
           const local = grid.sub(cellCenter); // -0.5 .. 0.5
+          // correct for non-square cells so the LED stays a round dot
+          const shaped = vec2(local.x.mul(u.cellAspect), local.y);
           // circular LED — soft edge gives the "clipping dots" look
-          const dot = smoothstep(u.dotRadius, u.dotRadius.sub(0.06), local.length());
+          const dot = smoothstep(u.dotRadius, u.dotRadius.sub(0.06), shaped.length());
 
           const cuv = cellCenter.div(vec2(u.cols, u.rows)); // cell-centre uv 0..1
           const scroll = time.mul(u.panSpeed);
@@ -278,6 +299,8 @@
         return mat;
       }
 
+      const STAND_TOP = 0.7; // board sits this high above the ground
+
       function buildScene() {
         const ground = new THREE.Mesh(
           new THREE.PlaneGeometry(60, 60),
@@ -286,24 +309,19 @@
         ground.rotation.x = -Math.PI / 2;
         scene.add(ground);
 
-        const pad = 0.16;
-        const frame = new THREE.Mesh(
-          new THREE.BoxGeometry(BOARD_W + pad * 2, BOARD_H + pad * 2, 0.22),
+        // Unit-sized meshes; layoutBoard() scales/positions them to boardW/H.
+        frame = new THREE.Mesh(
+          new THREE.BoxGeometry(1, 1, 0.22),
           new THREE.MeshStandardNodeMaterial({
             color: 0x120708,
             roughness: 0.55,
             metalness: 0.3,
           }),
         );
-        frame.position.set(0, 1.6, -0.08);
         scene.add(frame);
 
-        const board = new THREE.Mesh(
-          new THREE.PlaneGeometry(BOARD_W, BOARD_H),
-          boardMaterial,
-        );
+        board = new THREE.Mesh(new THREE.PlaneGeometry(1, 1), boardMaterial);
         board.name = "ledBoard";
-        board.position.set(0, 1.6, 0.04);
         scene.add(board);
 
         const legMat = new THREE.MeshStandardNodeMaterial({
@@ -311,14 +329,12 @@
           roughness: 0.6,
           metalness: 0.4,
         });
-        for (const x of [-BOARD_W * 0.35, BOARD_W * 0.35]) {
-          const leg = new THREE.Mesh(
-            new THREE.CylinderGeometry(0.07, 0.09, 1.3, 12),
-            legMat,
-          );
-          leg.position.set(x, 0.65, -0.05);
-          scene.add(leg);
-        }
+        legL = new THREE.Mesh(
+          new THREE.CylinderGeometry(0.07, 0.09, STAND_TOP, 12),
+          legMat,
+        );
+        legR = legL.clone();
+        scene.add(legL, legR);
 
         const spill = new THREE.PointLight(0xff7a1e, 26, 14, 2);
         spill.position.set(0, 1.4, 2.0);
@@ -327,6 +343,32 @@
         const key = new THREE.DirectionalLight(0xffffff, 0.4);
         key.position.set(3, 6, 4);
         scene.add(key);
+
+        layoutBoard();
+      }
+
+      // (Re)position + size the board, frame and legs from boardW/boardH.
+      function layoutBoard() {
+        const w = params.boardW;
+        const h = params.boardH;
+        const pad = 0.16;
+        const cy = STAND_TOP + h / 2;
+        board.scale.set(w, h, 1);
+        board.position.set(0, cy, 0.04);
+        frame.scale.set(w + pad * 2, h + pad * 2, 1);
+        frame.position.set(0, cy, -0.08);
+        legL.position.set(-w * 0.35, STAND_TOP / 2, -0.05);
+        legR.position.set(w * 0.35, STAND_TOP / 2, -0.05);
+        updateCellAspect();
+        updateContentMapping();
+        controls.target.set(0, cy, 0);
+        controls.update();
+      }
+
+      // Keep LED dots round: cell world aspect = (boardW/cols)/(boardH/rows).
+      function updateCellAspect() {
+        u.cellAspect.value =
+          params.boardW / params.cols / (params.boardH / params.rows);
       }
 
       function buildPost() {
@@ -364,7 +406,9 @@
         c.fillText(str, padX, h * 0.52);
 
         // show the text at natural size (height fills board), let it scroll
-        commitContent(BOARD_ASPECT / (contentCanvas.width / contentCanvas.height));
+        sourceAspect = contentCanvas.width / contentCanvas.height;
+        commitContent(true);
+        updateContentMapping();
       }
 
       function applyImageFromURL(url) {
@@ -375,18 +419,46 @@
           const c = contentCanvas.getContext("2d");
           c.clearRect(0, 0, contentCanvas.width, contentCanvas.height);
           c.drawImage(img, 0, 0);
-          commitContent(1.0); // fill the board once
+          sourceAspect = img.naturalWidth / img.naturalHeight;
+          commitContent(true);
+          updateContentMapping();
           URL.revokeObjectURL(url);
         };
         img.onerror = () => URL.revokeObjectURL(url);
         img.src = url;
       }
 
+      function applyVideoFromURL(url) {
+        // size the content canvas to the video (capped) once metadata is known
+        video.onloadedmetadata = () => {
+          const maxW = 640;
+          const scale = Math.min(1, maxW / video.videoWidth);
+          contentCanvas.width = Math.max(2, Math.round(video.videoWidth * scale));
+          contentCanvas.height = Math.max(2, Math.round(video.videoHeight * scale));
+          sourceAspect = video.videoWidth / video.videoHeight;
+          updateContentMapping();
+          commitContent(true);
+        };
+        video.src = url;
+        video.play().catch(() => {});
+      }
+
+      // Draw the current video frame into the content canvas (called per frame).
+      function pumpVideo() {
+        if (params.source !== MODE.VIDEO) return;
+        if (video.readyState < 2) return; // HAVE_CURRENT_DATA
+        const c = contentCanvas.getContext("2d");
+        c.drawImage(video, 0, 0, contentCanvas.width, contentCanvas.height);
+        commitContent(false); // same size every frame → cheap upload
+      }
+
       function setSource(mode) {
         params.source = mode;
         u.mode.value = mode;
         if (mode === MODE.TEXT) applyText(params.text);
-        // image content is loaded on file pick; chevron ignores the texture
+        if (mode === MODE.VIDEO) video.play().catch(() => {});
+        else video.pause();
+        // image/video content load on file pick; chevron ignores the texture
         refreshSourceRows();
       }
 
@@ -402,12 +474,16 @@
               <option value="0">Chevron (procedural)</option>
               <option value="1">Image</option>
               <option value="2">Text marquee</option>
+              <option value="3">Video</option>
             </select></div>
             <div class="row" id="row-rgb"><label class="chk full">
               <input type="checkbox" id="rgb" /> RGB colour (video-wall)
             </label></div>
             <div class="row hidden" id="row-image">
               <input type="file" id="imageFile" class="full" accept="image/*" />
+            </div>
+            <div class="row hidden" id="row-video">
+              <input type="file" id="videoFile" class="full" accept="video/*" />
             </div>
             <div class="row hidden" id="row-text">
               <input type="text" id="textInput" class="full" value="${params.text}" />
@@ -426,6 +502,18 @@
               <span>Pan speed</span><output id="o-panSpeed">${params.panSpeed.toFixed(2)}</output>
               <input type="range" id="panSpeed" min="-1.5" max="1.5" step="0.01" value="${params.panSpeed}" />
             </div>
+          </section>
+          <section>
+            <label>Board size</label>
+            <div class="row">
+              <span>Width</span><output id="o-boardW">${params.boardW.toFixed(1)}</output>
+              <input type="range" id="boardW" min="1" max="12" step="0.1" value="${params.boardW}" />
+            </div>
+            <div class="row">
+              <span>Height</span><output id="o-boardH">${params.boardH.toFixed(1)}</output>
+              <input type="range" id="boardH" min="0.6" max="8" step="0.1" value="${params.boardH}" />
+            </div>
+            <div class="row"><button id="fitBtn" class="full">Fit board to source</button></div>
           </section>
           <section id="sec-chevron">
             <label>Chevron</label>
@@ -489,16 +577,32 @@
             apply(v);
           });
         };
+        // push a params value back onto its slider + readout (after Fit button)
+        const syncSlider = (id, dec) => {
+          const el = document.getElementById(id);
+          const out = document.getElementById("o-" + id);
+          if (el) el.value = params[id];
+          if (out) out.textContent = params[id].toFixed(dec);
+        };
+        const clampNum = (v, lo, hi) => Math.min(hi, Math.max(lo, v));
 
         slider("panSpeed", 2, (v) => (u.panSpeed.value = v));
         slider("threshold", 2, (v) => (u.threshold.value = v));
         slider("chevronCount", 0, (v) => (u.chevronCount.value = v));
         slider("skew", 1, (v) => (u.skew.value = v));
         slider("duty", 2, (v) => (u.duty.value = v));
-        slider("cols", 0, (v) => (u.cols.value = v));
-        slider("rows", 0, (v) => (u.rows.value = v));
+        slider("cols", 0, (v) => {
+          u.cols.value = v;
+          updateCellAspect();
+        });
+        slider("rows", 0, (v) => {
+          u.rows.value = v;
+          updateCellAspect();
+        });
         slider("dotRadius", 2, (v) => (u.dotRadius.value = v));
         slider("emissive", 1, (v) => (u.emissive.value = v));
+        slider("boardW", 1, layoutBoard);
+        slider("boardH", 1, layoutBoard);
         slider("bloomStrength", 2, (v) => (bloomPass.strength.value = v));
         slider("bloomRadius", 2, (v) => (bloomPass.radius.value = v));
 
@@ -521,6 +625,17 @@
           const file = e.target.files?.[0];
           if (file) applyImageFromURL(URL.createObjectURL(file));
         });
+        document.getElementById("videoFile").addEventListener("change", (e) => {
+          const file = e.target.files?.[0];
+          if (file) applyVideoFromURL(URL.createObjectURL(file));
+        });
+        document.getElementById("fitBtn").addEventListener("click", () => {
+          // match the board's aspect to the source so it isn't squeezed
+          params.boardH = clampNum(params.boardW / sourceAspect, 0.6, 8);
+          syncSlider("boardW", 1);
+          syncSlider("boardH", 1);
+          layoutBoard();
+        });
         const applyTextFromInput = () => {
           params.text = document.getElementById("textInput").value;
           applyText(params.text);
@@ -538,13 +653,16 @@
         const isChevron = params.source === MODE.CHEVRON;
         const isImage = params.source === MODE.IMAGE;
         const isText = params.source === MODE.TEXT;
+        const isVideo = params.source === MODE.VIDEO;
+        const hasContent = isImage || isText || isVideo;
         const show = (id, on) =>
           document.getElementById(id).classList.toggle("hidden", !on);
 
         show("row-image", isImage);
+        show("row-video", isVideo);
         show("row-text", isText);
         show("row-textbtn", isText);
-        show("row-threshold", (isImage || isText) && params.rgb === 0);
+        show("row-threshold", hasContent && params.rgb === 0);
         show("row-rgb", !isChevron);
         document.getElementById("sec-chevron").classList.toggle("hidden", !isChevron);
         // mono colour pickers only matter when not showing source RGB
@@ -560,6 +678,7 @@
 
       function animate() {
         controls.update();
+        pumpVideo();
         pipeline.render();
       }
     </script>
