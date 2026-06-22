@@ -138,10 +138,15 @@ export function updateWindmillRotors(root, params = {}, dt = 0) {
 }
 
 export function disposeWindmillGroup(group) {
+  // Windmill units are clones of a shared, app-lifetime template, and
+  // Object3D.clone() copies geometry/material *references* — it does not
+  // deep-copy them. So every clone shares the template's geometry + material.
+  // Disposing them here would destroy the template's GPU buffers and make
+  // every subsequent windmill build render a destroyed buffer ("used in
+  // submit while destroyed"). Nothing in a clone owns GPU data, so detaching
+  // is all that's needed; the caller already removes it from the scene.
   if (!group) return;
-  group.traverse((obj) => {
-    if (obj.isMesh) obj.geometry?.dispose();
-  });
+  if (group.parent) group.parent.remove(group);
 }
 
 /**

@@ -534,7 +534,7 @@
         streetLamp: { ...STREET_LAMP_DEFAULTS },
         sidewalk: { ...SIDEWALK_DEFAULTS, _map: null },
         windmill: { ...WINDMILL_DEFAULTS },
-        lab: { objectType: "guardrail" },
+        lab: { objectType: "guardrail", layout: "spline" },
         spline: {
           closed: false,
           editMode: false,
@@ -753,8 +753,8 @@
           });
         }
 
-        function getLabParams() {
-          switch (PARAMS.lab.objectType) {
+        function getLabParams(type = PARAMS.lab.objectType) {
+          switch (type) {
             case "fence":
               return PARAMS.fence;
             case "barrier":
@@ -776,14 +776,19 @@
           }
         }
 
-        function buildLabObject({ points, closed, params }) {
+        function buildLabObject({
+          points,
+          closed,
+          params,
+          type = PARAMS.lab.objectType,
+        }) {
           const opts = {
             points,
             closed,
             params,
             getWorldHeight: sampleHeight,
           };
-          switch (PARAMS.lab.objectType) {
+          switch (type) {
             case "fence":
               return buildFenceMesh(opts);
             case "barrier":
@@ -830,11 +835,11 @@
           lab.pointMeshes = [];
         }
 
-        function getHeroPoints() {
-          if (PARAMS.lab.objectType === "streetLamp") {
+        function getHeroPoints(type = PARAMS.lab.objectType) {
+          if (type === "streetLamp") {
             return STREET_LAMP_HERO_POINTS;
           }
-          if (PARAMS.lab.objectType === "windmill") {
+          if (type === "windmill") {
             return WINDMILL_HERO_POINTS;
           }
           return HERO_STRIP_POINTS;
@@ -849,7 +854,8 @@
 
         preloadWindmillModel(PARAMS.windmill.modelPath)
           .then(() => {
-            if (PARAMS.lab.objectType === "windmill") rebuildObjects();
+            if (PARAMS.lab.layout === "gallery") buildGallery();
+            else if (PARAMS.lab.objectType === "windmill") rebuildObjects();
           })
           .catch((err) => console.error("Windmill GLB load failed:", err));
 
@@ -894,6 +900,10 @@
 
         function rebuildSplineVisual() {
           disposeHandleGroup();
+          if (PARAMS.lab.layout === "gallery") {
+            handleGroup.visible = false;
+            return;
+          }
           if (lab.points.length >= 2 && PARAMS.spline.showHandles) {
             const curve = new THREE.CatmullRomCurve3(
               lab.points,
@@ -1030,6 +1040,175 @@
             );
           }
           controls.update();
+        }
+
+        // ── GALLERY LAYOUT (every object side by side on its own pad) ──
+        // Same build functions as the spline path, but each object is built
+        // on a short straight preview strip (point objects on a single point)
+        // and tiled into a grid. Lets non-spline objects — procedural
+        // bridges, car-game boards, props — be compared at a glance.
+        const GALLERY_TYPES = [
+          "guardrail",
+          "fence",
+          "barrier",
+          "kerb",
+          "woodFence",
+          "woodPlankFence",
+          "streetLamp",
+          "sidewalk",
+          "windmill",
+        ];
+        const GALLERY_LABELS = {
+          guardrail: "Guardrail",
+          fence: "Fence",
+          barrier: "Barrier",
+          kerb: "Kerb",
+          woodFence: "Wood picket",
+          woodPlankFence: "Wood plank",
+          streetLamp: "Street lamp",
+          sidewalk: "Sidewalk",
+          windmill: "Windmill",
+        };
+        const GALLERY_COLS = 3;
+        const GALLERY_GAP = 4; // open space between cell footprints (m)
+        // Short preview strip — keeps path-object footprints modest so the
+        // grid stays compact. Point objects get a single origin point.
+        // NOTE: 3 *collinear* points, not 2 — a 2-point CatmullRom curve
+        // isn't straight (phantom endpoints make it curl + overshoot), which
+        // twists ribbon objects like the sidewalk. A middle point pins it flat.
+        const GALLERY_STRIP = [
+          { x: -3, y: 0, z: 0 },
+          { x: 0, y: 0, z: 0 },
+          { x: 3, y: 0, z: 0 },
+        ];
+        function getPreviewPoints(type) {
+          if (type === "streetLamp" || type === "windmill") {
+            return [{ x: 0, y: 0, z: 0 }];
+          }
+          return GALLERY_STRIP.map((p) => ({ ...p }));
+        }
+
+        const galleryGroup = new THREE.Group();
+        galleryGroup.name = "Gallery";
+        galleryGroup.visible = false;
+        scene.add(galleryGroup);
+        const galleryCells = []; // { type, built, pad, label }
+
+        function disposeGallery() {
+          for (const cell of galleryCells) {
+            disposeLabObject(cell.built);
+            cell.pad.geometry?.dispose();
+            cell.pad.material?.dispose();
+            cell.label.material?.map?.dispose();
+            cell.label.material?.dispose();
+          }
+          while (galleryGroup.children.length) {
+            galleryGroup.remove(galleryGroup.children[0]);
+          }
+          galleryCells.length = 0;
+        }
+
+        function buildGallery() {
+          disposeGallery();
+
+          // Pass 1 — build each object, recenter its footprint on the origin
+          // (keeping ground Y) and track the largest footprint for cell size.
+          const tmpBox = new THREE.Box3();
+          const tmpCenter = new THREE.Vector3();
+          const tmpSize = new THREE.Vector3();
+          const staged = [];
+          let maxFoot = 4;
+          for (const type of GALLERY_TYPES) {
+            const built = buildLabObject({
+              points: getPreviewPoints(type),
+              closed: false,
+              params: getLabParams(type),
+              type,
+            });
+            if (!built) continue;
+            built.updateMatrixWorld(true);
+            tmpBox.setFromObject(built);
+            if (tmpBox.isEmpty()) {
+              disposeLabObject(built);
+              continue;
+            }
+            tmpBox.getCenter(tmpCenter);
+            tmpBox.getSize(tmpSize);
+            built.position.x -= tmpCenter.x;
+            built.position.z -= tmpCenter.z;
+            maxFoot = Math.max(maxFoot, tmpSize.x, tmpSize.z);
+            staged.push({ type, built, top: tmpSize.y });
+          }
+
+          // Pass 2 — lay the recentered objects out in a uniform grid.
+          const cell = maxFoot + GALLERY_GAP;
+          const cols = GALLERY_COLS;
+          const rows = Math.max(1, Math.ceil(staged.length / cols));
+          const padR = maxFoot * 0.5 + GALLERY_GAP * 0.3;
+          staged.forEach((s, i) => {
+            const col = i % cols;
+            const row = Math.floor(i / cols);
+            const cx = (col - (cols - 1) / 2) * cell;
+            const cz = (row - (rows - 1) / 2) * cell;
+            s.built.position.x += cx;
+            s.built.position.z += cz;
+            galleryGroup.add(s.built);
+
+            const pad = makePad(padR);
+            pad.position.set(cx, 0.005, cz);
+            galleryGroup.add(pad);
+
+            const label = makeLabelSprite(GALLERY_LABELS[s.type] || s.type);
+            label.position.set(cx, s.top + 1.0, cz);
+            galleryGroup.add(label);
+
+            galleryCells.push({ type: s.type, built: s.built, pad, label });
+          });
+        }
+
+        function frameGalleryCamera() {
+          const box = new THREE.Box3().setFromObject(galleryGroup);
+          if (box.isEmpty()) {
+            frameCamera("overview");
+            return;
+          }
+          const center = box.getCenter(new THREE.Vector3());
+          const size = box.getSize(new THREE.Vector3());
+          const maxDim = Math.max(size.x, size.z, 8);
+          controls.target.copy(center);
+          camera.position.set(
+            center.x,
+            center.y + maxDim * 0.55,
+            center.z + maxDim * 0.95,
+          );
+          controls.update();
+        }
+
+        function setLayout(mode) {
+          PARAMS.lab.layout = mode;
+          const gallery = mode === "gallery";
+          if (gallery && PARAMS.spline.editMode) setSplineEditMode(false);
+          galleryGroup.visible = gallery;
+          if (gallery) {
+            // Tear down the spline object + handles; show the grid instead.
+            if (lab.objectGroup) {
+              scene.remove(lab.objectGroup);
+              disposeLabObject(lab.objectGroup);
+              lab.objectGroup = null;
+            }
+            if (lab.heroGroup) {
+              scene.remove(lab.heroGroup);
+              disposeLabObject(lab.heroGroup);
+              lab.heroGroup = null;
+            }
+            handleGroup.visible = false;
+            buildGallery();
+            frameGalleryCamera();
+          } else {
+            disposeGallery();
+            rebuildSplineVisual();
+            frameCamera("overview");
+          }
         }
 
         const labmodeEl = document.getElementById("labmode");
@@ -1282,7 +1461,13 @@
           capsule.rotation.y =
             Math.atan2(state.lastFacingX, state.lastFacingZ) + Math.PI;
 
-          if (PARAMS.lab.objectType === "windmill") {
+          if (PARAMS.lab.layout === "gallery") {
+            const wmParams = getLabParams("windmill");
+            for (const cell of galleryCells) {
+              if (cell.type === "windmill")
+                updateWindmillRotors(cell.built, wmParams, dt);
+            }
+          } else if (PARAMS.lab.objectType === "windmill") {
             const wmParams = getLabParams();
             if (lab.objectGroup) updateWindmillRotors(lab.objectGroup, wmParams, dt);
             if (lab.heroGroup) updateWindmillRotors(lab.heroGroup, wmParams, dt);
@@ -1303,8 +1488,13 @@
             );
             camera.lookAt(playerPos.x, lookAtY, playerPos.z);
           } else {
-            // Orbit: keep target glued to capsule so player stays in view.
-            controls.target.set(playerPos.x, capsuleCY, playerPos.z);
+            // Orbit: in spline mode keep the target glued to the capsule so
+            // the player stays in view. In gallery mode let OrbitControls
+            // roam freely (pan/zoom/rotate) so any object can be inspected
+            // from any angle.
+            if (PARAMS.lab.layout !== "gallery") {
+              controls.target.set(playerPos.x, capsuleCY, playerPos.z);
+            }
             controls.update();
           }
 
@@ -1336,7 +1526,63 @@
           setSplineEditMode,
           frameCamera,
           applyOrbitMouseButtons,
+          buildGallery,
+          setLayout,
+          frameGalleryCamera,
         });
+      }
+
+      // === Gallery helpers (pad disc + billboard text label) ===
+      function makePad(radius) {
+        const geo = new THREE.CircleGeometry(radius, 56);
+        geo.rotateX(-Math.PI / 2);
+        const mat = new THREE.MeshStandardMaterial({
+          color: 0x2b2b2b,
+          roughness: 0.95,
+          metalness: 0,
+          polygonOffset: true,
+          polygonOffsetFactor: -1,
+          polygonOffsetUnits: -1,
+        });
+        const mesh = new THREE.Mesh(geo, mat);
+        mesh.receiveShadow = true;
+        return mesh;
+      }
+
+      function makeLabelSprite(text) {
+        const fontSize = 48;
+        const padX = 28;
+        const padY = 18;
+        const canvas = document.createElement("canvas");
+        const ctx = canvas.getContext("2d");
+        const font = `600 ${fontSize}px "Segoe UI", system-ui, sans-serif`;
+        ctx.font = font;
+        const w = Math.ceil(ctx.measureText(text).width) + padX * 2;
+        const h = fontSize + padY * 2;
+        canvas.width = w;
+        canvas.height = h;
+        ctx.fillStyle = "rgba(0,0,0,0.55)";
+        if (ctx.roundRect) {
+          ctx.beginPath();
+          ctx.roundRect(0, 0, w, h, 14);
+          ctx.fill();
+        } else {
+          ctx.fillRect(0, 0, w, h);
+        }
+        ctx.font = font;
+        ctx.fillStyle = "#e0f0c0";
+        ctx.textAlign = "center";
+        ctx.textBaseline = "middle";
+        ctx.fillText(text, w / 2, h / 2 + 2);
+
+        const tex = new THREE.CanvasTexture(canvas);
+        tex.colorSpace = THREE.SRGBColorSpace;
+        tex.anisotropy = 4;
+        const mat = new THREE.SpriteMaterial({ map: tex, transparent: true });
+        const sprite = new THREE.Sprite(mat);
+        const s = 0.011;
+        sprite.scale.set(w * s, h * s, 1);
+        return sprite;
       }
 
       // === Widget factory (mirrors v2/editor.html _section/_slider/etc.) ===
@@ -1504,9 +1750,17 @@
         deleteSelectedPoint,
         setSplineEditMode,
         frameCamera,
+        buildGallery,
+        setLayout,
+        frameGalleryCamera,
       }) {
         const body = document.getElementById("inspector-body");
-        const rebuildObj = () => rebuildObjects();
+        // Param edits route to whichever layout is live: rebuild the spline
+        // object, or rebuild the whole gallery so the edited cell updates.
+        const rebuildObj = () => {
+          if (PARAMS.lab.layout === "gallery") buildGallery();
+          else rebuildObjects();
+        };
 
         function syncObjectSections() {
           const type = PARAMS.lab.objectType;
@@ -1589,6 +1843,11 @@
         // ── Object picker ──
         {
           const sec = _section(body, "Object", true);
+          _dropdown(sec, PARAMS.lab, "layout", {
+            label: "Layout",
+            options: { spline: "Spline", gallery: "Gallery (all)" },
+            onChange: (v) => setLayout(v),
+          });
           _dropdown(sec, PARAMS.lab, "objectType", {
             label: "Type",
             options: {
@@ -2599,6 +2858,10 @@
           _button(sec, {
             title: "Camera — Overview",
             onClick: () => frameCamera("overview"),
+          });
+          _button(sec, {
+            title: "Camera — Gallery grid",
+            onClick: () => frameGalleryCamera(),
           });
         }
 
