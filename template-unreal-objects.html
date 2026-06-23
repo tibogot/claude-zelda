@@ -499,6 +499,7 @@
         POWER_LINE_DEFAULTS,
         POWER_LINE_HERO_POINTS,
       } from "./objects/powerLine.js";
+      import { OBJECTS, OBJECT_MAP } from "./objects/index.js";
       import { pass, mrt, output, emissive } from "three/tsl";
       import { bloom } from "three/addons/tsl/display/BloomNode.js";
 
@@ -574,6 +575,12 @@
           showHandles: true,
         },
       };
+
+      // Fill in params for every registered object (so adding an object only
+      // needs a descriptor in objects/index.js — no edits here).
+      for (const o of OBJECTS) {
+        if (!PARAMS[o.id]) PARAMS[o.id] = { ...o.defaults, ...(o.initParams || {}) };
+      }
 
       // Capsule + camera tuning — same constants as v2/play/playMode.js.
       const CAP_R = 0.4;
@@ -786,34 +793,10 @@
         }
 
         function getLabParams(type = PARAMS.lab.objectType) {
-          switch (type) {
-            case "fence":
-              return PARAMS.fence;
-            case "barrier":
-              return PARAMS.barrier;
-            case "kerb":
-              return PARAMS.kerb;
-            case "woodFence":
-              return PARAMS.woodFence;
-            case "woodPlankFence":
-              return PARAMS.woodPlankFence;
-            case "streetLamp":
-              return PARAMS.streetLamp;
-            case "sidewalk":
-              return { ...PARAMS.sidewalk, map: PARAMS.sidewalk._map ?? null };
-            case "windmill":
-              return PARAMS.windmill;
-            case "trafficLight":
-              return PARAMS.trafficLight;
-            case "bridge":
-              return PARAMS.bridge;
-            case "gantry":
-              return PARAMS.gantry;
-            case "powerLine":
-              return PARAMS.powerLine;
-            default:
-              return PARAMS.guardrail;
-          }
+          const d = OBJECT_MAP.get(type);
+          if (!d) return PARAMS.guardrail;
+          const p = PARAMS[type];
+          return d.resolveParams ? d.resolveParams(p) : p;
         }
 
         function buildLabObject({
@@ -822,40 +805,9 @@
           params,
           type = PARAMS.lab.objectType,
         }) {
-          const opts = {
-            points,
-            closed,
-            params,
-            getWorldHeight: sampleHeight,
-          };
-          switch (type) {
-            case "fence":
-              return buildFenceMesh(opts);
-            case "barrier":
-              return buildBarrierMesh(opts);
-            case "kerb":
-              return buildKerbMesh(opts);
-            case "woodFence":
-              return buildWoodFenceMesh(opts);
-            case "woodPlankFence":
-              return buildWoodPlankFenceMesh(opts);
-            case "streetLamp":
-              return buildStreetLampMesh(opts);
-            case "sidewalk":
-              return buildSidewalkMesh(opts);
-            case "windmill":
-              return buildWindmillMesh(opts);
-            case "trafficLight":
-              return buildTrafficLightMesh(opts);
-            case "bridge":
-              return buildBridgeMesh(opts);
-            case "gantry":
-              return buildGantryMesh(opts);
-            case "powerLine":
-              return buildPowerLineMesh(opts);
-            default:
-              return buildGuardrailMesh(opts);
-          }
+          const d = OBJECT_MAP.get(type);
+          if (!d) return null;
+          return d.build({ points, closed, params, getWorldHeight: sampleHeight });
         }
 
         const lab = {
@@ -884,33 +836,11 @@
         }
 
         function getHeroPoints(type = PARAMS.lab.objectType) {
-          if (type === "streetLamp") {
-            return STREET_LAMP_HERO_POINTS;
-          }
-          if (type === "windmill") {
-            return WINDMILL_HERO_POINTS;
-          }
-          if (type === "trafficLight") {
-            return TRAFFIC_LIGHT_HERO_POINTS;
-          }
-          if (type === "bridge") {
-            return BRIDGE_HERO_POINTS;
-          }
-          if (type === "gantry") {
-            return GANTRY_HERO_POINTS;
-          }
-          if (type === "powerLine") {
-            return POWER_LINE_HERO_POINTS;
-          }
-          return HERO_STRIP_POINTS;
+          return OBJECT_MAP.get(type)?.hero ?? HERO_STRIP_POINTS;
         }
 
         function minSplinePointsForLab() {
-          return PARAMS.lab.objectType === "streetLamp" ||
-            PARAMS.lab.objectType === "windmill" ||
-            PARAMS.lab.objectType === "trafficLight"
-            ? 1
-            : 2;
+          return OBJECT_MAP.get(PARAMS.lab.objectType)?.minPoints ?? 2;
         }
 
         preloadWindmillModel(PARAMS.windmill.modelPath)
@@ -1108,36 +1038,10 @@
         // on a short straight preview strip (point objects on a single point)
         // and tiled into a grid. Lets non-spline objects — procedural
         // bridges, car-game boards, props — be compared at a glance.
-        const GALLERY_TYPES = [
-          "guardrail",
-          "fence",
-          "barrier",
-          "kerb",
-          "woodFence",
-          "woodPlankFence",
-          "streetLamp",
-          "sidewalk",
-          "windmill",
-          "trafficLight",
-          "bridge",
-          "gantry",
-          "powerLine",
-        ];
-        const GALLERY_LABELS = {
-          guardrail: "Guardrail",
-          fence: "Fence",
-          barrier: "Barrier",
-          kerb: "Kerb",
-          woodFence: "Wood picket",
-          woodPlankFence: "Wood plank",
-          streetLamp: "Street lamp",
-          sidewalk: "Sidewalk",
-          windmill: "Windmill",
-          trafficLight: "Traffic Light",
-          bridge: "Bridge",
-          gantry: "Gantry",
-          powerLine: "Power line",
-        };
+        const GALLERY_TYPES = OBJECTS.map((o) => o.id);
+        const GALLERY_LABELS = Object.fromEntries(
+          OBJECTS.map((o) => [o.id, o.label]),
+        );
         const GALLERY_COLS = 3;
         const GALLERY_GAP = 4; // open space between cell footprints (m)
         // Short preview strip — keeps path-object footprints modest so the
@@ -1151,7 +1055,7 @@
           { x: 3, y: 0, z: 0 },
         ];
         function getPreviewPoints(type) {
-          if (type === "streetLamp" || type === "windmill" || type === "trafficLight") {
+          if (OBJECT_MAP.get(type)?.preview === "point") {
             return [{ x: 0, y: 0, z: 0 }];
           }
           return GALLERY_STRIP.map((p) => ({ ...p }));
@@ -1852,32 +1756,10 @@
 
         function syncObjectSections() {
           const type = PARAMS.lab.objectType;
-          guardrailSection.parentElement.style.display =
-            type === "guardrail" ? "" : "none";
-          fenceSection.parentElement.style.display =
-            type === "fence" ? "" : "none";
-          barrierSection.parentElement.style.display =
-            type === "barrier" ? "" : "none";
-          kerbSection.parentElement.style.display =
-            type === "kerb" ? "" : "none";
-          woodFenceSection.parentElement.style.display =
-            type === "woodFence" ? "" : "none";
-          woodPlankFenceSection.parentElement.style.display =
-            type === "woodPlankFence" ? "" : "none";
-          streetLampSection.parentElement.style.display =
-            type === "streetLamp" ? "" : "none";
-          sidewalkSection.parentElement.style.display =
-            type === "sidewalk" ? "" : "none";
-          windmillSection.parentElement.style.display =
-            type === "windmill" ? "" : "none";
-          trafficLightSection.parentElement.style.display =
-            type === "trafficLight" ? "" : "none";
-          bridgeSection.parentElement.style.display =
-            type === "bridge" ? "" : "none";
-          gantrySection.parentElement.style.display =
-            type === "gantry" ? "" : "none";
-          powerLineSection.parentElement.style.display =
-            type === "powerLine" ? "" : "none";
+          for (const id in objectSections) {
+            objectSections[id].parentElement.style.display =
+              id === type ? "" : "none";
+          }
         }
 
         // Toggle show/hide.
@@ -1946,21 +1828,7 @@
           });
           _dropdown(sec, PARAMS.lab, "objectType", {
             label: "Type",
-            options: {
-              guardrail: "Guardrail",
-              fence: "Fence",
-              barrier: "Barrier",
-              kerb: "Kerb",
-              woodFence: "Wood picket",
-              woodPlankFence: "Wood plank",
-              streetLamp: "Street lamp",
-              sidewalk: "Sidewalk",
-              windmill: "Windmill",
-              trafficLight: "Traffic Light",
-              bridge: "Bridge",
-              gantry: "Gantry",
-              powerLine: "Power line",
-            },
+            options: Object.fromEntries(OBJECTS.map((o) => [o.id, o.label])),
             onChange: () => {
               syncObjectSections();
               rebuildObj();
@@ -1968,1120 +1836,50 @@
           });
         }
 
-        // ── Guardrail (object params — mirrors v2 names) ──
-        const guardrailSection = _section(body, "Guardrail", true);
-        {
-          const sec = guardrailSection;
-          const G = PARAMS.guardrail;
-          _slider(sec, G, "height", {
-            label: "Height",
-            min: 0.1,
-            max: 3,
-            step: 0.01,
-            onChange: rebuildObj,
-          });
-          _slider(sec, G, "depth", {
-            label: "Depth",
-            min: 0.05,
-            max: 2,
-            step: 0.01,
-            onChange: rebuildObj,
-          });
-          _slider(sec, G, "crownDepth", {
-            label: "Crown",
-            min: 0,
-            max: 0.5,
-            step: 0.005,
-            onChange: rebuildObj,
-          });
-          _slider(sec, G, "thickness", {
-            label: "Thickness",
-            min: 0,
-            max: 0.2,
-            step: 0.002,
-            onChange: rebuildObj,
-          });
-          _slider(sec, G, "railYOffset", {
-            label: "Rail Y",
-            min: 0,
-            max: 2,
-            step: 0.01,
-            onChange: rebuildObj,
-          });
-          _separator(sec);
-          _slider(sec, G, "postSpacing", {
-            label: "Post gap",
-            min: 0.5,
-            max: 8,
-            step: 0.1,
-            onChange: rebuildObj,
-          });
-          _slider(sec, G, "postWidth", {
-            label: "Post W",
-            min: 0.02,
-            max: 0.6,
-            step: 0.01,
-            onChange: rebuildObj,
-          });
-          _slider(sec, G, "postDepth", {
-            label: "Post D",
-            min: 0.02,
-            max: 0.6,
-            step: 0.01,
-            onChange: rebuildObj,
-          });
-          _slider(sec, G, "postHeight", {
-            label: "Post H",
-            min: 0.2,
-            max: 3,
-            step: 0.05,
-            onChange: rebuildObj,
-          });
-          _slider(sec, G, "postSink", {
-            label: "Post sink",
-            min: 0,
-            max: 0.5,
-            step: 0.01,
-            onChange: rebuildObj,
-          });
-          _separator(sec);
-          _slider(sec, G, "pathSegments", {
-            label: "Path segs",
-            min: 16,
-            max: 320,
-            step: 1,
-            onChange: rebuildObj,
-          });
-          _color(sec, G, "color", {
-            label: "Color",
-            onChange: rebuildObj,
-          });
-          _slider(sec, G, "roughness", {
-            label: "Roughness",
-            min: 0,
-            max: 1,
-            step: 0.01,
-            onChange: rebuildObj,
-          });
-          _slider(sec, G, "metalness", {
-            label: "Metalness",
-            min: 0,
-            max: 1,
-            step: 0.01,
-            onChange: rebuildObj,
-          });
-        }
-
-        // ── Fence (object params — mirrors v2 names) ──
-        const fenceSection = _section(body, "Fence", true);
-        {
-          const sec = fenceSection;
-          const F = PARAMS.fence;
-          _slider(sec, F, "height", {
-            label: "Height",
-            min: 0.35,
-            max: 4,
-            step: 0.05,
-            onChange: rebuildObj,
-          });
-          _slider(sec, F, "postSpacing", {
-            label: "Post gap",
-            min: 0.4,
-            max: 8,
-            step: 0.1,
-            onChange: rebuildObj,
-          });
-          _slider(sec, F, "postWidth", {
-            label: "Post W",
-            min: 0.02,
-            max: 0.3,
-            step: 0.01,
-            onChange: rebuildObj,
-          });
-          _slider(sec, F, "postDepth", {
-            label: "Post D",
-            min: 0.02,
-            max: 0.3,
-            step: 0.01,
-            onChange: rebuildObj,
-          });
-          _slider(sec, F, "railCount", {
-            label: "Rail count",
-            min: 1,
-            max: 6,
-            step: 1,
-            onChange: rebuildObj,
-          });
-          _slider(sec, F, "railThickness", {
-            label: "Rail thick",
-            min: 0.01,
-            max: 0.15,
-            step: 0.005,
-            onChange: rebuildObj,
-          });
-          _slider(sec, F, "pathSegments", {
-            label: "Path segs",
-            min: 16,
-            max: 320,
-            step: 1,
-            onChange: rebuildObj,
-          });
-          _color(sec, F, "color", {
-            label: "Color",
-            onChange: rebuildObj,
-          });
-          _slider(sec, F, "roughness", {
-            label: "Roughness",
-            min: 0,
-            max: 1,
-            step: 0.01,
-            onChange: rebuildObj,
-          });
-          _slider(sec, F, "metalness", {
-            label: "Metalness",
-            min: 0,
-            max: 1,
-            step: 0.01,
-            onChange: rebuildObj,
-          });
-        }
-
-        // ── Barrier (Jersey profile — mirrors v2 names) ──
-        const barrierSection = _section(body, "Barrier", true);
-        {
-          const sec = barrierSection;
-          const B = PARAMS.barrier;
-          _slider(sec, B, "height", {
-            label: "Height",
-            min: 0.2,
-            max: 2,
-            step: 0.01,
-            onChange: rebuildObj,
-          });
-          _slider(sec, B, "topWidth", {
-            label: "Top W",
-            min: 0.05,
-            max: 0.8,
-            step: 0.01,
-            onChange: rebuildObj,
-          });
-          _slider(sec, B, "bottomWidth", {
-            label: "Bottom W",
-            min: 0.1,
-            max: 1.2,
-            step: 0.01,
-            onChange: rebuildObj,
-          });
-          _slider(sec, B, "pathSegments", {
-            label: "Path segs",
-            min: 16,
-            max: 320,
-            step: 1,
-            onChange: rebuildObj,
-          });
-          _color(sec, B, "color", {
-            label: "Color",
-            onChange: rebuildObj,
-          });
-          _slider(sec, B, "roughness", {
-            label: "Roughness",
-            min: 0,
-            max: 1,
-            step: 0.01,
-            onChange: rebuildObj,
-          });
-          _slider(sec, B, "metalness", {
-            label: "Metalness",
-            min: 0,
-            max: 1,
-            step: 0.01,
-            onChange: rebuildObj,
-          });
-        }
-
-        // ── Kerb (chunked red/white — mirrors v2 names) ──
-        const kerbSection = _section(body, "Kerb", true);
-        {
-          const sec = kerbSection;
-          const K = PARAMS.kerb;
-          _dropdown(sec, K, "side", {
-            label: "Side",
-            options: { right: "Right", left: "Left" },
-            onChange: rebuildObj,
-          });
-          _slider(sec, K, "width", {
-            label: "Width",
-            min: 0.2,
-            max: 2,
-            step: 0.01,
-            onChange: rebuildObj,
-          });
-          _slider(sec, K, "height", {
-            label: "Height",
-            min: 0.02,
-            max: 0.5,
-            step: 0.005,
-            onChange: rebuildObj,
-          });
-          _slider(sec, K, "lipHeight", {
-            label: "Lip H",
-            min: 0,
-            max: 0.15,
-            step: 0.005,
-            onChange: rebuildObj,
-          });
-          _slider(sec, K, "stripeLength", {
-            label: "Stripe len",
-            min: 0.2,
-            max: 3,
-            step: 0.05,
-            onChange: rebuildObj,
-          });
-          _color(sec, K, "colorA", {
-            label: "Color A",
-            onChange: rebuildObj,
-          });
-          _color(sec, K, "colorB", {
-            label: "Color B",
-            onChange: rebuildObj,
-          });
-          _slider(sec, K, "roughness", {
-            label: "Roughness",
-            min: 0,
-            max: 1,
-            step: 0.01,
-            onChange: rebuildObj,
-          });
-          _slider(sec, K, "metalness", {
-            label: "Metalness",
-            min: 0,
-            max: 1,
-            step: 0.01,
-            onChange: rebuildObj,
-          });
-        }
-
-        // ── Wood picket (vertical boards — beach / garden style) ──
-        const woodFenceSection = _section(body, "Wood picket", true);
-        {
-          const sec = woodFenceSection;
-          const W = PARAMS.woodFence;
-          _slider(sec, W, "height", {
-            label: "Height",
-            min: 0.4,
-            max: 3,
-            step: 0.05,
-            onChange: rebuildObj,
-          });
-          _slider(sec, W, "postSpacing", {
-            label: "Post gap",
-            min: 0.8,
-            max: 6,
-            step: 0.1,
-            onChange: rebuildObj,
-          });
-          _slider(sec, W, "postWidth", {
-            label: "Post W",
-            min: 0.06,
-            max: 0.35,
-            step: 0.01,
-            onChange: rebuildObj,
-          });
-          _slider(sec, W, "postDepth", {
-            label: "Post D",
-            min: 0.05,
-            max: 0.3,
-            step: 0.01,
-            onChange: rebuildObj,
-          });
-          _separator(sec);
-          _slider(sec, W, "picketWidth", {
-            label: "Board W",
-            min: 0.04,
-            max: 0.25,
-            step: 0.005,
-            onChange: rebuildObj,
-          });
-          _slider(sec, W, "picketDepth", {
-            label: "Board D",
-            min: 0.02,
-            max: 0.12,
-            step: 0.005,
-            onChange: rebuildObj,
-          });
-          _slider(sec, W, "picketGap", {
-            label: "Board gap",
-            min: 0,
-            max: 0.15,
-            step: 0.005,
-            onChange: rebuildObj,
-          });
-          _slider(sec, W, "railCount", {
-            label: "Rail count",
-            min: 0,
-            max: 3,
-            step: 1,
-            onChange: rebuildObj,
-          });
-          _slider(sec, W, "railThickness", {
-            label: "Rail thick",
-            min: 0.03,
-            max: 0.14,
-            step: 0.005,
-            onChange: rebuildObj,
-          });
-          _separator(sec);
-          _slider(sec, W, "leanAmount", {
-            label: "Lean °",
-            min: 0,
-            max: 25,
-            step: 0.5,
-            onChange: rebuildObj,
-          });
-          _slider(sec, W, "leanRatio", {
-            label: "Lean ratio",
-            min: 0,
-            max: 1,
-            step: 0.01,
-            onChange: rebuildObj,
-          });
-          _slider(sec, W, "heightVariation", {
-            label: "H var",
-            min: 0,
-            max: 0.25,
-            step: 0.01,
-            onChange: rebuildObj,
-          });
-          _slider(sec, W, "colorVariation", {
-            label: "Color var",
-            min: 0,
-            max: 1,
-            step: 0.01,
-            onChange: rebuildObj,
-          });
-          _slider(sec, W, "seed", {
-            label: "Seed",
-            min: 0,
-            max: 9999,
-            step: 1,
-            onChange: rebuildObj,
-          });
-          _separator(sec);
-          _color(sec, W, "colorMain", {
-            label: "Wood A",
-            onChange: rebuildObj,
-          });
-          _color(sec, W, "colorAlt", {
-            label: "Wood B",
-            onChange: rebuildObj,
-          });
-          _slider(sec, W, "roughness", {
-            label: "Roughness",
-            min: 0,
-            max: 1,
-            step: 0.01,
-            onChange: rebuildObj,
-          });
-          _toggle(sec, W, "flatShading", {
-            label: "Flat shade",
-            onChange: rebuildObj,
-          });
-        }
-
-        // ── Wood plank (horizontal rails — ranch / cartoon style) ──
-        const woodPlankFenceSection = _section(body, "Wood plank", true);
-        {
-          const sec = woodPlankFenceSection;
-          const P = PARAMS.woodPlankFence;
-          _slider(sec, P, "height", {
-            label: "Height",
-            min: 0.5,
-            max: 3,
-            step: 0.05,
-            onChange: rebuildObj,
-          });
-          _slider(sec, P, "postSpacing", {
-            label: "Post gap",
-            min: 1,
-            max: 6,
-            step: 0.1,
-            onChange: rebuildObj,
-          });
-          _slider(sec, P, "postWidth", {
-            label: "Post W",
-            min: 0.08,
-            max: 0.35,
-            step: 0.01,
-            onChange: rebuildObj,
-          });
-          _slider(sec, P, "postDepth", {
-            label: "Post D",
-            min: 0.07,
-            max: 0.3,
-            step: 0.01,
-            onChange: rebuildObj,
-          });
-          _slider(sec, P, "postOverhang", {
-            label: "Post top+",
-            min: 0,
-            max: 0.5,
-            step: 0.01,
-            onChange: rebuildObj,
-          });
-          _separator(sec);
-          _slider(sec, P, "railCount", {
-            label: "Rail count",
-            min: 1,
-            max: 4,
-            step: 1,
-            onChange: rebuildObj,
-          });
-          _slider(sec, P, "railThickness", {
-            label: "Rail thick",
-            min: 0.04,
-            max: 0.2,
-            step: 0.005,
-            onChange: rebuildObj,
-          });
-          _slider(sec, P, "railDepth", {
-            label: "Rail depth",
-            min: 0.03,
-            max: 0.16,
-            step: 0.005,
-            onChange: rebuildObj,
-          });
-          _slider(sec, P, "railInset", {
-            label: "Rail inset",
-            min: 0,
-            max: 0.12,
-            step: 0.005,
-            onChange: rebuildObj,
-          });
-          _separator(sec);
-          _slider(sec, P, "leanAmount", {
-            label: "Rail slant",
-            min: 0,
-            max: 0.6,
-            step: 0.01,
-            onChange: rebuildObj,
-          });
-          _slider(sec, P, "leanRatio", {
-            label: "Slant ratio",
-            min: 0,
-            max: 1,
-            step: 0.01,
-            onChange: rebuildObj,
-          });
-          _slider(sec, P, "railYOffset", {
-            label: "Rail jitter",
-            min: 0,
-            max: 0.12,
-            step: 0.005,
-            onChange: rebuildObj,
-          });
-          _slider(sec, P, "colorVariation", {
-            label: "Color var",
-            min: 0,
-            max: 1,
-            step: 0.01,
-            onChange: rebuildObj,
-          });
-          _slider(sec, P, "seed", {
-            label: "Seed",
-            min: 0,
-            max: 9999,
-            step: 1,
-            onChange: rebuildObj,
-          });
-          _separator(sec);
-          _color(sec, P, "colorMain", {
-            label: "Wood A",
-            onChange: rebuildObj,
-          });
-          _color(sec, P, "colorAlt", {
-            label: "Wood B",
-            onChange: rebuildObj,
-          });
-          _slider(sec, P, "roughness", {
-            label: "Roughness",
-            min: 0,
-            max: 1,
-            step: 0.01,
-            onChange: rebuildObj,
-          });
-          _toggle(sec, P, "flatShading", {
-            label: "Flat shade",
-            onChange: rebuildObj,
-          });
-        }
-
-        // ── Street lamp (stylized — placement + silhouette) ──
-        const streetLampSection = _section(body, "Street lamp", true);
-        {
-          const sec = streetLampSection;
-          const L = PARAMS.streetLamp;
-          _slider(sec, L, "spacing", {
-            label: "Spacing",
-            min: 4,
-            max: 40,
-            step: 0.5,
-            onChange: rebuildObj,
-          });
-          _slider(sec, L, "sideOffset", {
-            label: "Side offset",
-            min: 0,
-            max: 8,
-            step: 0.1,
-            onChange: rebuildObj,
-          });
-          _dropdown(sec, L, "side", {
-            label: "Side",
-            options: { right: "Right", left: "Left" },
-            onChange: rebuildObj,
-          });
-          _separator(sec);
-          _slider(sec, L, "poleHeight", {
-            label: "Pole H",
-            min: 2,
-            max: 8,
-            step: 0.05,
-            onChange: rebuildObj,
-          });
-          _slider(sec, L, "poleRadiusBase", {
-            label: "Pole base R",
-            min: 0.04,
-            max: 0.25,
-            step: 0.005,
-            onChange: rebuildObj,
-          });
-          _slider(sec, L, "poleRadiusTop", {
-            label: "Pole top R",
-            min: 0.03,
-            max: 0.2,
-            step: 0.005,
-            onChange: rebuildObj,
-          });
-          _slider(sec, L, "baseWidth", {
-            label: "Base W",
-            min: 0.2,
-            max: 1,
-            step: 0.02,
-            onChange: rebuildObj,
-          });
-          _slider(sec, L, "baseHeight", {
-            label: "Base H",
-            min: 0.04,
-            max: 0.4,
-            step: 0.01,
-            onChange: rebuildObj,
-          });
-          _slider(sec, L, "collarScale", {
-            label: "Collar scale",
-            min: 1,
-            max: 2.2,
-            step: 0.05,
-            onChange: rebuildObj,
-          });
-          _separator(sec);
-          _slider(sec, L, "armLength", {
-            label: "Arm len",
-            min: 0.3,
-            max: 2.5,
-            step: 0.05,
-            onChange: rebuildObj,
-          });
-          _slider(sec, L, "armMountHeight", {
-            label: "Arm height",
-            min: 1.5,
-            max: 7,
-            step: 0.05,
-            onChange: rebuildObj,
-          });
-          _slider(sec, L, "armThickness", {
-            label: "Arm thick",
-            min: 0.04,
-            max: 0.18,
-            step: 0.005,
-            onChange: rebuildObj,
-          });
-          _slider(sec, L, "armPitch", {
-            label: "Arm pitch°",
-            min: -35,
-            max: 20,
-            step: 1,
-            onChange: rebuildObj,
-          });
-          _separator(sec);
-          _slider(sec, L, "headWidth", {
-            label: "Head W",
-            min: 0.2,
-            max: 1.2,
-            step: 0.02,
-            onChange: rebuildObj,
-          });
-          _slider(sec, L, "headHeight", {
-            label: "Head H",
-            min: 0.12,
-            max: 0.8,
-            step: 0.02,
-            onChange: rebuildObj,
-          });
-          _slider(sec, L, "headDepth", {
-            label: "Head D",
-            min: 0.15,
-            max: 0.9,
-            step: 0.02,
-            onChange: rebuildObj,
-          });
-          _slider(sec, L, "headDrop", {
-            label: "Head drop",
-            min: 0,
-            max: 0.35,
-            step: 0.01,
-            onChange: rebuildObj,
-          });
-          _slider(sec, L, "capHeight", {
-            label: "Cap H",
-            min: 0,
-            max: 0.35,
-            step: 0.01,
-            onChange: rebuildObj,
-          });
-          _slider(sec, L, "bulbSize", {
-            label: "Bulb size",
-            min: 0.08,
-            max: 0.5,
-            step: 0.01,
-            onChange: rebuildObj,
-          });
-          _separator(sec);
-          _color(sec, L, "emissiveColor", {
-            label: "Glow color",
-            onChange: rebuildObj,
-          });
-          _slider(sec, L, "emissiveIntensity", {
-            label: "Glow int",
-            min: 0,
-            max: 6,
-            step: 0.1,
-            onChange: rebuildObj,
-          });
-          _toggle(sec, L, "castLight", {
-            label: "Point light",
-            onChange: rebuildObj,
-          });
-          _slider(sec, L, "lightIntensity", {
-            label: "Light int",
-            min: 0,
-            max: 4,
-            step: 0.05,
-            onChange: rebuildObj,
-          });
-          _slider(sec, L, "lightDistance", {
-            label: "Light dist",
-            min: 4,
-            max: 40,
-            step: 1,
-            onChange: rebuildObj,
-          });
-          _separator(sec);
-          _color(sec, L, "colorPole", {
-            label: "Pole color",
-            onChange: rebuildObj,
-          });
-          _color(sec, L, "colorMetal", {
-            label: "Metal color",
-            onChange: rebuildObj,
-          });
-          _slider(sec, L, "roughness", {
-            label: "Roughness",
-            min: 0,
-            max: 1,
-            step: 0.01,
-            onChange: rebuildObj,
-          });
-          _slider(sec, L, "metalness", {
-            label: "Metalness",
-            min: 0,
-            max: 1,
-            step: 0.01,
-            onChange: rebuildObj,
-          });
-          _slider(sec, L, "leanAmount", {
-            label: "Lean °",
-            min: 0,
-            max: 8,
-            step: 0.25,
-            onChange: rebuildObj,
-          });
-          _slider(sec, L, "leanRatio", {
-            label: "Lean ratio",
-            min: 0,
-            max: 1,
-            step: 0.01,
-            onChange: rebuildObj,
-          });
-          _slider(sec, L, "seed", {
-            label: "Seed",
-            min: 0,
-            max: 9999,
-            step: 1,
-            onChange: rebuildObj,
-          });
-          _toggle(sec, L, "flatShading", {
-            label: "Flat shade",
-            onChange: rebuildObj,
-          });
-        }
-
-        // ── Sidewalk (wide slab ribbon — UVs for image texture) ──
-        const sidewalkSection = _section(body, "Sidewalk", true);
-        {
-          const sec = sidewalkSection;
-          const S = PARAMS.sidewalk;
-          _dropdown(sec, S, "side", {
-            label: "Side",
-            options: { right: "Right", left: "Left" },
-            onChange: rebuildObj,
-          });
-          _slider(sec, S, "sideOffset", {
-            label: "Side offset",
-            min: 0,
-            max: 12,
-            step: 0.1,
-            onChange: rebuildObj,
-          });
-          _slider(sec, S, "width", {
-            label: "Width",
-            min: 1,
-            max: 12,
-            step: 0.1,
-            onChange: rebuildObj,
-          });
-          _slider(sec, S, "thickness", {
-            label: "Thickness",
-            min: 0.02,
-            max: 0.5,
-            step: 0.01,
-            onChange: rebuildObj,
-          });
-          _slider(sec, S, "yOffset", {
-            label: "Y offset",
-            min: 0,
-            max: 0.2,
-            step: 0.002,
-            onChange: rebuildObj,
-          });
-          _slider(sec, S, "pathSegments", {
-            label: "Path segs",
-            min: 16,
-            max: 320,
-            step: 1,
-            onChange: rebuildObj,
-          });
-          _separator(sec);
-          _slider(sec, S, "uvRepeatAlong", {
-            label: "UV along (m)",
-            min: 0.5,
-            max: 10,
-            step: 0.1,
-            onChange: rebuildObj,
-          });
-          _slider(sec, S, "uvRepeatAcross", {
-            label: "UV across (m)",
-            min: 0.5,
-            max: 10,
-            step: 0.1,
-            onChange: rebuildObj,
-          });
-          _color(sec, S, "color", {
-            label: "Color",
-            onChange: rebuildObj,
-          });
-          _slider(sec, S, "roughness", {
-            label: "Roughness",
-            min: 0,
-            max: 1,
-            step: 0.01,
-            onChange: rebuildObj,
-          });
-          _slider(sec, S, "metalness", {
-            label: "Metalness",
-            min: 0,
-            max: 1,
-            step: 0.01,
-            onChange: rebuildObj,
-          });
-          _separator(sec);
-          {
-            const row = document.createElement("div");
-            row.className = "prop-row";
-            row.innerHTML =
-              '<span class="prop-label">Texture</span><div class="prop-value"><input type="file" accept="image/*" class="prop-file"></div>';
-            const fileInp = row.querySelector(".prop-file");
-            fileInp.addEventListener("change", () => {
-              const file = fileInp.files?.[0];
-              if (!file) return;
-              const blobUrl = URL.createObjectURL(file);
-              if (S._map) S._map.dispose();
-              new THREE.TextureLoader().load(
-                blobUrl,
-                (tex) => {
-                  URL.revokeObjectURL(blobUrl);
-                  tex.wrapS = THREE.RepeatWrapping;
-                  tex.wrapT = THREE.RepeatWrapping;
-                  tex.colorSpace = THREE.SRGBColorSpace;
-                  S._map = tex;
-                  rebuildObj();
-                },
-                undefined,
-                () => URL.revokeObjectURL(blobUrl),
-              );
-            });
-            sec.appendChild(row);
+        // ── object param sections (generated from each object's schema) ──
+        const objectSections = {};
+        for (const o of OBJECTS) {
+          const sec = _section(body, o.label, true);
+          objectSections[o.id] = sec;
+          const P = PARAMS[o.id];
+          for (const e of o.schema) {
+            if (e.type === "sep") {
+              _separator(sec);
+            } else if (e.type === "slider") {
+              _slider(sec, P, e.key, { label: e.label, min: e.min, max: e.max, step: e.step, onChange: rebuildObj });
+            } else if (e.type === "color") {
+              _color(sec, P, e.key, { label: e.label, onChange: rebuildObj });
+            } else if (e.type === "toggle") {
+              _toggle(sec, P, e.key, { label: e.label, onChange: rebuildObj });
+            } else if (e.type === "select") {
+              _dropdown(sec, P, e.key, { label: e.label, options: e.options, onChange: rebuildObj });
+            } else if (e.type === "file") {
+              const row = document.createElement("div");
+              row.className = "prop-row";
+              row.innerHTML = `<span class="prop-label">${e.label}</span><div class="prop-value"><input type="file" accept="${e.accept || "image/*"}" class="prop-file"></div>`;
+              const fileInp = row.querySelector(".prop-file");
+              fileInp.addEventListener("change", () => {
+                const file = fileInp.files?.[0];
+                if (!file) return;
+                const blobUrl = URL.createObjectURL(file);
+                if (P[e.key]) P[e.key].dispose?.();
+                new THREE.TextureLoader().load(
+                  blobUrl,
+                  (tex) => {
+                    URL.revokeObjectURL(blobUrl);
+                    tex.wrapS = THREE.RepeatWrapping;
+                    tex.wrapT = THREE.RepeatWrapping;
+                    tex.colorSpace = THREE.SRGBColorSpace;
+                    P[e.key] = tex;
+                    rebuildObj();
+                  },
+                  undefined,
+                  () => URL.revokeObjectURL(blobUrl),
+                );
+              });
+              sec.appendChild(row);
+            }
           }
-        }
-
-        // ── Windmill (GLB — Plane + Circle002 rotor) ──
-        const windmillSection = _section(body, "Windmill", true);
-        {
-          const sec = windmillSection;
-          const W = PARAMS.windmill;
-          _slider(sec, W, "spacing", {
-            label: "Spacing",
-            min: 12,
-            max: 200,
-            step: 1,
-            onChange: rebuildObj,
-          });
-          _slider(sec, W, "sideOffset", {
-            label: "Side offset",
-            min: 0,
-            max: 40,
-            step: 0.5,
-            onChange: rebuildObj,
-          });
-          _dropdown(sec, W, "side", {
-            label: "Side",
-            options: { right: "Right", left: "Left" },
-            onChange: rebuildObj,
-          });
-          _slider(sec, W, "scale", {
-            label: "Scale",
-            min: 0.1,
-            max: 3,
-            step: 0.05,
-            onChange: rebuildObj,
-          });
-          _slider(sec, W, "rotorSpeedDeg", {
-            label: "Rotor °/s",
-            min: 0,
-            max: 120,
-            step: 1,
-            onChange: rebuildObj,
-          });
-          _dropdown(sec, W, "rotorAxis", {
-            label: "Rotor axis",
-            options: { x: "X", y: "Y", z: "Z" },
-            onChange: rebuildObj,
-          });
-          _toggle(sec, W, "facePath", {
-            label: "Face path",
-            onChange: rebuildObj,
-          });
-        }
-
-        const trafficLightSection = _section(body, "Traffic Light", true);
-        {
-          const sec = trafficLightSection;
-          const T = PARAMS.trafficLight;
-          _slider(sec, T, "poleHeight", {
-            label: "Pole H (place height)",
-            min: 0.5,
-            max: 8,
-            step: 0.05,
-            onChange: rebuildObj,
-          });
-          _slider(sec, T, "poleRadius", {
-            label: "Pole R",
-            min: 0.04,
-            max: 0.2,
-            step: 0.005,
-            onChange: rebuildObj,
-          });
-          _separator(sec);
-          _slider(sec, T, "lampSize", {
-            label: "Lamp size",
-            min: 0.15,
-            max: 0.8,
-            step: 0.01,
-            onChange: rebuildObj,
-          });
-          _slider(sec, T, "lampGap", {
-            label: "Lamp gap",
-            min: 0.2,
-            max: 1.0,
-            step: 0.01,
-            onChange: rebuildObj,
-          });
-          _separator(sec);
-          _slider(sec, T, "density", {
-            label: "LED density",
-            min: 6,
-            max: 32,
-            step: 1,
-            onChange: rebuildObj,
-          });
-          _slider(sec, T, "dotRadius", {
-            label: "Dot size",
-            min: 0.12,
-            max: 0.5,
-            step: 0.01,
-            onChange: rebuildObj,
-          });
-          _slider(sec, T, "emissive", {
-            label: "Brightness",
-            min: 1,
-            max: 14,
-            step: 0.1,
-            onChange: rebuildObj,
-          });
-          _separator(sec);
-          _slider(sec, T, "greenDur", {
-            label: "Green s",
-            min: 0,
-            max: 10,
-            step: 0.1,
-            onChange: rebuildObj,
-          });
-          _slider(sec, T, "amberDur", {
-            label: "Amber s",
-            min: 0,
-            max: 6,
-            step: 0.1,
-            onChange: rebuildObj,
-          });
-          _slider(sec, T, "redDur", {
-            label: "Red s",
-            min: 0,
-            max: 10,
-            step: 0.1,
-            onChange: rebuildObj,
-          });
-          _slider(sec, T, "redAmberDur", {
-            label: "Red+Amber s",
-            min: 0,
-            max: 6,
-            step: 0.1,
-            onChange: rebuildObj,
-          });
-          _slider(sec, T, "speed", {
-            label: "Speed",
-            min: 0.1,
-            max: 5,
-            step: 0.1,
-            onChange: rebuildObj,
-          });
-          _separator(sec);
-          _color(sec, T, "redColor", { label: "Red", onChange: rebuildObj });
-          _color(sec, T, "amberColor", { label: "Amber", onChange: rebuildObj });
-          _color(sec, T, "greenColor", { label: "Green", onChange: rebuildObj });
-        }
-
-        const bridgeSection = _section(body, "Bridge", true);
-        {
-          const sec = bridgeSection;
-          const B = PARAMS.bridge;
-          _slider(sec, B, "width", { label: "Width", min: 1, max: 8, step: 0.1, onChange: rebuildObj });
-          _slider(sec, B, "archHeight", { label: "Arch height", min: 0, max: 4, step: 0.05, onChange: rebuildObj });
-          _slider(sec, B, "deckClearance", { label: "Deck lift", min: 0, max: 1.5, step: 0.02, onChange: rebuildObj });
-          _slider(sec, B, "pathSegments", { label: "Resolution", min: 20, max: 120, step: 2, onChange: rebuildObj });
-          _separator(sec);
-          _slider(sec, B, "plankWidth", { label: "Plank width", min: 0.15, max: 0.7, step: 0.01, onChange: rebuildObj });
-          _slider(sec, B, "plankGap", { label: "Plank gap", min: 0, max: 0.15, step: 0.005, onChange: rebuildObj });
-          _slider(sec, B, "deckThickness", { label: "Deck thick", min: 0.05, max: 0.3, step: 0.01, onChange: rebuildObj });
-          _slider(sec, B, "plankToneVar", { label: "Tone var", min: 0, max: 0.3, step: 0.01, onChange: rebuildObj });
-          _separator(sec);
-          _slider(sec, B, "railHeight", { label: "Rail height", min: 0.4, max: 1.6, step: 0.02, onChange: rebuildObj });
-          _slider(sec, B, "postSpacing", { label: "Post spacing", min: 0.8, max: 6, step: 0.1, onChange: rebuildObj });
-          _toggle(sec, B, "midRail", { label: "Mid rail", onChange: rebuildObj });
-          _separator(sec);
-          _toggle(sec, B, "truss", { label: "Arched truss", onChange: rebuildObj });
-          _slider(sec, B, "trussCross", { label: "Truss cross-beams", min: 0, max: 14, step: 1, onChange: rebuildObj });
-          _toggle(sec, B, "abutments", { label: "Stone abutments", onChange: rebuildObj });
-          _separator(sec);
-          _toggle(sec, B, "lanterns", { label: "Lanterns (glow)", onChange: rebuildObj });
-          _slider(sec, B, "lanternSpacing", { label: "Lantern spacing", min: 2, max: 16, step: 0.5, onChange: rebuildObj });
-          _slider(sec, B, "lanternIntensity", { label: "Lantern glow", min: 0, max: 12, step: 0.2, onChange: rebuildObj });
-          _color(sec, B, "lanternColor", { label: "Lantern", onChange: rebuildObj });
-          _separator(sec);
-          _color(sec, B, "woodMain", { label: "Deck wood", onChange: rebuildObj });
-          _color(sec, B, "woodAlt", { label: "Structure", onChange: rebuildObj });
-          _color(sec, B, "woodRail", { label: "Railing", onChange: rebuildObj });
-          _color(sec, B, "stoneColor", { label: "Stone", onChange: rebuildObj });
-        }
-
-        const gantrySection = _section(body, "Gantry", true);
-        {
-          const sec = gantrySection;
-          const G = PARAMS.gantry;
-          _dropdown(sec, G, "boardMode", {
-            label: "Board",
-            options: { checker: "Checkered", chevron: "Chevron", lights: "Start lights" },
-            onChange: rebuildObj,
-          });
-          _dropdown(sec, G, "boardShape", {
-            label: "Pixel style",
-            options: { round: "Round dots", square: "Square dots", diamond: "Diamond", solid: "Solid (no dots)" },
-            onChange: rebuildObj,
-          });
-          _slider(sec, G, "towerHeight", { label: "Clearance H", min: 2, max: 12, step: 0.1, onChange: rebuildObj });
-          _slider(sec, G, "beamHeight", { label: "Beam height", min: 0.4, max: 2.5, step: 0.05, onChange: rebuildObj });
-          _slider(sec, G, "beamDepth", { label: "Beam depth", min: 0.3, max: 1.5, step: 0.05, onChange: rebuildObj });
-          _slider(sec, G, "towerWidth", { label: "Tower W", min: 0.2, max: 1.2, step: 0.02, onChange: rebuildObj });
-          _slider(sec, G, "strutSpacing", { label: "Strut spacing", min: 0.5, max: 4, step: 0.1, onChange: rebuildObj });
-          _separator(sec);
-          _slider(sec, G, "boardHeightFrac", { label: "Board H frac", min: 0.3, max: 1, step: 0.02, onChange: rebuildObj });
-          _slider(sec, G, "boardInsetEnds", { label: "Board inset", min: 0, max: 3, step: 0.05, onChange: rebuildObj });
-          _slider(sec, G, "dotPitch", { label: "LED pitch (m)", min: 0.04, max: 0.3, step: 0.005, onChange: rebuildObj });
-          _slider(sec, G, "dotRadius", { label: "Dot size", min: 0.12, max: 0.5, step: 0.01, onChange: rebuildObj });
-          _slider(sec, G, "emissive", { label: "Brightness", min: 1, max: 14, step: 0.1, onChange: rebuildObj });
-          _separator(sec);
-          _slider(sec, G, "checkerSize", { label: "Checker size (m)", min: 0.15, max: 2, step: 0.05, onChange: rebuildObj });
-          _slider(sec, G, "chevronSpacing", { label: "Chevron spacing (m)", min: 0.3, max: 4, step: 0.05, onChange: rebuildObj });
-          _slider(sec, G, "panSpeed", { label: "Chevron speed", min: -1.5, max: 1.5, step: 0.01, onChange: rebuildObj });
-          _color(sec, G, "chevronColor", { label: "Chevron", onChange: rebuildObj });
-          _color(sec, G, "lightColor", { label: "Start light", onChange: rebuildObj });
-          _separator(sec);
-          _toggle(sec, G, "cornerLights", { label: "Corner lights", onChange: rebuildObj });
-          _color(sec, G, "cornerColor", { label: "Corner", onChange: rebuildObj });
-          _color(sec, G, "colorTower", { label: "Tower", onChange: rebuildObj });
-          _color(sec, G, "colorBeam", { label: "Beam", onChange: rebuildObj });
-        }
-
-        const powerLineSection = _section(body, "Power line", true);
-        {
-          const sec = powerLineSection;
-          const P = PARAMS.powerLine;
-          _slider(sec, P, "spacing", { label: "Pole spacing", min: 5, max: 40, step: 0.5, onChange: rebuildObj });
-          _slider(sec, P, "poleHeight", { label: "Pole height", min: 3, max: 14, step: 0.1, onChange: rebuildObj });
-          _slider(sec, P, "poleRadius", { label: "Pole radius", min: 0.06, max: 0.4, step: 0.01, onChange: rebuildObj });
-          _separator(sec);
-          _slider(sec, P, "crossarms", { label: "Crossarms", min: 1, max: 4, step: 1, onChange: rebuildObj });
-          _slider(sec, P, "crossarmLength", { label: "Arm length", min: 1, max: 4, step: 0.1, onChange: rebuildObj });
-          _slider(sec, P, "crossarmDrop", { label: "Arm drop", min: 0, max: 2, step: 0.05, onChange: rebuildObj });
-          _slider(sec, P, "crossarmSpacing", { label: "Arm spacing", min: 0.3, max: 2, step: 0.05, onChange: rebuildObj });
-          _toggle(sec, P, "insulators", { label: "Insulators", onChange: rebuildObj });
-          _toggle(sec, P, "topWire", { label: "Top earth wire", onChange: rebuildObj });
-          _separator(sec);
-          _slider(sec, P, "wireSag", { label: "Wire sag", min: 0, max: 4, step: 0.05, onChange: rebuildObj });
-          _slider(sec, P, "wireRadius", { label: "Wire radius", min: 0.01, max: 0.12, step: 0.005, onChange: rebuildObj });
-          _slider(sec, P, "wireSegments", { label: "Wire segments", min: 4, max: 30, step: 1, onChange: rebuildObj });
-          _separator(sec);
-          _color(sec, P, "poleColor", { label: "Pole", onChange: rebuildObj });
-          _color(sec, P, "armColor", { label: "Arm", onChange: rebuildObj });
-          _color(sec, P, "wireColor", { label: "Wire", onChange: rebuildObj });
-          _color(sec, P, "insulatorColor", { label: "Insulator", onChange: rebuildObj });
         }
 
         syncObjectSections();
