@@ -558,7 +558,7 @@ export function createDayNightSky() {
     uMoonGlowStrength.value = P.moonGlowStrength;
     uMoonDiscBright.value = P.moonDiscBright;
 
-    // Moon phase frame (right/up ⊥ moonDir) + the phase-light direction.
+    // Moon disc-local frame (right/up ⊥ moonDir) for reconstructing the sphere.
     const md = frame.moonDir;
     _mUpRef.set(0, 1, 0);
     if (Math.abs(md.y) > 0.99) _mUpRef.set(0, 0, 1);
@@ -566,14 +566,21 @@ export function createDayNightSky() {
     _mUp.crossVectors(md, _mRight).normalize();
     uMoonRight.value.copy(_mRight);
     uMoonUp.value.copy(_mUp);
-    const ang = (1 - P.moonPhase) * Math.PI; // 0 = full, π = new
-    const orient = THREE.MathUtils.degToRad(P.moonPhaseOrient);
-    _mL.copy(md).multiplyScalar(-Math.cos(ang));
-    _mTmp.copy(_mRight).multiplyScalar(Math.sin(ang) * Math.cos(orient));
-    _mL.add(_mTmp);
-    _mTmp.copy(_mUp).multiplyScalar(Math.sin(ang) * Math.sin(orient));
-    _mL.add(_mTmp).normalize();
-    uMoonLightDir.value.copy(_mL);
+    // Phase light: prefer the REAL sun direction the driver passes (phase +
+    // crescent orientation then emerge from the actual sun/moon geometry).
+    // Fall back to the legacy manual moonPhase/orient knobs if it's absent.
+    if (frame.moonLightDir) {
+      uMoonLightDir.value.copy(frame.moonLightDir);
+    } else {
+      const ang = (1 - P.moonPhase) * Math.PI; // 0 = full, π = new
+      const orient = THREE.MathUtils.degToRad(P.moonPhaseOrient ?? 0);
+      _mL.copy(md).multiplyScalar(-Math.cos(ang));
+      _mTmp.copy(_mRight).multiplyScalar(Math.sin(ang) * Math.cos(orient));
+      _mL.add(_mTmp);
+      _mTmp.copy(_mUp).multiplyScalar(Math.sin(ang) * Math.sin(orient));
+      _mL.add(_mTmp).normalize();
+      uMoonLightDir.value.copy(_mL);
+    }
     uMoonSinR.value = Math.sin(THREE.MathUtils.degToRad(P.moonSizeDeg));
     uMoonSurface.value = P.moonSurface;
     uMoonEarthshine.value = P.moonEarthshine;

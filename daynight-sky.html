@@ -106,6 +106,9 @@
         timeOfDay: 9.5,      // 0..24
         autoAdvance: false,
         daySpeed: 0.5,       // hours per second
+        latitude: 45,        // observer latitude (°) — tilts the sun/moon arc
+        dayOfYear: 172,      // 1..365 → solar declination (172 ≈ N summer solstice)
+        moonAge: 0.55,       // synodic age 0=new .5=full 1=new → moon position + phase
         exposure: 1.0,
         env: {
           sunIntensity: 3.2,
@@ -156,9 +159,28 @@
       };
 
       // ── Celestial driver: time-of-day → sun/moon directions + light ────────
-      const SKY_TILT = 0.28;
+      // ── Astronomical sun/moon model ────────────────────────────────────────
+      // Real altitude/azimuth from latitude + day-of-year (solar declination) +
+      // hour angle, so the daily arc TILTS with latitude/season instead of
+      // rising straight up, and twilight lengthens toward the poles. The moon
+      // rides the ecliptic, trailing the sun by its synodic age, and is lit by
+      // the real sun (so its phase + crescent orientation are automatic).
+      const DEG = Math.PI / 180;
+      const OBLIQUITY = 23.44 * DEG; // Earth's axial tilt
+
+      // Hour angle H + declination → world direction (X=east, Y=up, Z=south).
+      function equatorialToDir(H, decl, lat, out) {
+        const sinD = Math.sin(decl), cosD = Math.cos(decl);
+        const sinL = Math.sin(lat), cosL = Math.cos(lat);
+        const cosH = Math.cos(H), sinH = Math.sin(H);
+        const east = -cosD * sinH;
+        const up = sinL * sinD + cosL * cosD * cosH;
+        const south = cosD * sinL * cosH - sinD * cosL;
+        return out.set(east, up, south).normalize();
+      }
       const _sunDir = new THREE.Vector3();
       const _moonDir = new THREE.Vector3();
+      const _moonLightDir = new THREE.Vector3();
       const _sunHigh = new THREE.Color();
       const _sunWarm = new THREE.Color();
       const _lightColor = new THREE.Color();
@@ -168,11 +190,26 @@
       const _fogColor = new THREE.Color();
 
       function computeFrameLighting() {
-        const ang = (PARAMS.timeOfDay / 24) * Math.PI * 2;
-        const elev = -Math.cos(ang);
-        const sx = Math.sin(ang);
-        _sunDir.set(sx, elev, SKY_TILT).normalize();
-        _moonDir.copy(_sunDir).negate();
+        // ── Celestial positions (astronomical) ──
+        const lat = PARAMS.latitude * DEG;
+        // Sun ecliptic longitude from day-of-year (≈0° at the vernal equinox, day 80).
+        const lamSun = (360 * (PARAMS.dayOfYear - 80) / 365.25) * DEG;
+        const declSun = Math.asin(Math.sin(OBLIQUITY) * Math.sin(lamSun));
+        const raSun = Math.atan2(Math.cos(OBLIQUITY) * Math.sin(lamSun), Math.cos(lamSun));
+        const Hsun = (PARAMS.timeOfDay - 12) * 15 * DEG; // hour angle: 15°/h, 0 at solar noon
+        equatorialToDir(Hsun, declSun, lat, _sunDir);
+
+        // Moon: same machinery, sharing the sun-implied sidereal time, trailing
+        // the sun along the ecliptic by its synodic age (0=new → .5=full → 1=new).
+        const lst = Hsun + raSun; // local sidereal time
+        const lamMoon = lamSun + PARAMS.moonAge * 2 * Math.PI;
+        const declMoon = Math.asin(Math.sin(OBLIQUITY) * Math.sin(lamMoon));
+        const raMoon = Math.atan2(Math.cos(OBLIQUITY) * Math.sin(lamMoon), Math.cos(lamMoon));
+        equatorialToDir(lst - raMoon, declMoon, lat, _moonDir);
+
+        // The moon is lit by the real sun → terminator + crescent orientation
+        // follow the actual geometry, and the phase matches the moon's age.
+        _moonLightDir.copy(_sunDir);
 
         const sunUp = _sunDir.y;
         const dayF = smoothstep(-0.15, 0.25, sunUp);
@@ -630,6 +667,8 @@
         const timeSlider = sl(s, PARAMS, "timeOfDay", 0, 24, 0.01);
         tg(s, PARAMS, "autoAdvance");
         sl(s, PARAMS, "daySpeed", 0.05, 4, 0.05);
+        sl(s, PARAMS, "latitude", -66, 66, 1, "Latitude °");
+        sl(s, PARAMS, "dayOfYear", 1, 365, 1, "Day of year");
         sl(s, PARAMS, "exposure", 0.2, 2.5, 0.01);
 
         s = _section(uiBody, "Camera / character");
@@ -871,8 +910,7 @@
         sl(s, PARAMS.sky, "moonGlowStrength", 0, 2, 0.01);
 
         s = _section(uiBody, "Moon", false);
-        sl(s, PARAMS.sky, "moonPhase", 0, 1, 0.01, "Phase (new→full)");
-        sl(s, PARAMS.sky, "moonPhaseOrient", 0, 360, 1, "Crescent angle");
+        sl(s, PARAMS, "moonAge", 0, 1, 0.01, "Age (new→full→new)");
         sl(s, PARAMS.sky, "moonTermSoft", 0.005, 0.3, 0.005, "Terminator soft");
         sl(s, PARAMS.sky, "moonSurface", 0, 1, 0.01, "Surface detail");
         sl(s, PARAMS.sky, "moonEarthshine", 0, 0.6, 0.01, "Earthshine");
@@ -1002,7 +1040,7 @@
 
           const frame = {
             time: elapsed, dt,
-            sunDir: _sunDir, moonDir: _moonDir, camera,
+            sunDir: _sunDir, moonDir: _moonDir, moonLightDir: _moonLightDir, camera,
             lightDir: L.lightDir,
             lightColor: _lightColor,
             lightIntensity: Math.max(L.lightIntensity, 0.15),
